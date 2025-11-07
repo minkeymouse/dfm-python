@@ -21,16 +21,7 @@ except ImportError:
     SCIPY_AVAILABLE = False
 
 # Import rem_nans_spline from utils to avoid duplication
-import sys
-from pathlib import Path
-try:
-    from ..utils.data_utils import rem_nans_spline
-except (ImportError, ValueError):
-    # Fallback: add parent directory to path if relative import fails
-    utils_path = Path(__file__).parent.parent.parent / 'utils'
-    if str(utils_path) not in sys.path:
-        sys.path.insert(0, str(utils_path.parent))
-    from utils.data_utils import rem_nans_spline
+from .utils.data_utils import rem_nans_spline
 
 def _rem_nans_spline(X: np.ndarray, method: int = 2, k: int = 3):
     """Treat NaNs in dataset for DFM estimation (wrapper for rem_nans_spline).
