@@ -30,7 +30,7 @@ Example:
 For detailed documentation, see the README.md file.
 """
 
-__version__ = "0.1.2"
+__version__ = "0.1.4"
 
 from .config import DFMConfig
 from .data_loader import (
