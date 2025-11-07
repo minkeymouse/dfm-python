@@ -1,0 +1,119 @@
+# Synthetic DFM Configuration
+# This configuration defines a Dynamic Factor Model with multiple blocks
+
+# Model structure: series definitions
+model:
+  series:
+    gdp_real:
+      series_name: "Real GDP (Quarterly)"
+      frequency: "q"
+      transformation: "pca"
+      category: "GDP"
+      units: "Index (2000=100)"
+      blocks: [Global, Consumption, Investment]
+    
+    gdp_nominal:
+      series_name: "Nominal GDP (Quarterly)"
+      frequency: "q"
+      transformation: "pca"
+      category: "GDP"
+      units: "Index (2000=100)"
+      blocks: [Global, Consumption]
+    
+    consumption:
+      series_name: "Consumption (Monthly)"
+      frequency: "m"
+      transformation: "pch"
+      category: "Consumption"
+      units: "Index (2000=100)"
+      blocks: [Global, Consumption]
+    
+    investment:
+      series_name: "Investment (Monthly)"
+      frequency: "m"
+      transformation: "pch"
+      category: "Investment"
+      units: "Index (2000=100)"
+      blocks: [Global, Investment]
+    
+    exports:
+      series_name: "Exports (Monthly)"
+      frequency: "m"
+      transformation: "pch"
+      category: "External"
+      units: "Index (2000=100)"
+      blocks: [Global]
+    
+    imports:
+      series_name: "Imports (Monthly)"
+      frequency: "m"
+      transformation: "pch"
+      category: "External"
+      units: "Index (2000=100)"
+      blocks: [Global]
+    
+    unemployment:
+      series_name: "Unemployment Rate (Monthly)"
+      frequency: "m"
+      transformation: "chg"
+      category: "Labor"
+      units: "Percentage Points"
+      blocks: [Global]
+    
+    industrial_production:
+      series_name: "Industrial Production (Monthly)"
+      frequency: "m"
+      transformation: "pch"
+      category: "Production"
+      units: "Index (2000=100)"
+      blocks: [Global, Investment]
+    
+    retail_sales:
+      series_name: "Retail Sales (Monthly)"
+      frequency: "m"
+      transformation: "pch"
+      category: "Consumption"
+      units: "Index (2000=100)"
+      blocks: [Global, Consumption]
+    
+    consumer_confidence:
+      series_name: "Consumer Confidence (Monthly)"
+      frequency: "m"
+      transformation: "chg"
+      category: "Sentiment"
+      units: "Index"
+      blocks: [Global, Consumption]
+    
+    stock_index:
+      series_name: "Stock Market Index (Daily)"
+      frequency: "d"
+      transformation: "pch"
+      category: "Financial"
+      units: "Index"
+      blocks: [Global, Investment]
+    
+    exchange_rate:
+      series_name: "Exchange Rate (Daily)"
+      frequency: "d"
+      transformation: "pch"
+      category: "Financial"
+      units: "Rate"
+      blocks: [Global]
+
+  # Block definitions with factor dimensions
+  blocks:
+    Global:
+      factors: 2
+    Consumption:
+      factors: 1
+    Investment:
+      factors: 1
+
+# DFM estimation parameters
+dfm:
+  ar_lag: 1
+  threshold: 1e-5
+  max_iter: 5000
+  nan_method: 2
+  nan_k: 3
+

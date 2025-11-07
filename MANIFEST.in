@@ -1,0 +1,32 @@
+# Include only the DFM module (src/nowcasting)
+# Exclude all application-specific code (adapters, database, scripts, config, etc.)
+
+include README.md
+include LICENSE
+include pyproject.toml
+
+# Include only the nowcasting package
+recursive-include src/nowcasting *.py
+
+# Exclude application-specific directories
+prune adapters
+prune database
+prune scripts
+prune services
+prune config
+prune migrations
+prune tests
+prune assets
+
+# Include README (already specified above, but be explicit)
+include README.md
+
+# Exclude other application-specific files (but keep README.md)
+exclude *.yaml
+exclude *.yml
+exclude *.csv
+exclude *.sql
+exclude *.lock
+exclude .gitignore
+exclude .env*
+
