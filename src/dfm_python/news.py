@@ -1,4 +1,18 @@
-"""News decomposition for nowcast updates."""
+"""News decomposition for nowcasting updates.
+
+This module implements the news decomposition framework for understanding how
+new data releases affect nowcasts. The "news" is defined as the difference
+between the new data release and the model's previous forecast, decomposed
+into contributions from each data series.
+
+The news decomposition provides:
+- Forecast updates when new data arrives
+- Attribution of forecast changes to specific data series
+- Understanding of which data releases are most informative
+
+This is essential for nowcasting applications where policymakers need to
+understand the drivers of forecast revisions.
+"""
 
 import numpy as np
 from scipy.linalg import pinv, inv
@@ -13,9 +27,17 @@ from .dfm import DFMResult
 # Set up logger
 _logger = logging.getLogger(__name__)
 
+# ============================================================================
 # Constants
-FORECAST_HORIZON_MONTHS = 12  # Number of months to append for forecasting horizon
-DEFAULT_FALLBACK_DATE = '2017-01-01'  # Default fallback date for time index extension
+# ============================================================================
+
+# Number of months to append for forecasting horizon
+# Used when extending the time index for forecast generation
+FORECAST_HORIZON_MONTHS: int = 12
+
+# Default fallback date for time index extension
+# Used when the end date cannot be determined from the data
+DEFAULT_FALLBACK_DATE: str = '2017-01-01'
 
 
 def _check_config_consistency(saved_config: Any, current_config: DFMConfig) -> None:

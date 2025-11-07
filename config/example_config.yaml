@@ -1,25 +1,37 @@
-# Synthetic DFM Configuration
-# This configuration defines a Dynamic Factor Model with multiple blocks
+# DFM Configuration with All Frequencies
+# This configuration demonstrates mixed-frequency data handling:
+# Daily (d), Weekly (w), Monthly (m), Quarterly (q), Semi-annual (sa), Annual (a)
 
 # Model structure: series definitions
 model:
   series:
-    gdp_real:
-      series_name: "Real GDP (Quarterly)"
-      frequency: "q"
-      transformation: "pca"
-      category: "GDP"
-      units: "Index (2000=100)"
-      blocks: [Global, Consumption, Investment]
+    # Daily series (2)
+    stock_index:
+      series_name: "Stock Market Index (Daily)"
+      frequency: "d"
+      transformation: "pch"
+      category: "Financial"
+      units: "Index"
+      blocks: [Global, Investment]
     
-    gdp_nominal:
-      series_name: "Nominal GDP (Quarterly)"
-      frequency: "q"
-      transformation: "pca"
-      category: "GDP"
-      units: "Index (2000=100)"
-      blocks: [Global, Consumption]
+    exchange_rate:
+      series_name: "Exchange Rate (Daily)"
+      frequency: "d"
+      transformation: "pch"
+      category: "Financial"
+      units: "Rate"
+      blocks: [Global]
     
+    # Weekly series (1)
+    weekly_claims:
+      series_name: "Weekly Unemployment Claims (Weekly)"
+      frequency: "w"
+      transformation: "chg"
+      category: "Labor"
+      units: "Thousands"
+      blocks: [Global]
+    
+    # Monthly series (8)
     consumption:
       series_name: "Consumption (Monthly)"
       frequency: "m"
@@ -84,20 +96,39 @@ model:
       units: "Index"
       blocks: [Global, Consumption]
     
-    stock_index:
-      series_name: "Stock Market Index (Daily)"
-      frequency: "d"
-      transformation: "pch"
-      category: "Financial"
-      units: "Index"
-      blocks: [Global, Investment]
+    # Quarterly series (2)
+    gdp_real:
+      series_name: "Real GDP (Quarterly)"
+      frequency: "q"
+      transformation: "pca"
+      category: "GDP"
+      units: "Index (2000=100)"
+      blocks: [Global, Consumption, Investment]
     
-    exchange_rate:
-      series_name: "Exchange Rate (Daily)"
-      frequency: "d"
+    gdp_nominal:
+      series_name: "Nominal GDP (Quarterly)"
+      frequency: "q"
+      transformation: "pca"
+      category: "GDP"
+      units: "Index (2000=100)"
+      blocks: [Global, Consumption]
+    
+    # Semi-annual series (1)
+    semi_annual_gdp:
+      series_name: "Semi-Annual GDP (Semi-annual)"
+      frequency: "sa"
+      transformation: "pca"
+      category: "GDP"
+      units: "Index (2000=100)"
+      blocks: [Global, Consumption]
+    
+    # Annual series (1)
+    annual_budget:
+      series_name: "Annual Budget (Annual)"
+      frequency: "a"
       transformation: "pch"
-      category: "Financial"
-      units: "Rate"
+      category: "Fiscal"
+      units: "Billions"
       blocks: [Global]
 
   # Block definitions with factor dimensions
@@ -108,7 +139,6 @@ model:
       factors: 1
     Investment:
       factors: 1
-
 # DFM estimation parameters
 dfm:
   ar_lag: 1
@@ -116,4 +146,4 @@ dfm:
   max_iter: 5000
   nan_method: 2
   nan_k: 3
-
+  clock: "m"  # Base frequency for nowcasting: 'd', 'w', 'm', 'q', 'sa', 'a' (defaults to 'm' for monthly)

@@ -1,4 +1,15 @@
-"""Configuration models for DFM nowcasting using OmegaConf and Hydra."""
+"""Configuration models for DFM nowcasting using OmegaConf and Hydra.
+
+This module defines the configuration structure for Dynamic Factor Models,
+providing a unified interface for specifying:
+- Series definitions (frequency, transformation, block loadings)
+- Block structure and factor dimensions
+- Estimation parameters (EM algorithm settings, missing data handling)
+- Clock frequency for mixed-frequency synchronization
+
+The configuration system supports both YAML and CSV formats, with validation
+and type checking to ensure model specifications are correct before estimation.
+"""
 
 import numpy as np
 from typing import List, Optional, Dict, Any
@@ -106,6 +117,7 @@ class DFMConfig:
     max_iter: int = 5000  # Maximum EM iterations
     nan_method: int = 2  # Missing data handling method (1-5)
     nan_k: int = 3  # Spline parameter for NaN interpolation
+    clock: str = 'm'  # Base frequency for nowcasting (global clock): 'd', 'w', 'm', 'q', 'sa', 'a' (defaults to 'm' for monthly)
     
     # ========================================================================
     # Internal cache (not user-configurable)
@@ -113,9 +125,26 @@ class DFMConfig:
     _cached_blocks: Optional[np.ndarray] = field(default=None, init=False, repr=False)
     
     def __post_init__(self):
-        """Validate blocks structure and consistency."""
+        """Validate blocks structure and consistency.
+        
+        This method performs comprehensive validation of the DFM configuration:
+        - Ensures at least one series is specified
+        - Validates block structure consistency across all series
+        - Ensures all series load on the global block
+        - Validates factor dimensions match block structure
+        - Validates clock frequency
+        
+        Raises
+        ------
+        ValueError
+            If any validation check fails, with a descriptive error message
+            indicating what needs to be fixed.
+        """
         if not self.series:
-            raise ValueError("At least one series must be specified")
+            raise ValueError(
+                "DFM configuration must contain at least one series. "
+                "Please add series definitions to your configuration."
+            )
         
         # Auto-generate series_id if not provided
         for i, s in enumerate(self.series):
@@ -132,16 +161,19 @@ class DFMConfig:
         for i, s in enumerate(self.series):
             if len(s.blocks) != n_blocks:
                 raise ValueError(
-                    f"Series {i} ({s.series_id}) has {len(s.blocks)} blocks, "
-                    f"but expected {n_blocks} (from block_names)"
+                    f"Series {i} ('{s.series_id}') has {len(s.blocks)} block loadings, "
+                    f"but expected {n_blocks} (from block_names: {self.block_names}). "
+                    f"Each series must specify a loading (0 or 1) for each block."
                 )
         
         # Check first column (global block) is all 1s
         for i, s in enumerate(self.series):
             if s.blocks[0] != 1:
                 raise ValueError(
-                    f"Series {i} ({s.series_id}) must load on global block "
-                    f"(first block must be 1)"
+                    f"Series {i} ('{s.series_id}') must load on the global block "
+                    f"(first block '{self.block_names[0]}'). "
+                    f"All series must have blocks[0] = 1. "
+                    f"Current value: {s.blocks[0]}"
                 )
         
         # Validate factors_per_block if provided
@@ -149,10 +181,21 @@ class DFMConfig:
             if len(self.factors_per_block) != n_blocks:
                 raise ValueError(
                     f"factors_per_block length ({len(self.factors_per_block)}) must match "
-                    f"number of blocks ({n_blocks})"
+                    f"number of blocks ({n_blocks}). "
+                    f"Block names: {self.block_names}. "
+                    f"Please provide one factor count per block."
                 )
             if any(f < 1 for f in self.factors_per_block):
-                raise ValueError("factors_per_block must contain positive integers (>= 1)")
+                invalid_blocks = [i for i, f in enumerate(self.factors_per_block) if f < 1]
+                raise ValueError(
+                    f"factors_per_block must contain positive integers (>= 1). "
+                    f"Invalid values found at block indices {invalid_blocks}: "
+                    f"{[self.factors_per_block[i] for i in invalid_blocks]}. "
+                    f"Each block must have at least one factor."
+                )
+        
+        # Validate clock
+        self.clock = validate_frequency(self.clock)
     
     # Convenience properties for backward compatibility
     @property
@@ -250,18 +293,19 @@ class DFMConfig:
                 category=str(cat_val) if cat_val is not None else ''
             ))
         
-        # Extract estimation parameters if provided
-        return cls(
-            series=series_list,
-            block_names=data.get('BlockNames', data.get('block_names', [])),
-            factors_per_block=data.get('factors_per_block', None),
-            # Estimation parameters
-            ar_lag=data.get('ar_lag', 1),
-            threshold=data.get('threshold', 1e-5),
-            max_iter=data.get('max_iter', 5000),
-            nan_method=data.get('nan_method', 2),
-            nan_k=data.get('nan_k', 3)
-        )
+            # Extract estimation parameters if provided
+            return cls(
+                series=series_list,
+                block_names=data.get('BlockNames', data.get('block_names', [])),
+                factors_per_block=data.get('factors_per_block', None),
+                # Estimation parameters
+                ar_lag=data.get('ar_lag', 1),
+                threshold=data.get('threshold', 1e-5),
+                max_iter=data.get('max_iter', 5000),
+                nan_method=data.get('nan_method', 2),
+                nan_k=data.get('nan_k', 3),
+                clock=data.get('clock', 'm')
+            )
     
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'DFMConfig':
@@ -331,7 +375,8 @@ class DFMConfig:
                 threshold=data.get('threshold', 1e-5),
                 max_iter=data.get('max_iter', 5000),
                 nan_method=data.get('nan_method', 2),
-                nan_k=data.get('nan_k', 3)
+                nan_k=data.get('nan_k', 3),
+                clock=data.get('clock', 'm')
             )
         
         # New format with series list
@@ -350,7 +395,8 @@ class DFMConfig:
                 threshold=data.get('threshold', 1e-5),
                 max_iter=data.get('max_iter', 5000),
                 nan_method=data.get('nan_method', 2),
-                nan_k=data.get('nan_k', 3)
+                nan_k=data.get('nan_k', 3),
+                clock=data.get('clock', 'm')
             )
         
         # Direct instantiation (shouldn't happen often, but handle it)
@@ -415,6 +461,7 @@ if HYDRA_AVAILABLE and ConfigStore is not None:
             max_iter: int = 5000
             nan_method: int = 2
             nan_k: int = 3
+            clock: str = 'm'
         
         # Register schemas in config groups (following Hydra docs pattern)
         # These can be referenced in YAML defaults lists for validation
