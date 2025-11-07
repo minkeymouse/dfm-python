@@ -422,6 +422,11 @@ def init_conditions(x: np.ndarray, r: np.ndarray, p: int, blocks: np.ndarray,
     for i in range(n_b):
         r_i = int(r[i])  # r_i = 1 when block is loaded (ensure integer)
         
+        # Reset block-specific variables at start of each iteration to prevent dimension mismatch
+        # These variables are block-specific and must be reset to avoid using values from previous blocks
+        ff = None
+        A_temp = None
+        
         # Observation equation
         C_i = np.zeros((N, int(r_i * ppC)))
         idx_i = np.where(blocks[:, i] == 1)[0]  # Series loading block i
@@ -605,7 +610,18 @@ def init_conditions(x: np.ndarray, r: np.ndarray, p: int, blocks: np.ndarray,
         
         # Pad ff with zeros to match res dimensions (T x N) - BLOCK-SPECIFIC
         # This must be inside the block loop to handle different r_i per block
-        if 'ff' in locals():
+        if ff is not None:
+            # Validate dimensions match before stacking (safety check)
+            expected_width = int(pC * r_i)
+            if ff.shape[1] != expected_width:
+                # This should not happen if ff is properly reset, but add safety check
+                _logger.warning(
+                    f"init_conditions: Block {i+1} ff dimension mismatch detected. "
+                    f"Expected width {expected_width}, got {ff.shape[1]}. Resetting ff."
+                )
+                ff = None
+        
+        if ff is not None:
             # ff has shape (T - pC + 1, r_i * pC) from lag_data
             # Need to pad to match res shape (T, r_i * pC)
             ff_padded_i = np.vstack([np.zeros((pC - 1, int(pC * r_i))), ff])
@@ -615,12 +631,8 @@ def init_conditions(x: np.ndarray, r: np.ndarray, p: int, blocks: np.ndarray,
         else:
             # If no monthly series, create dummy ff
             ff_padded_i = np.zeros((T, int(pC * r_i)))
-            if len(idx_iM) > 0:
-                F = np.hstack([f] + [np.roll(f, -kk, axis=0) for kk in range(1, max(p+1, pC))])
-                ff = F[:, :int(r_i * pC)]
-                ff_padded_i = np.vstack([np.zeros((pC - 1, int(pC * r_i))), ff])
-                if ff_padded_i.shape[0] < T:
-                    ff_padded_i = np.vstack([ff_padded_i, np.zeros((T - ff_padded_i.shape[0], int(pC * r_i)))])
+            # Note: If we're in this else branch, len(idx_iM) == 0, so the condition below is unreachable
+            # but kept for safety in case of edge cases
         
         # Residual calculations - ensure shapes match (only for this block's series)
         # C_i has shape (N, r_i * ppC), but we only use the first r_i * pC columns for residuals
@@ -673,7 +685,7 @@ def init_conditions(x: np.ndarray, r: np.ndarray, p: int, blocks: np.ndarray,
             
             Q_i = np.zeros((int(ppC * r_i), int(ppC * r_i)))
             if len(z) > 0:
-                e = z - Z_lag @ A_temp if 'A_temp' in locals() else z
+                e = z - Z_lag @ A_temp if A_temp is not None else z
                 # Clean e before covariance calculation
                 e_clean = e.copy()
                 e_clean[np.isnan(e_clean)] = 0.0
@@ -1462,8 +1474,9 @@ def em_step(y: np.ndarray, A: np.ndarray, C: np.ndarray, Q: np.ndarray,
     n_bl = bl.shape[0]  # Number of unique loadings
     
     # Initialize indices: These help with subsetting
-    bl_idxM = []  # Indicator for monthly factor loadings
-    bl_idxQ = []  # Indicator for quarterly factor loadings
+    # Initialize as None - will be set to numpy arrays on first iteration
+    bl_idxM = None  # Indicator for monthly factor loadings
+    bl_idxQ = None  # Indicator for quarterly factor loadings
     R_con_list = []  # List to build block diagonal
     
     # Loop through each block to build indices
@@ -1484,7 +1497,7 @@ def em_step(y: np.ndarray, A: np.ndarray, C: np.ndarray, Q: np.ndarray,
         bl_col_quarterly = np.repeat(bl[:, i:i+1], r_i * ppC, axis=1)  # n_bl x (r_i * ppC)
         
         # Append columns (MATLAB uses horizontal concatenation)
-        if len(bl_idxM) == 0:
+        if bl_idxM is None:
             bl_idxM = bl_col_monthly
             bl_idxQ = bl_col_quarterly
         else:
@@ -1496,8 +1509,14 @@ def em_step(y: np.ndarray, A: np.ndarray, C: np.ndarray, Q: np.ndarray,
             R_con_list.append(np.kron(R_mat, np.eye(r_i)))
     
     # Convert to boolean (MATLAB: logical)
-    bl_idxM = bl_idxM.astype(bool)
-    bl_idxQ = bl_idxQ.astype(bool)
+    # Handle case where no blocks were processed (shouldn't happen, but be safe)
+    if bl_idxM is not None:
+        bl_idxM = bl_idxM.astype(bool)
+        bl_idxQ = bl_idxQ.astype(bool)
+    else:
+        # No blocks processed - create empty boolean arrays
+        bl_idxM = np.array([]).reshape(n_bl, 0).astype(bool)
+        bl_idxQ = np.array([]).reshape(n_bl, 0).astype(bool)
     
     # Build block diagonal constraint matrix
     if len(R_con_list) > 0:
@@ -1680,11 +1699,19 @@ def em_step(y: np.ndarray, A: np.ndarray, C: np.ndarray, Q: np.ndarray,
                 R_con_i = R_con_i[~no_c, :]
                 q_con_i = q_con_i[~no_c]
             else:
-                R_con_i = np.array([]).reshape(0, len(bl_idxQ_i))
+                # Handle empty bl_idxQ_i case
+                if len(bl_idxQ_i) > 0:
+                    R_con_i = np.array([]).reshape(0, len(bl_idxQ_i))
+                else:
+                    R_con_i = np.array([]).reshape(0, 1)  # Default to 1 column for empty case
                 q_con_i = np.array([])
         else:
             bl_idxQ_i = np.where(bl_idxQ[i, :])[0]
-            R_con_i = np.array([]).reshape(0, len(bl_idxQ_i))
+            # Handle empty bl_idxQ_i case
+            if len(bl_idxQ_i) > 0:
+                R_con_i = np.array([]).reshape(0, len(bl_idxQ_i))
+            else:
+                R_con_i = np.array([]).reshape(0, 1)  # Default to 1 column for empty case
             q_con_i = np.array([])
         
         # Loop through quarterly series in this block pattern

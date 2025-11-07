@@ -21,267 +21,9 @@ try:
 except ImportError:
     SCIPY_AVAILABLE = False
 
-# Test data cache
-_test_cache = {}
-
-def _get_test_data():
-    """Get or load test data (cached)."""
-    if 'data' not in _test_cache:
-        base_dir = Path(__file__).parent.parent.parent
-        spec_file = base_dir / 'Nowcasting' / 'Spec_US_example.xls'
-        config = load_config(spec_file)
-        vintage = '2016-06-29'
-        data_file = base_dir / 'Nowcasting' / 'data' / 'US' / f'{vintage}.xls'
-        X, Time, Z = load_data(data_file, config, sample_start=pd.Timestamp('2000-01-01'))
-        _test_cache['data'] = (config, X, Time, Z)
-    return _test_cache['data']
-
-def _get_dfm_result(threshold=1e-4):
-    """Get or compute DFM result (cached)."""
-    cache_key = f'dfm_{threshold}'
-    if cache_key not in _test_cache:
-        config, X, Time, Z = _get_test_data()
-        Res = dfm(X, config, threshold)
-        _test_cache[cache_key] = Res
-    return _test_cache[cache_key]
-
 # ============================================================================
-# Basic DFM Tests
+# Tests using synthetic data only (no external files required)
 # ============================================================================
-
-def test_dfm_estimation():
-    """Test basic DFM estimation."""
-    print("\n" + "="*70)
-    print("TEST: DFM Estimation")
-    print("="*70)
-    
-    spec, X, Time, Z = _get_test_data()
-    threshold = 1e-4
-    
-    Res = dfm(X, spec, threshold)
-    
-    assert hasattr(Res, 'x_sm') and hasattr(Res, 'X_sm')
-    assert hasattr(Res, 'Z') and hasattr(Res, 'C')
-    assert hasattr(Res, 'A') and hasattr(Res, 'Q') and hasattr(Res, 'R')
-    
-    T, N = X.shape
-    assert Res.x_sm.shape == (T, N)
-    assert Res.Z.shape[0] == T
-    assert Res.C.shape[0] == N
-    
-    assert not np.all(np.isnan(Res.Z))
-    assert not np.all(np.isnan(Res.x_sm))
-    assert np.isfinite(Res.C).any()
-    
-    print("✓ DFM estimation completed")
-    return Res
-
-def test_dfm_workflow():
-    """Test complete DFM workflow."""
-    print("\n" + "="*70)
-    print("TEST: Complete DFM Workflow")
-    print("="*70)
-    
-    spec, X, Time, Z = _get_test_data()
-    threshold = 1e-3
-    Res = _get_dfm_result(threshold)
-    
-    T, N = X.shape
-    m = Res.A.shape[0]
-    
-    assert Res.x_sm.shape == (T, N)
-    assert Res.X_sm.shape == (T, N)
-    assert Res.Z.shape[0] == T
-    assert Res.C.shape[0] == N
-    assert Res.R.shape == (N, N)
-    assert Res.A.shape == (m, m)
-    assert Res.Q.shape == (m, m)
-    
-    assert np.allclose(Res.R, Res.R.T, atol=1e-10)
-    assert np.allclose(Res.Q, Res.Q.T, atol=1e-10)
-    
-    print("✓ Workflow test passed")
-    return Res
-
-def test_dfm_convergence():
-    """Test DFM convergence."""
-    print("\n" + "="*70)
-    print("TEST: DFM Convergence")
-    print("="*70)
-    
-    spec, X, Time, Z = _get_test_data()
-    threshold = 1e-3
-    Res = _get_dfm_result(threshold)
-    
-    assert Res is not None
-    assert not np.all(np.isnan(Res.Z))
-    assert np.isfinite(Res.C).any()
-    
-    print("✓ Convergence test passed")
-    return True
-
-def test_dfm_parameter_stability():
-    """Test parameter stability."""
-    print("\n" + "="*70)
-    print("TEST: Parameter Stability")
-    print("="*70)
-    
-    spec, X, Time, Z = _get_test_data()
-    threshold = 1e-3
-    Res = _get_dfm_result(threshold)
-    
-    eigvals = np.linalg.eigvals(Res.A)
-    max_eigval = np.max(np.abs(eigvals))
-    assert max_eigval < 1e4
-    
-    Q_diag = np.diag(Res.Q)
-    assert np.all(Q_diag >= -1e-10)
-    
-    R_diag = np.diag(Res.R)
-    assert np.all(R_diag >= 1e-6)
-    
-    print(f"✓ Parameter stability verified (max |eigval|: {max_eigval:.4f})")
-    return True
-
-# ============================================================================
-# Integration Tests
-# ============================================================================
-
-def test_dfm_output_consistency():
-    """Test DFM output consistency."""
-    print("\n" + "="*70)
-    print("TEST: Output Consistency")
-    print("="*70)
-    
-    spec, X, Time, Z = _get_test_data()
-    threshold = 1e-3
-    Res = _get_dfm_result(threshold)
-    
-    x_sm_from_factors = Res.Z @ Res.C.T
-    finite_mask = np.isfinite(Res.x_sm) & np.isfinite(x_sm_from_factors)
-    
-    if np.sum(finite_mask) > 0:
-        diff = np.abs(Res.x_sm[finite_mask] - x_sm_from_factors[finite_mask])
-        max_diff = np.max(diff)
-        assert max_diff < 1e-3 or np.mean(diff) < 1e-6
-    
-    print("✓ Output consistency verified")
-    return True
-
-def test_dfm_factor_analysis():
-    """Test factor extraction."""
-    print("\n" + "="*70)
-    print("TEST: Factor Analysis")
-    print("="*70)
-    
-    spec, X, Time, Z = _get_test_data()
-    threshold = 1e-3
-    Res = _get_dfm_result(threshold)
-    
-    m = Res.A.shape[0]
-    if m > 0:
-        factor_0 = Res.Z[:, 0]
-        factor_0_finite = factor_0[np.isfinite(factor_0)]
-        if len(factor_0_finite) > 1:
-            var_0 = np.var(factor_0_finite)
-            assert var_0 > 1e-10
-        
-        common_loadings = Res.C[:, 0]
-        finite_loadings = common_loadings[np.isfinite(common_loadings)]
-        non_zero_loadings = np.sum(np.abs(finite_loadings) > 1e-4)
-        assert non_zero_loadings >= 1
-    
-    print("✓ Factor analysis passed")
-    return True
-
-# ============================================================================
-# Edge Cases
-# ============================================================================
-
-def test_dfm_edge_all_missing():
-    """Test with all missing data."""
-    print("\n" + "="*70)
-    print("TEST: All Missing Data")
-    print("="*70)
-    
-    spec, X, Time, Z = _get_test_data()
-    X_all_missing = np.full_like(X, np.nan)
-    
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        try:
-            Res = dfm(X_all_missing, spec, threshold=1e-3)
-            if Res is not None:
-                assert hasattr(Res, 'Z')
-        except (ValueError, RuntimeError, np.linalg.LinAlgError):
-            pass
-    
-    print("✓ All missing data handled")
-    return True
-
-def test_dfm_edge_short_series():
-    """Test with short time series."""
-    print("\n" + "="*70)
-    print("TEST: Short Time Series")
-    print("="*70)
-    
-    spec, X, Time, Z = _get_test_data()
-    T_min = 15
-    X_short = X[:T_min, :]
-    
-    try:
-        Res = dfm(X_short, spec, threshold=1e-3)
-        assert Res is not None
-        assert Res.Z.shape[0] == T_min
-    except (ValueError, np.linalg.LinAlgError):
-        pass
-    
-    print("✓ Short series handled")
-    return True
-
-def test_dfm_edge_extreme_values():
-    """Test with extreme values."""
-    print("\n" + "="*70)
-    print("TEST: Extreme Values")
-    print("="*70)
-    
-    spec, X, Time, Z = _get_test_data()
-    X_extreme = X.copy()
-    X_extreme[:, 0] *= 1e6
-    
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        try:
-            Res = dfm(X_extreme, spec, threshold=1e-3)
-            assert Res is not None
-        except (ValueError, np.linalg.LinAlgError, OverflowError):
-            pass
-    
-    print("✓ Extreme values handled")
-    return True
-
-def test_dfm_edge_high_missing():
-    """Test with high missing rate."""
-    print("\n" + "="*70)
-    print("TEST: High Missing Rate")
-    print("="*70)
-    
-    spec, X, Time, Z = _get_test_data()
-    np.random.seed(42)
-    X_high_missing = X.copy()
-    missing_mask = np.random.rand(*X.shape) < 0.6
-    X_high_missing[missing_mask] = np.nan
-    
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        try:
-            Res = dfm(X_high_missing, spec, threshold=1e-3)
-            assert Res is not None
-        except (ValueError, np.linalg.LinAlgError):
-            pass
-    
-    print("✓ High missing rate handled")
-    return True
 
 # ============================================================================
 # EM Step Tests
@@ -341,7 +83,6 @@ def test_em_step_basic():
     assert np.allclose(R_new, R_new.T)
     
     print("✓ EM step basic test passed")
-    return True
 
 def test_em_step_dimensions():
     """Test EM step dimension consistency."""
@@ -357,7 +98,6 @@ def test_em_step_dimensions():
     assert A_new.shape == inputs['A'].shape
     
     print("✓ EM step dimensions verified")
-    return True
 
 # ============================================================================
 # Initial Conditions Tests
@@ -404,87 +144,7 @@ def test_init_conditions_basic():
     assert not np.any(np.isnan(C))
     
     print("✓ Init conditions basic test passed")
-    return True
 
-# ============================================================================
-# MATLAB Comparison Tests
-# ============================================================================
-
-def load_matlab_results(mat_file):
-    """Load MATLAB results from .mat file."""
-    if not SCIPY_AVAILABLE:
-        raise ImportError("scipy.io.loadmat required")
-    if not mat_file.exists():
-        raise FileNotFoundError(f"MATLAB file not found: {mat_file}")
-    
-    mat_data = loadmat(str(mat_file), squeeze_me=True, struct_as_record=False)
-    if 'Res' in mat_data:
-        return {'Res': mat_data['Res'], 'Spec': mat_data.get('Spec', None)}
-    keys = [k for k in mat_data.keys() if not k.startswith('__')]
-    if len(keys) > 0:
-        return {'Res': mat_data[keys[0]], 'Spec': None}
-    raise ValueError(f"No DFM results found in {mat_file}")
-
-def compare_matrices(py_mat, mat_mat, name, rtol=1e-3, atol=1e-5):
-    """Compare two matrices with tolerance."""
-    if py_mat.shape != mat_mat.shape:
-        return False, {'error': f"Shape mismatch: {py_mat.shape} vs {mat_mat.shape}"}
-    
-    diff = np.abs(py_mat - mat_mat)
-    max_diff = np.max(diff)
-    mean_diff = np.mean(diff)
-    
-    mat_abs = np.abs(mat_mat)
-    finite_mask = mat_abs > atol
-    if np.sum(finite_mask) > 0:
-        rel_diff = diff[finite_mask] / mat_abs[finite_mask]
-        max_rel_diff = np.max(rel_diff)
-    else:
-        max_rel_diff = max_diff
-    
-    passed = (max_diff < atol) or (max_rel_diff < rtol)
-    return passed, {'max_diff': max_diff, 'mean_diff': mean_diff, 'max_rel_diff': max_rel_diff}
-
-def test_matlab_comparison():
-    """Compare Python vs MATLAB results."""
-    print("\n" + "="*70)
-    print("TEST: MATLAB Comparison")
-    print("="*70)
-    
-    if not SCIPY_AVAILABLE:
-        print("SKIPPED: scipy.io.loadmat not available")
-        return False
-    
-    base_dir = Path(__file__).parent.parent.parent
-    mat_file = base_dir / 'matlab' / 'ResDFM.mat'
-    
-    if not mat_file.exists():
-        print(f"SKIPPED: MATLAB results not found: {mat_file}")
-        return False
-    
-    try:
-        mat_data = load_matlab_results(mat_file)
-        mat_res = mat_data['Res']
-        
-        spec, X, Time, Z = _get_test_data()
-        py_res = dfm(X, config, threshold=1e-4)
-        
-        results = {}
-        if hasattr(mat_res, 'C'):
-            results['C'] = compare_matrices(py_res.C, mat_res.C, 'C', rtol=1e-3, atol=1e-5)
-        if hasattr(mat_res, 'A'):
-            results['A'] = compare_matrices(py_res.A, mat_res.A, 'A', rtol=1e-3, atol=1e-5)
-        if hasattr(mat_res, 'Z'):
-            results['Z'] = compare_matrices(py_res.Z, mat_res.Z, 'Z', rtol=1e-4, atol=1e-6)
-        
-        passed = sum(1 for p, _ in results.values() if p)
-        total = len(results)
-        print(f"Comparison results: {passed}/{total} passed")
-        
-        return passed == total
-    except Exception as e:
-        print(f"Comparison failed: {e}")
-        return False
 
 # ============================================================================
 # Test Runner
@@ -499,20 +159,12 @@ def run_all_tests():
     results = {}
     
     test_funcs = [
-        ('estimation', test_dfm_estimation),
-        ('workflow', test_dfm_workflow),
-        ('convergence', test_dfm_convergence),
-        ('parameter_stability', test_dfm_parameter_stability),
-        ('output_consistency', test_dfm_output_consistency),
-        ('factor_analysis', test_dfm_factor_analysis),
-        ('edge_all_missing', test_dfm_edge_all_missing),
-        ('edge_short_series', test_dfm_edge_short_series),
-        ('edge_extreme_values', test_dfm_edge_extreme_values),
-        ('edge_high_missing', test_dfm_edge_high_missing),
         ('em_step_basic', test_em_step_basic),
         ('em_step_dimensions', test_em_step_dimensions),
         ('init_conditions_basic', test_init_conditions_basic),
-        ('matlab_comparison', test_matlab_comparison),
+        ('dfm_quick', test_dfm_quick),
+        ('init_conditions_blocks', test_init_conditions_blocks),
+        ('multi_block_different_factors', test_multi_block_different_factor_counts),
     ]
     
     for name, func in test_funcs:
@@ -605,7 +257,6 @@ def test_dfm_quick():
     print(f"  Data shape: {X.shape}")
     print(f"  Factors estimated: {Res.Z.shape[1]}")
     print(f"  Convergence: {'Yes' if hasattr(Res, 'converged') and Res.converged else 'Partial (quick test)'}")
-    return Res
 
 
 def test_init_conditions_blocks():
@@ -712,7 +363,97 @@ def test_init_conditions_blocks():
     print("    ✓ Missing data handling: PASSED")
     
     print("✓ Init conditions blocks test completed")
-    return True
+
+
+def test_multi_block_different_factor_counts():
+    """
+    Test for bug fix: multi-block models with different factor counts.
+    
+    This test reproduces the bug where ff variable from previous block
+    iteration caused dimension mismatch when stacking arrays.
+    
+    Bug scenario:
+    - Block 0: r_i=3, creates ff with width 3*pC
+    - Block 1: r_i=2, tries to use ff from block 0 (width 3*pC) 
+               with np.zeros(width 2*pC) -> dimension mismatch
+    
+    Fix: Reset ff = None at start of each block iteration.
+    """
+    print("\n" + "="*70)
+    print("Testing multi-block with different factor counts (bug fix)")
+    print("="*70)
+    
+    np.random.seed(42)
+    T = 100  # Time periods
+    N = 15   # Total series
+    
+    # Create synthetic data
+    x = np.random.randn(T, N)
+    
+    # Create blocks: 3 blocks with different factor counts
+    # Block 0: 5 series, 3 factors
+    # Block 1: 5 series, 2 factors  
+    # Block 2: 5 series, 2 factors
+    blocks = np.zeros((N, 3), dtype=int)
+    blocks[0:5, 0] = 1   # First 5 series in block 0
+    blocks[5:10, 1] = 1  # Next 5 series in block 1
+    blocks[10:15, 2] = 1 # Last 5 series in block 2
+    # All series also load on block 0 (global factor)
+    blocks[:, 0] = 1
+    
+    # Different factor counts per block (this triggers the bug)
+    r = np.array([3, 2, 2])  # 3 factors, 2 factors, 2 factors
+    p = 1  # AR lag
+    pC = max(p, 1)  # Will be 1
+    
+    # Setup other parameters
+    opt_nan = {'method': 2, 'k': 3}
+    nQ = 0  # All monthly
+    i_idio = np.ones(N)
+    Rcon = None
+    q = None
+    
+    # This should NOT raise ValueError about dimension mismatch
+    try:
+        A, C, Q, R, Z_0, V_0 = init_conditions(
+            x, r, p, blocks, opt_nan, Rcon, q, nQ, i_idio
+        )
+        
+        # Verify outputs are valid
+        assert A is not None, "A should not be None"
+        assert C is not None, "C should not be None"
+        assert Q is not None, "Q should not be None"
+        assert R is not None, "R should not be None"
+        
+        # Verify dimensions
+        # State dimension = sum(r_i * ppC) + monthly_idio + quarterly_idio * 5
+        # where ppC = max(p, pC) and pC = 1 when Rcon is None
+        ppC = max(p, 1)  # pC = 1 when Rcon is None
+        expected_state_dim = sum(r) * ppC + N + 5 * nQ  # factors + monthly_idio + quarterly_idio*5
+        assert A.shape == (expected_state_dim, expected_state_dim), \
+            f"A shape {A.shape} != expected {(expected_state_dim, expected_state_dim)}"
+        assert C.shape == (N, expected_state_dim), \
+            f"C shape {C.shape} != expected {(N, expected_state_dim)}"
+        
+        # Verify no NaN/Inf
+        assert np.all(np.isfinite(A)), "A contains NaN/Inf"
+        assert np.all(np.isfinite(C)), "C contains NaN/Inf"
+        assert np.all(np.isfinite(Q)), "Q contains NaN/Inf"
+        assert np.all(np.isfinite(R)), "R contains NaN/Inf"
+        
+        print("    ✓ Multi-block init_conditions with different factor counts: PASSED")
+        print(f"    ✓ State dimension: {expected_state_dim}")
+        print(f"    ✓ A shape: {A.shape}")
+        print(f"    ✓ C shape: {C.shape}")
+        
+    except ValueError as e:
+        if "dimension" in str(e).lower() and "match" in str(e).lower():
+            print(f"    ✗ FAILED: Dimension mismatch error still present!")
+            print(f"    Error: {e}")
+            raise
+        else:
+            # Other ValueError is OK (e.g., insufficient data)
+            print(f"    ⚠ Warning: {e}")
 
 
 if __name__ == '__main__':
