@@ -1,0 +1,13 @@
+series_id,series_name,frequency,transformation,category,units,Block_Global,Block_Consumption,Block_Investment
+gdp_real,Real GDP (Quarterly),q,pca,GDP,Index (2000=100),1,1,1
+gdp_nominal,Nominal GDP (Quarterly),q,pca,GDP,Index (2000=100),1,1,0
+consumption,Consumption (Monthly),m,pch,Consumption,Index (2000=100),1,1,0
+investment,Investment (Monthly),m,pch,Investment,Index (2000=100),1,0,1
+exports,Exports (Monthly),m,pch,External,Index (2000=100),1,0,0
+imports,Imports (Monthly),m,pch,External,Index (2000=100),1,0,0
+unemployment,Unemployment Rate (Monthly),m,chg,Labor,Percentage Points,1,0,0
+industrial_production,Industrial Production (Monthly),m,pch,Production,Index (2000=100),1,0,1
+retail_sales,Retail Sales (Monthly),m,pch,Consumption,Index (2000=100),1,1,0
+consumer_confidence,Consumer Confidence (Monthly),m,chg,Sentiment,Index,1,1,0
+stock_index,Stock Market Index (Daily),d,pch,Financial,Index,1,0,1
+exchange_rate,Exchange Rate (Daily),d,pch,Financial,Rate,1,0,0
