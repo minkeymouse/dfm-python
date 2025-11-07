@@ -209,6 +209,38 @@ series:
 - **max_iter**: Maximum EM iterations (typically 100-5000)
 - **ar_lag**: Autoregressive lag for factors (typically 1 for AR(1))
 
+### Numerical Stability Parameters
+
+For reproducibility and transparency, all numerical stability techniques are configurable:
+
+```yaml
+dfm:
+  # AR Coefficient Clipping
+  clip_ar_coefficients: true  # Enable AR coefficient clipping for stationarity
+  ar_clip_min: -0.99          # Minimum AR coefficient (must be > -1)
+  ar_clip_max: 0.99           # Maximum AR coefficient (must be < 1)
+  warn_on_ar_clip: true       # Warn when clipping occurs
+  
+  # Data Value Clipping
+  clip_data_values: true      # Enable clipping of extreme data values
+  data_clip_threshold: 100.0  # Clip values beyond this many standard deviations
+  warn_on_data_clip: true     # Warn when clipping occurs
+  
+  # Regularization
+  use_regularization: true     # Enable regularization for numerical stability
+  regularization_scale: 1e-6   # Scale factor for ridge regularization
+  min_eigenvalue: 1e-8        # Minimum eigenvalue for positive definite matrices
+  max_eigenvalue: 1e6         # Maximum eigenvalue cap
+  warn_on_regularization: true # Warn when regularization is applied
+  
+  # Damped Updates
+  use_damped_updates: true    # Enable damped updates when likelihood decreases
+  damping_factor: 0.8        # Damping factor (0.8 = 80% new, 20% old)
+  warn_on_damped_update: true # Warn when damped updates are used
+```
+
+**Important**: These parameters are fully transparent and documented. When enabled, the package logs warnings explaining when and why each technique is applied, allowing researchers to understand any potential bias introduced. All parameters can be disabled or adjusted for research purposes.
+
 ## Data Format
 
 ### CSV Structure
@@ -428,13 +460,28 @@ Ensure:
 
 ### Numerical Instability
 
-The package includes robust numerical stability features:
-- Automatic handling of zero/near-zero standard deviations
-- Clipping of extreme values
-- Regularization of ill-conditioned matrices
-- Positive definite enforcement for covariance matrices
+The package includes comprehensive numerical stability features that are fully configurable:
 
-If issues persist, check data for outliers or extreme values.
+**Automatic Stability Techniques**:
+- **AR Coefficient Clipping**: Ensures stationarity by clipping AR coefficients to [-0.99, 0.99]
+- **Data Value Clipping**: Clips extreme outliers beyond configurable threshold (default: 100 std devs)
+- **Regularization**: Adds ridge regularization to prevent ill-conditioned matrices
+- **Positive Definite Enforcement**: Ensures covariance matrices remain positive semi-definite
+- **Damped Updates**: Prevents likelihood decreases by using weighted parameter updates
+
+**Transparency**:
+- All techniques are configurable via YAML config
+- Warnings are logged when techniques are applied
+- Statistics are tracked for monitoring
+- Techniques can be disabled for research purposes
+
+**Best Practices**:
+- Monitor warnings to understand when stability techniques are applied
+- If techniques are frequently needed, investigate data quality
+- Adjust thresholds based on your data characteristics
+- Consider disabling techniques if they introduce unacceptable bias
+
+If issues persist, check data for outliers, extreme values, or near-unit root behavior.
 
 ## Architecture
 
@@ -466,9 +513,9 @@ If you use this package in your research, please cite:
 @software{dfm-python,
   title = {dfm-python: Dynamic Factor Models for Nowcasting and Forecasting},
   author = {DFM Python Contributors},
-  year = {2024},
+  year = {2025},
   url = {https://pypi.org/project/dfm-python/},
-  version = {0.1.4}
+  version = {0.1.5}
 }
 ```
 
@@ -478,6 +525,6 @@ This package implements Dynamic Factor Models following established econometric 
 
 ---
 
-**Package Status**: Stable (v0.1.4+)  
+**Package Status**: Stable (v0.1.5+)  
 **PyPI**: https://pypi.org/project/dfm-python/  
 **Python**: 3.12+
