@@ -1729,12 +1729,11 @@ def em_step(y: np.ndarray, A: np.ndarray, C: np.ndarray, Q: np.ndarray,
     num_blocks = blocks.shape[1]
     
     # Get config defaults if not provided
+    # Create a minimal config object with defaults for backward compatibility
+    # We use a simple object to avoid DFMConfig validation which requires series
     if config is None:
-        # Create a minimal config with defaults for backward compatibility
-        from dfm_python.config import DFMConfig
-        config = DFMConfig(
-            series=[],
-            block_names=[],
+        from types import SimpleNamespace
+        config = SimpleNamespace(
             clip_ar_coefficients=True,
             ar_clip_min=-0.99,
             ar_clip_max=0.99,
