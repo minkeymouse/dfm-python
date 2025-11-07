@@ -1,4 +1,14 @@
-"""Data loading, specification parsing, and transformation functions."""
+"""Data loading and transformation utilities for DFM estimation.
+
+This module provides comprehensive data handling for Dynamic Factor Models:
+- Configuration loading from YAML and CSV files
+- Data loading from CSV with automatic date parsing
+- Time series transformations (differences, percent changes, etc.)
+- Data sorting and alignment with configuration
+
+The module supports flexible configuration formats and handles common data
+issues such as missing dates, inconsistent formats, and transformation errors.
+"""
 
 import numpy as np
 import pandas as pd
@@ -9,7 +19,8 @@ import warnings
 import logging
 
 from .config import DFMConfig
-# Backward compatibility
+
+# Backward compatibility alias (deprecated - use DFMConfig)
 ModelConfig = DFMConfig
 
 logger = logging.getLogger(__name__)
@@ -53,16 +64,34 @@ def load_config_from_yaml(configfile: Union[str, Path]) -> DFMConfig:
     cfg = OmegaConf.load(configfile)
     cfg_dict = OmegaConf.to_container(cfg, resolve=True)
     
+    # Extract model config and dfm parameters
+    model_dict = None
+    dfm_params = {}
+    
     # Handle nested structure (if config has @package model: directive)
     if 'series' in cfg_dict and 'block_names' in cfg_dict:
         # Direct model config structure
-        return DFMConfig.from_dict(cfg_dict)
+        model_dict = cfg_dict
     elif 'model' in cfg_dict:
         # Nested under 'model' key (from @package model:)
-        return DFMConfig.from_dict(cfg_dict['model'])
+        model_dict = cfg_dict['model']
     else:
         # Try to construct from top-level keys
-        return DFMConfig.from_dict(cfg_dict)
+        model_dict = cfg_dict
+    
+    # Extract dfm parameters (estimation parameters like clock)
+    if 'dfm' in cfg_dict:
+        dfm_params = cfg_dict['dfm']
+    
+    # Merge dfm parameters into model config
+    if dfm_params:
+        if isinstance(model_dict, dict):
+            model_dict = {**model_dict, **dfm_params}
+        else:
+            # If model_dict is not a dict, create new dict
+            model_dict = {'series': model_dict, **dfm_params} if model_dict else dfm_params
+    
+    return DFMConfig.from_dict(model_dict)
 
 
 def load_config_from_csv(configfile: Union[str, Path]) -> DFMConfig:
@@ -291,16 +320,36 @@ def _transform_series(Z: np.ndarray, formula: str, freq: str, step: int) -> np.n
 
 
 def transform_data(Z: np.ndarray, Time: pd.DatetimeIndex, config: DFMConfig) -> Tuple[np.ndarray, pd.DatetimeIndex, np.ndarray]:
-    """Transform each data series based on specification."""
+    """Transform each data series based on specification.
+    
+    Handles all frequencies: daily (d), weekly (w), monthly (m), 
+    quarterly (q), semi-annual (sa), annual (a).
+    """
     T, N = Z.shape
     X = np.full((T, N), np.nan)
     
-    for i in range(N):
-        step = 3 if config.Frequency[i] == 'q' else 1
-        X[:, i] = _transform_series(Z[:, i], config.Transformation[i], config.Frequency[i], step)
+    # Frequency to step mapping (step = number of base periods per observation)
+    # Base frequency is monthly, so step is months per observation
+    freq_to_step = {
+        'd': 1,   # Daily: 1 month per observation (aggregated to monthly)
+        'w': 1,   # Weekly: 1 month per observation (aggregated to monthly)
+        'm': 1,   # Monthly: 1 month per observation
+        'q': 3,   # Quarterly: 3 months per observation
+        'sa': 6,  # Semi-annual: 6 months per observation
+        'a': 12,  # Annual: 12 months per observation
+    }
     
-    # Drop first quarter of observations (4 months) since transformations cause missing values
-    drop = 4
+    for i in range(N):
+        freq = config.Frequency[i]
+        step = freq_to_step.get(freq, 1)  # Default to 1 if unknown frequency
+        X[:, i] = _transform_series(Z[:, i], config.Transformation[i], freq, step)
+    
+    # Drop initial observations based on highest frequency in data
+    # Find maximum step (longest period) to determine drop period
+    max_step = max([freq_to_step.get(f, 1) for f in config.Frequency])
+    # Drop period should be at least max_step + 1 to handle transformations
+    drop = max(4, max_step + 1)  # At least 4 for quarterly, more for annual
+    
     if T > drop:
         return X[drop:], Time[drop:], Z[drop:]
     return X, Time, Z

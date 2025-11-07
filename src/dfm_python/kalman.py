@@ -23,7 +23,33 @@ if not _logger.handlers:
 
 @dataclass
 class KalmanFilterState:
-    """Kalman filter state structure."""
+    """Kalman filter state structure.
+    
+    This dataclass stores the complete state of the Kalman filter after forward
+    and backward passes, including prior/posterior estimates and covariances.
+    
+    Attributes
+    ----------
+    Zm : np.ndarray
+        Prior (predicted) factor state estimates, shape (m x nobs).
+        Zm[:, t] is the predicted state at time t given observations up to t-1.
+    Vm : np.ndarray
+        Prior covariance matrices, shape (m x m x nobs).
+        Vm[:, :, t] is the covariance of Zm[:, t].
+    ZmU : np.ndarray
+        Posterior (updated) factor state estimates, shape (m x (nobs+1)).
+        ZmU[:, t] is the updated state at time t given observations up to t.
+        Includes initial state at t=0.
+    VmU : np.ndarray
+        Posterior covariance matrices, shape (m x m x (nobs+1)).
+        VmU[:, :, t] is the covariance of ZmU[:, t].
+    loglik : float
+        Log-likelihood of the data under the current model parameters.
+        Computed as sum of log-likelihoods at each time step.
+    k_t : np.ndarray
+        Kalman gain matrix, shape (m x k) where k is number of observed series.
+        Used to update state estimates with new observations.
+    """
     Zm: np.ndarray      # Prior/predicted factor state (m x nobs)
     Vm: np.ndarray      # Prior covariance (m x m x nobs)
     ZmU: np.ndarray     # Posterior/updated state (m x (nobs+1))
@@ -33,27 +59,53 @@ class KalmanFilterState:
 
 
 def miss_data(y: np.ndarray, C: np.ndarray, R: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Eliminate rows in y, C, R corresponding to missing data (NaN) in y.
+    """Handle missing data by removing NaN observations from the Kalman filter equations.
     
-    Parameters:
-    -----------
+    This function implements the standard approach to missing data in Kalman filtering:
+    observations with NaN values are removed from the observation vector, observation
+    matrix, and covariance matrix. A selection matrix L is returned to restore standard
+    dimensions if needed.
+    
+    Parameters
+    ----------
     y : np.ndarray
-        Vector of observations at time t (k,)
+        Vector of observations at time t, shape (k,) where k is number of series.
+        Missing values should be NaN.
     C : np.ndarray
-        Observation matrix (k x m)
+        Observation/loading matrix, shape (k x m) where m is state dimension.
+        Each row corresponds to a series in y.
     R : np.ndarray
-        Covariance for observation matrix residuals (k x k)
+        Covariance matrix for observation residuals, shape (k x k).
+        Typically diagonal (idiosyncratic variances).
         
-    Returns:
-    --------
-    y : np.ndarray
-        Reduced observation vector
-    C : np.ndarray
-        Reduced observation matrix
-    R : np.ndarray
-        Reduced covariance matrix
+    Returns
+    -------
+    y_clean : np.ndarray
+        Reduced observation vector with NaN values removed, shape (k_obs,)
+        where k_obs is number of non-missing observations.
+    C_clean : np.ndarray
+        Reduced observation matrix, shape (k_obs x m).
+        Rows corresponding to missing observations are removed.
+    R_clean : np.ndarray
+        Reduced covariance matrix, shape (k_obs x k_obs).
+        Rows and columns corresponding to missing observations are removed.
     L : np.ndarray
-        Selection matrix to restore standard dimensions
+        Selection matrix, shape (k x k_obs), used to restore standard dimensions.
+        L @ y_clean gives y with zeros for missing values.
+        
+    Notes
+    -----
+    This function is called at each time step in the Kalman filter to handle
+    missing observations. The selection matrix L allows reconstruction of the
+    full-dimensional vectors if needed for downstream processing.
+    
+    Examples
+    --------
+    >>> y = np.array([1.0, np.nan, 3.0])
+    >>> C = np.array([[1, 0], [0, 1], [1, 1]])
+    >>> R = np.eye(3)
+    >>> y_clean, C_clean, R_clean, L = miss_data(y, C, R)
+    >>> # y_clean = [1.0, 3.0], C_clean has 2 rows, R_clean is 2x2
     """
     # Returns True for nonmissing series
     ix = ~np.isnan(y)

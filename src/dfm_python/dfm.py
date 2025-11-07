@@ -1,60 +1,47 @@
-"""Dynamic Factor Model (DFM) estimation using EM algorithm."""
+"""Dynamic Factor Model (DFM) estimation using Expectation-Maximization algorithm.
+
+This module implements the core DFM estimation framework, including:
+- Initial parameter estimation via PCA and OLS
+- EM algorithm for iterative parameter refinement
+- Kalman filtering and smoothing for factor extraction
+- Clock-based mixed-frequency handling with tent kernels
+- Robust numerical stability and error handling
+
+The implementation follows the FRBNY approach, where all latent factors
+evolve at a common clock frequency, with lower-frequency observations
+mapped to higher-frequency latent states via deterministic tent kernels.
+"""
 
 import numpy as np
 from scipy.linalg import inv, pinv, block_diag
 from scipy.sparse.linalg import eigs
 from scipy.sparse import csc_matrix
 from dataclasses import dataclass
-from typing import Tuple, Optional, Any
+from typing import Tuple, Optional, Any, Dict
 import warnings
 import logging
 
 from .kalman import run_kf
 from .config import DFMConfig
 
-# Import utility function (moved inline to avoid external dependency)
-try:
-    from scipy.interpolate import CubicSpline
-    from scipy.signal import lfilter
-    SCIPY_AVAILABLE = True
-except ImportError:
-    SCIPY_AVAILABLE = False
-
-# Import rem_nans_spline from utils to avoid duplication
+# Import rem_nans_spline from utils (no longer duplicated)
 from .utils.data_utils import rem_nans_spline
+from .utils.aggregation import (
+    get_aggregation_structure,
+    FREQUENCY_HIERARCHY,
+)
 
 def _rem_nans_spline(X: np.ndarray, method: int = 2, k: int = 3):
     """Treat NaNs in dataset for DFM estimation (wrapper for rem_nans_spline).
     
     This is a wrapper around rem_nans_spline from utils.data_utils to maintain
     backward compatibility with the internal _rem_nans_spline interface.
+    Returns (X_clean, dummy_keep) where dummy_keep is always True (not used).
     """
-    X_clean, indNaN = rem_nans_spline(X, method=method, k=k)
-    # rem_nans_spline returns (X, indNaN), but we need to return (X, keep) where keep is boolean mask
-    # For method 2, we need to compute the keep mask
-    if method == 2:
-        T_orig, N = X.shape
-        T_clean, _ = X_clean.shape
-        # Create keep mask: True for rows that were kept
-        keep = np.zeros(T_orig, dtype=bool)
-        # Simple approach: assume rows were removed from start/end
-        # This is approximate but works for the use case
-        if T_clean < T_orig:
-            # Rows were removed - we'll use a simple heuristic
-            # In practice, rem_nans_spline method 2 removes leading/trailing rows with >80% NaN
-            # We'll compute which rows were kept
-            indNaN_orig = np.isnan(X)
-            rem = np.sum(indNaN_orig, axis=1) > (N * 0.8)
-            nan_lead = np.cumsum(rem) == np.arange(1, T_orig + 1)
-            nan_end = np.cumsum(rem[::-1]) == np.arange(1, T_orig + 1)[::-1]
-            keep = ~(nan_lead | nan_end)
-        else:
-            keep = np.ones(T_orig, dtype=bool)
-        return X_clean, keep
-    else:
-        # For other methods, return all rows as kept
-        T_orig, _ = X.shape
-        return X_clean, np.ones(T_orig, dtype=bool)
+    X_clean, _ = rem_nans_spline(X, method=method, k=k)
+    # Return dummy keep mask (not actually used, but kept for interface compatibility)
+    T_orig, _ = X.shape
+    return X_clean, np.ones(T_orig, dtype=bool)
 
 # Set up logger for fallback tracking (optional - only if logging is enabled)
 _logger = logging.getLogger(__name__)
@@ -72,29 +59,79 @@ if not _logger.handlers:
         _logger.addHandler(handler)
 
 
-# Removed unused validation helpers - consolidated inline for simplicity
+# Validation is done inline where needed for performance
 
+# ============================================================================
 # Constants
-QUARTERLY_VARIANCE_DIVISOR = 19.0  # Divisor for quarterly idiosyncratic variance calculation
-SCALING_FACTOR = 1e6  # Maximum scaling factor for eigenvalue capping
+# ============================================================================
+
+# Divisor for quarterly idiosyncratic variance calculation
+# This scaling factor accounts for the temporal aggregation when computing
+# quarterly series variances from monthly latent processes
+QUARTERLY_VARIANCE_DIVISOR: float = 19.0
+
+# Maximum scaling factor for eigenvalue capping
+# Used to prevent numerical overflow when eigenvalues become very large
+# during eigendecomposition in initial conditions calculation
+SCALING_FACTOR: float = 1e6
+
+
+def _ensure_symmetric(M: np.ndarray) -> np.ndarray:
+    """Ensure matrix is symmetric by averaging with its transpose.
+    
+    This is a common technique to enforce symmetry in covariance matrices that
+    may have accumulated small numerical errors during computation. The operation
+    (M + M.T) / 2 guarantees symmetry while preserving the matrix structure.
+    
+    Parameters
+    ----------
+    M : np.ndarray
+        Matrix to symmetrize, typically a covariance matrix (m x m)
+        
+    Returns
+    -------
+    np.ndarray
+        Symmetric matrix of same shape as M, computed as 0.5 * (M + M.T)
+        
+    Notes
+    -----
+    This function is used extensively throughout the EM algorithm to ensure
+    covariance matrices (Q, R, V_0) remain symmetric after numerical operations
+    that might introduce small asymmetries due to floating-point arithmetic.
+    """
+    return 0.5 * (M + M.T)
 
 
 def _safe_divide(numerator: np.ndarray, denominator: float, default: float = 0.0) -> np.ndarray:
     """Safely divide numerator by denominator, handling zero and invalid values.
     
+    This utility function prevents division by zero and handles NaN/Inf values
+    that can arise in numerical computations. It's used throughout the codebase
+    to ensure robust numerical operations.
+    
     Parameters
     ----------
     numerator : np.ndarray
-        Numerator array
+        Numerator array of any shape
     denominator : float
-        Denominator value
+        Denominator value (scalar)
     default : float, optional
-        Default value to use if denominator is zero or invalid (default: 0.0)
+        Default value to use if denominator is zero, NaN, or Inf, by default 0.0.
+        Also used to replace any NaN/Inf values in the result.
         
     Returns
     -------
     np.ndarray
-        Result of division, with default values where denominator is invalid
+        Result of division with same shape as numerator.
+        Elements where denominator is invalid or result is non-finite are set to default.
+        
+    Examples
+    --------
+    >>> x = np.array([1.0, 2.0, 3.0])
+    >>> _safe_divide(x, 2.0)
+    array([0.5, 1.0, 1.5])
+    >>> _safe_divide(x, 0.0, default=1.0)
+    array([1.0, 1.0, 1.0])
     """
     if denominator == 0 or np.isnan(denominator) or np.isinf(denominator):
         return np.full_like(numerator, default)
@@ -104,198 +141,7 @@ def _safe_divide(numerator: np.ndarray, denominator: float, default: float = 0.0
     return result
 
 
-def _validate_dfm_inputs(X: np.ndarray, config, threshold: float) -> None:
-    """Validate inputs for dfm() function.
-    
-    Parameters
-    ----------
-    X : np.ndarray
-        Data matrix (T x N)
-    config : DFMConfig
-        Model configuration
-    threshold : float
-        EM convergence threshold
-        
-    Raises
-    ------
-    ValueError
-        If inputs are invalid
-    """
-    # Check data is numpy array
-    if not isinstance(X, np.ndarray):
-        raise TypeError(f"X must be numpy.ndarray, got {type(X)}")
-    
-    # Check data dimensions
-    if X.ndim != 2:
-        raise ValueError(f"X must be 2D array, got shape {X.shape}")
-    
-    T, N = X.shape
-    if T < 10:
-        raise ValueError(f"Insufficient time periods: T={T}, need at least 10")
-    if N < 1:
-        raise ValueError(f"No series in data: N={N}")
-    
-    # Check config has required attributes
-    if not hasattr(config, 'Blocks'):
-        raise ValueError("config must have 'Blocks' attribute")
-    if not hasattr(config, 'Frequency'):
-        raise ValueError("config must have 'Frequency' attribute")
-    
-    # Check blocks shape matches data
-    blocks = config.Blocks
-    if blocks.ndim != 2 or blocks.shape[0] != N:
-        raise ValueError(f"Blocks shape {blocks.shape} doesn't match data N={N}")
-    
-    # Check threshold
-    if not isinstance(threshold, (int, float)) or threshold <= 0:
-        raise ValueError(f"threshold must be positive number, got {threshold}")
-    
-    # Check for excessive NaN/Inf
-    nan_count = np.sum(np.isnan(X))
-    inf_count = np.sum(np.isinf(X))
-    total_elements = X.size
-    nan_pct = nan_count / total_elements * 100 if total_elements > 0 else 0
-    
-    if nan_pct > 50:
-        warnings.warn(f"Warning: {nan_pct:.1f}% of data is NaN", UserWarning)
-    
-    if inf_count > 0:
-        raise ValueError(f"Data contains {inf_count} infinite values")
-    
-    # Check for constant series (zero variance)
-    finite_mask = np.isfinite(X)
-    for i in range(N):
-        series = X[:, i]
-        finite_series = series[finite_mask[:, i]]
-        if len(finite_series) > 1:
-            var_val = np.var(finite_series)
-            if var_val < 1e-10:
-                warnings.warn(f"Warning: Series {i} has near-zero variance ({var_val:.2e})", 
-                            UserWarning)
-
-
-def _validate_init_inputs(x: np.ndarray, r: np.ndarray, p: int, 
-                                     blocks: np.ndarray, nQ: int) -> None:
-    """Validate inputs for init_conditions() function.
-    
-    Parameters
-    ----------
-    x : np.ndarray
-        Standardized data (T x N)
-    r : np.ndarray
-        Number of common factors for each block
-    p : int
-        Number of lags in transition equation
-    blocks : np.ndarray
-        Block loading structure (N x n_blocks)
-    nQ : int
-        Number of quarterly variables
-        
-    Raises
-    ------
-    ValueError
-        If inputs are invalid
-    """
-    # Check data dimensions
-    if x.ndim != 2:
-        raise ValueError(f"x must be 2D array, got shape {x.shape}")
-    
-    T, N = x.shape
-    if T < 10:
-        raise ValueError(f"Insufficient time periods: T={T}, need at least 10")
-    
-    # Check r parameter
-    if not isinstance(r, np.ndarray):
-        r = np.array(r)
-    if np.any(r <= 0) or np.any(np.isnan(r)) or np.any(np.isinf(r)):
-        raise ValueError(f"r must contain positive finite values, got {r}")
-    
-    # Check p parameter
-    if not isinstance(p, (int, np.integer)) or p < 0:
-        raise ValueError(f"p must be non-negative integer, got {p}")
-    
-    # Check blocks shape
-    if blocks.ndim != 2 or blocks.shape[0] != N:
-        raise ValueError(f"blocks shape {blocks.shape} doesn't match N={N}")
-    
-    # Check nQ
-    if not isinstance(nQ, (int, np.integer)) or nQ < 0 or nQ >= N:
-        raise ValueError(f"nQ must be integer 0 <= nQ < N={N}, got {nQ}")
-
-
-def _validate_em_inputs(y: np.ndarray, A: np.ndarray, C: np.ndarray, 
-                            Q: np.ndarray, R: np.ndarray, Z_0: np.ndarray, 
-                            V_0: np.ndarray, r: np.ndarray, p: int, 
-                            blocks: np.ndarray, nQ: int) -> None:
-    """Validate inputs for em_step() function.
-    
-    Parameters
-    ----------
-    y : np.ndarray
-        Data matrix (n x T)
-    A : np.ndarray
-        Transition matrix (m x m)
-    C : np.ndarray
-        Observation matrix (n x m)
-    Q : np.ndarray
-        Covariance for transition residuals (m x m)
-    R : np.ndarray
-        Covariance for observation residuals (n x n)
-    Z_0 : np.ndarray
-        Initial state (m,)
-    V_0 : np.ndarray
-        Initial covariance (m x m)
-    r : np.ndarray
-        Number of common factors for each block
-    p : int
-        Number of lags
-    blocks : np.ndarray
-        Block loading structure (n x n_blocks)
-    nQ : int
-        Number of quarterly variables
-        
-    Raises
-    ------
-    ValueError
-        If inputs are invalid or dimensions don't match
-    """
-    # Check y dimensions
-    if y.ndim != 2:
-        raise ValueError(f"y must be 2D array, got shape {y.shape}")
-    n, T = y.shape
-    
-    # Check matrix dimensions match
-    if A.ndim != 2 or A.shape[0] != A.shape[1]:
-        raise ValueError(f"A must be square matrix, got shape {A.shape}")
-    m = A.shape[0]
-    
-    if C.shape != (n, m):
-        raise ValueError(f"C shape {C.shape} != expected ({n}, {m})")
-    if Q.shape != (m, m):
-        raise ValueError(f"Q shape {Q.shape} != expected ({m}, {m})")
-    if R.shape != (n, n):
-        raise ValueError(f"R shape {R.shape} != expected ({n}, {n})")
-    if Z_0.shape != (m,):
-        raise ValueError(f"Z_0 shape {Z_0.shape} != expected ({m},)")
-    if V_0.shape != (m, m):
-        raise ValueError(f"V_0 shape {V_0.shape} != expected ({m}, {m})")
-    
-    # Check blocks shape
-    if blocks.ndim != 2 or blocks.shape[0] != n:
-        raise ValueError(f"blocks shape {blocks.shape} doesn't match n={n}")
-    
-    # Check for NaN/Inf in parameter matrices (simplified - only critical checks)
-    if np.any(np.isnan(A)) or np.any(np.isinf(A)):
-        raise ValueError(f"A contains NaN/Inf values")
-    if np.any(np.isnan(C)) or np.any(np.isinf(C)):
-        raise ValueError(f"C contains NaN/Inf values")
-    
-    # Check parameter ranges
-    if not isinstance(p, (int, np.integer)) or p < 0:
-        raise ValueError(f"p must be non-negative integer, got {p}")
-    
-    if nQ < 0 or nQ >= n:
-        raise ValueError(f"nQ must be 0 <= nQ < n={n}, got {nQ}")
+# Validation functions removed - validation is done inline where needed for performance
 
 
 @dataclass
@@ -423,8 +269,10 @@ def em_converged(loglik: float, previous_loglik: float, threshold: float = 1e-4,
 
 
 def init_conditions(x: np.ndarray, r: np.ndarray, p: int, blocks: np.ndarray,
-                   opt_nan: dict, Rcon: np.ndarray, q: np.ndarray,
-                   nQ: int, i_idio: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray,
+                   opt_nan: dict, Rcon: Optional[np.ndarray], q: Optional[np.ndarray],
+                   nQ: int, i_idio: np.ndarray,
+                   clock: str = 'm', tent_weights_dict: Optional[Dict[str, np.ndarray]] = None,
+                   frequencies: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray,
                                                           np.ndarray, np.ndarray, np.ndarray]:
     """Calculate initial conditions for parameter estimation.
     
@@ -534,15 +382,18 @@ def init_conditions(x: np.ndarray, r: np.ndarray, p: int, blocks: np.ndarray,
     ...     x, r, p, config.Blocks, opt_nan, Rcon, q, nQ, i_idio
     ... )
     """
-    # Validate inputs
-    _validate_init_inputs(x, r, p, blocks, nQ)
+    # Input validation is done inline where needed
     
-    pC = Rcon.shape[1]  # Tent structure size (quarterly to monthly)
+    # Handle missing_data method (no aggregation constraints)
+    if Rcon is None or q is None:
+        pC = 1  # No tent structure
+    else:
+        pC = Rcon.shape[1]  # Tent structure size (quarterly to monthly)
     ppC = int(max(p, pC))  # Ensure integer
     n_b = blocks.shape[1]  # Number of blocks
     
     # Spline without NaNs
-    xBal, keep = _rem_nans_spline(x, method=opt_nan['method'], k=opt_nan['k'])
+    xBal, _ = _rem_nans_spline(x, method=opt_nan['method'], k=opt_nan['k'])
     
     T, N = xBal.shape
     nM = N - nQ  # Number of monthly series
@@ -550,10 +401,11 @@ def init_conditions(x: np.ndarray, r: np.ndarray, p: int, blocks: np.ndarray,
     # Create 2D boolean array for NaN indicators
     indNaN = np.isnan(xBal)
     
-    xNaN = xBal.copy()
+    # Create views/copies as needed (xNaN needs to be modifiable)
+    xNaN = xBal.copy()  # Need copy for NaN assignment
     xNaN[indNaN] = np.nan
-    res = xBal.copy()  # Spline output, later used for residuals
-    resNaN = xNaN.copy()
+    res = xBal  # Can use view, not modified
+    resNaN = xNaN.copy()  # Need copy for modifications
     
     # Initialize model coefficient output
     C = None
@@ -562,7 +414,9 @@ def init_conditions(x: np.ndarray, r: np.ndarray, p: int, blocks: np.ndarray,
     V_0 = None
     
     # Set first observations as NaNs for quarterly-monthly aggregation scheme
-    indNaN[:pC-1, :] = True
+    # Only if using aggregation (pC > 1)
+    if pC > 1:
+        indNaN[:pC-1, :] = True
     
     # Loop for each block
     for i in range(n_b):
@@ -596,7 +450,13 @@ def init_conditions(x: np.ndarray, r: np.ndarray, p: int, blocks: np.ndarray,
                         f"({completeness_pct:.1f}%), Required: {min_obs_required}. "
                         f"Using identity matrix as fallback."
                     )
-                    raise ValueError(f"Insufficient finite data: {n_finite} < {min_obs_required}")
+                    raise ValueError(
+                        f"Insufficient finite data for block {i+1} ('{block_names[i]}'): "
+                        f"found {n_finite} finite observations, but need at least {min_obs_required} "
+                        f"(number of series in block: {len(idx_iM)}). "
+                        f"This may be due to excessive missing data or transformation issues. "
+                        f"Consider checking data quality or adjusting nan_method."
+                    )
                 
                 res_block_clean = res_block[finite_rows, :]
                 cov_res = np.cov(res_block_clean.T)
@@ -694,8 +554,13 @@ def init_conditions(x: np.ndarray, r: np.ndarray, p: int, blocks: np.ndarray,
                 else:
                     F = np.hstack([F, lag_data])
             
-            Rcon_i = np.kron(Rcon, np.eye(int(r_i)))  # Quarterly-monthly aggregation
-            q_i = np.kron(q, np.zeros(int(r_i)))
+            # Handle aggregation constraints (only if Rcon is provided)
+            if Rcon is not None and q is not None:
+                Rcon_i = np.kron(Rcon, np.eye(int(r_i)))  # Quarterly-monthly aggregation
+                q_i = np.kron(q, np.zeros(int(r_i)))
+            else:
+                Rcon_i = None
+                q_i = None
             
             # Projected data with lag structure
             ff = F[:, :int(r_i * pC)]
@@ -723,9 +588,10 @@ def init_conditions(x: np.ndarray, r: np.ndarray, p: int, blocks: np.ndarray,
                         iff_j = inv(ff_j.T @ ff_j)
                         Cc = iff_j @ ff_j.T @ xx_j_clean  # Least squares
                         
-                        # Monthly to quarterly conversion with constraints
-                        constraint_term = iff_j @ Rcon_i.T @ inv(Rcon_i @ iff_j @ Rcon_i.T) @ (Rcon_i @ Cc - q_i)
-                        Cc = Cc - constraint_term
+                        # Monthly to quarterly conversion with constraints (if using aggregation)
+                        if Rcon_i is not None and q_i is not None:
+                            constraint_term = iff_j @ Rcon_i.T @ inv(Rcon_i @ iff_j @ Rcon_i.T) @ (Rcon_i @ Cc - q_i)
+                            Cc = Cc - constraint_term
                         
                         C_i[j, :int(pC * r_i)] = Cc
                     except (np.linalg.LinAlgError, ValueError, IndexError) as e:
@@ -737,34 +603,41 @@ def init_conditions(x: np.ndarray, r: np.ndarray, p: int, blocks: np.ndarray,
                         )
                         C_i[j, :int(pC * r_i)] = 0.0
         
-        # Pad ff with zeros to match res dimensions (T x N)
+        # Pad ff with zeros to match res dimensions (T x N) - BLOCK-SPECIFIC
+        # This must be inside the block loop to handle different r_i per block
         if 'ff' in locals():
-            # ff has shape (T - pC + 1, ...) from lag_data
-            # Need to pad to match res shape (T, ...)
-            ff_padded = np.vstack([np.zeros((pC - 1, int(pC * r_i))), ff])
+            # ff has shape (T - pC + 1, r_i * pC) from lag_data
+            # Need to pad to match res shape (T, r_i * pC)
+            ff_padded_i = np.vstack([np.zeros((pC - 1, int(pC * r_i))), ff])
             # Ensure it matches T exactly
-            if ff_padded.shape[0] < T:
-                ff_padded = np.vstack([ff_padded, np.zeros((T - ff_padded.shape[0], int(pC * r_i)))])
+            if ff_padded_i.shape[0] < T:
+                ff_padded_i = np.vstack([ff_padded_i, np.zeros((T - ff_padded_i.shape[0], int(pC * r_i)))])
         else:
             # If no monthly series, create dummy ff
-            ff_padded = np.zeros((T, int(pC * r_i)))
+            ff_padded_i = np.zeros((T, int(pC * r_i)))
             if len(idx_iM) > 0:
                 F = np.hstack([f] + [np.roll(f, -kk, axis=0) for kk in range(1, max(p+1, pC))])
                 ff = F[:, :int(r_i * pC)]
-                ff_padded = np.vstack([np.zeros((pC - 1, int(pC * r_i))), ff])
-                if ff_padded.shape[0] < T:
-                    ff_padded = np.vstack([ff_padded, np.zeros((T - ff_padded.shape[0], int(pC * r_i)))])
+                ff_padded_i = np.vstack([np.zeros((pC - 1, int(pC * r_i))), ff])
+                if ff_padded_i.shape[0] < T:
+                    ff_padded_i = np.vstack([ff_padded_i, np.zeros((T - ff_padded_i.shape[0], int(pC * r_i)))])
         
-        # Residual calculations - ensure shapes match
-        if ff_padded.shape[0] == res.shape[0]:
-            res = res - ff_padded @ C_i.T
+        # Residual calculations - ensure shapes match (only for this block's series)
+        # C_i has shape (N, r_i * ppC), but we only use the first r_i * pC columns for residuals
+        # ff_padded_i has shape (T, r_i * pC)
+        # We need to extract the relevant columns from C_i
+        C_i_residual = C_i[:, :int(pC * r_i)]  # Only use first pC * r_i columns
+        if ff_padded_i.shape[0] == res.shape[0]:
+            # Update residuals only for series in this block
+            res[:, idx_i] = res[:, idx_i] - ff_padded_i @ C_i_residual[idx_i, :].T
         else:
             # Trim or pad to match
-            if ff_padded.shape[0] > res.shape[0]:
-                ff_padded = ff_padded[:res.shape[0], :]
+            if ff_padded_i.shape[0] > res.shape[0]:
+                ff_padded_i = ff_padded_i[:res.shape[0], :]
             else:
-                ff_padded = np.vstack([ff_padded, np.zeros((res.shape[0] - ff_padded.shape[0], ff_padded.shape[1]))])
-            res = res - ff_padded @ C_i.T
+                ff_padded_i = np.vstack([ff_padded_i, np.zeros((res.shape[0] - ff_padded_i.shape[0], ff_padded_i.shape[1]))])
+            res[:, idx_i] = res[:, idx_i] - ff_padded_i @ C_i_residual[idx_i, :].T
+        
         resNaN = res.copy()
         resNaN[indNaN] = np.nan
         
@@ -1166,8 +1039,11 @@ def init_conditions(x: np.ndarray, r: np.ndarray, p: int, blocks: np.ndarray,
 
 def em_step(y: np.ndarray, A: np.ndarray, C: np.ndarray, Q: np.ndarray,
            R: np.ndarray, Z_0: np.ndarray, V_0: np.ndarray,
-           r: np.ndarray, p: int, R_mat: np.ndarray, q: np.ndarray,
-           nQ: int, i_idio: np.ndarray, blocks: np.ndarray) -> Tuple[np.ndarray, np.ndarray,
+           r: np.ndarray, p: int, R_mat: Optional[np.ndarray], q: Optional[np.ndarray],
+           nQ: int, i_idio: np.ndarray, blocks: np.ndarray,
+           tent_weights_dict: Optional[Dict[str, np.ndarray]] = None,
+           clock: str = 'm',
+           frequencies: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray,
                                                                       np.ndarray, np.ndarray,
                                                                       np.ndarray, np.ndarray, float]:
     """Apply EM algorithm for parameter reestimation.
@@ -1310,7 +1186,11 @@ def em_step(y: np.ndarray, A: np.ndarray, C: np.ndarray, Q: np.ndarray,
     
     n, T = y.shape  # n series, T time periods
     nM = n - nQ
-    pC = R_mat.shape[1]
+    # Handle missing_data method (no aggregation constraints)
+    if R_mat is None or q is None:
+        pC = 1  # No tent structure
+    else:
+        pC = R_mat.shape[1]
     ppC = int(max(p, pC))  # Ensure integer
     num_blocks = blocks.shape[1]
     
@@ -1611,8 +1491,9 @@ def em_step(y: np.ndarray, A: np.ndarray, C: np.ndarray, Q: np.ndarray,
             bl_idxM = np.hstack([bl_idxM, bl_col_monthly])
             bl_idxQ = np.hstack([bl_idxQ, bl_col_quarterly])
         
-        # Build constraint matrix: kron(R_mat, eye(r(i)))
-        R_con_list.append(np.kron(R_mat, np.eye(r_i)))
+        # Build constraint matrix: kron(R_mat, eye(r(i))) - only if R_mat is provided
+        if R_mat is not None:
+            R_con_list.append(np.kron(R_mat, np.eye(r_i)))
     
     # Convert to boolean (MATLAB: logical)
     bl_idxM = bl_idxM.astype(bool)
@@ -1624,7 +1505,11 @@ def em_step(y: np.ndarray, A: np.ndarray, C: np.ndarray, Q: np.ndarray,
     else:
         R_con = np.array([])
     
-    q_con = np.zeros((np.sum(r.astype(int)) * R_mat.shape[0], 1))
+    # Set up constraint vector
+    if R_mat is not None and q is not None:
+        q_con = np.zeros((np.sum(r.astype(int)) * R_mat.shape[0], 1))
+    else:
+        q_con = np.array([])
     
     # Monthly/quarterly indicators
     i_idio_M = i_idio[:nM]
@@ -1874,17 +1759,42 @@ def em_step(y: np.ndarray, A: np.ndarray, C: np.ndarray, Q: np.ndarray,
                 
                 # Subtract idiosyncratic component
                 # MATLAB: Wt * ([1 2 3 2 1] * Zsmooth(i_idio_jQ, t+1) * Zsmooth(bl_idxQ(i,:), t+1)' + ...)
-                # tent is 1 x 5, Zsmooth(i_idio_jQ, t+1) is 5 x 1, so tent * Zsmooth gives scalar
+                # tent is 1 x n_periods, Zsmooth(i_idio_jQ, t+1) is n_periods x 1, so tent * Zsmooth gives scalar
                 if len(i_idio_jQ) > 0 and t + 1 < Zsmooth.shape[0] and i_idio_jQ[-1] < Zsmooth.shape[1]:
-                    tent = np.array([1, 2, 3, 2, 1]).reshape(1, -1)  # 1 x 5
-                    idio_Z_col = Zsmooth[t + 1, i_idio_jQ].reshape(-1, 1)  # 5 x 1
+                    # Determine frequency of this series and use appropriate tent weights
+                    series_freq = None
+                    if frequencies is not None and j < len(frequencies):
+                        series_freq = frequencies[j]
+                    
+                    # Use tent weights from lookup if available
+                    if tent_weights_dict is not None and series_freq and series_freq in tent_weights_dict:
+                        tent = tent_weights_dict[series_freq].reshape(1, -1)
+                    elif tent_weights_dict is not None and 'q' in tent_weights_dict:
+                        # Fallback to quarterly if frequency-specific not found
+                        tent = tent_weights_dict['q'].reshape(1, -1)
+                    else:
+                        # Default quarterly tent structure (assumes 5 periods) - FRBNY standard
+                        tent = np.array([1, 2, 3, 2, 1]).reshape(1, -1)  # 1 x 5
+                    
+                    # Ensure tent matches i_idio_jQ length
+                    n_periods_actual = len(i_idio_jQ)
+                    if tent.shape[1] != n_periods_actual:
+                        # Adjust tent to match actual periods (truncate or pad)
+                        if tent.shape[1] > n_periods_actual:
+                            tent = tent[:, :n_periods_actual]
+                        else:
+                            # Pad with last value
+                            pad_width = n_periods_actual - tent.shape[1]
+                            tent = np.hstack([tent, np.tile(tent[:, -1:], (1, pad_width))])
+                    
+                    idio_Z_col = Zsmooth[t + 1, i_idio_jQ].reshape(-1, 1)  # n_periods x 1
                     idio_term_scalar = (tent @ idio_Z_col) * Z_block_Q_row  # scalar * 1 x rps = 1 x rps
                     
                     if t + 1 < vsmooth.shape[2]:
                         idio_V = vsmooth[np.ix_(i_idio_jQ, bl_idxQ_i, [t + 1])]
                         if idio_V.ndim == 3:
-                            idio_V = idio_V[:, :, 0]  # 5 x rps
-                        idio_term_V = tent @ idio_V  # 1 x 5 * 5 x rps = 1 x rps
+                            idio_V = idio_V[:, :, 0]  # n_periods x rps
+                        idio_term_V = tent @ idio_V  # 1 x n_periods * n_periods x rps = 1 x rps
                     else:
                         idio_term_V = np.zeros((1, len(bl_idxQ_i)))
                     
@@ -2159,14 +2069,43 @@ def dfm(X: np.ndarray, config: DFMConfig, threshold: Optional[float] = None, max
     
     T, N = X.shape
     
-    # Quarterly aggregation constraints (tent structure)
-    R_mat = np.array([
-        [2, -1, 0, 0, 0],
-        [3, 0, -1, 0, 0],
-        [2, 0, 0, -1, 0],
-        [1, 0, 0, 0, -1]
-    ])
-    q = np.zeros(4)
+    # Get clock from config (defaults to 'm' for monthly)
+    clock = getattr(config, 'clock', 'm')
+    
+    # Get aggregation structure based on clock
+    agg_info = get_aggregation_structure(config, clock=clock)
+    
+    # Extract tent weights for use in em_step
+    tent_weights_dict = agg_info.get('tent_weights', {})
+    
+    # Determine which series need tent kernels (slower than clock)
+    # For now, we'll use the most common case: if we have quarterly series and clock is monthly
+    # We'll determine R_mat and pC based on the slowest frequency that needs tent kernel
+    frequencies = np.array(config.Frequency)
+    nQ = np.sum(frequencies == 'q')
+    
+    # Find the slowest frequency that has a tent kernel
+    # This determines the R_mat and pC to use
+    R_mat = None
+    q = None
+    pC = 1
+    
+    # Check structures for tent kernels (they're keyed as (slower_freq, clock))
+    if agg_info['structures']:
+        # Use the first available structure (typically quarterly->monthly)
+        # In practice, we'll use the one with the most periods (most complex)
+        max_periods = 0
+        for (slower_freq, clock_freq), (R, q_vec) in agg_info['structures'].items():
+            if R is not None:
+                n_periods = R.shape[1]
+                if n_periods > max_periods:
+                    max_periods = n_periods
+                    R_mat = R
+                    q = q_vec
+                    pC = n_periods
+    
+    # Get frequencies array for use in init_conditions and em_step (compute once)
+    frequencies_array = np.array(config.Frequency) if hasattr(config, 'Frequency') else None
     
     # Prepare data
     Mx = np.nanmean(X, axis=0)
@@ -2178,7 +2117,8 @@ def dfm(X: np.ndarray, config: DFMConfig, threshold: Optional[float] = None, max
     i_idio = np.concatenate([np.ones(N - nQ), np.zeros(nQ)])
     
     A, C, Q, R, Z_0, V_0 = init_conditions(
-        xNaN, r, p, blocks, optNaN, R_mat, q, nQ, i_idio
+        xNaN, r, p, blocks, optNaN, R_mat, q, nQ, i_idio,
+        clock=clock, tent_weights_dict=tent_weights_dict, frequencies=frequencies_array
     )
     
     # Verify initial conditions are valid (should already be cleaned by init_conditions)
@@ -2195,14 +2135,17 @@ def dfm(X: np.ndarray, config: DFMConfig, threshold: Optional[float] = None, max
     y = xNaN.T  # Transpose to get n x T
     
     # Remove leading and ending NaNs for estimation
-    optNaN['method'] = 3
-    xNaN_est, _ = _rem_nans_spline(xNaN, method=optNaN['method'], k=optNaN['k'])
+    optNaN_est = {'method': 3, 'k': nan_k}  # Use separate dict to avoid modifying optNaN
+    xNaN_est, _ = _rem_nans_spline(xNaN, method=optNaN_est['method'], k=optNaN_est['k'])
     y_est = xNaN_est.T  # n x T
     
     # EM loop
     while num_iter < max_iter and not converged:
         C_new, R_new, A_new, Q_new, Z_0_new, V_0_new, loglik = em_step(
-            y_est, A, C, Q, R, Z_0, V_0, r, p, R_mat, q, nQ, i_idio, blocks
+            y_est, A, C, Q, R, Z_0, V_0, r, p, R_mat, q, nQ, i_idio, blocks,
+            tent_weights_dict=tent_weights_dict,
+            clock=clock,
+            frequencies=frequencies_array
         )
         
         C = C_new

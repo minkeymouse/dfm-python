@@ -28,10 +28,10 @@ def _get_test_data():
     """Get or load test data (cached)."""
     if 'data' not in _test_cache:
         base_dir = Path(__file__).parent.parent.parent
-        spec_file = base_dir / 'matlab' / 'Spec_US_example.xls'
+        spec_file = base_dir / 'Nowcasting' / 'Spec_US_example.xls'
         config = load_config(spec_file)
         vintage = '2016-06-29'
-        data_file = base_dir / 'data' / 'US' / f'{vintage}.xls'
+        data_file = base_dir / 'Nowcasting' / 'data' / 'US' / f'{vintage}.xls'
         X, Time, Z = load_data(data_file, config, sample_start=pd.Timestamp('2000-01-01'))
         _test_cache['data'] = (config, X, Time, Z)
     return _test_cache['data']
@@ -561,7 +561,7 @@ def test_dfm_quick():
     X[missing_mask] = np.nan
     
     # Create minimal config
-    from src.nowcasting.config import ModelConfig, SeriesConfig
+    from dfm_python.config import DFMConfig, SeriesConfig
     
     block_names = ['Global', 'Block1']
     series_list = []
@@ -578,7 +578,7 @@ def test_dfm_quick():
             blocks=blocks
         ))
     
-    config = ModelConfig(series=series_list, block_names=block_names)
+    config = DFMConfig(series=series_list, block_names=block_names)
     
     # Run DFM with relaxed threshold for faster convergence
     # Note: dfm() uses max_iter=5000 internally, but with relaxed threshold
@@ -618,7 +618,7 @@ def test_init_conditions_blocks():
     print("TEST: Init Conditions Blocks (Fast Test)")
     print("="*70)
     
-    from src.nowcasting.dfm import init_conditions
+    from dfm_python.dfm import init_conditions
     
     # Test case 1: Multiple series per block
     print("  Test 1: Multiple series per block")

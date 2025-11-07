@@ -1,4 +1,14 @@
-"""Utility functions for data preprocessing and summary statistics."""
+"""Utility functions for data preprocessing and summary statistics.
+
+This module provides essential data handling utilities for Dynamic Factor Models:
+- Missing value treatment via spline interpolation
+- Data summary and visualization
+- Robust handling of edge cases (all-NaN series, constant series, etc.)
+
+The spline interpolation methods follow standard econometric practice for handling
+missing data in time series, with options for different treatment strategies
+depending on data characteristics.
+"""
 
 import numpy as np
 from scipy.interpolate import CubicSpline

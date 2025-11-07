@@ -18,7 +18,7 @@ from dfm_python import load_config, load_data, dfm, update_nowcast
 def _get_spec_and_data():
     """Load specification and data."""
     base_dir = Path(__file__).parent.parent.parent
-    spec_file = base_dir / 'matlab' / 'Spec_US_example.xls'
+    spec_file = base_dir / 'Nowcasting' / 'Spec_US_example.xls'
     config = load_config(spec_file)
     return config, base_dir
 
