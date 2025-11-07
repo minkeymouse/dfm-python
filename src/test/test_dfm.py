@@ -13,7 +13,7 @@ sys.path.insert(0, str(project_root / 'src'))
 
 from dfm_python.dfm import dfm, DFMResult, em_step, init_conditions
 from dfm_python.data_loader import load_config, load_data
-from utils.data_utils import rem_nans_spline
+from dfm_python.utils.data_utils import rem_nans_spline
 
 try:
     from scipy.io import loadmat
