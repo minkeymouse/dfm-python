@@ -120,6 +120,32 @@ class DFMConfig:
     clock: str = 'm'  # Base frequency for nowcasting (global clock): 'd', 'w', 'm', 'q', 'sa', 'a' (defaults to 'm' for monthly)
     
     # ========================================================================
+    # Numerical Stability Parameters (transparent and configurable)
+    # ========================================================================
+    # AR Coefficient Clipping
+    clip_ar_coefficients: bool = True  # Enable AR coefficient clipping for stationarity
+    ar_clip_min: float = -0.99  # Minimum AR coefficient (must be > -1 for stationarity)
+    ar_clip_max: float = 0.99   # Maximum AR coefficient (must be < 1 for stationarity)
+    warn_on_ar_clip: bool = True  # Warn when AR coefficients are clipped (indicates near-unit root)
+    
+    # Data Value Clipping
+    clip_data_values: bool = True  # Enable clipping of extreme data values
+    data_clip_threshold: float = 100.0  # Clip values beyond this many standard deviations
+    warn_on_data_clip: bool = True  # Warn when data values are clipped (indicates outliers)
+    
+    # Regularization
+    use_regularization: bool = True  # Enable regularization for numerical stability
+    regularization_scale: float = 1e-6  # Scale factor for ridge regularization (relative to trace)
+    min_eigenvalue: float = 1e-8  # Minimum eigenvalue for positive definite matrices
+    max_eigenvalue: float = 1e6   # Maximum eigenvalue cap to prevent explosion
+    warn_on_regularization: bool = True  # Warn when regularization is applied
+    
+    # Damped Updates
+    use_damped_updates: bool = True  # Enable damped updates when likelihood decreases
+    damping_factor: float = 0.8  # Damping factor (0.8 = 80% new, 20% old)
+    warn_on_damped_update: bool = True  # Warn when damped updates are used
+    
+    # ========================================================================
     # Internal cache (not user-configurable)
     # ========================================================================
     _cached_blocks: Optional[np.ndarray] = field(default=None, init=False, repr=False)
@@ -293,8 +319,8 @@ class DFMConfig:
                 category=str(cat_val) if cat_val is not None else ''
             ))
         
-            # Extract estimation parameters if provided
-            return cls(
+        # Extract estimation parameters if provided
+        return cls(
                 series=series_list,
                 block_names=data.get('BlockNames', data.get('block_names', [])),
                 factors_per_block=data.get('factors_per_block', None),
@@ -304,7 +330,23 @@ class DFMConfig:
                 max_iter=data.get('max_iter', 5000),
                 nan_method=data.get('nan_method', 2),
                 nan_k=data.get('nan_k', 3),
-                clock=data.get('clock', 'm')
+                clock=data.get('clock', 'm'),
+                # Numerical stability parameters
+                clip_ar_coefficients=data.get('clip_ar_coefficients', True),
+                ar_clip_min=data.get('ar_clip_min', -0.99),
+                ar_clip_max=data.get('ar_clip_max', 0.99),
+                warn_on_ar_clip=data.get('warn_on_ar_clip', True),
+                clip_data_values=data.get('clip_data_values', True),
+                data_clip_threshold=data.get('data_clip_threshold', 100.0),
+                warn_on_data_clip=data.get('warn_on_data_clip', True),
+                use_regularization=data.get('use_regularization', True),
+                regularization_scale=data.get('regularization_scale', 1e-6),
+                min_eigenvalue=data.get('min_eigenvalue', 1e-8),
+                max_eigenvalue=data.get('max_eigenvalue', 1e6),
+                warn_on_regularization=data.get('warn_on_regularization', True),
+                use_damped_updates=data.get('use_damped_updates', True),
+                damping_factor=data.get('damping_factor', 0.8),
+                warn_on_damped_update=data.get('warn_on_damped_update', True)
             )
     
     @classmethod
@@ -376,7 +418,23 @@ class DFMConfig:
                 max_iter=data.get('max_iter', 5000),
                 nan_method=data.get('nan_method', 2),
                 nan_k=data.get('nan_k', 3),
-                clock=data.get('clock', 'm')
+                clock=data.get('clock', 'm'),
+                # Numerical stability parameters
+                clip_ar_coefficients=data.get('clip_ar_coefficients', True),
+                ar_clip_min=data.get('ar_clip_min', -0.99),
+                ar_clip_max=data.get('ar_clip_max', 0.99),
+                warn_on_ar_clip=data.get('warn_on_ar_clip', True),
+                clip_data_values=data.get('clip_data_values', True),
+                data_clip_threshold=data.get('data_clip_threshold', 100.0),
+                warn_on_data_clip=data.get('warn_on_data_clip', True),
+                use_regularization=data.get('use_regularization', True),
+                regularization_scale=data.get('regularization_scale', 1e-6),
+                min_eigenvalue=data.get('min_eigenvalue', 1e-8),
+                max_eigenvalue=data.get('max_eigenvalue', 1e6),
+                warn_on_regularization=data.get('warn_on_regularization', True),
+                use_damped_updates=data.get('use_damped_updates', True),
+                damping_factor=data.get('damping_factor', 0.8),
+                warn_on_damped_update=data.get('warn_on_damped_update', True)
             )
         
         # New format with series list
@@ -396,7 +454,23 @@ class DFMConfig:
                 max_iter=data.get('max_iter', 5000),
                 nan_method=data.get('nan_method', 2),
                 nan_k=data.get('nan_k', 3),
-                clock=data.get('clock', 'm')
+                clock=data.get('clock', 'm'),
+                # Numerical stability parameters
+                clip_ar_coefficients=data.get('clip_ar_coefficients', True),
+                ar_clip_min=data.get('ar_clip_min', -0.99),
+                ar_clip_max=data.get('ar_clip_max', 0.99),
+                warn_on_ar_clip=data.get('warn_on_ar_clip', True),
+                clip_data_values=data.get('clip_data_values', True),
+                data_clip_threshold=data.get('data_clip_threshold', 100.0),
+                warn_on_data_clip=data.get('warn_on_data_clip', True),
+                use_regularization=data.get('use_regularization', True),
+                regularization_scale=data.get('regularization_scale', 1e-6),
+                min_eigenvalue=data.get('min_eigenvalue', 1e-8),
+                max_eigenvalue=data.get('max_eigenvalue', 1e6),
+                warn_on_regularization=data.get('warn_on_regularization', True),
+                use_damped_updates=data.get('use_damped_updates', True),
+                damping_factor=data.get('damping_factor', 0.8),
+                warn_on_damped_update=data.get('warn_on_damped_update', True)
             )
         
         # Direct instantiation (shouldn't happen often, but handle it)

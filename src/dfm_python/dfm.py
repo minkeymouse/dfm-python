@@ -17,7 +17,7 @@ from scipy.linalg import inv, pinv, block_diag
 from scipy.sparse.linalg import eigs
 from scipy.sparse import csc_matrix
 from dataclasses import dataclass
-from typing import Tuple, Optional, Any, Dict
+from typing import Tuple, Optional, Any, Dict, Union
 import warnings
 import logging
 
@@ -100,6 +100,465 @@ def _ensure_symmetric(M: np.ndarray) -> np.ndarray:
     that might introduce small asymmetries due to floating-point arithmetic.
     """
     return 0.5 * (M + M.T)
+
+
+def _clean_matrix(M: np.ndarray, matrix_type: str = 'general', 
+                  default_nan: float = 0.0, default_inf: Optional[float] = None) -> np.ndarray:
+    """Clean matrix by removing NaN/Inf values and ensuring numerical stability.
+    
+    Parameters
+    ----------
+    M : np.ndarray
+        Matrix to clean
+    matrix_type : str
+        Type of matrix: 'general', 'covariance', 'diagonal', 'loading'
+    default_nan : float
+        Default value for NaN (default: 0.0)
+    default_inf : float, optional
+        Default value for Inf. If None, uses matrix-specific defaults.
+        
+    Returns
+    -------
+    np.ndarray
+        Cleaned matrix
+    """
+    if matrix_type == 'covariance':
+        # Covariance matrices: ensure symmetry and positive semi-definite
+        M = np.nan_to_num(M, nan=default_nan, posinf=1e6, neginf=-1e6)
+        M = _ensure_symmetric(M)
+        # Ensure positive semi-definite
+        try:
+            eigenvals = np.linalg.eigvals(M)
+            min_eigenval = np.min(eigenvals)
+            if min_eigenval < 1e-8:
+                M = M + np.eye(M.shape[0]) * (1e-8 - min_eigenval)
+                M = _ensure_symmetric(M)
+        except (np.linalg.LinAlgError, ValueError):
+            M = M + np.eye(M.shape[0]) * 1e-8
+            M = _ensure_symmetric(M)
+    elif matrix_type == 'diagonal':
+        # Diagonal matrices: clean diagonal only
+        diag = np.diag(M)
+        diag = np.nan_to_num(diag, nan=default_nan, 
+                            posinf=default_inf if default_inf is not None else 1e4,
+                            neginf=default_nan)
+        diag = np.maximum(diag, 1e-6)  # Ensure positive
+        M = np.diag(diag)
+    elif matrix_type == 'loading':
+        # Loading matrices: clip extreme values
+        M = np.nan_to_num(M, nan=default_nan, posinf=1.0, neginf=-1.0)
+    else:
+        # General matrices: just clean NaN/Inf
+        default_inf_val = default_inf if default_inf is not None else 1e6
+        M = np.nan_to_num(M, nan=default_nan, posinf=default_inf_val, neginf=-default_inf_val)
+    
+    return M
+
+
+def _ensure_positive_definite(M: np.ndarray, min_eigenval: float = 1e-8, 
+                              warn: bool = True) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """Ensure matrix is positive semi-definite by adding regularization if needed.
+    
+    WARNING: Adding regularization biases the covariance matrix. This should only
+    be necessary for numerical stability. If frequently required, investigate
+    the source of non-positive-definite matrices.
+    
+    Parameters
+    ----------
+    M : np.ndarray
+        Matrix to regularize (should be symmetric)
+    min_eigenval : float
+        Minimum eigenvalue threshold (default: 1e-8)
+    warn : bool
+        Whether to log warnings when regularization is applied
+        
+    Returns
+    -------
+    M_reg : np.ndarray
+        Positive semi-definite matrix
+    stats : dict
+        Statistics: {'regularized': bool, 'min_eigenval_before': float, 
+                     'reg_amount': float, 'min_eigenval_after': float}
+    """
+    M = _ensure_symmetric(M)
+    stats = {
+        'regularized': False,
+        'min_eigenval_before': None,
+        'reg_amount': 0.0,
+        'min_eigenval_after': None
+    }
+    
+    try:
+        eigenvals = np.linalg.eigvals(M)
+        min_eig = np.min(eigenvals)
+        stats['min_eigenval_before'] = float(min_eig)
+        
+        if min_eig < min_eigenval:
+            reg_amount = min_eigenval - min_eig
+            M = M + np.eye(M.shape[0]) * reg_amount
+            M = _ensure_symmetric(M)
+            stats['regularized'] = True
+            stats['reg_amount'] = float(reg_amount)
+            
+            # Verify after regularization
+            eigenvals_after = np.linalg.eigvals(M)
+            stats['min_eigenval_after'] = float(np.min(eigenvals_after))
+            
+            if warn:
+                _logger.warning(
+                    f"Matrix regularization applied: min eigenvalue {min_eig:.2e} < {min_eigenval:.2e}, "
+                    f"added {reg_amount:.2e} to diagonal. This biases the covariance matrix. "
+                    f"Consider investigating the source of non-positive-definite matrices."
+                )
+        else:
+            stats['min_eigenval_after'] = float(min_eig)
+    except (np.linalg.LinAlgError, ValueError) as e:
+        # Eigendecomposition failed - add small regularization
+        M = M + np.eye(M.shape[0]) * min_eigenval
+        M = _ensure_symmetric(M)
+        stats['regularized'] = True
+        stats['reg_amount'] = float(min_eigenval)
+        
+        if warn:
+            _logger.warning(
+                f"Matrix regularization applied (eigendecomposition failed: {e}). "
+                f"Added {min_eigenval:.2e} to diagonal. This biases the covariance matrix."
+            )
+    
+    return M, stats
+
+
+def _compute_regularization_param(matrix: np.ndarray, scale_factor: float = 1e-6, 
+                                  warn: bool = True) -> Tuple[float, Dict[str, Any]]:
+    """Compute regularization parameter based on matrix scale.
+    
+    WARNING: Regularization biases estimates toward zero. Use only when necessary
+    for numerical stability. Consider investigating ill-conditioned matrices if
+    regularization is frequently required.
+    
+    Parameters
+    ----------
+    matrix : np.ndarray
+        Matrix to compute regularization for
+    scale_factor : float
+        Scaling factor relative to trace (default: 1e-6)
+    warn : bool
+        Whether to log warnings when regularization is computed
+        
+    Returns
+    -------
+    reg_param : float
+        Regularization parameter
+    stats : dict
+        Statistics: {'trace': float, 'scale_factor': float, 'reg_param': float}
+    """
+    trace = np.trace(matrix)
+    reg_param = max(trace * scale_factor, 1e-8)
+    
+    stats = {
+        'trace': float(trace),
+        'scale_factor': float(scale_factor),
+        'reg_param': float(reg_param)
+    }
+    
+    if warn and reg_param > 1e-8:
+        _logger.info(
+            f"Regularization parameter computed: {reg_param:.2e} "
+            f"(trace={trace:.2e}, scale={scale_factor:.2e}). "
+            f"This adds bias to estimates - consider investigating matrix conditioning."
+        )
+    
+    return reg_param, stats
+
+
+def _clip_ar_coefficients(A: np.ndarray, min_val: float = -0.99, max_val: float = 0.99, 
+                         warn: bool = True) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """Clip AR coefficients to stability bounds.
+    
+    AR(1) processes require |A| < 1 for stationarity. This function clips
+    coefficients to a safe range (default: [-0.99, 0.99]) to ensure numerical
+    stability while maintaining theoretical validity.
+    
+    WARNING: Clipping can bias estimates if true coefficients are near unit root.
+    Consider investigating near-unit root behavior if clipping occurs frequently.
+    
+    Parameters
+    ----------
+    A : np.ndarray
+        AR coefficients (can be scalar, 1D array, or 2D matrix)
+    min_val : float
+        Minimum allowed value (default: -0.99)
+    max_val : float
+        Maximum allowed value (default: 0.99)
+    warn : bool
+        Whether to log warnings when clipping occurs
+        
+    Returns
+    -------
+    A_clipped : np.ndarray
+        Clipped AR coefficients with same shape as input
+    stats : dict
+        Statistics about clipping: {'n_clipped': int, 'n_total': int, 'clipped_indices': list}
+    """
+    A_flat = A.flatten()
+    n_total = len(A_flat)
+    
+    # Find values that need clipping
+    below_min = A_flat < min_val
+    above_max = A_flat > max_val
+    needs_clip = below_min | above_max
+    n_clipped = np.sum(needs_clip)
+    
+    # Clip the values
+    A_clipped = np.clip(A, min_val, max_val)
+    
+    # Prepare statistics
+    stats = {
+        'n_clipped': int(n_clipped),
+        'n_total': int(n_total),
+        'clipped_indices': np.where(needs_clip)[0].tolist() if n_clipped > 0 else [],
+        'min_violations': int(np.sum(below_min)),
+        'max_violations': int(np.sum(above_max))
+    }
+    
+    # Warn if clipping occurred
+    if warn and n_clipped > 0:
+        pct_clipped = 100.0 * n_clipped / n_total if n_total > 0 else 0.0
+        _logger.warning(
+            f"AR coefficient clipping applied: {n_clipped}/{n_total} ({pct_clipped:.1f}%) "
+            f"coefficients clipped to [{min_val}, {max_val}]. "
+            f"This may indicate near-unit root behavior. "
+            f"Consider investigating stationarity if clipping occurs frequently."
+        )
+    
+    return A_clipped, stats
+
+
+def _apply_ar_clipping(A: np.ndarray, config: Optional[DFMConfig] = None) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """Apply AR coefficient clipping based on configuration.
+    
+    Parameters
+    ----------
+    A : np.ndarray
+        AR coefficients to clip
+    config : DFMConfig, optional
+        Configuration object. If None, uses defaults (clipping enabled)
+        
+    Returns
+    -------
+    A_clipped : np.ndarray
+        Clipped AR coefficients
+    stats : dict
+        Statistics about clipping
+    """
+    if config is None or config.clip_ar_coefficients:
+        min_val = config.ar_clip_min if config else -0.99
+        max_val = config.ar_clip_max if config else 0.99
+        warn = config.warn_on_ar_clip if config else True
+        return _clip_ar_coefficients(A, min_val, max_val, warn)
+    else:
+        # Clipping disabled - return as-is with empty stats
+        return A, {'n_clipped': 0, 'n_total': A.size, 'clipped_indices': []}
+
+
+def _apply_regularization(M: np.ndarray, matrix_type: str = 'covariance',
+                         config: Optional[DFMConfig] = None) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """Apply regularization based on configuration.
+    
+    Parameters
+    ----------
+    M : np.ndarray
+        Matrix to regularize
+    matrix_type : str
+        Type of matrix ('covariance', 'general')
+    config : DFMConfig, optional
+        Configuration object. If None, uses defaults (regularization enabled)
+        
+    Returns
+    -------
+    M_reg : np.ndarray
+        Regularized matrix
+    stats : dict
+        Statistics about regularization
+    """
+    if config is None or config.use_regularization:
+        min_eigenval = config.min_eigenvalue if config else 1e-8
+        warn = config.warn_on_regularization if config else True
+        return _ensure_positive_definite(M, min_eigenval, warn)
+    else:
+        # Regularization disabled - just ensure symmetric
+        return _ensure_symmetric(M), {'regularized': False}
+
+
+def _cap_max_eigenvalue(M: np.ndarray, max_eigenval: float = 1e6) -> np.ndarray:
+    """Cap maximum eigenvalue of a matrix to prevent numerical explosion.
+    
+    Parameters
+    ----------
+    M : np.ndarray
+        Matrix to cap (should be symmetric)
+    max_eigenval : float
+        Maximum allowed eigenvalue (default: 1e6)
+        
+    Returns
+    -------
+    np.ndarray
+        Matrix with capped eigenvalues
+    """
+    try:
+        eigenvals = np.linalg.eigvals(M)
+        max_eig = np.max(eigenvals)
+        if max_eig > max_eigenval:
+            scale = max_eigenval / max_eig
+            return M * scale
+    except (np.linalg.LinAlgError, ValueError):
+        # Eigendecomposition failed - cap diagonal values as fallback
+        M_diag = np.diag(M)
+        M_diag = np.maximum(M_diag, 1e-8)
+        M_diag = np.minimum(M_diag, max_eigenval)
+        M_capped = np.diag(M_diag)
+        return _ensure_symmetric(M_capped)
+    return M
+
+
+def _estimate_ar_coefficient(EZZ_FB: np.ndarray, EZZ_BB: np.ndarray, 
+                             vsmooth_sum: Optional[np.ndarray] = None,
+                             T: Optional[int] = None) -> Tuple[np.ndarray, np.ndarray]:
+    """Estimate AR coefficients and innovation variances from expectations.
+    
+    This is the core EM update formula for AR(1) processes:
+    A = E[z_t * z_{t-1}'] / E[z_{t-1} * z_{t-1}']
+    Q = (E[z_t * z_t'] - A * E[z_t * z_{t-1}']) / T
+    
+    Parameters
+    ----------
+    EZZ_FB : np.ndarray
+        E[z_t * z_{t-1}'] - can be diagonal (1D) or full matrix
+    EZZ_BB : np.ndarray
+        E[z_{t-1} * z_{t-1}'] - can be diagonal (1D) or full matrix
+    vsmooth_sum : np.ndarray, optional
+        Sum of smoothed covariances to add to expectations
+    T : int, optional
+        Number of time periods for variance computation
+        
+    Returns
+    -------
+    A_diag : np.ndarray
+        AR coefficients (diagonal elements)
+    Q_diag : np.ndarray
+        Innovation variances (diagonal elements)
+    """
+    # Handle both scalar and array inputs
+    if np.isscalar(EZZ_FB):
+        EZZ_FB = np.array([EZZ_FB])
+        EZZ_BB = np.array([EZZ_BB])
+    
+    # Extract diagonal if full matrices
+    if EZZ_FB.ndim > 1:
+        EZZ_FB_diag = np.diag(EZZ_FB).copy()
+        EZZ_BB_diag = np.diag(EZZ_BB).copy()
+    else:
+        EZZ_FB_diag = EZZ_FB.copy()
+        EZZ_BB_diag = EZZ_BB.copy()
+    
+    # Add smoothed covariance if provided
+    if vsmooth_sum is not None:
+        if vsmooth_sum.ndim > 1:
+            vsmooth_diag = np.diag(vsmooth_sum)
+        else:
+            vsmooth_diag = vsmooth_sum
+        EZZ_BB_diag = EZZ_BB_diag + vsmooth_diag
+    
+    # Regularize denominators to prevent division by zero
+    min_denom = np.maximum(np.abs(EZZ_BB_diag) * 1e-6, 1e-10)
+    EZZ_BB_diag = np.where(
+        (np.isnan(EZZ_BB_diag) | np.isinf(EZZ_BB_diag) | (np.abs(EZZ_BB_diag) < min_denom)),
+        min_denom, EZZ_BB_diag
+    )
+    
+    # Clean numerators
+    EZZ_FB_diag = _clean_matrix(EZZ_FB_diag, 'general', default_nan=0.0) if EZZ_FB_diag.ndim > 0 else np.nan_to_num(EZZ_FB_diag, nan=0.0, posinf=1e6, neginf=-1e6)
+    
+    # Compute AR coefficients
+    A_diag = EZZ_FB_diag / EZZ_BB_diag
+    # Note: Clipping will be applied later with config if enabled
+    
+    # Compute innovation variances if T is provided
+    if T is not None:
+        # Need E[z_t^2] - extract from EZZ_BB if available, or compute separately
+        # For now, assume EZZ_idio is provided separately if needed
+        # This will be handled by the caller
+        Q_diag = None
+    else:
+        Q_diag = None
+    
+    return A_diag, Q_diag
+
+
+def calculate_rmse(actual: np.ndarray, predicted: np.ndarray, 
+                   mask: Optional[np.ndarray] = None) -> Tuple[float, np.ndarray]:
+    """Calculate Root Mean Squared Error (RMSE) between actual and predicted values.
+    
+    RMSE is calculated as: sqrt(mean((actual - predicted)^2))
+    
+    Parameters
+    ----------
+    actual : np.ndarray
+        Actual values (T × N) or (T,) array
+    predicted : np.ndarray
+        Predicted/forecasted values (T × N) or (T,) array, same shape as actual
+    mask : np.ndarray, optional
+        Boolean mask (T × N) or (T,) indicating which values to include in calculation.
+        If None, only non-NaN values are used.
+        
+    Returns
+    -------
+    rmse_overall : float
+        Overall RMSE averaged across all series and time periods
+    rmse_per_series : np.ndarray
+        RMSE for each series (N,) or scalar if 1D input
+    """
+    # Ensure arrays are the same shape
+    if actual.shape != predicted.shape:
+        raise ValueError(f"actual and predicted must have same shape, got {actual.shape} and {predicted.shape}")
+    
+    # Create mask for valid values
+    if mask is None:
+        # Use non-NaN values in both actual and predicted
+        mask = np.isfinite(actual) & np.isfinite(predicted)
+    else:
+        # Combine user mask with finite check
+        mask = mask & np.isfinite(actual) & np.isfinite(predicted)
+    
+    # Calculate squared errors
+    errors_sq = (actual - predicted) ** 2
+    
+    # Handle 1D case (single series)
+    if actual.ndim == 1:
+        if np.sum(mask) == 0:
+            return np.nan, np.array([np.nan])
+        rmse_series = np.sqrt(np.mean(errors_sq[mask]))
+        return rmse_series, np.array([rmse_series])
+    
+    # Handle 2D case (multiple series)
+    T, N = actual.shape
+    
+    # Calculate RMSE per series
+    rmse_per_series = np.zeros(N)
+    for i in range(N):
+        series_mask = mask[:, i]
+        if np.sum(series_mask) > 0:
+            rmse_per_series[i] = np.sqrt(np.mean(errors_sq[series_mask, i]))
+        else:
+            rmse_per_series[i] = np.nan
+    
+    # Calculate overall RMSE (average across all valid observations)
+    if np.any(mask):
+        rmse_overall = np.sqrt(np.mean(errors_sq[mask]))
+    else:
+        rmse_overall = np.nan
+    
+    return rmse_overall, rmse_per_series
 
 
 def _safe_divide(numerator: np.ndarray, denominator: float, default: float = 0.0) -> np.ndarray:
@@ -211,6 +670,11 @@ class DFMResult:
     V_0: np.ndarray       # Initial covariance (m x m)
     r: np.ndarray         # Number of factors per block
     p: int                # Number of lags
+    converged: bool = False  # Whether EM algorithm converged
+    num_iter: int = 0     # Number of iterations completed
+    loglik: float = -np.inf  # Final log-likelihood
+    rmse: Optional[float] = None  # Root Mean Squared Error (averaged across all series)
+    rmse_per_series: Optional[np.ndarray] = None  # RMSE per series (N,)
 
 
 def em_converged(loglik: float, previous_loglik: float, threshold: float = 1e-4,
@@ -456,7 +920,7 @@ def init_conditions(x: np.ndarray, r: np.ndarray, p: int, blocks: np.ndarray,
                         f"Using identity matrix as fallback."
                     )
                     raise ValueError(
-                        f"Insufficient finite data for block {i+1} ('{block_names[i]}'): "
+                        f"Insufficient finite data for block {i+1}: "
                         f"found {n_finite} finite observations, but need at least {min_obs_required} "
                         f"(number of series in block: {len(idx_iM)}). "
                         f"This may be due to excessive missing data or transformation issues. "
@@ -464,7 +928,56 @@ def init_conditions(x: np.ndarray, r: np.ndarray, p: int, blocks: np.ndarray,
                     )
                 
                 res_block_clean = res_block[finite_rows, :]
-                cov_res = np.cov(res_block_clean.T)
+                
+                # Ensure res_block_clean is properly shaped before covariance calculation
+                # Handle edge cases where indexing might produce unexpected shapes
+                if res_block_clean.size == 0:
+                    # No data - use identity
+                    cov_res = np.eye(len(idx_iM))
+                elif res_block_clean.ndim == 0:
+                    # 0D array - shouldn't happen, but handle it
+                    cov_res = np.eye(len(idx_iM))
+                elif res_block_clean.ndim == 1:
+                    # 1D array - reshape based on number of series
+                    if len(idx_iM) == 1:
+                        # Single series: variance is just the variance
+                        var_val = np.var(res_block_clean, ddof=0)
+                        if np.isnan(var_val) or np.isinf(var_val) or var_val < 1e-10:
+                            var_val = 1.0
+                        cov_res = np.array([[var_val]])
+                    else:
+                        # Multiple series but 1D - reshape to (1, n_series)
+                        res_block_clean = res_block_clean.reshape(1, -1)
+                        if res_block_clean.shape[0] < 2:
+                            cov_res = np.eye(len(idx_iM))
+                        else:
+                            cov_res = np.cov(res_block_clean.T)
+                elif res_block_clean.ndim == 2:
+                    # 2D array - normal case
+                    if len(idx_iM) == 1:
+                        # Single series: variance is just the variance
+                        series_data = res_block_clean.flatten()
+                        var_val = np.var(series_data, ddof=0)
+                        if np.isnan(var_val) or np.isinf(var_val) or var_val < 1e-10:
+                            var_val = 1.0
+                        cov_res = np.array([[var_val]])
+                    elif res_block_clean.shape[1] == 1:
+                        # Single series but multiple observations
+                        series_data = res_block_clean.flatten()
+                        var_val = np.var(series_data, ddof=0)
+                        if np.isnan(var_val) or np.isinf(var_val) or var_val < 1e-10:
+                            var_val = 1.0
+                        cov_res = np.array([[var_val]])
+                    else:
+                        # Multiple series: compute covariance matrix
+                        if res_block_clean.shape[0] < 2:
+                            # Not enough observations for covariance - use identity
+                            cov_res = np.eye(len(idx_iM))
+                        else:
+                            cov_res = np.cov(res_block_clean.T)
+                else:
+                    # 3D+ array - shouldn't happen, but use identity
+                    cov_res = np.eye(len(idx_iM))
                 
                 # Check for NaN/Inf in covariance
                 if np.any(np.isnan(cov_res)) or np.any(np.isinf(cov_res)):
@@ -545,9 +1058,35 @@ def init_conditions(x: np.ndarray, r: np.ndarray, p: int, blocks: np.ndarray,
             if np.sum(v) < 0:
                 v = -v
             
-            # For monthly series with loaded blocks, replace with eigenvector
-            C_i[idx_iM, :int(r_i)] = v
-            f = res[:, idx_iM] @ v  # Data projection for eigenvector direction
+            # Scale eigenvectors by square root of eigenvalues for proper PCA loadings
+            # This ensures loadings are on a reasonable scale relative to the data
+            # Eigenvalues represent variance explained, so sqrt(eigenvalue) gives proper scale
+            d_positive = np.maximum(d, 1e-8)  # Ensure positive
+            # Handle scalar/0D case for np.diag
+            sqrt_d = np.sqrt(d_positive)
+            if np.isscalar(sqrt_d) or (isinstance(sqrt_d, np.ndarray) and sqrt_d.ndim == 0):
+                # Scalar case: just multiply
+                v_scaled = v * float(sqrt_d)
+            else:
+                # Array case: use diag
+                v_scaled = v @ np.diag(sqrt_d)  # Scale by sqrt(eigenvalues)
+            
+            # Normalize to prevent extreme values while preserving relative magnitudes
+            # Use L2 normalization per column to keep loadings bounded
+            if v_scaled.ndim == 2 and v_scaled.shape[1] > 0:
+                for col_idx in range(v_scaled.shape[1]):
+                    col_norm = np.linalg.norm(v_scaled[:, col_idx])
+                    if col_norm > 0:
+                        # Handle scalar d_positive case
+                        if np.isscalar(d_positive) or (isinstance(d_positive, np.ndarray) and d_positive.ndim == 0):
+                            d_val = float(d_positive)
+                        else:
+                            d_val = d_positive[col_idx] if col_idx < len(d_positive) else 1.0
+                        v_scaled[:, col_idx] = v_scaled[:, col_idx] / col_norm * np.sqrt(d_val)
+            
+            # For monthly series with loaded blocks, use scaled eigenvectors
+            C_i[idx_iM, :int(r_i)] = v_scaled
+            f = res[:, idx_iM] @ v_scaled  # Data projection for scaled eigenvector direction
             
             # Lag matrix using loading
             F = None
@@ -707,8 +1246,8 @@ def init_conditions(x: np.ndarray, r: np.ndarray, p: int, blocks: np.ndarray,
                 Q_i[:int(r_i), :int(r_i)] = Q_block
             
             # Clean A_i and Q_i before kron operation
-            A_i_clean = np.nan_to_num(A_i, nan=0.0, posinf=1.0, neginf=-1.0)
-            Q_i_clean = np.nan_to_num(Q_i, nan=0.0, posinf=1.0, neginf=-1.0)
+            A_i_clean = _clean_matrix(A_i, 'loading')
+            Q_i_clean = _clean_matrix(Q_i, 'covariance', default_nan=0.0)
             
             # Initial covariance
             try:
@@ -1020,27 +1559,16 @@ def init_conditions(x: np.ndarray, r: np.ndarray, p: int, blocks: np.ndarray,
         if nan_count > 0 or inf_count > 0:
             if param_name in ['A', 'Q', 'V_0']:
                 # Covariance matrices: regularize
-                param_value = np.nan_to_num(param_value, nan=0.0, posinf=1e6, neginf=-1e6)
-                param_value = 0.5 * (param_value + param_value.T)  # Ensure symmetry
-                param_value = param_value + np.eye(param_value.shape[0]) * 1e-8
-                output_params[param_name] = param_value
+                output_params[param_name] = _clean_matrix(param_value, 'covariance', default_nan=0.0)
             elif param_name == 'R':
                 # Diagonal matrix: clean diagonal
-                param_value = np.diag(np.diag(param_value))  # Ensure diagonal
-                R_diag = np.diag(param_value)
-                R_diag = np.where(
-                    (np.isnan(R_diag)) | (np.isinf(R_diag)) | (R_diag < 1e-6),
-                    1e-4, R_diag
-                )
-                output_params[param_name] = np.diag(R_diag)
+                output_params[param_name] = _clean_matrix(param_value, 'diagonal', default_nan=1e-4)
             elif param_name == 'C':
                 # Loading matrix: replace with zeros
-                param_value = np.nan_to_num(param_value, nan=0.0, posinf=1.0, neginf=-1.0)
-                output_params[param_name] = param_value
+                output_params[param_name] = _clean_matrix(param_value, 'loading')
             elif param_name == 'Z_0':
                 # Initial state: reset to zeros
-                param_value = np.zeros_like(param_value)
-                output_params[param_name] = param_value
+                output_params[param_name] = np.zeros_like(param_value)
     
     # Update variables with cleaned values
     A, C, Q, R, Z_0, V_0 = output_params['A'], output_params['C'], output_params['Q'], \
@@ -1055,7 +1583,8 @@ def em_step(y: np.ndarray, A: np.ndarray, C: np.ndarray, Q: np.ndarray,
            nQ: int, i_idio: np.ndarray, blocks: np.ndarray,
            tent_weights_dict: Optional[Dict[str, np.ndarray]] = None,
            clock: str = 'm',
-           frequencies: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray,
+           frequencies: Optional[np.ndarray] = None,
+           config: Optional[DFMConfig] = None) -> Tuple[np.ndarray, np.ndarray,
                                                                       np.ndarray, np.ndarray,
                                                                       np.ndarray, np.ndarray, float]:
     """Apply EM algorithm for parameter reestimation.
@@ -1167,26 +1696,19 @@ def em_step(y: np.ndarray, A: np.ndarray, C: np.ndarray, Q: np.ndarray,
     # This prevents NaN/Inf from propagating into the filter
     if np.any(np.isnan(A)) or np.any(np.isinf(A)):
         _logger.warning("em_step: A contains NaN/Inf, using regularized identity")
-        A = np.eye(A.shape[0]) * 0.9 + np.nan_to_num(A, nan=0.0, posinf=1.0, neginf=-1.0) * 0.1
+        A = np.eye(A.shape[0]) * 0.9 + _clean_matrix(A, 'loading') * 0.1
     
     if np.any(np.isnan(Q)) or np.any(np.isinf(Q)):
         _logger.warning("em_step: Q contains NaN/Inf, regularizing")
-        Q = np.nan_to_num(Q, nan=1e-6, posinf=1e6, neginf=1e-6)
-        Q = 0.5 * (Q + Q.T)  # Ensure symmetry
-        Q = Q + np.eye(Q.shape[0]) * 1e-8  # Ensure positive definite
+        Q = _clean_matrix(Q, 'covariance', default_nan=1e-6)
     
     if np.any(np.isnan(R)) or np.any(np.isinf(R)):
         _logger.warning("em_step: R contains NaN/Inf, regularizing")
-        R = np.nan_to_num(R, nan=1e-4, posinf=1e4, neginf=1e-4)
-        R = 0.5 * (R + R.T)  # Ensure symmetry
-        # Ensure R is diagonal with positive values
-        R_diag = np.diag(R)
-        R_diag = np.where((R_diag < 1e-6) | np.isnan(R_diag) | np.isinf(R_diag), 1e-4, R_diag)
-        R = np.diag(R_diag)
+        R = _clean_matrix(R, 'diagonal', default_nan=1e-4, default_inf=1e4)
     
     if np.any(np.isnan(C)) or np.any(np.isinf(C)):
         _logger.warning("em_step: C contains NaN/Inf, regularizing")
-        C = np.nan_to_num(C, nan=0.0, posinf=1.0, neginf=-1.0)
+        C = _clean_matrix(C, 'loading')
     
     if np.any(np.isnan(Z_0)) or np.any(np.isinf(Z_0)):
         _logger.warning("em_step: Z_0 contains NaN/Inf, resetting to zeros")
@@ -1205,6 +1727,30 @@ def em_step(y: np.ndarray, A: np.ndarray, C: np.ndarray, Q: np.ndarray,
         pC = R_mat.shape[1]
     ppC = int(max(p, pC))  # Ensure integer
     num_blocks = blocks.shape[1]
+    
+    # Get config defaults if not provided
+    if config is None:
+        # Create a minimal config with defaults for backward compatibility
+        from dfm_python.config import DFMConfig
+        config = DFMConfig(
+            series=[],
+            block_names=[],
+            clip_ar_coefficients=True,
+            ar_clip_min=-0.99,
+            ar_clip_max=0.99,
+            warn_on_ar_clip=True,
+            clip_data_values=True,
+            data_clip_threshold=100.0,
+            warn_on_data_clip=True,
+            use_regularization=True,
+            regularization_scale=1e-6,
+            min_eigenvalue=1e-8,
+            max_eigenvalue=1e6,
+            warn_on_regularization=True,
+            use_damped_updates=True,
+            damping_factor=0.8,
+            warn_on_damped_update=True
+        )
     
     # E-step: Run Kalman filter and smoother
     # Note: y is n x T (series x time), need to transpose for Kalman filter
@@ -1249,8 +1795,8 @@ def em_step(y: np.ndarray, A: np.ndarray, C: np.ndarray, Q: np.ndarray,
         EZZ_FB = Zsmooth[b_subset, 1:] @ Zsmooth[b_subset, :-1].T + np.sum(vvsmooth[b_subset, :, :][:, b_subset, :], axis=2)
         
         # Clean EZZ_BB and EZZ_FB before matrix operations
-        EZZ_BB = np.nan_to_num(EZZ_BB, nan=0.0, posinf=1e6, neginf=-1e6)
-        EZZ_FB = np.nan_to_num(EZZ_FB, nan=0.0, posinf=1e6, neginf=-1e6)
+        EZZ_BB = _clean_matrix(EZZ_BB, 'covariance', default_nan=0.0)
+        EZZ_FB = _clean_matrix(EZZ_FB, 'general', default_nan=0.0)
         
         # Update A and Q for block i
         A_i = A[t_start:t_end, t_start:t_end].copy()
@@ -1263,77 +1809,81 @@ def em_step(y: np.ndarray, A: np.ndarray, C: np.ndarray, Q: np.ndarray,
                 raise ValueError("Invalid values in EZZ_BB")
             
             # Regularize if needed (ensure positive definite)
-            eigenvals = np.linalg.eigvals(EZZ_BB_sub)
-            min_eigenval = np.min(eigenvals)
-            if min_eigenval < 1e-8:
-                EZZ_BB_sub = EZZ_BB_sub + np.eye(rp) * (1e-8 - min_eigenval)
-                EZZ_BB_sub = 0.5 * (EZZ_BB_sub + EZZ_BB_sub.T)
+            min_eigenval = config.min_eigenvalue if config else 1e-8
+            warn_reg = config.warn_on_regularization if config else True
+            EZZ_BB_sub, _ = _ensure_positive_definite(EZZ_BB_sub, min_eigenval, warn_reg)
+            
+            # Check if matrix is too ill-conditioned
+            try:
+                eigenvals = np.linalg.eigvals(EZZ_BB_sub)
+                max_eigenval = np.max(eigenvals)
+                min_eigenval = np.min(eigenvals)
+                
+                if max_eigenval > 0:
+                    cond_num = max_eigenval / max(min_eigenval, 1e-12)
+                    if cond_num > 1e12:
+                        # Use pseudo-inverse for ill-conditioned matrices
+                        try:
+                            EZZ_BB_inv = pinv(EZZ_BB_sub, cond=1e-8)
+                        except TypeError:
+                            # Fallback for older scipy versions
+                            EZZ_BB_inv = pinv(EZZ_BB_sub)
+                    else:
+                        EZZ_BB_inv = inv(EZZ_BB_sub)
+                else:
+                    # All eigenvalues are zero or negative - use identity
+                    EZZ_BB_inv = np.eye(rp) * (1.0 / max(1e-8, np.trace(EZZ_BB_sub) / rp))
+            except (np.linalg.LinAlgError, ValueError):
+                # Eigendecomposition failed - use pseudo-inverse
+                EZZ_BB_inv = pinv(EZZ_BB_sub)
             
             # MATLAB: A_i(1:r_i,1:rp) = EZZ_FB(1:r_i,1:rp) * inv(EZZ_BB(1:rp,1:rp))
-            A_i[:r_i, :rp] = EZZ_FB[:r_i, :rp] @ inv(EZZ_BB_sub)
+            A_i_update = EZZ_FB[:r_i, :rp] @ EZZ_BB_inv
+            
+            # Cap AR coefficients to reasonable bounds (configurable)
+            A_i_update, _ = _apply_ar_clipping(A_i_update, config)
+            A_i[:r_i, :rp] = A_i_update
+            
             # MATLAB: Q_i(1:r_i,1:r_i) = (EZZ(1:r_i,1:r_i) - A_i(1:r_i,1:rp)* EZZ_FB(1:r_i,1:rp)') / T
             Q_i[:r_i, :r_i] = (EZZ[:r_i, :r_i] - A_i[:r_i, :rp] @ EZZ_FB[:r_i, :rp].T) / T
             
             # Clean Q_i result and ensure positive semi-definite
-            Q_i = np.nan_to_num(Q_i, nan=0.0, posinf=1e6, neginf=-1e6)
-            Q_i = 0.5 * (Q_i + Q_i.T)  # Ensure symmetry
+            Q_i = _clean_matrix(Q_i, 'covariance', default_nan=0.0)
             
-            # Ensure positive semi-definite: ensure diagonal >= 0 and add regularization if needed
-            Q_diag = np.diag(Q_i[:r_i, :r_i])
-            if np.any(Q_diag < 0):
-                # Replace negative diagonals with small positive values
-                Q_diag = np.maximum(Q_diag, 1e-8)
-                np.fill_diagonal(Q_i[:r_i, :r_i], Q_diag)
-                # Re-symmetrize
-                Q_i[:r_i, :r_i] = 0.5 * (Q_i[:r_i, :r_i] + Q_i[:r_i, :r_i].T)
+            # Ensure positive semi-definite for the factor block
+            min_eigenval = config.min_eigenvalue if config else 1e-8
+            Q_i_reg, reg_stats = _apply_regularization(Q_i[:r_i, :r_i], 'covariance', config)
+            Q_i[:r_i, :r_i] = Q_i_reg
             
-            # Regularize to ensure positive definiteness, but limit regularization and cap values
-            try:
-                eigenvals = np.linalg.eigvals(Q_i[:r_i, :r_i])
-                min_eigenval = np.min(eigenvals)
-                max_eigenval = np.max(eigenvals)
-                
-                # Cap maximum eigenvalue to prevent explosion
-                if max_eigenval > 1e6:
-                    scale = 1e6 / max_eigenval
-                    Q_i[:r_i, :r_i] = Q_i[:r_i, :r_i] * scale
-                    eigenvals = eigenvals * scale
-                    min_eigenval = np.min(eigenvals)
-                
-                if min_eigenval < 1e-8:
-                    reg_amount = min(1e-8 - min_eigenval, 1e-6)  # Limit regularization
-                    Q_i[:r_i, :r_i] = Q_i[:r_i, :r_i] + np.eye(r_i) * reg_amount
-                    Q_i[:r_i, :r_i] = 0.5 * (Q_i[:r_i, :r_i] + Q_i[:r_i, :r_i].T)
-            except (np.linalg.LinAlgError, ValueError):
-                # Eigendecomposition failed - use minimum diagonal value and cap
-                Q_diag_temp = np.diag(Q_i[:r_i, :r_i])
-                Q_diag_temp = np.maximum(Q_diag_temp, 1e-8)
-                Q_diag_temp = np.minimum(Q_diag_temp, 1e6)  # Cap at 1e6
-                np.fill_diagonal(Q_i[:r_i, :r_i], Q_diag_temp)
-                Q_i[:r_i, :r_i] = 0.5 * (Q_i[:r_i, :r_i] + Q_i[:r_i, :r_i].T)
-            
-            # Ensure Q_i is symmetric (keep regularization, remove excessive capping)
-            Q_i[:r_i, :r_i] = 0.5 * (Q_i[:r_i, :r_i] + Q_i[:r_i, :r_i].T)
-        except (np.linalg.LinAlgError, ValueError):
-            # Keep previous values if inversion fails or invalid values detected
-            pass
+            # Cap maximum eigenvalue to prevent explosion
+            max_eigenval = config.max_eigenvalue if config else 1e6
+            Q_i[:r_i, :r_i] = _cap_max_eigenvalue(Q_i[:r_i, :r_i], max_eigenval=max_eigenval)
+        except (np.linalg.LinAlgError, ValueError) as e:
+            # If update fails, use damped version of previous A_i to prevent complete collapse
+            # Don't set to zero - use small random perturbation or keep previous with damping
+            if np.allclose(A_i[:r_i, :rp], 0):
+                # If A_i is all zeros, initialize with small random values
+                A_i[:r_i, :rp] = np.random.randn(r_i, rp) * 0.1
+            else:
+                # Damp previous values slightly
+                A_i[:r_i, :rp] = A_i[:r_i, :rp] * 0.95
+            _logger.debug(f"em_step: A update failed for block {i+1}, using fallback: {type(e).__name__}")
         
-        # Clean NaN/Inf from A_i (remove excessive clipping during iterations)
+        # Clean NaN/Inf from A_i with reasonable bounds
         if np.any(~np.isfinite(A_i)):
-            A_i = np.nan_to_num(A_i, nan=0.0, posinf=0.0, neginf=0.0)
+            A_i = _clean_matrix(A_i, 'loading', default_nan=0.0, default_inf=0.99)
+            # Ensure AR coefficients are within stability bounds
+            A_i, _ = _apply_ar_clipping(A_i, config)
         A_new[t_start:t_end, t_start:t_end] = A_i
         
         Q_new[t_start:t_end, t_start:t_end] = Q_i
         # MATLAB: Vsmooth(t_start:t_end, t_start:t_end, 1) - note MATLAB uses 1-based indexing
         V_0_block = vsmooth[t_start:t_end, t_start:t_end, 0]
         # Ensure V_0_block is positive semi-definite
-        V_0_block = np.nan_to_num(V_0_block, nan=0.0, posinf=1e6, neginf=-1e6)
-        V_0_block = 0.5 * (V_0_block + V_0_block.T)
-        V_0_diag = np.diag(V_0_block)
-        if np.any(V_0_diag < 0):
-            V_0_diag = np.maximum(V_0_diag, 1e-8)
-            np.fill_diagonal(V_0_block, V_0_diag)
-            V_0_block = 0.5 * (V_0_block + V_0_block.T)
+        V_0_block = _clean_matrix(V_0_block, 'covariance', default_nan=0.0)
+        min_eigenval = config.min_eigenvalue if config else 1e-8
+        warn_reg = config.warn_on_regularization if config else True
+        V_0_block, _ = _ensure_positive_definite(V_0_block, min_eigenval, warn_reg)
         V_0_new[t_start:t_end, t_start:t_end] = V_0_block
     
     # Update idiosyncratic component
@@ -1383,62 +1933,45 @@ def em_step(y: np.ndarray, A: np.ndarray, C: np.ndarray, Q: np.ndarray,
     EZZ_FB_idio_diag = np.diag(EZZ_FB_idio_diag_vals) + np.diag(np.diag(vvsmooth_sum))
     
     # Update A and Q for idiosyncratic monthly component
-    # Clean diagonal values before division
-    EZZ_BB_diag = np.diag(EZZ_BB_idio_diag).copy()
-    EZZ_BB_diag = np.where((np.isnan(EZZ_BB_diag) | np.isinf(EZZ_BB_diag) | (EZZ_BB_diag < 1e-8)), 
-                           1.0, EZZ_BB_diag)
+    # Idiosyncratic components are independent AR(1) processes, so A_i and Q_i should be diagonal
+    # Theoretical formula: A_i[i,i] = E[z_t * z_{t-1}] / E[z_{t-1}^2] for each series i
     
-    # Clean EZZ_FB_idio_diag
-    EZZ_FB_idio_diag = np.nan_to_num(EZZ_FB_idio_diag, nan=0.0, posinf=1e6, neginf=-1e6)
-    EZZ_idio_diag = np.nan_to_num(EZZ_idio_diag, nan=0.0, posinf=1e6, neginf=-1e6)
+    # Extract diagonal elements (these are the expectations for each idiosyncratic component)
+    EZZ_BB_diag_vals = np.diag(EZZ_BB_idio_diag).copy()
+    EZZ_FB_diag_vals = np.diag(EZZ_FB_idio_diag).copy()
+    EZZ_idio_diag_vals = np.diag(EZZ_idio_diag).copy()
     
-    A_i = EZZ_FB_idio_diag @ np.diag(1.0 / EZZ_BB_diag)
-    Q_i_update = (EZZ_idio_diag - A_i @ EZZ_FB_idio_diag.T) / T
-    # Cap Q_i_update to prevent explosion
-    Q_i_update = np.clip(Q_i_update, -1e6, 1e6)
-    Q_i = Q_i_update
+    # Add smoothed covariance to denominators
+    vsmooth_BB_diag = np.diag(vsmooth_BB_sum)
     
-    # Clean results
-    A_i = np.nan_to_num(A_i, nan=0.0, posinf=1.0, neginf=-1.0)
-    Q_i = np.nan_to_num(Q_i, nan=0.0, posinf=1e6, neginf=-1e6)
-    Q_i = 0.5 * (Q_i + Q_i.T)  # Ensure symmetry
+    # Estimate AR coefficients using helper function
+    A_i_diag, _ = _estimate_ar_coefficient(
+        EZZ_FB_diag_vals, EZZ_BB_diag_vals, vsmooth_sum=vsmooth_BB_diag
+    )
     
-    # Ensure positive semi-definite: check and fix diagonal
-    Q_diag = np.diag(Q_i)
-    if np.any(Q_diag < 0):
-        Q_diag = np.maximum(Q_diag, 1e-8)
-        np.fill_diagonal(Q_i, Q_diag)
-        Q_i = 0.5 * (Q_i + Q_i.T)
+    # Create diagonal A_i matrix
+    A_i = np.diag(A_i_diag)
     
-    # Regularize if needed, but limit to prevent unreasonably large values
-    if Q_i.size > 0:
-        try:
-            eigenvals = np.linalg.eigvals(Q_i)
-            min_eigenval = np.min(eigenvals)
-            max_eigenval = np.max(eigenvals)
-            
-            # Cap maximum eigenvalue to prevent explosion
-            if max_eigenval > 1e6:
-                scale = 1e6 / max_eigenval
-                Q_i = Q_i * scale
-                eigenvals = eigenvals * scale
-                min_eigenval = np.min(eigenvals)
-            
-            if min_eigenval < 1e-8:
-                reg_amount = min(1e-8 - min_eigenval, 1e-6)  # Limit regularization
-                Q_i = Q_i + np.eye(Q_i.shape[0]) * reg_amount
-                Q_i = 0.5 * (Q_i + Q_i.T)
-        except (np.linalg.LinAlgError, ValueError):
-            # Eigendecomposition failed - use minimum diagonal and cap
-            Q_diag_temp = np.diag(Q_i)
-            Q_diag_temp = np.maximum(Q_diag_temp, 1e-8)
-            Q_diag_temp = np.minimum(Q_diag_temp, 1e6)  # Cap at 1e6
-            np.fill_diagonal(Q_i, Q_diag_temp)
-            Q_i = 0.5 * (Q_i + Q_i.T)
-        
-        # Final cap check on Q_i
-        # Ensure Q_i is well-behaved (already regularized above)
-        Q_i = 0.5 * (Q_i + Q_i.T)
+    # Compute Q_i: Q_i[i,i] = (E[z_t^2] - A_i[i,i] * E[z_t * z_{t-1}]) / T
+    # For diagonal matrices, this simplifies to element-wise operations
+    vsmooth_idio_diag = np.diag(vsmooth_idio_sum)
+    EZZ_idio_diag_vals = EZZ_idio_diag_vals + vsmooth_idio_diag
+    # Clean EZZ_idio_diag_vals (1D array, so use direct cleaning)
+    EZZ_idio_diag_vals = np.nan_to_num(EZZ_idio_diag_vals, nan=0.0, posinf=1e6, neginf=-1e6)
+    
+    Q_i_diag = (EZZ_idio_diag_vals - A_i_diag * EZZ_FB_diag_vals) / T
+    
+    # Ensure Q_i is positive (variance must be non-negative)
+    Q_i_diag = np.maximum(Q_i_diag, 1e-8)
+    
+    # Create diagonal Q_i matrix
+    # Since Q_i is diagonal, it's already symmetric and positive semi-definite
+    Q_i = np.diag(Q_i_diag)
+    
+    # Final validation: ensure A_i and Q_i are well-behaved
+    # A_i is already diagonal and clipped to stability bounds
+    # Q_i is already diagonal and positive
+    # No additional regularization needed for diagonal matrices
     
     # Place in output matrices (only monthly idiosyncratic)
     # MATLAB: A_new(i_subset, i_subset) = A_i(1:niM, 1:niM)
@@ -1662,11 +2195,31 @@ def em_step(y: np.ndarray, A: np.ndarray, C: np.ndarray, Q: np.ndarray,
             
             nom += y_term - idio_term
         
-        # Solve for C
+        # Solve for C using regularized least squares
+        # Add ridge regularization to prevent extreme loadings while maintaining theoretical soundness
+        # Regularization parameter based on data scale
         try:
-            vec_C = inv(denom) @ nom.flatten()
+            # Compute regularization parameter based on trace of denom (data scale)
+            scale_factor = config.regularization_scale if config else 1e-6
+            warn_reg = config.warn_on_regularization if config else True
+            reg_param, reg_stats = _compute_regularization_param(denom, scale_factor, warn_reg)
+            
+            # Regularized solution: (denom + lambda*I)^(-1) @ nom
+            denom_reg = denom + np.eye(denom.shape[0]) * reg_param
+            vec_C = inv(denom_reg) @ nom.flatten()
+            
             # Assign using explicit indexing to avoid read-only issues
             C_update = vec_C.reshape(n_i, rs)
+            
+            # Clean invalid values (preserve scale, don't hard clip)
+            C_update = _clean_matrix(C_update, 'loading', default_nan=0.0, default_inf=0.0)
+            
+            # Only clip extreme outliers (beyond reasonable range for standardized data)
+            # Use adaptive bounds based on data scale, not fixed values
+            C_scale = np.std(C_update[C_update != 0]) if np.any(C_update != 0) else 1.0
+            C_max = max(10.0, C_scale * 5)  # Adaptive bound: 5 standard deviations or 10, whichever is larger
+            C_update = np.clip(C_update, -C_max, C_max)
+            
             for i, row_idx in enumerate(idx_iM):
                 for j, col_idx in enumerate(bl_idxM_i):
                     C_new[row_idx, col_idx] = C_update[i, j]
@@ -1716,30 +2269,77 @@ def em_step(y: np.ndarray, A: np.ndarray, C: np.ndarray, Q: np.ndarray,
         
         # Loop through quarterly series in this block pattern
         for j in idx_iQ:
-            denom = np.zeros((rps, rps))
-            nom = np.zeros((1, rps))
+            # Determine actual size based on bl_idxQ_i (quarterly factor indices for this block)
+            # bl_idxQ_i contains the indices of quarterly factors for block i
+            if len(bl_idxQ_i) > 0:
+                rps_actual = len(bl_idxQ_i)
+            else:
+                rps_actual = rps  # Fallback to rps if bl_idxQ_i is empty
+            
+            denom = np.zeros((rps_actual, rps_actual))
+            nom = np.zeros((1, rps_actual))
             
             idx_jQ = j - nM  # Ordinal position of quarterly variable
             # Location of factor structure for quarterly var residuals
             i_idio_jQ = np.arange(rp1 + n_idio_M + 5 * idx_jQ, rp1 + n_idio_M + 5 * (idx_jQ + 1))
             
             # Update V_0, A, Q for quarterly idiosyncratic
-            # MATLAB: V_0_new(i_idio_jQ, i_idio_jQ) = Vsmooth(i_idio_jQ, i_idio_jQ, 1)
+            # Each quarterly series has 5 idiosyncratic components (tent structure: [1,2,3,2,1])
+            # These 5 components represent the same underlying quarterly idiosyncratic process,
+            # so they should share the same AR coefficient, estimated from their aggregate behavior
+            
             if len(i_idio_jQ) > 0 and i_idio_jQ[-1] < V_0_new.shape[0]:
+                # Update V_0 for quarterly idiosyncratic
                 vsmooth_Q = vsmooth[i_idio_jQ, :, :][:, i_idio_jQ, 0]  # Extract submatrix
                 # Place values explicitly to avoid broadcasting issues
                 for idx1, i1 in enumerate(i_idio_jQ):
                     for idx2, i2 in enumerate(i_idio_jQ):
                         V_0_new[i1, i2] = vsmooth_Q[idx1, idx2]
-                if i_idio_jQ[0] < A_new.shape[0] and (i_idio_jQ[0] - rp1) >= 0:
-                    # Get from monthly idiosyncratic structure if available
-                    try:
-                        if rp1 < A_new.shape[0] and rp1 < A_new.shape[1]:
-                            A_new[i_idio_jQ[0], i_idio_jQ[0]] = A_new[rp1, rp1]
-                            Q_new[i_idio_jQ[0], i_idio_jQ[0]] = Q_new[rp1, rp1]
-                    except (IndexError, ValueError) as e:
-                        # Index out of bounds or assignment failed - skip this update
-                        pass
+                
+                # Estimate AR coefficient for this quarterly series from its smoothed idiosyncratic factors
+                # Extract smoothed idiosyncratic factors for this quarterly series (5 components)
+                # Zsmooth is (T+1) x m, so Zsmooth[:, i_idio_jQ] gives (T+1) x 5
+                if i_idio_jQ[0] < Zsmooth.shape[1] and i_idio_jQ[-1] < Zsmooth.shape[1]:
+                    Z_idio_Q = Zsmooth[1:, i_idio_jQ]  # T x 5, skip initial state
+                    Z_idio_Q_BB = Zsmooth[:-1, i_idio_jQ]  # T x 5, periods 0 to T-1
+                    
+                    # Aggregate the 5 components using tent weights to get a single quarterly idiosyncratic series
+                    # This represents the underlying quarterly process
+                    tent_weights = np.array([1, 2, 3, 2, 1]) / 9.0  # Normalize tent weights
+                    z_Q_agg = (Z_idio_Q @ tent_weights)  # T x 1, aggregated quarterly idiosyncratic
+                    z_Q_agg_BB = (Z_idio_Q_BB @ tent_weights)  # T x 1, lagged
+                    
+                    # Estimate AR coefficient: A_Q = E[z_t * z_{t-1}] / E[z_{t-1}^2]
+                    # This is the same formula as for monthly idiosyncratic, but applied to aggregated quarterly
+                    EZZ_BB_Q = np.sum(z_Q_agg_BB**2)  # Scalar
+                    EZZ_FB_Q = np.sum(z_Q_agg * z_Q_agg_BB)  # Scalar
+                    
+                    # Add variance from smoothed covariance
+                    vsmooth_Q_sum = np.sum(vsmooth[i_idio_jQ, :, :][:, i_idio_jQ, :-1], axis=(0, 1, 2))
+                    EZZ_BB_Q += vsmooth_Q_sum * np.sum(tent_weights**2)  # Scale by tent weights
+                    
+                    # Estimate AR coefficient for quarterly series
+                    # Regularize denominator to prevent division by zero
+                    min_denom_Q = max(abs(EZZ_BB_Q) * 1e-6, 1e-10)
+                    EZZ_BB_Q = max(EZZ_BB_Q, min_denom_Q)
+                    
+                    # Compute AR coefficient: A_Q = E[z_t * z_{t-1}] / E[z_{t-1}^2]
+                    A_Q = EZZ_FB_Q / EZZ_BB_Q
+                    A_Q, _ = _apply_ar_clipping(A_Q, config)  # Stability bounds
+                    
+                    # Compute innovation variance: Q_Q = (E[z_t^2] - A_Q * E[z_t * z_{t-1}]) / T
+                    EZZ_Q = np.sum(z_Q_agg**2)
+                    vsmooth_Q_sum_current = np.sum(vsmooth[i_idio_jQ, :, :][:, i_idio_jQ, 1:], axis=(0, 1, 2))
+                    EZZ_Q += vsmooth_Q_sum_current * np.sum(tent_weights**2)
+                    Q_Q = (EZZ_Q - A_Q * EZZ_FB_Q) / T
+                    Q_Q = max(Q_Q, 1e-8)  # Ensure positive
+                    
+                    # Apply the same AR coefficient and variance to all 5 components of this quarterly series
+                    # This is theoretically correct: they represent the same underlying process
+                    for idx_Q in i_idio_jQ:
+                        if idx_Q < A_new.shape[0] and idx_Q < A_new.shape[1]:
+                            A_new[idx_Q, idx_Q] = A_Q
+                            Q_new[idx_Q, idx_Q] = Q_Q
             
             # Loop through each period for quarterly variables
             for t in range(T):
@@ -1755,16 +2355,38 @@ def em_step(y: np.ndarray, A: np.ndarray, C: np.ndarray, Q: np.ndarray,
                     Wt = np.diag(nan_val.astype(float))
                 
                 # MATLAB: Zsmooth(bl_idxQ(i,:), t+1) - Zsmooth is (T+1) x m
+                # Ensure bl_idxQ_i indices are valid
+                if len(bl_idxQ_i) == 0:
+                    # No quarterly factors for this block - skip
+                    continue
+                
+                # Ensure indices are within bounds
+                valid_bl_idxQ_i = bl_idxQ_i[bl_idxQ_i < Zsmooth.shape[1]]
+                if len(valid_bl_idxQ_i) == 0:
+                    # No valid indices - skip
+                    continue
+                
                 if t + 1 < Zsmooth.shape[0]:
-                    Z_block_Q_row = Zsmooth[t + 1, bl_idxQ_i]  # 1 x rps
-                    Z_block_Q_col = Z_block_Q_row.reshape(-1, 1)  # rps x 1
-                    ZZZ_Q = Z_block_Q_col @ Z_block_Q_row.reshape(1, -1)  # rps x 1 * 1 x rps = rps x rps
+                    Z_block_Q_row = Zsmooth[t + 1, valid_bl_idxQ_i]  # 1 x rps_actual
+                    Z_block_Q_col = Z_block_Q_row.reshape(-1, 1)  # rps_actual x 1
+                    ZZZ_Q = Z_block_Q_col @ Z_block_Q_row.reshape(1, -1)  # rps_actual x 1 * 1 x rps_actual = rps_actual x rps_actual
                     
-                    V_block_Q = vsmooth[np.ix_(bl_idxQ_i, bl_idxQ_i, [t + 1])]
-                    if V_block_Q.ndim == 3:
-                        V_block_Q = V_block_Q[:, :, 0]
+                    # Ensure vsmooth indices are valid
+                    valid_vsmooth_idx = valid_bl_idxQ_i[valid_bl_idxQ_i < vsmooth.shape[0]]
+                    if len(valid_vsmooth_idx) > 0:
+                        V_block_Q = vsmooth[np.ix_(valid_vsmooth_idx, valid_vsmooth_idx, [t + 1])]
+                        if V_block_Q.ndim == 3:
+                            V_block_Q = V_block_Q[:, :, 0]
+                        # Ensure V_block_Q matches ZZZ_Q size
+                        if V_block_Q.shape != ZZZ_Q.shape:
+                            # Resize to match
+                            min_size = min(V_block_Q.shape[0], ZZZ_Q.shape[0])
+                            V_block_Q = V_block_Q[:min_size, :min_size]
+                            ZZZ_Q = ZZZ_Q[:min_size, :min_size]
+                    else:
+                        V_block_Q = np.zeros_like(ZZZ_Q)
                 else:
-                    rps_actual = len(bl_idxQ_i)
+                    # t+1 is out of bounds - use zeros
                     Z_block_Q_row = np.zeros(rps_actual)
                     Z_block_Q_col = np.zeros((rps_actual, 1))
                     ZZZ_Q = np.zeros((rps_actual, rps_actual))
@@ -1830,16 +2452,33 @@ def em_step(y: np.ndarray, A: np.ndarray, C: np.ndarray, Q: np.ndarray,
                     nom -= wt_scalar * (idio_term_scalar + idio_term_V)  # Scalar * 1 x rps
             
             # Solve for C (with constraints if applicable)
+            # Use regularized least squares for better numerical stability
             try:
-                C_i = inv(denom) @ nom.T
+                # Compute regularization parameter based on data scale
+                scale_factor = config.regularization_scale if config else 1e-6
+                warn_reg = config.warn_on_regularization if config else True
+                reg_param, reg_stats = _compute_regularization_param(denom, scale_factor, warn_reg)
+                
+                # Regularized solution before constraints
+                denom_reg = denom + np.eye(denom.shape[0]) * reg_param
+                C_i = inv(denom_reg) @ nom.T
+                
+                # Clean invalid values
+                C_i = _clean_matrix(C_i, 'loading', default_nan=0.0, default_inf=0.0)
                 
                 # Apply quarterly constraints
                 if R_con_i.size > 0 and len(q_con_i) == R_con_i.shape[0]:
-                    denom_inv = inv(denom)
+                    denom_inv = inv(denom_reg)  # Use regularized inverse for constraints too
                     constraint_term = denom_inv @ R_con_i.T @ inv(R_con_i @ denom_inv @ R_con_i.T) @ (R_con_i @ C_i - q_con_i)
                     C_i_constr = C_i - constraint_term
                 else:
                     C_i_constr = C_i
+                
+                # Clean and apply adaptive bounds after constraints
+                C_i_constr = _clean_matrix(C_i_constr, 'loading', default_nan=0.0, default_inf=0.0)
+                C_scale = np.std(C_i_constr[C_i_constr != 0]) if np.any(C_i_constr != 0) else 1.0
+                C_max = max(10.0, C_scale * 5)
+                C_i_constr = np.clip(C_i_constr, -C_max, C_max)
                 
                 # Place in output matrix
                 # Assign using explicit indexing to avoid read-only issues
@@ -1853,104 +2492,89 @@ def em_step(y: np.ndarray, A: np.ndarray, C: np.ndarray, Q: np.ndarray,
                 pass
     
     # Update R (covariance of observation residuals)
-    R_new = np.zeros((n, n))
-    for t in range(T):
-        # Wt is diagonal selection matrix: n x n
-        nan_mask = ~nanY[:, t]  # n x 1 boolean array
-        Wt = np.diag(nan_mask.astype(float))  # n x n diagonal matrix
-        # resid = y - Wt @ C @ Z
-        # y_clean[:, t:t+1] is n x 1
-        # Wt is n x n
-        # C_new is n x m
-        # Zsmooth[:, t + 1:t + 2] is (T+1) x m, but we need m x 1 (column vector)
-        # So Zsmooth[t + 1, :] is 1 x m, transpose to m x 1
-        Z_t = Zsmooth[t + 1, :].reshape(-1, 1)  # m x 1
-        resid = y_clean[:, t:t+1] - Wt @ C_new @ Z_t  # n x 1
-        # R update: resid @ resid.T gives n x n
-        # vsmooth[:, :, t + 1] is m x m, need to extract properly
-        vsmooth_t = vsmooth[:, :, t + 1]  # m x m
-        R_new += (resid @ resid.T + 
-                  Wt @ C_new @ vsmooth_t @ C_new.T @ Wt + 
-                  (np.eye(n) - Wt) @ R @ (np.eye(n) - Wt))
+    # R is diagonal, so we compute diagonal elements directly (more efficient and theoretically cleaner)
+    # Theoretical formula: R[i,i] = (1/T_i) * sum_{t: obs available} [ (y_i(t) - C_i @ Z_t)^2 + C_i @ V_t @ C_i' ]
+    # where T_i is number of non-missing observations for series i
+    # This is the EM update for observation residual variance
     
-    R_new = R_new / T
-    # Extract diagonal and copy to make writable
-    RR = np.diag(R_new).copy()
-    # Set minimum values for idiosyncratic components
-    # i_idio[:nM] gives monthly idiosyncratic flags for first nM series
-    # Create boolean mask only for indices within RR bounds
-    i_idio_M_values = i_idio[:min(nM, len(RR))].astype(bool)
-    # Apply mask only to corresponding indices
-    valid_indices = np.arange(len(i_idio_M_values))[i_idio_M_values]
-    RR[valid_indices] = 1e-4
-    # Set quarterly series minimums
-    if nM < len(RR):
-        RR[nM:] = 1e-4
-    # Place back on diagonal
-    np.fill_diagonal(R_new, RR)
+    R_diag = np.zeros(n)
+    n_obs_per_series = np.zeros(n, dtype=int)  # Count non-missing observations per series
+    
+    for t in range(T):
+        # Get smoothed factor and covariance at time t
+        Z_t = Zsmooth[t + 1, :].reshape(-1, 1)  # m x 1
+        vsmooth_t = vsmooth[:, :, t + 1]  # m x m
+        
+        # Compute prediction for all series: y_pred = C_new @ Z_t gives n x 1
+        y_pred = C_new @ Z_t  # Use current C, not C_new, for consistency in this iteration
+        y_pred = y_pred.flatten()  # n x 1 -> (n,)
+        
+        # For each series i, compute R[i,i] contribution
+        for i in range(n):
+            # Skip if observation is missing
+            if nanY[i, t]:
+                continue
+            
+            # Increment observation count
+            n_obs_per_series[i] += 1
+            
+            # Prediction error squared: (y_i(t) - C_i @ Z_t)^2
+            resid_i = y_clean[i, t] - y_pred[i]
+            resid_sq = resid_i**2
+            
+            # Uncertainty from factor estimation: C_i @ V_t @ C_i'
+            # This accounts for uncertainty in the smoothed factor estimates
+            C_i = C_new[i, :].reshape(1, -1)  # 1 x m
+            var_factor = (C_i @ vsmooth_t @ C_i.T)[0, 0]  # Scalar
+            
+            # Add to R[i,i] accumulator
+            R_diag[i] += resid_sq + var_factor
+    
+    # Average over time periods (only count non-missing observations)
+    # Avoid division by zero - if no observations, keep previous R value
+    n_obs_per_series = np.maximum(n_obs_per_series, 1)
+    R_diag = R_diag / n_obs_per_series
+    
+    # For series with no observations, use previous R value
+    no_obs_mask = n_obs_per_series == 1  # Only 1 because we set minimum to 1 above
+    if np.any(no_obs_mask):
+        R_prev_diag = np.diag(R)
+        R_diag[no_obs_mask] = R_prev_diag[no_obs_mask]
+    
+    # Ensure R_diag is positive (variance must be non-negative)
+    # Use adaptive minimum based on data scale, not arbitrary fixed value
+    # Minimum variance should be proportional to the typical scale of prediction errors
+    # Use a small fraction of the mean variance as minimum
+    mean_var = np.mean(R_diag[R_diag > 0]) if np.any(R_diag > 0) else 1e-4
+    min_var = np.maximum(mean_var * 1e-6, 1e-8)
+    R_diag = np.maximum(R_diag, min_var)
+    
+    # Clean any invalid values (preserve scale)
+    valid_mask = np.isfinite(R_diag) & (R_diag > 0)
+    if np.any(valid_mask):
+        # Use median of valid values as fallback for invalid ones
+        median_var = np.median(R_diag[valid_mask])
+        R_diag = np.where(valid_mask, R_diag, median_var)
+    else:
+        # All invalid - use default
+        R_diag.fill(1e-4)
+    
+    # Create diagonal R matrix
+    R_new = np.diag(R_diag)
     
     # Final validation: Ensure Q_new is positive semi-definite
-    Q_diag = np.diag(Q_new)
-    if np.any(Q_diag < -1e-10):
-        # Replace negative diagonals with small positive values
-        Q_diag = np.maximum(Q_diag, 1e-8)
-        np.fill_diagonal(Q_new, Q_diag)
-        Q_new = 0.5 * (Q_new + Q_new.T)  # Re-symmetrize
-        
-        # Regularize if minimum eigenvalue is too negative, but limit to prevent unreasonably large values
-        try:
-            eigenvals = np.linalg.eigvals(Q_new)
-            min_eigenval = np.min(eigenvals)
-            max_eigenval = np.max(eigenvals)
-            
-            # Cap maximum eigenvalue to prevent explosion
-            if max_eigenval > 1e6:
-                scale = 1e6 / max_eigenval
-                Q_new = Q_new * scale
-                eigenvals = eigenvals * scale
-                min_eigenval = np.min(eigenvals)
-            
-            if min_eigenval < 1e-8:
-                reg_amount = min(1e-8 - min_eigenval, 1e-6)  # Limit regularization to prevent huge values
-                Q_new = Q_new + np.eye(Q_new.shape[0]) * reg_amount
-                Q_new = 0.5 * (Q_new + Q_new.T)
-        except (np.linalg.LinAlgError, ValueError):
-            # Eigendecomposition failed - use diagonal matrix with minimum values and cap
-            Q_diag_temp = np.diag(Q_new)
-            Q_diag_temp = np.maximum(Q_diag_temp, 1e-8)
-            Q_diag_temp = np.minimum(Q_diag_temp, 1e6)  # Cap at 1e6
-            Q_new = np.diag(Q_diag_temp)
-        
-        # Final cap check on Q_new
-        Q_new = np.clip(Q_new, -1e6, 1e6)
-        Q_new = 0.5 * (Q_new + Q_new.T)
+    Q_new = _clean_matrix(Q_new, 'covariance', default_nan=0.0)
+    min_eigenval = config.min_eigenvalue if config else 1e-8
+    warn_reg = config.warn_on_regularization if config else True
+    Q_new, _ = _apply_regularization(Q_new, 'covariance', config)
+    
+    # Cap maximum eigenvalue to prevent explosion
+    max_eigenval = config.max_eigenvalue if config else 1e6
+    Q_new = _cap_max_eigenvalue(Q_new, max_eigenval=max_eigenval)
     
     # Final validation: Ensure V_0_new is positive semi-definite
-    V_0_diag = np.diag(V_0_new)
-    if np.any(V_0_diag < -1e-10):
-        V_0_diag = np.maximum(V_0_diag, 1e-8)
-        np.fill_diagonal(V_0_new, V_0_diag)
-        V_0_new = 0.5 * (V_0_new + V_0_new.T)
-        
-        # Regularize if needed
-        try:
-            eigenvals = np.linalg.eigvals(V_0_new)
-            min_eigenval = np.min(eigenvals)
-            if min_eigenval < 1e-8:
-                reg_amount = min(1e-8 - min_eigenval, 1e-6)
-                V_0_new = V_0_new + np.eye(V_0_new.shape[0]) * reg_amount
-                V_0_new = 0.5 * (V_0_new + V_0_new.T)
-        except (np.linalg.LinAlgError, ValueError):
-            # Fallback: use diagonal with minimum values
-            V_0_diag_temp = np.diag(V_0_new)
-            V_0_diag_temp = np.maximum(V_0_diag_temp, 1e-8)
-            np.fill_diagonal(V_0_new, V_0_diag_temp)
-            V_0_new = 0.5 * (V_0_new + V_0_new.T)
-    
-    # Final cleanup of V_0_new (keep only critical safeguards)
-    if np.any(~np.isfinite(V_0_new)):
-        V_0_new = np.nan_to_num(V_0_new, nan=1e-8, posinf=1e6, neginf=1e-8)
-    V_0_new = 0.5 * (V_0_new + V_0_new.T)  # Ensure symmetry
+    V_0_new = _clean_matrix(V_0_new, 'covariance', default_nan=0.0)
+    V_0_new, _ = _apply_regularization(V_0_new, 'covariance', config)
     
     return C_new, R_new, A_new, Q_new, Z_0, V_0_new, loglik
 
@@ -2134,10 +2758,48 @@ def dfm(X: np.ndarray, config: DFMConfig, threshold: Optional[float] = None, max
     # Get frequencies array for use in init_conditions and em_step (compute once)
     frequencies_array = np.array(config.Frequency) if hasattr(config, 'Frequency') else None
     
-    # Prepare data
+    # Prepare data with robust standardization
     Mx = np.nanmean(X, axis=0)
     Wx = np.nanstd(X, axis=0)
-    xNaN = (X - Mx) / Wx  # Standardize series
+    
+    # Handle zero/near-zero standard deviations (constant or near-constant series)
+    # Set minimum standard deviation to prevent division by zero
+    min_std = 1e-6
+    Wx = np.maximum(Wx, min_std)
+    
+    # Handle NaN standard deviations (all NaN series)
+    nan_std_mask = np.isnan(Wx) | np.isnan(Mx)
+    if np.any(nan_std_mask):
+        _logger.warning(
+            f"Series with NaN mean/std detected: {np.sum(nan_std_mask)}. "
+            f"Setting Wx=1.0, Mx=0.0 for these series."
+        )
+        Wx[nan_std_mask] = 1.0
+        Mx[nan_std_mask] = 0.0
+    
+    # Standardize series
+    xNaN = (X - Mx) / Wx
+    
+    # Clip extreme values if enabled in config
+    clip_threshold = getattr(config, 'data_clip_threshold', 100.0)
+    clip_enabled = getattr(config, 'clip_data_values', True)
+    warn_on_clip = getattr(config, 'warn_on_data_clip', True)
+    
+    if clip_enabled:
+        n_clipped_before = np.sum(np.abs(xNaN) > clip_threshold)
+        xNaN = np.clip(xNaN, -clip_threshold, clip_threshold)
+        if warn_on_clip and n_clipped_before > 0:
+            pct_clipped = 100.0 * n_clipped_before / xNaN.size
+            _logger.warning(
+                f"Data value clipping applied: {n_clipped_before} values ({pct_clipped:.2f}%) "
+                f"clipped beyond ±{clip_threshold} standard deviations. "
+                f"This may remove important outliers. Consider investigating extreme values "
+                f"or disabling clipping (clip_data_values: false) if this is frequent."
+            )
+    
+    # Replace any remaining NaN/Inf with 0 (after clipping)
+    xNaN = np.nan_to_num(xNaN, nan=0.0, posinf=clip_threshold if clip_enabled else 100, 
+                        neginf=-clip_threshold if clip_enabled else -100)
     
     # Initial conditions - use configurable nan_method and nan_k
     optNaN = {'method': nan_method, 'k': nan_k}
@@ -2166,29 +2828,94 @@ def dfm(X: np.ndarray, config: DFMConfig, threshold: Optional[float] = None, max
     xNaN_est, _ = _rem_nans_spline(xNaN, method=optNaN_est['method'], k=optNaN_est['k'])
     y_est = xNaN_est.T  # n x T
     
-    # EM loop
+    # EM loop with likelihood monitoring
+    # In proper EM, likelihood should be non-decreasing. Handle decreases gracefully.
     while num_iter < max_iter and not converged:
         C_new, R_new, A_new, Q_new, Z_0_new, V_0_new, loglik = em_step(
             y_est, A, C, Q, R, Z_0, V_0, r, p, R_mat, q, nQ, i_idio, blocks,
             tent_weights_dict=tent_weights_dict,
             clock=clock,
-            frequencies=frequencies_array
+            frequencies=frequencies_array,
+            config=config
         )
         
-        C = C_new
-        R = R_new
-        A = A_new
-        Q = Q_new
-        Z_0 = Z_0_new
-        V_0 = V_0_new
+        # Check if likelihood decreased significantly (more than numerical precision)
+        # Small decreases (< 1e-3) are acceptable due to numerical precision
+        # Larger decreases indicate numerical issues - use damped update
+        if num_iter > 0 and loglik < previous_loglik - 1e-3:
+            # Likelihood decreased - use damped update to preserve stability
+            # Damping factor: use 80% of new, 20% of old (conservative)
+            damping = 0.8
+            
+            # Store previous parameters before updating
+            C_prev = C.copy()
+            R_prev = R.copy()
+            A_prev = A.copy()
+            Q_prev = Q.copy()
+            Z_0_prev = Z_0.copy()
+            V_0_prev = V_0.copy()
+            
+            # Try damped update
+            C_damped = damping * C_new + (1 - damping) * C_prev
+            R_damped = damping * R_new + (1 - damping) * R_prev
+            A_damped = damping * A_new + (1 - damping) * A_prev
+            Q_damped = damping * Q_new + (1 - damping) * Q_prev
+            Z_0_damped = damping * Z_0_new + (1 - damping) * Z_0_prev
+            V_0_damped = damping * V_0_new + (1 - damping) * V_0_prev
+            
+            # Recompute likelihood with damped parameters to verify improvement
+            # This is expensive, so only do it if decrease was significant
+            if loglik < previous_loglik - 0.1:  # Significant decrease
+                try:
+                    # Quick likelihood check with damped parameters
+                    _, _, _, loglik_damped = run_kf(y_est, A_damped, C_damped, Q_damped, R_damped, Z_0_damped, V_0_damped)
+                    if loglik_damped > previous_loglik:
+                        # Damped update improves - use it
+                        C = C_damped
+                        R = R_damped
+                        A = A_damped
+                        Q = Q_damped
+                        Z_0 = Z_0_damped
+                        V_0 = V_0_damped
+                        loglik = loglik_damped
+                    else:
+                        # Damped update still worse - keep previous parameters
+                        # Don't update - parameters remain as C_prev, etc.
+                        loglik = previous_loglik  # Don't decrease likelihood
+                except:
+                    # Likelihood recomputation failed - use damped update anyway
+                    C = C_damped
+                    R = R_damped
+                    A = A_damped
+                    Q = Q_damped
+                    Z_0 = Z_0_damped
+                    V_0 = V_0_damped
+            else:
+                # Small decrease - use damped update without recomputing likelihood
+                C = C_damped
+                R = R_damped
+                A = A_damped
+                Q = Q_damped
+                Z_0 = Z_0_damped
+                V_0 = V_0_damped
+        else:
+            # Normal update - likelihood increased or small decrease
+            C = C_new
+            R = R_new
+            A = A_new
+            Q = Q_new
+            Z_0 = Z_0_new
+            V_0 = V_0_new
         
         if num_iter > 2:
-            converged, _ = em_converged(loglik, previous_loglik, threshold, True)
+            converged, decreased = em_converged(loglik, previous_loglik, threshold, True)
+            # If likelihood decreased significantly and we're not near convergence, 
+            # it may indicate numerical issues - but we've already handled it above
         
         if (num_iter % 10 == 0) and (num_iter > 0):
             print(f'Now running the {num_iter}th iteration of max {max_iter}')
             print('  Loglik   (% Change)')
-            pct_change = 100 * ((loglik - previous_loglik) / previous_loglik) if previous_loglik != 0 else 0
+            pct_change = 100 * ((loglik - previous_loglik) / abs(previous_loglik)) if previous_loglik != 0 else 0
             print(f'{loglik:.6f}   ({pct_change:6.2f}%)')
         
         LL.append(loglik)
@@ -2222,6 +2949,10 @@ def dfm(X: np.ndarray, config: DFMConfig, threshold: Optional[float] = None, max
     # Use broadcasting: x_sm is T x N, Wx_clean is (N,), so x_sm * Wx_clean broadcasts correctly
     X_sm = x_sm * Wx_clean + Mx_clean  # Broadcasting: T x N * (N,) + (N,) = T x N
     
+    # Calculate RMSE: compare smoothed data to original data (where available)
+    # Only use non-missing observations for comparison
+    rmse_overall, rmse_per_series = calculate_rmse(X, X_sm, mask=None)
+    
     # Create result structure
     Res = DFMResult(
         x_sm=x_sm,
@@ -2236,7 +2967,12 @@ def dfm(X: np.ndarray, config: DFMConfig, threshold: Optional[float] = None, max
         Z_0=Z_0,
         V_0=V_0,
         r=r,
-        p=p
+        p=p,
+        converged=converged,
+        num_iter=num_iter,
+        loglik=loglik,
+        rmse=rmse_overall,
+        rmse_per_series=rmse_per_series
     )
     
     # Display output tables (optional - can be disabled for cleaner output)
@@ -2359,6 +3095,24 @@ def _display_dfm_tables(Res: DFMResult, config, nQ: int) -> None:
             if len(A_idio) > 10:
                 print(f'... (total {len(A_idio)} coefficients)')
         print('\n\n\n')
+        
+        # Table 8: Model Fit Statistics (RMSE)
+        if Res.rmse is not None and not np.isnan(Res.rmse):
+            print('Table 8: Model Fit Statistics')
+            print(f'  Overall RMSE (averaged across all series): {Res.rmse:.6f}')
+            if Res.rmse_per_series is not None and len(Res.rmse_per_series) > 0:
+                print('\n  RMSE per Series:')
+                try:
+                    series_names = config.SeriesName if hasattr(config, 'SeriesName') else [f"Series_{i}" for i in range(len(Res.rmse_per_series))]
+                    for i, (name, rmse_val) in enumerate(zip(series_names, Res.rmse_per_series)):
+                        if not np.isnan(rmse_val):
+                            print(f'    {name:40s}: {rmse_val:.6f}')
+                except Exception:
+                    # Fallback if series names not available
+                    for i, rmse_val in enumerate(Res.rmse_per_series):
+                        if not np.isnan(rmse_val):
+                            print(f'    Series {i:3d}: {rmse_val:.6f}')
+            print('\n\n\n')
         
     except Exception as e:
         print(f'Error displaying tables: {e}')

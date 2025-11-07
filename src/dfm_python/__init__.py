@@ -36,7 +36,7 @@ from .config import DFMConfig
 from .data_loader import (
     load_config, load_config_from_yaml, load_config_from_csv, load_data, transform_data
 )
-from .dfm import DFMResult, dfm
+from .dfm import DFMResult, dfm, calculate_rmse
 from .kalman import run_kf, skf, fis, miss_data
 from .news import update_nowcast, news_dfm, para_const
 
@@ -51,7 +51,7 @@ __all__ = [
     'ModelConfig',  # Alias for DFMConfig
     'load_config', 'load_config_from_yaml', 'load_config_from_csv',
     'load_data', 'transform_data',
-    'DFMResult', 'dfm',
+    'DFMResult', 'dfm', 'calculate_rmse',
     'run_kf', 'skf', 'fis', 'miss_data',
     'update_nowcast', 'news_dfm', 'para_const',
     # Deprecated aliases
