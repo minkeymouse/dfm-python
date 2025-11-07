@@ -74,7 +74,13 @@ def load_config_from_yaml(configfile: Union[str, Path]) -> DFMConfig:
         model_dict = cfg_dict
     elif 'model' in cfg_dict:
         # Nested under 'model' key (from @package model:)
-        model_dict = cfg_dict['model']
+        model_dict = cfg_dict['model'].copy() if isinstance(cfg_dict['model'], dict) else {}
+        # If series is at top level, merge it into model_dict
+        if 'series' in cfg_dict and 'series' not in model_dict:
+            model_dict['series'] = cfg_dict['series']
+    elif 'series' in cfg_dict:
+        # Series at top level, construct model_dict from top-level keys
+        model_dict = {k: v for k, v in cfg_dict.items() if k not in ['dfm', 'data', 'experiment_name', 'output_dir', 'defaults']}
     else:
         # Try to construct from top-level keys
         model_dict = cfg_dict
@@ -362,6 +368,10 @@ def read_data(datafile: Union[str, Path]) -> Tuple[np.ndarray, pd.DatetimeIndex,
     - First column: Date (YYYY-MM-DD format or pandas parseable)
     - Subsequent columns: Series data (one column per series)
     - Header row: Series IDs (matching config.SeriesID)
+    
+    Alternatively, CSV can have metadata columns first:
+    - Metadata columns: series_id, series_name, frequency, transformation, category, units
+    - Then date columns starting from the first date column
     """
     datafile = Path(datafile)
     if not datafile.exists():
@@ -369,13 +379,94 @@ def read_data(datafile: Union[str, Path]) -> Tuple[np.ndarray, pd.DatetimeIndex,
     
     # Read CSV file
     try:
-        df = pd.read_csv(datafile, index_col=0, parse_dates=True)
+        df = pd.read_csv(datafile)
     except Exception as e:
         raise ValueError(f"Failed to read CSV file {datafile}: {e}")
     
+    # Check if first column is a date column or metadata
+    first_col = df.columns[0]
+    
+    # Try to parse first column as date
+    try:
+        pd.to_datetime(df[first_col].iloc[0])
+        is_date_first = True
+    except (ValueError, TypeError):
+        is_date_first = False
+    
+    # If first column is not a date, check if CSV is in "long" format (one row per series)
+    if not is_date_first:
+        # Check if first column contains series IDs (string values)
+        first_col_values = df[first_col].astype(str)
+        # If first column looks like series IDs and we have date columns, transpose
+        if 'series_id' in first_col.lower() or first_col_values.str.match(r'^[A-Z0-9_]+$').any():
+            # Long format: transpose so series are columns and dates are rows
+            # Find first date column
+            date_col_idx = None
+            for i, col in enumerate(df.columns):
+                try:
+                    # Try to parse first value as date
+                    pd.to_datetime(df[col].iloc[0])
+                    date_col_idx = i
+                    break
+                except (ValueError, TypeError):
+                    continue
+            
+            if date_col_idx is None:
+                raise ValueError(f"Could not find date column in CSV file {datafile}")
+            
+            # Set series_id as index, then transpose
+            series_id_col = df.columns[0]
+            df = df.set_index(series_id_col)
+            
+            # Get date columns (from date_col_idx onwards)
+            date_cols = df.columns[date_col_idx:]
+            df_data = df[date_cols].T  # Transpose: dates become rows, series become columns
+            
+            # Convert date column names to datetime index
+            df_data.index = pd.to_datetime(df_data.index)
+            
+            mnemonics = df_data.columns.tolist()
+            Time = df_data.index
+            Z = df_data.apply(pd.to_numeric, errors='coerce').values.astype(float)
+            
+            return Z, Time, mnemonics
+        else:
+            # Find first column that looks like a date
+            date_col_idx = None
+            for i, col in enumerate(df.columns):
+                try:
+                    # Try to parse first value as date
+                    pd.to_datetime(df[col].iloc[0])
+                    date_col_idx = i
+                    break
+                except (ValueError, TypeError):
+                    continue
+            
+            if date_col_idx is None:
+                raise ValueError(f"Could not find date column in CSV file {datafile}")
+            
+            # Use first date column as index, drop metadata columns
+            date_col = df.columns[date_col_idx]
+            df = df.set_index(date_col)
+            df.index = pd.to_datetime(df.index)
+            # Drop any remaining non-numeric columns (metadata)
+            numeric_cols = []
+            for col in df.columns:
+                try:
+                    pd.to_numeric(df[col], errors='coerce')
+                    numeric_cols.append(col)
+                except (ValueError, TypeError):
+                    continue
+            df = df[numeric_cols]
+    else:
+        # Standard format: first column is date
+        df = df.set_index(first_col)
+        df.index = pd.to_datetime(df.index)
+    
     mnemonics = df.columns.tolist()
     Time = df.index
-    Z = df.values.astype(float)
+    # Convert to float, handling any remaining non-numeric values
+    Z = df.apply(pd.to_numeric, errors='coerce').values.astype(float)
     
     return Z, Time, mnemonics
 

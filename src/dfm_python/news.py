@@ -22,7 +22,7 @@ import logging
 
 from .kalman import skf, fis, miss_data
 from .config import DFMConfig
-from .dfm import DFMResult
+from .dfm import DFMResult, calculate_rmse
 
 # Set up logger
 _logger = logging.getLogger(__name__)
@@ -706,6 +706,16 @@ def update_nowcast(X_old: np.ndarray, X_new: np.ndarray, Time: pd.DatetimeIndex,
                 series_id = config.SeriesID[i]
                 print(f'{series_id:20s}  Forecast: {forecast[i]:8.2f}  Actual: {actual[i]:8.2f}  '
                       f'Weight: {weight[i]:8.4f}  Impact: {impact_releases[i]:8.2f}')
+        
+        # Calculate and display RMSE for nowcast
+        # Compare actual values to forecasts where both are available
+        valid_mask = np.isfinite(actual) & np.isfinite(forecast)
+        if np.any(valid_mask):
+            actual_valid = actual[valid_mask]
+            forecast_valid = forecast[valid_mask]
+            if len(actual_valid) > 0:
+                nowcast_rmse = np.sqrt(np.mean((actual_valid - forecast_valid) ** 2))
+                print(f'\n  Nowcast RMSE (across all series with updates): {nowcast_rmse:.6f}')
         
         # Save nowcast using callback if provided (generic - not database-specific)
         if save_callback is not None:

@@ -1,0 +1,214 @@
+# Series definitions with their configurations and block memberships
+# Each series specifies which blocks it loads on
+
+defaults:
+  - _self_
+
+# Series definitions
+series:
+  # GDP and National Accounts
+  BOK_200Y106_1400:
+    series_name: "Real GDP (Quarterly)"
+    frequency: "q"
+    transformation: "pca"
+    units: "Billion Won"
+    category: "GDP"
+    blocks: [Global]
+  
+  BOK_200Y105_1400:
+    series_name: "Nominal GDP (Quarterly)"
+    frequency: "q"
+    transformation: "pca"
+    units: "Billion Won"
+    category: "GDP"
+    blocks: [Global]
+  
+  BOK_200Y109_10201:
+    series_name: "Total Capital Formation (Quarterly)"
+    frequency: "q"
+    transformation: "pca"
+    units: "Billion Won"
+    category: "GDP"
+    blocks: [Global, Investment]
+  
+  BOK_200Y129_10101:
+    series_name: "Gross Fixed Capital Formation (Quarterly)"
+    frequency: "q"
+    transformation: "pca"
+    units: "Billion Won"
+    category: "Investment"
+    blocks: [Global, Investment]
+  
+  # Financial Indicators
+  BOK_101Y019_BBLA00:
+    series_name: "M1 Money Supply (Monthly)"
+    frequency: "m"
+    transformation: "pch"
+    units: "Billion Won"
+    category: "Financial"
+    blocks: [Global, Investment]
+  
+  BOK_101Y004_BBHA00:
+    series_name: "M2 Money Supply (Monthly)"
+    frequency: "m"
+    transformation: "pch"
+    units: "Billion Won"
+    category: "Financial"
+    blocks: [Global, Investment]
+  
+  BOK_104Y016_BDCA1:
+    series_name: "Total Bank Loans (Monthly)"
+    frequency: "m"
+    transformation: "pch"
+    units: "Billion Won"
+    category: "Financial"
+    blocks: [Global, Investment]
+  
+  # Labor Market
+  KOSIS_101_DT_1DA7002S_T90:
+    series_name: "Employment Rate (Monthly)"
+    frequency: "m"
+    transformation: "lin"
+    units: "Percent"
+    category: "Labor"
+    blocks: [Global, Consumption]
+  
+  KOSIS_101_DT_1DA7002S_T80:
+    series_name: "Unemployment Rate (Monthly)"
+    frequency: "m"
+    transformation: "lin"
+    units: "Percent"
+    category: "Labor"
+    blocks: [Global, Consumption]
+  
+  # Investment Indicators
+  BOK_901Y033_A00:
+    series_name: "Industrial Production Index (Monthly)"
+    frequency: "m"
+    transformation: "pch"
+    units: "Index"
+    category: "Investment"
+    blocks: [Global]
+  
+  BOK_404Y014_*AA:
+    series_name: "Producer Price Index (Monthly)"
+    frequency: "m"
+    transformation: "pch"
+    units: "Index"
+    category: "Investment"
+    blocks: [Global, Consumption]
+  
+  BOK_901Y020_I42A:
+    series_name: "Domestic Construction Orders (Monthly)"
+    frequency: "m"
+    transformation: "pch"
+    units: "Million Won"
+    category: "Investment"
+    blocks: [Global]
+  
+  # External Sector
+  BOK_301Y013_100000:
+    series_name: "Balance of Payments - Goods (Monthly)"
+    frequency: "m"
+    transformation: "chg"
+    units: "Million Dollars"
+    category: "External"
+    blocks: [Global, External]
+  
+  BOK_901Y011_FIEE:
+    series_name: "Total Exports (Monthly)"
+    frequency: "m"
+    transformation: "pch"
+    units: "Thousand Dollars"
+    category: "External"
+    blocks: [Global, External]
+  
+  BOK_901Y012_FIEF:
+    series_name: "Total Imports (Monthly)"
+    frequency: "m"
+    transformation: "pch"
+    units: "Thousand Dollars"
+    category: "External"
+    blocks: [Global, External]
+  
+  BOK_731Y001_0000001:
+    series_name: "KRW/USD Exchange Rate (Daily)"
+    frequency: "d"
+    transformation: "pch"
+    units: "Won per Dollar"
+    category: "External"
+    blocks: [Global, External, Investment]  # Exchange rate affects investment decisions
+  
+  BOK_802Y001_0001000:
+    series_name: "KOSPI Index (Daily)"
+    frequency: "d"
+    transformation: "pch"
+    units: "Index"
+    category: "Financial"
+    blocks: [Global, Investment]
+
+# Model structure: block definitions
+model:
+  blocks:
+    Global:
+      factors: 3
+    Consumption:
+      factors: 2
+    Investment:  # Maps to CSV 'Block_Invest'
+      factors: 3  # Increased from 2 to capture more investment dynamics
+    External:  # External sector block
+      factors: 2  # Increased from 1 to better capture trade and exchange rate dynamics
+
+# DFM estimation parameters
+dfm:
+  clock: "m"  # Base frequency for all latent factors (monthly clock)
+  threshold: 1e-5
+  max_iter: 5000
+  nan_method: 2
+  nan_k: 3
+  ar_lag: 1
+  
+  # Numerical stability parameters (for reproducibility and transparency)
+  # These parameters control clipping, regularization, and damped updates
+  # All are enabled by default but can be adjusted or disabled for research purposes
+  
+  # AR Coefficient Clipping
+  clip_ar_coefficients: true  # Enable AR coefficient clipping for stationarity
+  ar_clip_min: -0.99  # Minimum AR coefficient (must be > -1 for stationarity)
+  ar_clip_max: 0.99   # Maximum AR coefficient (must be < 1 for stationarity)
+  warn_on_ar_clip: true  # Warn when AR coefficients are clipped (indicates near-unit root)
+  
+  # Data Value Clipping
+  clip_data_values: true  # Enable clipping of extreme data values
+  data_clip_threshold: 100.0  # Clip values beyond this many standard deviations
+  warn_on_data_clip: true  # Warn when data values are clipped (indicates outliers)
+  
+  # Regularization
+  use_regularization: true  # Enable regularization for numerical stability
+  regularization_scale: 1e-6  # Scale factor for ridge regularization (relative to trace)
+  min_eigenvalue: 1e-8  # Minimum eigenvalue for positive definite matrices
+  max_eigenvalue: 1e6   # Maximum eigenvalue cap to prevent explosion
+  warn_on_regularization: true  # Warn when regularization is applied
+  
+  # Damped Updates
+  use_damped_updates: true  # Enable damped updates when likelihood decreases
+  damping_factor: 0.8  # Damping factor (0.8 = 80% new, 20% old)
+  warn_on_damped_update: true  # Warn when damped updates are used
+
+# Data loading configuration
+data:
+  use_database: false
+  strict_mode: false
+  country: KR
+  vintage: null
+  vintage_old: null
+  vintage_new: null
+  sample_start: null
+  config_id: null
+  data_path: null
+  forecast_periods: 2  # For nowcast_dfm.py: number of forward forecast periods
+
+# Experiment metadata
+experiment_name: default
+output_dir: outputs
+
