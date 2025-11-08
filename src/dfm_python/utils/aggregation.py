@@ -11,10 +11,9 @@ The module provides:
 - Constraint matrix (R_mat) generation from tent weights
 - Aggregation structure computation based on global clock
 
-The tent kernel approach follows the FRBNY methodology, where quarterly (or other
-lower-frequency) series are connected to monthly latent factors through weighted
-aggregation constraints. This allows all factors to evolve at the same clock frequency
-while properly handling mixed-frequency observations.
+The tent kernel approach connects lower-frequency series to higher-frequency 
+latent factors through weighted aggregation constraints. This allows all factors to 
+evolve at the same clock frequency while properly handling mixed-frequency observations.
 """
 
 import numpy as np
@@ -48,12 +47,6 @@ MAX_TENT_SIZE: int = 12
 
 # Deterministic tent weights lookup for supported frequency pairs
 # Format: (slower_freq, faster_freq) -> tent_weights_array
-# 
-# These weights define how lower-frequency observations aggregate to higher-frequency
-# latent states. The tent shape (symmetric, peaking in the middle) follows FRBNY's
-# approach and ensures smooth aggregation while giving more weight to the central
-# periods of the aggregation window.
-#
 # Example: ('q', 'm'): [1, 2, 3, 2, 1] means a quarterly observation aggregates
 # 5 monthly latent states with weights 1, 2, 3, 2, 1 (peaking at the middle month).
 TENT_WEIGHTS_LOOKUP: Dict[Tuple[str, str], np.ndarray] = {

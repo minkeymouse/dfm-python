@@ -6,7 +6,7 @@ This script loads a trained DFM model and performs inference,
 including factor extraction and forecasting.
 
 Usage:
-    python scripts/inference.py --model outputs/ResDFM.pkl --data data/example_macro_data.csv --forecast-horizon 12
+    python scripts/inference.py --model outputs/model.pkl --data data/data.csv --forecast-horizon 12
 """
 
 import sys
@@ -136,24 +136,25 @@ def main():
     
     # Create forecast time index
     last_date = Time[-1]
-    if pd.infer_freq(Time) == 'M':  # Monthly
+    freq_str = pd.infer_freq(Time)
+    if freq_str == 'M' or freq_str == 'ME':  # Monthly
         forecast_dates = pd.date_range(
             start=last_date + pd.DateOffset(months=1),
             periods=args.forecast_horizon,
-            freq='M'
+            freq='ME'
         )
-    elif pd.infer_freq(Time) == 'Q':  # Quarterly
+    elif freq_str == 'Q' or freq_str == 'QE':  # Quarterly
         forecast_dates = pd.date_range(
             start=last_date + pd.DateOffset(months=3),
             periods=args.forecast_horizon,
-            freq='Q'
+            freq='QE'
         )
     else:
         # Default to monthly
         forecast_dates = pd.date_range(
             start=last_date + pd.DateOffset(months=1),
             periods=args.forecast_horizon,
-            freq='M'
+            freq='ME'
         )
     
     # Save forecasts

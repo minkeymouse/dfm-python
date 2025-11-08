@@ -130,22 +130,6 @@ series:
     units: "Thousand Dollars"
     category: "External"
     blocks: [Global, External]
-  
-  BOK_731Y001_0000001:
-    series_name: "KRW/USD Exchange Rate (Daily)"
-    frequency: "d"
-    transformation: "pch"
-    units: "Won per Dollar"
-    category: "External"
-    blocks: [Global, External, Investment]  # Exchange rate affects investment decisions
-  
-  BOK_802Y001_0001000:
-    series_name: "KOSPI Index (Daily)"
-    frequency: "d"
-    transformation: "pch"
-    units: "Index"
-    category: "Financial"
-    blocks: [Global, Investment]
 
 # Model structure: block definitions
 model:

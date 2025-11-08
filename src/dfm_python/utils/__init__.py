@@ -23,5 +23,3 @@ __all__ = [
     'MAX_TENT_SIZE',
 ]
 
-# Note: Direct import of data_utils module available for backward compatibility
-

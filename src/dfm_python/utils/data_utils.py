@@ -125,7 +125,9 @@ def summarize(X: np.ndarray, Time, config, vintage: Optional[str] = None) -> Non
         name = config.SeriesName[i][:27] + "..." if len(config.SeriesName[i]) > 30 else config.SeriesName[i]
         sid = f"[{config.SeriesID[i][:25]}...]" if len(config.SeriesID[i]) > 28 else f"[{config.SeriesID[i]}]"
         
-        freq = 'Monthly' if config.Frequency[i] == 'm' else 'Quarterly'
+        # Map frequency codes to readable names
+        freq_map = {'m': 'Monthly', 'q': 'Quarterly', 'sa': 'Semi-annual', 'a': 'Annual'}
+        freq = freq_map.get(config.Frequency[i], config.Frequency[i].upper())
         trans = config.Transformation[i]
         units_t = 'MoM%' if trans == 'pch' and config.Frequency[i] == 'm' else \
                   'QoQ% AR' if trans == 'pca' and config.Frequency[i] == 'q' else \
