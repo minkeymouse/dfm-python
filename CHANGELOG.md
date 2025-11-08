@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.1.7] - 2025-01-XX
+
+### Changed
+- **BREAKING**: Removed CSV config loading - use YAML files or create `DFMConfig` objects directly
+- Made package more generic by removing application-specific dependencies
+- Improved code documentation and comments throughout codebase
+- Refactored variable naming for clarity and consistency
+- Updated README to be more concise and focused
+
+### Added
+- Direct `DFMConfig` object creation support in `load_config()`
+- Application-specific adapter guidance for custom formats
+- Database-backed data loading adapter interface documentation
+- Enhanced function docstrings with detailed parameter descriptions
+
+### Removed
+- CSV configuration file support (deprecated, use YAML or direct object creation)
+- `load_config_from_csv()` function (deprecated, kept for backward compatibility with warning)
+- Spec file dependencies
+
+### Fixed
+- Improved error messages for frequency constraint violations
+- Enhanced type hints and documentation
+
+## [0.1.6] - Previous release
+
+### Changed
+- Frequency generalization improvements
+- Code cleanup and refactoring
+
+## [0.1.5] - Previous release
+
+### Changed
+- Additional improvements and bug fixes
+
 ## [0.1.4] - 2024-11-07
 
 ### Fixed

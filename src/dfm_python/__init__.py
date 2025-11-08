@@ -39,7 +39,7 @@ Example:
 For detailed documentation, see the README.md file.
 """
 
-__version__ = "0.1.6"
+__version__ = "0.1.7"
 
 from .config import DFMConfig, SeriesConfig
 from .data_loader import (
