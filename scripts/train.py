@@ -6,7 +6,7 @@ This script loads configuration and data, runs DFM estimation,
 and saves the results for later use in inference.
 
 Usage:
-    python scripts/train.py --config config/example_config_macro_data.yaml --data data/example_macro_data.csv --output outputs/ResDFM.pkl
+    python scripts/train.py --config config/config.yaml --data data/data.csv --output outputs/model.pkl
 """
 
 import sys
@@ -152,8 +152,8 @@ def main():
                        help='Path to configuration file (YAML or CSV)')
     parser.add_argument('--data', type=str, required=True,
                        help='Path to data file (CSV)')
-    parser.add_argument('--output', type=str, default='outputs/ResDFM.pkl',
-                       help='Output path for trained model (default: outputs/ResDFM.pkl)')
+    parser.add_argument('--output', type=str, default='outputs/model.pkl',
+                       help='Output path for trained model (default: outputs/model.pkl)')
     parser.add_argument('--sample-start', type=str, default=None,
                        help='Sample start date (YYYY-MM-DD, optional)')
     parser.add_argument('--threshold', type=float, default=None,

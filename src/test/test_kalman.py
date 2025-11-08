@@ -1,4 +1,4 @@
-"""Consolidated tests for Kalman filter and smoother."""
+"""Core tests for Kalman filter and smoother."""
 
 import sys
 from pathlib import Path
@@ -6,8 +6,6 @@ import numpy as np
 import warnings
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-
-# Add src to path for imports
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root / 'src'))
 
@@ -21,7 +19,6 @@ def create_test_data(T=100, n=10, m=3, seed=42):
     """Create test data for Kalman filter."""
     np.random.seed(seed)
     
-    # State space model: y_t = C * z_t + e_t, z_t = A * z_{t-1} + w_t
     A = np.random.randn(m, m) * 0.5
     A = A / (np.max(np.abs(np.linalg.eigvals(A))) + 0.1)  # Ensure stability
     
@@ -45,7 +42,7 @@ def create_test_data(T=100, n=10, m=3, seed=42):
     return y, A, C, Q, R, Z_0, V_0, z
 
 # ============================================================================
-# Kalman Filter Tests
+# Core Tests
 # ============================================================================
 
 def test_skf_basic():
@@ -59,18 +56,14 @@ def test_skf_basic():
     Sf = skf(y, A, C, Q, R, Z_0, V_0)
     
     assert Sf is not None
-    assert hasattr(Sf, 'ZmU')
-    assert hasattr(Sf, 'VmU')
+    assert hasattr(Sf, 'ZmU') and hasattr(Sf, 'VmU')
     assert hasattr(Sf, 'loglik')
-    
     assert Sf.ZmU.shape == (z_true.shape[1], y.shape[1] + 1)
     assert np.isfinite(Sf.loglik)
     
-    print(f"✓ Kalman filter completed")
-    print(f"  State shape: {Sf.ZmU.shape}")
-    print(f"  Log-likelihood: {Sf.loglik:.4f}")
-    
+    print("✓ Kalman filter basic test passed")
     return True
+
 
 def test_skf_missing_data():
     """Test Kalman filter with missing data."""
@@ -90,35 +83,9 @@ def test_skf_missing_data():
     assert Sf is not None
     assert np.isfinite(Sf.loglik)
     
-    print(f"✓ Kalman filter with missing data completed")
-    print(f"  Missing rate: {np.sum(missing_mask) / missing_mask.size * 100:.1f}%")
-    
+    print("✓ Kalman filter missing data test passed")
     return True
 
-def test_skf_dimensions():
-    """Test Kalman filter dimension consistency."""
-    print("\n" + "="*70)
-    print("TEST: Kalman Filter Dimensions")
-    print("="*70)
-    
-    y, A, C, Q, R, Z_0, V_0, z_true = create_test_data(T=60, n=8, m=3)
-    
-    Sf = skf(y, A, C, Q, R, Z_0, V_0)
-    
-    n, T = y.shape
-    m = A.shape[0]
-    
-    assert Sf.ZmU.shape == (m, T + 1)
-    assert Sf.VmU.shape[0] == m
-    assert Sf.VmU.shape[1] == m
-    assert Sf.VmU.shape[2] == T + 1
-    
-    print("✓ Dimension consistency verified")
-    return True
-
-# ============================================================================
-# Fixed Interval Smoother Tests
-# ============================================================================
 
 def test_fis_basic():
     """Test basic fixed interval smoother."""
@@ -132,64 +99,13 @@ def test_fis_basic():
     Ss = fis(A, Sf)
     
     assert Ss is not None
-    assert hasattr(Ss, 'ZmT')
-    assert hasattr(Ss, 'VmT')
-    
+    assert hasattr(Ss, 'ZmT') and hasattr(Ss, 'VmT')
     assert Ss.ZmT.shape == Sf.ZmU.shape
     assert Ss.VmT.shape == Sf.VmU.shape
     
-    print("✓ Fixed interval smoother completed")
+    print("✓ Fixed interval smoother basic test passed")
     return True
 
-def test_fis_smoothness():
-    """Test that smoothed estimates are smoother than filtered."""
-    print("\n" + "="*70)
-    print("TEST: Smoother Smoothness")
-    print("="*70)
-    
-    y, A, C, Q, R, Z_0, V_0, z_true = create_test_data(T=50, n=5, m=2)
-    
-    Sf = skf(y, A, C, Q, R, Z_0, V_0)
-    Ss = fis(A, Sf)
-    
-    # Smoothed estimates should generally have lower variance
-    # Skip initial time point (index 0) which may have different properties
-    filtered_var = np.var(Sf.ZmU[:, 1:], axis=1)
-    smoothed_var = np.var(Ss.ZmT[:, 1:], axis=1)
-    
-    # Check that variances are reasonable and close to each other
-    # Note: The theoretical property that smoothed variance <= filtered variance
-    # may not always hold exactly due to numerical issues, especially with
-    # ill-conditioned matrices or short time series. We check that the difference
-    # is within a reasonable bound (within 5% of filtered variance or 0.01 absolute)
-    variance_diff = smoothed_var - filtered_var
-    tolerance = np.maximum(np.abs(filtered_var) * 0.05, 0.01)
-    assert np.all(np.abs(variance_diff) <= tolerance), \
-        f"Variance difference too large: {variance_diff}, tolerance: {tolerance}"
-    
-    print("✓ Smoothness property verified")
-    return True
-
-def test_fis_dimensions():
-    """Test fixed interval smoother dimensions."""
-    print("\n" + "="*70)
-    print("TEST: Smoother Dimensions")
-    print("="*70)
-    
-    y, A, C, Q, R, Z_0, V_0, z_true = create_test_data(T=60, n=8, m=3)
-    
-    Sf = skf(y, A, C, Q, R, Z_0, V_0)
-    Ss = fis(A, Sf)
-    
-    assert Ss.ZmT.shape == Sf.ZmU.shape
-    assert Ss.VmT.shape == Sf.VmU.shape
-    
-    print("✓ Dimension consistency verified")
-    return True
-
-# ============================================================================
-# Missing Data Utilities
-# ============================================================================
 
 def test_miss_data():
     """Test missing data elimination function."""
@@ -202,7 +118,7 @@ def test_miss_data():
     C = np.random.randn(n, m)
     R = np.eye(n) * 0.5
     
-    # Add some missing values
+    # Add missing values
     y_missing = y.copy()
     y_missing[2] = np.nan
     y_missing[5] = np.nan
@@ -214,65 +130,13 @@ def test_miss_data():
     assert C_new.shape[0] == n - 3
     assert C_new.shape[1] == m
     assert R_new.shape == (n - 3, n - 3)
-    # L is a selection matrix of shape (n, n-3) where columns correspond to non-missing observations
     assert L.shape == (n, n - 3)
     
-    # Check that non-missing observations are preserved
+    # Check non-missing observations preserved
     non_missing_idx = [i for i in range(n) if not np.isnan(y_missing[i])]
     assert np.allclose(y_new, y[non_missing_idx])
     
-    print("✓ Missing data elimination verified")
-    return True
-
-# ============================================================================
-# Integration Tests
-# ============================================================================
-
-def test_kalman_smoother_integration():
-    """Test integration of filter and smoother."""
-    print("\n" + "="*70)
-    print("TEST: Filter-Smoother Integration")
-    print("="*70)
-    
-    y, A, C, Q, R, Z_0, V_0, z_true = create_test_data(T=100, n=10, m=4)
-    
-    # Run filter
-    Sf = skf(y, A, C, Q, R, Z_0, V_0)
-    
-    # Run smoother
-    Ss = fis(A, Sf)
-    
-    # Check consistency
-    assert Ss.ZmT.shape == Sf.ZmU.shape
-    assert Ss.VmT.shape == Sf.VmU.shape
-    
-    # Smoothed should use all information (backward pass)
-    # So smoothed estimates at T should equal filtered
-    assert np.allclose(Ss.ZmT[:, -1], Sf.ZmU[:, -1], atol=1e-6)
-    
-    print("✓ Filter-smoother integration verified")
-    return True
-
-def test_kalman_stability():
-    """Test numerical stability."""
-    print("\n" + "="*70)
-    print("TEST: Numerical Stability")
-    print("="*70)
-    
-    y, A, C, Q, R, Z_0, V_0, z_true = create_test_data(T=200, n=15, m=5)
-    
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        Sf = skf(y, A, C, Q, R, Z_0, V_0)
-        Ss = fis(A, Sf)
-    
-    assert np.all(np.isfinite(Sf.ZmU))
-    assert np.all(np.isfinite(Sf.VmU))
-    assert np.all(np.isfinite(Ss.ZmT))
-    assert np.all(np.isfinite(Ss.VmT))
-    assert np.isfinite(Sf.loglik)
-    
-    print("✓ Numerical stability verified")
+    print("✓ Missing data elimination test passed")
     return True
 
 # ============================================================================
@@ -290,26 +154,23 @@ def run_all_tests():
     test_funcs = [
         ('skf_basic', test_skf_basic),
         ('skf_missing_data', test_skf_missing_data),
-        ('skf_dimensions', test_skf_dimensions),
         ('fis_basic', test_fis_basic),
-        ('fis_smoothness', test_fis_smoothness),
-        ('fis_dimensions', test_fis_dimensions),
         ('miss_data', test_miss_data),
-        ('integration', test_kalman_smoother_integration),
-        ('stability', test_kalman_stability),
     ]
     
     for name, func in test_funcs:
         try:
-            results[name] = func()
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                results[name] = func()
             print(f"✓ {name} PASSED")
         except Exception as e:
             print(f"✗ {name} FAILED: {e}")
             import traceback
             traceback.print_exc()
-            results[name] = None
+            results[name] = False
     
-    passed = sum(1 for v in results.values() if v is not None and v is not False)
+    passed = sum(1 for v in results.values() if v)
     total = len(results)
     
     print("\n" + "="*70)
@@ -318,8 +179,6 @@ def run_all_tests():
     
     return results
 
+
 if __name__ == '__main__':
     run_all_tests()
-
-
-

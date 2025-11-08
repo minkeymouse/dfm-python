@@ -27,16 +27,7 @@ from .dfm import DFMResult, calculate_rmse
 # Set up logger
 _logger = logging.getLogger(__name__)
 
-# ============================================================================
-# Constants
-# ============================================================================
-
-# Number of months to append for forecasting horizon
-# Used when extending the time index for forecast generation
 FORECAST_HORIZON_MONTHS: int = 12
-
-# Default fallback date for time index extension
-# Used when the end date cannot be determined from the data
 DEFAULT_FALLBACK_DATE: str = '2017-01-01'
 
 
@@ -112,12 +103,8 @@ def para_const(X: np.ndarray, P: Union[DFMResult, Dict[str, Any]], lag: int) -> 
     
     Plag = [Vs]
     
-    # Calculate lagged covariance matrices
-    # MATLAB loops backwards: for jt = size(Plag{1},3):-1:lag+1
     for jk in range(1, lag + 1):
         Plag_jk = np.zeros_like(Plag[0])
-        # Loop backwards from last time index down to lag+1 (MATLAB: size(Plag{1},3):-1:lag+1)
-        # Note: Python uses 0-based indexing, so range(N-1, lag, -1) gives N-1 down to lag+1
         for jt in range(Plag[0].shape[2] - 1, lag, -1):  # Backward iteration to match MATLAB
             As = Vf[:, :, jt - jk] @ A.T @ pinv(A @ Vf[:, :, jt - jk] @ A.T + Q)
             Plag_jk[:, :, jt] = As @ Plag[jk - 1][:, :, jt]
@@ -163,7 +150,7 @@ def news_dfm(X_old: np.ndarray, X_new: np.ndarray, Res: Union[DFMResult, Dict[st
     Res : Union[DFMResult, Dict[str, Any]]
         DFM estimation results. Can be:
         - DFMResult: Direct result object from dfm() function
-        - Dict: Dictionary containing 'Res' key with DFMResult, and optionally 'Config' or 'Spec'
+        - Dict: Dictionary containing 'Res' key with DFMResult, and optionally 'Config'
         Must have attributes: C, Mx, Wx, X_sm (or equivalent keys if dict)
     t_fcst : int
         Target time index (0-based) for the forecast period.
@@ -349,7 +336,7 @@ def news_dfm(X_old: np.ndarray, X_new: np.ndarray, Res: Union[DFMResult, Dict[st
             k = int(k)
             
             C = Res_actual.C
-            R_cov = Res_actual.R.T  # Note: R in Res might need transposition
+            R_cov = Res_actual.R.T
             
             n_news = len(lag)
             
@@ -499,8 +486,8 @@ def update_nowcast(X_old: np.ndarray, X_new: np.ndarray, Time: pd.DatetimeIndex,
     config : DFMConfig
         Model configuration
     Res : DFMResult or dict
-        DFM estimation results. If dict, must contain 'Res' and optionally 'Spec'.
-        If DFMResult and has .Spec attribute, it will be checked for consistency.
+        DFM estimation results. If dict, must contain 'Res' and optionally 'Config'.
+        If DFMResult and has .Config attribute, it will be checked for consistency.
     series : str
         Target series ID
     period : str
@@ -570,21 +557,14 @@ def update_nowcast(X_old: np.ndarray, X_new: np.ndarray, Time: pd.DatetimeIndex,
     
     # Handle dict format (from saved results) - extract Res and check config consistency
     if isinstance(Res, dict):
-        if 'Spec' in Res and 'Res' in Res:
-            # Legacy: Spec key for backward compatibility
-            saved_config = Res['Spec']
-            Res = Res['Res']
-            # Simple consistency check: compare SeriesID
-            _check_config_consistency(saved_config, config)
-        elif 'Config' in Res and 'Res' in Res:
-            # New format with Config key
+        if 'Config' in Res and 'Res' in Res:
             saved_config = Res['Config']
             Res = Res['Res']
             _check_config_consistency(saved_config, config)
         elif 'Res' in Res:
             Res = Res['Res']
     
-    # Also check if DFMResult has a Config attribute (for future compatibility)
+    # Check config consistency if Res has Config attribute
     if hasattr(Res, 'Config') and hasattr(config, 'SeriesID'):
         _check_config_consistency(Res.Config, config)
     

@@ -7,8 +7,9 @@ providing a unified interface for specifying:
 - Estimation parameters (EM algorithm settings, missing data handling)
 - Clock frequency for mixed-frequency synchronization
 
-The configuration system supports both YAML and CSV formats, with validation
-and type checking to ensure model specifications are correct before estimation.
+The configuration system supports YAML files (with Hydra/OmegaConf) or direct
+DFMConfig object creation, with validation and type checking to ensure model
+specifications are correct before estimation.
 """
 
 import numpy as np
@@ -19,13 +20,10 @@ from dataclasses import dataclass, field
 
 try:
     from hydra.core.config_store import ConfigStore
-    from omegaconf import DictConfig, OmegaConf
     HYDRA_AVAILABLE = True
 except ImportError:
     HYDRA_AVAILABLE = False
     ConfigStore = None
-    DictConfig = None
-    OmegaConf = None
 
 # Valid frequency codes
 _VALID_FREQUENCIES = {'d', 'w', 'm', 'q', 'sa', 'a'}
@@ -80,15 +78,12 @@ class SeriesConfig:
     series_name: Optional[str] = None  # Optional metadata for display
     units: str = ""  # Optional metadata
     category: str = ""  # Optional metadata
+    aggregate: Optional[str] = None  # Aggregation method (deprecated: higher frequencies than clock are not supported)
     
     def __post_init__(self):
         """Validate fields after initialization."""
         self.frequency = validate_frequency(self.frequency)
         self.transformation = validate_transformation(self.transformation)
-        # Auto-generate series_id if not provided
-        if self.series_id is None:
-            # Will be set when SeriesConfig is created in a list
-            pass
         # Auto-generate series_name if not provided
         if self.series_name is None and self.series_id:
             self.series_name = self.series_id
@@ -106,7 +101,7 @@ class DFMConfig:
     # Model Structure (WHAT - defines the model)
     # ========================================================================
     series: List[SeriesConfig]  # Series specifications
-    block_names: List[str]  # Block names (e.g., ["Global", "Consumption", "Investment"])
+    block_names: List[str]  # Block names (e.g., ["Block1", "Block2", "Block3"])
     factors_per_block: Optional[List[int]] = None  # Number of factors per block. If None, defaults to 1 per block
     
     # ========================================================================
@@ -223,7 +218,10 @@ class DFMConfig:
         # Validate clock
         self.clock = validate_frequency(self.clock)
     
-    # Convenience properties for backward compatibility
+    # ========================================================================
+    # Backward Compatibility Properties
+    # ========================================================================
+    
     @property
     def SeriesID(self) -> List[str]:
         """Backward compatibility: SeriesID property."""
@@ -257,6 +255,15 @@ class DFMConfig:
         return [s.category for s in self.series]
     
     @property
+    def Aggregate(self) -> List[Optional[str]]:
+        """Aggregation method for each series (deprecated - higher frequencies not supported).
+        
+        Returns None for all series as higher frequencies are no longer supported.
+        Kept for backward compatibility only.
+        """
+        return [None for _ in self.series]  # Always None - higher frequencies not supported
+    
+    @property
     def Blocks(self) -> np.ndarray:
         """Backward compatibility: Blocks property as numpy array (cached)."""
         if self._cached_blocks is None:
@@ -273,6 +280,38 @@ class DFMConfig:
     def UnitsTransformed(self) -> List[str]:
         """Backward compatibility: UnitsTransformed property."""
         return [_TRANSFORM_UNITS_MAP.get(t, t) for t in self.Transformation]
+    
+    # ========================================================================
+    # Factory Methods
+    # ========================================================================
+    
+    @classmethod
+    def _extract_estimation_params(cls, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract estimation parameters from dictionary (helper to reduce duplication)."""
+        return {
+            'ar_lag': data.get('ar_lag', 1),
+            'threshold': data.get('threshold', 1e-5),
+            'max_iter': data.get('max_iter', 5000),
+            'nan_method': data.get('nan_method', 2),
+            'nan_k': data.get('nan_k', 3),
+            'clock': data.get('clock', 'm'),
+            # Numerical stability parameters
+            'clip_ar_coefficients': data.get('clip_ar_coefficients', True),
+            'ar_clip_min': data.get('ar_clip_min', -0.99),
+            'ar_clip_max': data.get('ar_clip_max', 0.99),
+            'warn_on_ar_clip': data.get('warn_on_ar_clip', True),
+            'clip_data_values': data.get('clip_data_values', True),
+            'data_clip_threshold': data.get('data_clip_threshold', 100.0),
+            'warn_on_data_clip': data.get('warn_on_data_clip', True),
+            'use_regularization': data.get('use_regularization', True),
+            'regularization_scale': data.get('regularization_scale', 1e-6),
+            'min_eigenvalue': data.get('min_eigenvalue', 1e-8),
+            'max_eigenvalue': data.get('max_eigenvalue', 1e6),
+            'warn_on_regularization': data.get('warn_on_regularization', True),
+            'use_damped_updates': data.get('use_damped_updates', True),
+            'damping_factor': data.get('damping_factor', 0.8),
+            'warn_on_damped_update': data.get('warn_on_damped_update', True)
+        }
     
     @classmethod
     def _from_legacy_dict(cls, data: Dict[str, Any]) -> 'DFMConfig':
@@ -305,49 +344,74 @@ class DFMConfig:
             else:
                 series_blocks = []
             
-            freq_val = get_list_value('Frequency', i, 'm')
-            trans_val = get_list_value('Transformation', i, 'lin')
-            units_val = get_list_value('Units', i, '')
-            cat_val = get_list_value('Category', i, '')
             series_list.append(SeriesConfig(
-                frequency=str(freq_val) if freq_val is not None else 'm',
-                transformation=str(trans_val) if trans_val is not None else 'lin',
+                frequency=str(get_list_value('Frequency', i, 'm')),
+                transformation=str(get_list_value('Transformation', i, 'lin')),
                 blocks=series_blocks,
                 series_id=get_list_value('SeriesID', i, None),
                 series_name=get_list_value('SeriesName', i, None),
-                units=str(units_val) if units_val is not None else '',
-                category=str(cat_val) if cat_val is not None else ''
+                units=str(get_list_value('Units', i, '')),
+                category=str(get_list_value('Category', i, '')),
+                aggregate=get_list_value('Aggregate', i, None)
             ))
         
-        # Extract estimation parameters if provided
         return cls(
-                series=series_list,
-                block_names=data.get('BlockNames', data.get('block_names', [])),
-                factors_per_block=data.get('factors_per_block', None),
-                # Estimation parameters
-                ar_lag=data.get('ar_lag', 1),
-                threshold=data.get('threshold', 1e-5),
-                max_iter=data.get('max_iter', 5000),
-                nan_method=data.get('nan_method', 2),
-                nan_k=data.get('nan_k', 3),
-                clock=data.get('clock', 'm'),
-                # Numerical stability parameters
-                clip_ar_coefficients=data.get('clip_ar_coefficients', True),
-                ar_clip_min=data.get('ar_clip_min', -0.99),
-                ar_clip_max=data.get('ar_clip_max', 0.99),
-                warn_on_ar_clip=data.get('warn_on_ar_clip', True),
-                clip_data_values=data.get('clip_data_values', True),
-                data_clip_threshold=data.get('data_clip_threshold', 100.0),
-                warn_on_data_clip=data.get('warn_on_data_clip', True),
-                use_regularization=data.get('use_regularization', True),
-                regularization_scale=data.get('regularization_scale', 1e-6),
-                min_eigenvalue=data.get('min_eigenvalue', 1e-8),
-                max_eigenvalue=data.get('max_eigenvalue', 1e6),
-                warn_on_regularization=data.get('warn_on_regularization', True),
-                use_damped_updates=data.get('use_damped_updates', True),
-                damping_factor=data.get('damping_factor', 0.8),
-                warn_on_damped_update=data.get('warn_on_damped_update', True)
-            )
+            series=series_list,
+            block_names=data.get('BlockNames', data.get('block_names', [])),
+            factors_per_block=data.get('factors_per_block', None),
+            **cls._extract_estimation_params(data)
+        )
+    
+    @classmethod
+    def _from_hydra_dict(cls, data: Dict[str, Any]) -> 'DFMConfig':
+        """Convert Hydra format (series as dict) to new format."""
+        blocks_dict = data.get('blocks', {})
+        if isinstance(blocks_dict, dict):
+            block_names = list(blocks_dict.keys())
+            factors_per_block = [
+                blocks_dict[bn].get('factors', 1) if isinstance(blocks_dict[bn], dict) else blocks_dict[bn]
+                for bn in block_names
+            ]
+        else:
+            block_names = data.get('block_names', [])
+            factors_per_block = data.get('factors_per_block', None)
+        
+        # Parse series dict: {series_id: {frequency: ..., blocks: [block_names], ...}}
+        series_list = []
+        for series_id, series_cfg in data['series'].items():
+            if isinstance(series_cfg, dict):
+                # Convert block names to binary array (0/1 for each block)
+                series_blocks_names = series_cfg.get('blocks', [])
+                if isinstance(series_blocks_names, list) and series_blocks_names:
+                    # Create binary array: 1 if series loads on block, 0 otherwise
+                    # First block (Global) must always be 1
+                    series_blocks = [0] * len(block_names)
+                    series_blocks[0] = 1  # Global block is always 1
+                    for block_name in series_blocks_names:
+                        if block_name in block_names:
+                            block_idx = block_names.index(block_name)
+                            series_blocks[block_idx] = 1
+                else:
+                    # Default: only global block
+                    series_blocks = [1] + [0] * (len(block_names) - 1)
+                
+                series_list.append(SeriesConfig(
+                    series_id=series_id,
+                    series_name=series_cfg.get('series_name', series_id),
+                    frequency=series_cfg.get('frequency', 'm'),
+                    transformation=series_cfg.get('transformation', 'lin'),
+                    blocks=series_blocks,
+                    units=series_cfg.get('units', ''),
+                    category=series_cfg.get('category', ''),
+                    aggregate=series_cfg.get('aggregate', None)  # Deprecated
+                ))
+        
+        return cls(
+            series=series_list,
+            block_names=block_names,
+            factors_per_block=factors_per_block if factors_per_block else None,
+            **cls._extract_estimation_params(data)
+        )
     
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'DFMConfig':
@@ -364,78 +428,9 @@ class DFMConfig:
         if 'SeriesID' in data or ('series_id' in data and isinstance(data.get('series_id'), list)):
             return cls._from_legacy_dict(data)
         
-        # New Hydra format: series is a dict (series_id -> config), blocks is a dict (block_name -> {factors: N})
+        # New Hydra format: series is a dict
         if 'series' in data and isinstance(data['series'], dict):
-            # First, parse blocks dict to get block_names (needed for conversion)
-            blocks_dict = data.get('blocks', {})
-            if isinstance(blocks_dict, dict):
-                block_names = list(blocks_dict.keys())
-                factors_per_block = [
-                    blocks_dict[bn].get('factors', 1) if isinstance(blocks_dict[bn], dict) else blocks_dict[bn]
-                    for bn in block_names
-                ]
-            else:
-                block_names = data.get('block_names', [])
-                factors_per_block = data.get('factors_per_block', None)
-            
-            # Parse series dict: {series_id: {frequency: ..., blocks: [block_names], ...}}
-            series_list = []
-            for series_id, series_cfg in data['series'].items():
-                if isinstance(series_cfg, dict):
-                    # Convert block names to binary array (0/1 for each block)
-                    series_blocks_names = series_cfg.get('blocks', [])
-                    if isinstance(series_blocks_names, list) and series_blocks_names:
-                        # Create binary array: 1 if series loads on block, 0 otherwise
-                        # First block (Global) must always be 1
-                        series_blocks = [0] * len(block_names)
-                        series_blocks[0] = 1  # Global block is always 1
-                        for block_name in series_blocks_names:
-                            if block_name in block_names:
-                                block_idx = block_names.index(block_name)
-                                series_blocks[block_idx] = 1
-                    else:
-                        # Default: only global block
-                        series_blocks = [1] + [0] * (len(block_names) - 1)
-                    
-                    series_list.append(SeriesConfig(
-                        series_id=series_id,
-                        series_name=series_cfg.get('series_name', series_id),
-                        frequency=series_cfg.get('frequency', 'm'),
-                        transformation=series_cfg.get('transformation', 'lin'),
-                        blocks=series_blocks,
-                        units=series_cfg.get('units', ''),
-                        category=series_cfg.get('category', '')
-                    ))
-            
-            # Extract estimation parameters if provided
-            return cls(
-                series=series_list,
-                block_names=block_names,
-                factors_per_block=factors_per_block if factors_per_block else None,
-                # Estimation parameters
-                ar_lag=data.get('ar_lag', 1),
-                threshold=data.get('threshold', 1e-5),
-                max_iter=data.get('max_iter', 5000),
-                nan_method=data.get('nan_method', 2),
-                nan_k=data.get('nan_k', 3),
-                clock=data.get('clock', 'm'),
-                # Numerical stability parameters
-                clip_ar_coefficients=data.get('clip_ar_coefficients', True),
-                ar_clip_min=data.get('ar_clip_min', -0.99),
-                ar_clip_max=data.get('ar_clip_max', 0.99),
-                warn_on_ar_clip=data.get('warn_on_ar_clip', True),
-                clip_data_values=data.get('clip_data_values', True),
-                data_clip_threshold=data.get('data_clip_threshold', 100.0),
-                warn_on_data_clip=data.get('warn_on_data_clip', True),
-                use_regularization=data.get('use_regularization', True),
-                regularization_scale=data.get('regularization_scale', 1e-6),
-                min_eigenvalue=data.get('min_eigenvalue', 1e-8),
-                max_eigenvalue=data.get('max_eigenvalue', 1e6),
-                warn_on_regularization=data.get('warn_on_regularization', True),
-                use_damped_updates=data.get('use_damped_updates', True),
-                damping_factor=data.get('damping_factor', 0.8),
-                warn_on_damped_update=data.get('warn_on_damped_update', True)
-            )
+            return cls._from_hydra_dict(data)
         
         # New format with series list
         if 'series' in data and isinstance(data['series'], list):
@@ -443,114 +438,54 @@ class DFMConfig:
                 SeriesConfig(**s) if isinstance(s, dict) else s 
                 for s in data['series']
             ]
-            # Extract estimation parameters if provided
             return cls(
                 series=series_list,
                 block_names=data.get('block_names', []),
                 factors_per_block=data.get('factors_per_block', None),
-                # Estimation parameters
-                ar_lag=data.get('ar_lag', 1),
-                threshold=data.get('threshold', 1e-5),
-                max_iter=data.get('max_iter', 5000),
-                nan_method=data.get('nan_method', 2),
-                nan_k=data.get('nan_k', 3),
-                clock=data.get('clock', 'm'),
-                # Numerical stability parameters
-                clip_ar_coefficients=data.get('clip_ar_coefficients', True),
-                ar_clip_min=data.get('ar_clip_min', -0.99),
-                ar_clip_max=data.get('ar_clip_max', 0.99),
-                warn_on_ar_clip=data.get('warn_on_ar_clip', True),
-                clip_data_values=data.get('clip_data_values', True),
-                data_clip_threshold=data.get('data_clip_threshold', 100.0),
-                warn_on_data_clip=data.get('warn_on_data_clip', True),
-                use_regularization=data.get('use_regularization', True),
-                regularization_scale=data.get('regularization_scale', 1e-6),
-                min_eigenvalue=data.get('min_eigenvalue', 1e-8),
-                max_eigenvalue=data.get('max_eigenvalue', 1e6),
-                warn_on_regularization=data.get('warn_on_regularization', True),
-                use_damped_updates=data.get('use_damped_updates', True),
-                damping_factor=data.get('damping_factor', 0.8),
-                warn_on_damped_update=data.get('warn_on_damped_update', True)
+                **cls._extract_estimation_params(data)
             )
         
         # Direct instantiation (shouldn't happen often, but handle it)
         return cls(**data)
 
 
-# DataConfig removed - data loading is application-specific, not part of generic DFM module
-# Use adapters for data loading configuration
-
-@dataclass
-class AppConfig:
-    """Root application configuration (for backward compatibility only).
-    
-    Note: DataConfig has been removed from generic DFM module.
-    Data loading configuration should be handled by adapters/application layer.
-    """
-    model: DFMConfig  # Renamed from ModelConfig to DFMConfig
-    # data: DataConfig  # Removed - not part of generic DFM module
-    dfm: Optional[DFMConfig] = None  # Deprecated - use model config directly
-
-
-# Register with Hydra ConfigStore following the Structured Config schema pattern
-# This enables validation of YAML config files while keeping our full dataclass
-# with @property methods for runtime use.
-# 
-# Pattern: Schema validation (from Hydra docs)
-# - YAML files extend schemas via defaults list
-# - Schemas provide type checking and validation
-# - Runtime uses full ModelConfig with @property methods
+# Register with Hydra ConfigStore (optional - only if Hydra is available)
 if HYDRA_AVAILABLE and ConfigStore is not None:
     try:
         cs = ConfigStore.instance()
-        if cs is None:
-            raise RuntimeError("ConfigStore.instance() returned None")
-        # Create schema versions without @property methods for Hydra validation
-        # These match our dataclass structure exactly for schema validation.
-        # We'll still use the full ModelConfig/DataConfig/DFMConfig classes with
-        # @property methods at runtime via from_dict() conversion.
-        from dataclasses import dataclass as schema_dataclass
-        
-        @schema_dataclass
-        class SeriesConfigSchema:
-            """Schema for SeriesConfig validation in Hydra."""
-            series_id: str
-            series_name: str
-            frequency: str
-            units: str
-            transformation: str
-            category: str
-            blocks: List[int]
-        
-        @schema_dataclass
-        class DFMConfigSchema:
-            """Schema for unified DFMConfig validation in Hydra."""
-            # Model structure
-            series: List[SeriesConfigSchema]
-            block_names: List[str]
-            factors_per_block: Optional[List[int]] = None
-            # Estimation parameters
-            ar_lag: int = 1
-            threshold: float = 1e-5
-            max_iter: int = 5000
-            nan_method: int = 2
-            nan_k: int = 3
-            clock: str = 'm'
-        
-        # Register schemas in config groups (following Hydra docs pattern)
-        # These can be referenced in YAML defaults lists for validation
-        # Format: defaults: [base_dfm_config, _self_]
-        cs.store(group="dfm", name="base_dfm_config", node=DFMConfigSchema)
-        # Also register as "model" for backward compatibility
-        cs.store(group="model", name="base_model_config", node=DFMConfigSchema)
-        
-        # Also register standalone for direct use
-        cs.store(name="dfm_config_schema", node=DFMConfigSchema)
-        # Backward compatibility alias
-        cs.store(name="model_config_schema", node=DFMConfigSchema)
-        
+        if cs is not None:
+            from dataclasses import dataclass as schema_dataclass
+            
+            @schema_dataclass
+            class SeriesConfigSchema:
+                """Schema for SeriesConfig validation in Hydra."""
+                series_id: str
+                series_name: str
+                frequency: str
+                units: str
+                transformation: str
+                category: str
+                blocks: List[int]
+            
+            @schema_dataclass
+            class DFMConfigSchema:
+                """Schema for unified DFMConfig validation in Hydra."""
+                series: List[SeriesConfigSchema]
+                block_names: List[str]
+                factors_per_block: Optional[List[int]] = None
+                ar_lag: int = 1
+                threshold: float = 1e-5
+                max_iter: int = 5000
+                nan_method: int = 2
+                nan_k: int = 3
+                clock: str = 'm'
+            
+            # Register schemas
+            cs.store(group="dfm", name="base_dfm_config", node=DFMConfigSchema)
+            cs.store(group="model", name="base_model_config", node=DFMConfigSchema)
+            cs.store(name="dfm_config_schema", node=DFMConfigSchema)
+            cs.store(name="model_config_schema", node=DFMConfigSchema)
+            
     except Exception as e:
-        # If registration fails, continue without schema validation
-        # Configs will still work via from_dict() in scripts
         warnings.warn(f"Could not register Hydra structured config schemas: {e}. "
                      f"Configs will still work via from_dict() but without schema validation.")

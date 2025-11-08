@@ -1,26 +1,35 @@
 """Data loading and transformation utilities for DFM estimation.
 
 This module provides comprehensive data handling for Dynamic Factor Models:
-- Configuration loading from YAML and CSV files
-- Data loading from CSV with automatic date parsing
+- Configuration loading from YAML files or direct DFMConfig objects
+- Time series data loading with automatic date parsing
 - Time series transformations (differences, percent changes, etc.)
 - Data sorting and alignment with configuration
 
 The module supports flexible configuration formats and handles common data
 issues such as missing dates, inconsistent formats, and transformation errors.
+
+Configuration:
+    - YAML files via Hydra/OmegaConf
+    - Direct DFMConfig object creation
+    - Application-specific adapters for custom formats
+
+Data Loading:
+    - File-based data loading (CSV format supported for convenience)
+    - Database-backed applications should implement adapters that return
+      the same interface: (X, Time, Z) arrays
 """
+
+import io
+import logging
+from pathlib import Path
+from typing import List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
-import io
-from pathlib import Path
-from typing import List, Optional, Tuple, Union
-import warnings
-import logging
 
 from .config import DFMConfig
 
-# Backward compatibility alias (deprecated - use DFMConfig)
 ModelConfig = DFMConfig
 
 logger = logging.getLogger(__name__)
@@ -42,7 +51,7 @@ def load_config_from_yaml(configfile: Union[str, Path]) -> DFMConfig:
         
     Returns
     -------
-    ModelConfig
+    DFMConfig
         Model configuration (dataclass with validation)
         
     Raises
@@ -101,38 +110,24 @@ def load_config_from_yaml(configfile: Union[str, Path]) -> DFMConfig:
 
 
 def load_config_from_csv(configfile: Union[str, Path]) -> DFMConfig:
-    """Load model configuration from CSV file.
+    """DEPRECATED: Load model configuration from CSV file.
     
-    CSV format should have columns:
-    - series_id (or 'id' as alias), series_name, frequency, transformation, category, units
-    - Block columns (named after block names, e.g., Global, Consumption, Investment, External, or Block_Global, Block_Consumption, etc.)
-    - Block columns contain 0 or 1 (1 = series loads on that block)
+    This function is deprecated. CSV config loading has been removed to make
+    the package more generic. Users should:
+    - Use YAML config files with Hydra/OmegaConf
+    - Create DFMConfig objects directly in code
+    - Use application-specific adapters for custom formats
     
-    Note: API/database-specific columns (data_code, item_id, api_source, country, is_kpi, etc.)
-    are ignored by the generic DFM module. They should be handled by application-specific adapters.
-    
-    Example:
-        id,series_name,frequency,transformation,category,units,Block_Global,Block_Consumption,Block_Invest,Block_Extern
-        0,Real GDP (Quarterly),q,pca,GDP,Billion Won,1,1,0,0
-        1,Nominal GDP (Quarterly),q,pca,GDP,Billion Won,1,1,0,0
-    
-    Parameters
-    ----------
-    configfile : str or Path
-        Path to CSV specification file
-        
-    Returns
-    -------
-    ModelConfig
-        Model configuration object
-        
-    Raises
-    ------
-    FileNotFoundError
-        If configfile does not exist
-    ValueError
-        If required columns are missing or data is invalid
+    This function is kept for backward compatibility but will be removed in a future version.
     """
+    import warnings
+    warnings.warn(
+        "load_config_from_csv is deprecated. Use YAML config files or create DFMConfig objects directly. "
+        "For CSV configs, implement an application-specific adapter.",
+        DeprecationWarning,
+        stacklevel=2
+    )
+    
     configfile = Path(configfile)
     if not configfile.exists():
         raise FileNotFoundError(f"Configuration file not found: {configfile}")
@@ -146,20 +141,27 @@ def load_config_from_csv(configfile: Union[str, Path]) -> DFMConfig:
 
 
 def _load_config_from_dataframe(df: pd.DataFrame) -> DFMConfig:
-    """Load DFMConfig from a pandas DataFrame (shared by CSV and BytesIO loading).
+    """Load DFMConfig from a pandas DataFrame.
+    
+    This is a helper function for deprecated CSV config loading.
+    Converts tabular configuration data into DFMConfig format.
     
     Parameters
     ----------
     df : pd.DataFrame
-        DataFrame with CSV columns
+        DataFrame with configuration columns (series metadata and block loadings)
         
     Returns
     -------
     DFMConfig
-        Model configuration
+        Model configuration object
+        
+    Note
+    ----
+    This function is used internally by deprecated load_config_from_csv.
+    For new code, use YAML configs or create DFMConfig objects directly.
     """
-    # Handle 'id' as alias for 'series_id' (for backward compatibility)
-    # If CSV has data_code, item_id, api_source, generate series_id from them
+    # Handle series_id generation from various column combinations
     # Otherwise, use 'id' as fallback
     if 'id' in df.columns and 'series_id' not in df.columns:
         # Try to generate series_id from data_code, item_id, api_source if available
@@ -176,27 +178,24 @@ def _load_config_from_dataframe(df: pd.DataFrame) -> DFMConfig:
         # Both exist - prefer series_id, but if it's empty, use id
         df['series_id'] = df['series_id'].fillna(df['id'].astype(str))
     
-    # Required fields (DFM-relevant only - no API/database fields)
+    # Required fields for DFM configuration
     required_fields = ['series_id', 'series_name', 'frequency', 'transformation', 'category', 'units']
-    optional_fields = []  # No optional fields in generic DFM module
     
     missing = [f for f in required_fields if f not in df.columns]
     if missing:
         raise ValueError(f"Missing required columns: {', '.join(missing)}")
     
-    # Detect block columns (all columns that are not in required_fields or optional_fields)
-    # Also exclude 'id' (if it was used as alias, we already created series_id from it)
-    # and other non-DFM metadata columns (API/database fields are ignored by generic DFM module)
-    # Preserve original column order from DataFrame - first block should be Global
-    excluded_fields = set(required_fields) | set(optional_fields) | {
+    # Detect block columns (all columns not in required fields or excluded metadata)
+    # Exclude application-specific metadata fields that are not part of core DFM config
+    excluded_fields = set(required_fields) | {
         'id', 'country', 'data_code', 'item_id', 'api_source', 'api_code', 
         'api_group_id', 'is_kpi', 'description', 'priority', 'is_active', 'metadata'
     }
-    # Use DataFrame column order (not sorted) to preserve CSV structure
+    # Preserve original column order from DataFrame
     block_columns = [col for col in df.columns if col not in excluded_fields]
     
     if not block_columns:
-        raise ValueError("No block columns found. Expected columns like 'Global', 'Consumption', etc.")
+        raise ValueError("No block columns found. Expected columns like 'Block1', 'Block2', etc.")
     
     # Validate block columns contain only 0 or 1
     for block_col in block_columns:
@@ -208,12 +207,12 @@ def _load_config_from_dataframe(df: pd.DataFrame) -> DFMConfig:
         raise ValueError(f"First block column '{block_columns[0]}' is required")
     
     if not (df[block_columns[0]] == 1).all():
-        raise ValueError(f"All series must load on the first block '{block_columns[0]}' (Global)")
+        raise ValueError(f"All series must load on the first block '{block_columns[0]}'")
     
     # Build blocks array (N x n_blocks)
     blocks_data = df[block_columns].values.astype(int)
     
-    # Convert to ModelConfig format
+    # Convert to DFMConfig format
     from .config import SeriesConfig
     
     series_list = []
@@ -221,8 +220,8 @@ def _load_config_from_dataframe(df: pd.DataFrame) -> DFMConfig:
         # Build block array from block columns
         blocks = [int(row[col]) for col in block_columns]
         
-        # Create SeriesConfig with only DFM-relevant fields
-        # API/database fields (data_code, item_id, api_source, etc.) are ignored by generic DFM module
+        # Create SeriesConfig with core DFM fields only
+        # Application-specific metadata fields are ignored
         series_list.append(SeriesConfig(
             series_id=str(row['series_id']),  # Ensure string type
             series_name=row['series_name'],
@@ -236,20 +235,26 @@ def _load_config_from_dataframe(df: pd.DataFrame) -> DFMConfig:
     return DFMConfig(series=series_list, block_names=block_columns)
 
 
-# Note: Excel support removed - use CSV or YAML configs instead
 
 
-def load_config(configfile: Union[str, Path, io.BytesIO]) -> DFMConfig:
-    """Load model configuration from file (auto-detects YAML or CSV).
+def load_config(configfile: Union[str, Path, DFMConfig]) -> DFMConfig:
+    """Load model configuration from file or return existing DFMConfig object.
+    
+    This function supports:
+    - YAML files (using Hydra/OmegaConf)
+    - Direct DFMConfig objects (pass through)
+    
+    For CSV configs, use application-specific adapters or create DFMConfig objects directly.
     
     Parameters
     ----------
-    configfile : str, Path, or BytesIO
-        Path to configuration file (.yaml, .yml, or .csv), or BytesIO object with CSV content
+    configfile : str, Path, or DFMConfig
+        - Path to YAML configuration file (.yaml, .yml)
+        - Or existing DFMConfig object (returned as-is)
         
     Returns
     -------
-    ModelConfig
+    DFMConfig
         Model configuration (dataclass with validation)
         
     Raises
@@ -258,15 +263,14 @@ def load_config(configfile: Union[str, Path, io.BytesIO]) -> DFMConfig:
         If configfile does not exist (for file paths)
     ValueError
         If file format is not supported or configuration is invalid
+    TypeError
+        If configfile is not a valid type
     """
-    # Handle BytesIO (for database storage downloads)
-    if isinstance(configfile, io.BytesIO):
-        # Read CSV from BytesIO
-        configfile.seek(0)  # Reset to beginning
-        df = pd.read_csv(configfile)
-        # Use the same logic as load_config_from_csv but with DataFrame
-        return _load_config_from_dataframe(df)
+    # If already a DFMConfig object, return as-is
+    if isinstance(configfile, DFMConfig):
+        return configfile
     
+    # Handle file paths
     configfile = Path(configfile)
     if not configfile.exists():
         raise FileNotFoundError(f"Configuration file not found: {configfile}")
@@ -274,14 +278,37 @@ def load_config(configfile: Union[str, Path, io.BytesIO]) -> DFMConfig:
     suffix = configfile.suffix.lower()
     if suffix in ['.yaml', '.yml']:
         return load_config_from_yaml(configfile)
-    elif suffix == '.csv':
-        return load_config_from_csv(configfile)
     else:
-        raise ValueError(f"Unsupported file format: {suffix}. Use .yaml, .yml, or .csv")
+        raise ValueError(
+            f"Unsupported file format: {suffix}. Use .yaml or .yml files, "
+            f"or pass a DFMConfig object directly. "
+            f"For CSV configs, implement an application-specific adapter."
+        )
 
 
 def _transform_series(Z: np.ndarray, formula: str, freq: str, step: int) -> np.ndarray:
-    """Apply transformation to a single series."""
+    """Apply transformation formula to a single time series.
+    
+    Transforms raw series data according to the specified formula and frequency.
+    Handles various transformation types including differences, percent changes,
+    and logarithms.
+    
+    Parameters
+    ----------
+    Z : np.ndarray
+        Raw series data (1D array)
+    formula : str
+        Transformation formula: 'lin', 'chg', 'ch1', 'pch', 'pc1', 'pca', 'log'
+    freq : str
+        Series frequency (used for step calculation)
+    step : int
+        Number of base periods per observation (e.g., 3 for quarterly)
+        
+    Returns
+    -------
+    X : np.ndarray
+        Transformed series data (1D array, same length as Z)
+    """
     T = Z.shape[0]
     X = np.full(T, np.nan)
     t1 = step
@@ -326,19 +353,54 @@ def _transform_series(Z: np.ndarray, formula: str, freq: str, step: int) -> np.n
 
 
 def transform_data(Z: np.ndarray, Time: pd.DatetimeIndex, config: DFMConfig) -> Tuple[np.ndarray, pd.DatetimeIndex, np.ndarray]:
-    """Transform each data series based on specification.
+    """Transform each data series according to configuration.
     
-    Handles all frequencies: daily (d), weekly (w), monthly (m), 
-    quarterly (q), semi-annual (sa), annual (a).
+    Applies the specified transformation formula to each series based on its
+    frequency and transformation type. Handles mixed-frequency data by
+    applying transformations at the appropriate observation intervals.
+    
+    Supported frequencies: monthly (m), quarterly (q), semi-annual (sa), annual (a).
+    Frequencies faster than the clock frequency are not supported.
+    
+    Parameters
+    ----------
+    Z : np.ndarray
+        Raw data matrix (T x N)
+    Time : pd.DatetimeIndex
+        Time index for the data
+    config : DFMConfig
+        Model configuration with transformation specifications
+        
+    Returns
+    -------
+    X : np.ndarray
+        Transformed data matrix (T x N)
+    Time : pd.DatetimeIndex
+        Time index (may be truncated after transformation)
+    Z : np.ndarray
+        Original data (may be truncated to match X)
     """
     T, N = Z.shape
     X = np.full((T, N), np.nan)
     
+    # Validate frequencies - reject higher frequencies than clock
+    from .utils.aggregation import FREQUENCY_HIERARCHY
+    
+    clock = getattr(config, 'clock', 'm')
+    clock_hierarchy = FREQUENCY_HIERARCHY.get(clock, 3)
+    
+    for i, freq in enumerate(config.Frequency):
+        freq_hierarchy = FREQUENCY_HIERARCHY.get(freq, 3)
+        if freq_hierarchy < clock_hierarchy:
+            raise ValueError(
+                f"Series '{config.SeriesID[i]}' has frequency '{freq}' which is faster than clock '{clock}'. "
+                f"Higher frequencies (daily, weekly) are not supported. "
+                f"Please use monthly, quarterly, semi-annual, or annual frequencies only."
+            )
+    
     # Frequency to step mapping (step = number of base periods per observation)
     # Base frequency is monthly, so step is months per observation
     freq_to_step = {
-        'd': 1,   # Daily: 1 month per observation (aggregated to monthly)
-        'w': 1,   # Weekly: 1 month per observation (aggregated to monthly)
         'm': 1,   # Monthly: 1 month per observation
         'q': 3,   # Quarterly: 3 months per observation
         'sa': 6,  # Semi-annual: 6 months per observation
@@ -350,11 +412,11 @@ def transform_data(Z: np.ndarray, Time: pd.DatetimeIndex, config: DFMConfig) -> 
         step = freq_to_step.get(freq, 1)  # Default to 1 if unknown frequency
         X[:, i] = _transform_series(Z[:, i], config.Transformation[i], freq, step)
     
-    # Drop initial observations based on highest frequency in data
-    # Find maximum step (longest period) to determine drop period
+    # Drop initial observations to handle transformation edge effects
+    # Use maximum step (longest observation period) to determine drop period
     max_step = max([freq_to_step.get(f, 1) for f in config.Frequency])
-    # Drop period should be at least max_step + 1 to handle transformations
-    drop = max(4, max_step + 1)  # At least 4 for quarterly, more for annual
+    # Drop period ensures sufficient history for transformations
+    drop = max(4, max_step + 1)
     
     if T > drop:
         return X[drop:], Time[drop:], Z[drop:]
@@ -362,26 +424,44 @@ def transform_data(Z: np.ndarray, Time: pd.DatetimeIndex, config: DFMConfig) -> 
 
 
 def read_data(datafile: Union[str, Path]) -> Tuple[np.ndarray, pd.DatetimeIndex, List[str]]:
-    """Read data from CSV file.
+    """Read time series data from file.
     
-    CSV file should have:
-    - First column: Date (YYYY-MM-DD format or pandas parseable)
+    Supports tabular data formats with dates and series values.
+    Automatically detects date column and handles various data layouts.
+    
+    Expected format:
+    - First column: Date (YYYY-MM-DD format or pandas-parseable)
     - Subsequent columns: Series data (one column per series)
-    - Header row: Series IDs (matching config.SeriesID)
+    - Header row: Series IDs
     
-    Alternatively, CSV can have metadata columns first:
-    - Metadata columns: series_id, series_name, frequency, transformation, category, units
-    - Then date columns starting from the first date column
+    Alternative format (long format):
+    - Metadata columns: series_id, series_name, etc.
+    - Date columns: Starting from first date column
+    - One row per series, dates as columns
+    
+    Parameters
+    ----------
+    datafile : str or Path
+        Path to data file
+        
+    Returns
+    -------
+    Z : np.ndarray
+        Data matrix (T x N) with T time periods and N series
+    Time : pd.DatetimeIndex
+        Time index for the data
+    mnemonics : List[str]
+        Series identifiers (column names)
     """
     datafile = Path(datafile)
     if not datafile.exists():
         raise FileNotFoundError(f"Data file not found: {datafile}")
     
-    # Read CSV file
+    # Read data file
     try:
         df = pd.read_csv(datafile)
     except Exception as e:
-        raise ValueError(f"Failed to read CSV file {datafile}: {e}")
+        raise ValueError(f"Failed to read data file {datafile}: {e}")
     
     # Check if first column is a date column or metadata
     first_col = df.columns[0]
@@ -393,7 +473,7 @@ def read_data(datafile: Union[str, Path]) -> Tuple[np.ndarray, pd.DatetimeIndex,
     except (ValueError, TypeError):
         is_date_first = False
     
-    # If first column is not a date, check if CSV is in "long" format (one row per series)
+    # If first column is not a date, check if data is in "long" format (one row per series)
     if not is_date_first:
         # Check if first column contains series IDs (string values)
         first_col_values = df[first_col].astype(str)
@@ -412,7 +492,7 @@ def read_data(datafile: Union[str, Path]) -> Tuple[np.ndarray, pd.DatetimeIndex,
                     continue
             
             if date_col_idx is None:
-                raise ValueError(f"Could not find date column in CSV file {datafile}")
+                raise ValueError(f"Could not find date column in data file {datafile}")
             
             # Set series_id as index, then transpose
             series_id_col = df.columns[0]
@@ -443,7 +523,7 @@ def read_data(datafile: Union[str, Path]) -> Tuple[np.ndarray, pd.DatetimeIndex,
                     continue
             
             if date_col_idx is None:
-                raise ValueError(f"Could not find date column in CSV file {datafile}")
+                raise ValueError(f"Could not find date column in data file {datafile}")
             
             # Use first date column as index, drop metadata columns
             date_col = df.columns[date_col_idx]
@@ -472,7 +552,27 @@ def read_data(datafile: Union[str, Path]) -> Tuple[np.ndarray, pd.DatetimeIndex,
 
 
 def sort_data(Z: np.ndarray, Mnem: List[str], config: DFMConfig) -> Tuple[np.ndarray, List[str]]:
-    """Sort series to match configuration order."""
+    """Sort data series to match configuration order.
+    
+    Filters and reorders series to match the order specified in the configuration.
+    Only series present in both data and configuration are retained.
+    
+    Parameters
+    ----------
+    Z : np.ndarray
+        Data matrix (T x N) with N series
+    Mnem : List[str]
+        Series identifiers (mnemonics) corresponding to columns of Z
+    config : DFMConfig
+        Model configuration with series order specification
+        
+    Returns
+    -------
+    Z_sorted : np.ndarray
+        Filtered and sorted data matrix (T x M) where M <= N
+    Mnem_sorted : List[str]
+        Sorted series identifiers matching config.SeriesID order
+    """
     in_config = [m in config.SeriesID for m in Mnem]
     Mnem_filt = [m for m, in_c in zip(Mnem, in_config) if in_c]
     Z_filt = Z[:, in_config]
@@ -483,22 +583,28 @@ def sort_data(Z: np.ndarray, Mnem: List[str], config: DFMConfig) -> Tuple[np.nda
 
 def load_data(datafile: Union[str, Path], config: DFMConfig,
               sample_start: Optional[Union[pd.Timestamp, str]] = None) -> Tuple[np.ndarray, pd.DatetimeIndex, np.ndarray]:
-    """Load and transform data from CSV file.
+    """Load and transform time series data for DFM estimation.
     
-    This function reads data from a CSV file, sorts it to match the model
-    configuration (from CSV or YAML), and applies the specified transformations.
+    This function reads time series data, aligns it with the model configuration,
+    and applies the specified transformations. The data is sorted to match the
+    configuration order and validated against frequency constraints.
     
-    Note: For database-backed applications, create adapters that implement
-    the same interface (return X, Time, Z arrays).
-    
+    Data Format:
+        - File-based: CSV format supported for convenience
+        - Database-backed: Implement adapters that return (X, Time, Z) arrays
+        
+    Frequency Constraints:
+        - Frequencies faster than the clock frequency are not supported
+        - If any series violates this constraint, a ValueError is raised
+        
     Parameters
     ----------
     datafile : str or Path
-        Path to CSV data file (.csv)
-    config : ModelConfig
-        Model configuration object (from CSV or YAML)
+        Path to data file (CSV format supported)
+    config : DFMConfig
+        Model configuration object
     sample_start : pd.Timestamp or str, optional
-        Start date for sample (YYYY-MM-DD). If None, uses all available data.
+        Start date for sample (YYYY-MM-DD format). If None, uses all available data.
         Data before this date will be dropped.
         
     Returns
@@ -506,24 +612,61 @@ def load_data(datafile: Union[str, Path], config: DFMConfig,
     X : np.ndarray
         Transformed data matrix (T x N), ready for DFM estimation
     Time : pd.DatetimeIndex
-        Time index for the data
+        Time index for the data (aligned to clock frequency)
     Z : np.ndarray
         Original untransformed data (T x N), for reference
+        
+    Raises
+    ------
+    ValueError
+        If any series has frequency faster than clock, or data format is invalid
+    FileNotFoundError
+        If datafile does not exist
     """
     print('Loading data...')
     
     datafile = Path(datafile)
     if datafile.suffix.lower() != '.csv':
-        raise ValueError('Only CSV files supported. Use database for production data loading.')
+        raise ValueError(
+            'File-based data loading currently supports CSV format. '
+            'For other formats or database-backed applications, implement '
+            'an adapter that returns (X, Time, Z) arrays.'
+        )
     
     if not datafile.exists():
         raise FileNotFoundError(f"Data file not found: {datafile}")
     
-    # Read data from CSV file
+    # Read data from file
     Z, Time, Mnem = read_data(datafile)
     
-    # Process data: sort to match config order, then transform
+    # Process data: sort to match config order
     Z, _ = sort_data(Z, Mnem, config)
+    
+    # Get clock frequency (default to monthly)
+    clock = getattr(config, 'clock', 'm')
+    
+    # Import frequency hierarchy for resampling logic
+    from .utils.aggregation import FREQUENCY_HIERARCHY
+    
+    # Validate frequency constraints: no series can be faster than clock
+    clock_hierarchy = FREQUENCY_HIERARCHY.get(clock, 3)
+    
+    faster_series = []
+    for i, series_id in enumerate(config.SeriesID):
+        freq = config.Frequency[i] if i < len(config.Frequency) else clock
+        series_hierarchy = FREQUENCY_HIERARCHY.get(freq, 3)
+        if series_hierarchy < clock_hierarchy:
+            faster_series.append((series_id, freq))
+    
+    if faster_series:
+        faster_list = ', '.join([f"{sid} ({freq})" for sid, freq in faster_series])
+        raise ValueError(
+            f"Frequency constraint violation: The following series have frequencies "
+            f"faster than clock '{clock}': {faster_list}. "
+            f"All series must have frequency equal to or slower than the clock frequency."
+        )
+    
+    # Apply transformations (lower frequency series handled via tent kernels in dfm.py)
     X, Time, Z = transform_data(Z, Time, config)
     
     # Apply sample_start filtering
@@ -536,5 +679,3 @@ def load_data(datafile: Union[str, Path], config: DFMConfig,
     return X, Time, Z
 
 
-# Database adapters are application-specific and should be implemented separately.
-# This keeps the DFM module generic and database-agnostic.

@@ -7,7 +7,7 @@ This module implements the core DFM estimation framework, including:
 - Clock-based mixed-frequency handling with tent kernels
 - Robust numerical stability and error handling
 
-The implementation follows the FRBNY approach, where all latent factors
+The implementation uses a clock-based approach, where all latent factors
 evolve at a common clock frequency, with lower-frequency observations
 mapped to higher-frequency latent states via deterministic tent kernels.
 """
@@ -24,82 +24,106 @@ import logging
 from .kalman import run_kf
 from .config import DFMConfig
 
-# Import rem_nans_spline from utils (no longer duplicated)
 from .utils.data_utils import rem_nans_spline
 from .utils.aggregation import (
     get_aggregation_structure,
     FREQUENCY_HIERARCHY,
+    generate_R_mat,
+    get_tent_weights_for_pair,
+    generate_tent_weights,
 )
 
 def _rem_nans_spline(X: np.ndarray, method: int = 2, k: int = 3):
-    """Treat NaNs in dataset for DFM estimation (wrapper for rem_nans_spline).
-    
-    This is a wrapper around rem_nans_spline from utils.data_utils to maintain
-    backward compatibility with the internal _rem_nans_spline interface.
-    Returns (X_clean, dummy_keep) where dummy_keep is always True (not used).
-    """
+    """Treat NaNs in dataset for DFM estimation."""
     X_clean, _ = rem_nans_spline(X, method=method, k=k)
-    # Return dummy keep mask (not actually used, but kept for interface compatibility)
     T_orig, _ = X.shape
     return X_clean, np.ones(T_orig, dtype=bool)
 
-# Set up logger for fallback tracking (optional - only if logging is enabled)
 _logger = logging.getLogger(__name__)
-# Only configure if not already configured and if logging is enabled
-if not _logger.handlers:
-    # Check if logging is enabled at module level (avoid overhead if disabled)
-    root_logger = logging.getLogger()
-    if root_logger.level <= logging.WARNING:
-        _logger.setLevel(logging.WARNING)
-        handler = logging.StreamHandler()
-        handler.setFormatter(logging.Formatter(
-            '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S'
-        ))
-        _logger.addHandler(handler)
 
-
-# Validation is done inline where needed for performance
-
-# ============================================================================
-# Constants
-# ============================================================================
-
-# Divisor for quarterly idiosyncratic variance calculation
-# This scaling factor accounts for the temporal aggregation when computing
-# quarterly series variances from monthly latent processes
-QUARTERLY_VARIANCE_DIVISOR: float = 19.0
-
-# Maximum scaling factor for eigenvalue capping
-# Used to prevent numerical overflow when eigenvalues become very large
-# during eigendecomposition in initial conditions calculation
+SLOWER_FREQ_VARIANCE_DIVISOR: float = 19.0
 SCALING_FACTOR: float = 1e6
 
-
 def _ensure_symmetric(M: np.ndarray) -> np.ndarray:
-    """Ensure matrix is symmetric by averaging with its transpose.
+    """Ensure matrix is symmetric by averaging with its transpose."""
+    return 0.5 * (M + M.T)
+
+
+def _compute_principal_components(cov_matrix: np.ndarray, n_components: int, 
+                                   block_idx: Optional[int] = None) -> Tuple[np.ndarray, np.ndarray]:
+    """Compute principal components via eigendecomposition.
     
-    This is a common technique to enforce symmetry in covariance matrices that
-    may have accumulated small numerical errors during computation. The operation
-    (M + M.T) / 2 guarantees symmetry while preserving the matrix structure.
+    This function extracts the top n_components eigenvectors and eigenvalues
+    from a covariance matrix using various fallback strategies for numerical stability.
     
     Parameters
     ----------
-    M : np.ndarray
-        Matrix to symmetrize, typically a covariance matrix (m x m)
+    cov_matrix : np.ndarray
+        Covariance matrix for eigendecomposition
+    n_components : int
+        Number of principal components to extract
+    block_idx : int, optional
+        Block index for logging purposes
         
     Returns
     -------
-    np.ndarray
-        Symmetric matrix of same shape as M, computed as 0.5 * (M + M.T)
-        
-    Notes
-    -----
-    This function is used extensively throughout the EM algorithm to ensure
-    covariance matrices (Q, R, V_0) remain symmetric after numerical operations
-    that might introduce small asymmetries due to floating-point arithmetic.
+    eigenvalues : np.ndarray
+        Top n_components eigenvalues (sorted by magnitude, descending)
+    eigenvectors : np.ndarray
+        Corresponding eigenvectors (columns)
     """
-    return 0.5 * (M + M.T)
+    if cov_matrix.size == 1:
+        # Single series case
+        eigenvector = np.array([[1.0]])
+        eigenvalue = cov_matrix[0, 0] if np.isfinite(cov_matrix[0, 0]) else 1.0
+        return np.array([eigenvalue]), eigenvector
+    
+    n_series = cov_matrix.shape[0]
+    
+    # Strategy 1: Use sparse eigs if k < n_series - 1
+    if n_components < n_series - 1:
+        try:
+            cov_sparse = csc_matrix(cov_matrix)
+            eigenvalues, eigenvectors = eigs(cov_sparse, k=n_components, which='LM')
+            eigenvectors = eigenvectors.real
+            # Validate results
+            if np.any(~np.isfinite(eigenvalues)) or np.any(~np.isfinite(eigenvectors)):
+                raise ValueError("Invalid eigenvalue results")
+            return eigenvalues.real, eigenvectors
+        except (ValueError, np.linalg.LinAlgError, RuntimeError) as e:
+            # Fallback to regular eig
+            if block_idx is not None:
+                _logger.warning(
+                    f"init_conditions: Sparse eigendecomposition failed for block {block_idx+1}, "
+                    f"falling back to np.linalg.eig. Error: {type(e).__name__}"
+                )
+            eigenvalues, eigenvectors = np.linalg.eig(cov_matrix)
+            # Sort by magnitude and take top n_components
+            sort_idx = np.argsort(np.abs(eigenvalues))[::-1][:n_components]
+            return eigenvalues[sort_idx].real, eigenvectors[:, sort_idx].real
+    
+    # Strategy 2: Use regular eig for full eigendecomposition
+    try:
+        eigenvalues, eigenvectors = np.linalg.eig(cov_matrix)
+        # Filter valid eigenvalues
+        valid_mask = np.isfinite(eigenvalues)
+        if np.sum(valid_mask) < n_components:
+            raise ValueError("Not enough valid eigenvalues")
+        # Sort by magnitude and take top n_components
+        valid_eigenvalues = eigenvalues[valid_mask]
+        valid_eigenvectors = eigenvectors[:, valid_mask]
+        sort_idx = np.argsort(np.abs(valid_eigenvalues))[::-1][:n_components]
+        return valid_eigenvalues[sort_idx].real, valid_eigenvectors[:, sort_idx].real
+    except (IndexError, ValueError, np.linalg.LinAlgError) as e:
+        # Ultimate fallback: use identity matrix
+        if block_idx is not None:
+            _logger.warning(
+                f"init_conditions: Eigendecomposition failed for block {block_idx+1}, "
+                f"using identity matrix as fallback. Error: {type(e).__name__}"
+            )
+        eigenvectors = np.eye(n_series)[:, :n_components]
+        eigenvalues = np.ones(n_components)
+        return eigenvalues, eigenvectors
 
 
 def _clean_matrix(M: np.ndarray, matrix_type: str = 'general', 
@@ -481,7 +505,6 @@ def _estimate_ar_coefficient(EZZ_FB: np.ndarray, EZZ_BB: np.ndarray,
     
     # Compute AR coefficients
     A_diag = EZZ_FB_diag / EZZ_BB_diag
-    # Note: Clipping will be applied later with config if enabled
     
     # Compute innovation variances if T is provided
     if T is not None:
@@ -646,6 +669,20 @@ class DFMResult:
         how many factors are in each block structure.
     p : int
         Number of lags in the autoregressive structure of factors. Typically p=1.
+    rmse : float, optional
+        Overall RMSE on original scale (averaged across all series).
+    rmse_per_series : np.ndarray, optional
+        RMSE per series on original scale (N,).
+    rmse_std : float, optional
+        Overall RMSE on standardized scale (averaged across all series).
+    rmse_std_per_series : np.ndarray, optional
+        RMSE per series on standardized scale (N,).
+    converged : bool, optional
+        Whether EM algorithm converged.
+    num_iter : int, optional
+        Number of EM iterations performed.
+    loglik : float, optional
+        Final log-likelihood value.
     
     Examples
     --------
@@ -673,8 +710,10 @@ class DFMResult:
     converged: bool = False  # Whether EM algorithm converged
     num_iter: int = 0     # Number of iterations completed
     loglik: float = -np.inf  # Final log-likelihood
-    rmse: Optional[float] = None  # Root Mean Squared Error (averaged across all series)
-    rmse_per_series: Optional[np.ndarray] = None  # RMSE per series (N,)
+    rmse: Optional[float] = None  # Overall RMSE (original scale)
+    rmse_per_series: Optional[np.ndarray] = None  # RMSE per series (original scale)
+    rmse_std: Optional[float] = None  # Overall RMSE (standardized scale)
+    rmse_std_per_series: Optional[np.ndarray] = None  # RMSE per series (standardized scale)
 
 
 def em_converged(loglik: float, previous_loglik: float, threshold: float = 1e-4,
@@ -732,9 +771,84 @@ def em_converged(loglik: float, previous_loglik: float, threshold: float = 1e-4,
     return converged, decrease
 
 
+def group_series_by_frequency(
+    idx_i: np.ndarray,
+    frequencies: np.ndarray,
+    clock: str
+) -> Dict[str, np.ndarray]:
+    """Group series indices by their actual frequency.
+    
+    This function groups series by their actual frequency values, allowing
+    each frequency to be processed independently. Faster frequencies than clock
+    are validated and rejected.
+    
+    Parameters
+    ----------
+    idx_i : np.ndarray
+        Array of series indices to group (e.g., indices of series in a block)
+    frequencies : np.ndarray
+        Array of frequency strings for all series (length N)
+    clock : str
+        Clock frequency ('d', 'w', 'm', 'q', 'sa', 'a')
+        
+    Returns
+    -------
+    Dict[str, np.ndarray]
+        Dictionary with frequency strings as keys and arrays of indices as values.
+        Also includes 'clock' key for series matching the clock frequency.
+        
+    Examples
+    --------
+    >>> frequencies = np.array(['m', 'm', 'q', 'm', 'q'])
+    >>> idx_i = np.array([0, 1, 2, 3, 4])
+    >>> groups = group_series_by_frequency(idx_i, frequencies, 'm')
+    >>> groups['m']  # Monthly series
+    array([0, 1, 3])
+    >>> groups['q']  # Quarterly series
+    array([2, 4])
+    """
+    if frequencies is None or len(frequencies) == 0:
+        # Fallback: assume all are same as clock if frequencies not provided
+        return {clock: idx_i.copy()}
+    
+    clock_hierarchy = FREQUENCY_HIERARCHY.get(clock, 3)  # Default to monthly
+    
+    freq_groups: Dict[str, List[int]] = {}
+    faster_indices = []
+    
+    for idx in idx_i:
+        if idx >= len(frequencies):
+            # Index out of bounds - skip
+            continue
+        
+        freq = frequencies[idx]
+        freq_hierarchy = FREQUENCY_HIERARCHY.get(freq, 3)  # Default to monthly
+        
+        if freq_hierarchy < clock_hierarchy:
+            # Faster frequency (lower hierarchy number) - NOT SUPPORTED
+            faster_indices.append(idx)
+        else:
+            # Group by actual frequency
+            if freq not in freq_groups:
+                freq_groups[freq] = []
+            freq_groups[freq].append(idx)
+    
+    # Validate: faster frequencies are not supported
+    if len(faster_indices) > 0:
+        faster_series_names = [f"series_{idx}" for idx in faster_indices]
+        raise ValueError(
+            f"Higher frequencies (daily, weekly) are not supported. "
+            f"Found {len(faster_indices)} series with frequency faster than clock '{clock}'. "
+            f"Please use monthly, quarterly, semi-annual, or annual frequencies only."
+        )
+    
+    # Convert lists to numpy arrays
+    return {freq: np.array(indices, dtype=int) for freq, indices in freq_groups.items()}
+
+
 def init_conditions(x: np.ndarray, r: np.ndarray, p: int, blocks: np.ndarray,
                    opt_nan: dict, Rcon: Optional[np.ndarray], q: Optional[np.ndarray],
-                   nQ: int, i_idio: np.ndarray,
+                   nQ: Optional[int], i_idio: np.ndarray,
                    clock: str = 'm', tent_weights_dict: Optional[Dict[str, np.ndarray]] = None,
                    frequencies: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray,
                                                           np.ndarray, np.ndarray, np.ndarray]:
@@ -772,7 +886,7 @@ def init_conditions(x: np.ndarray, r: np.ndarray, p: int, blocks: np.ndarray,
         - 'k': int, spline parameter (typically 3)
         See `rem_nans_spline` for details.
     Rcon : np.ndarray
-        Quarterly aggregation constraints matrix (4 x 5). Implements the "tent structure"
+        Aggregation constraints matrix for slower-frequency series (e.g., 4 x 5 for quarterly when clock is monthly). Implements the "tent structure"
         that aggregates monthly values to quarterly. Standard structure is:
         [[2, -1, 0, 0, 0],
          [3, 0, -1, 0, 0],
@@ -780,13 +894,13 @@ def init_conditions(x: np.ndarray, r: np.ndarray, p: int, blocks: np.ndarray,
          [1, 0, 0, 0, -1]]
     q : np.ndarray
         Constraints vector (4,). Typically all zeros: np.zeros(4).
-        Used with Rcon to enforce quarterly aggregation.
-    nQ : int
-        Number of quarterly variables. Must satisfy 0 <= nQ < N.
-        The first (N - nQ) series are assumed to be monthly.
+        Used with Rcon to enforce slower-frequency aggregation.
+    nQ : int, optional
+        Number of slower-frequency variables (e.g., quarterly when clock is monthly).
+        If None, computed from frequencies array. Must satisfy 0 <= nQ < N.
     i_idio : np.ndarray
-        Logical array (N,) indicating idiosyncratic components: 1 for monthly series,
-        0 for quarterly series. Typically: np.concatenate([np.ones(N-nQ), np.zeros(nQ)]).
+        Logical array (N,) indicating idiosyncratic components: 1 for same-frequency series,
+        0 for slower-frequency series. Typically: np.concatenate([np.ones(N-nQ), np.zeros(nQ)]).
         
     Returns
     -------
@@ -826,9 +940,9 @@ def init_conditions(x: np.ndarray, r: np.ndarray, p: int, blocks: np.ndarray,
     Examples
     --------
     >>> from dfm_python import load_config, load_data, dfm
-    >>> # Load configuration from YAML or CSV
+    >>> # Load configuration from YAML or create DFMConfig directly
     >>> config = load_config('config.yaml')
-    >>> # Load data from CSV file
+    >>> # Load data from file
     >>> X, Time, Z = load_data('data.csv', config)
     >>> # Standardize data
     >>> x = (X - np.nanmean(X, axis=0)) / np.nanstd(X, axis=0)
@@ -854,13 +968,31 @@ def init_conditions(x: np.ndarray, r: np.ndarray, p: int, blocks: np.ndarray,
     else:
         pC = Rcon.shape[1]  # Tent structure size (quarterly to monthly)
     ppC = int(max(p, pC))  # Ensure integer
-    n_b = blocks.shape[1]  # Number of blocks
+    n_blocks = blocks.shape[1]  # Number of blocks
     
     # Spline without NaNs
     xBal, _ = _rem_nans_spline(x, method=opt_nan['method'], k=opt_nan['k'])
     
     T, N = xBal.shape
-    nM = N - nQ  # Number of monthly series
+    
+    # Determine pC from tent_weights_dict if available, otherwise use Rcon
+    # pC is the maximum tent kernel size needed for slower frequencies
+    pC = 1
+    if tent_weights_dict is not None and len(tent_weights_dict) > 0:
+        # Find maximum tent kernel size
+        for tent_weights in tent_weights_dict.values():
+            if tent_weights is not None and len(tent_weights) > pC:
+                pC = len(tent_weights)
+    elif Rcon is not None:
+        pC = Rcon.shape[1]
+    
+    # Fallback: if nQ is provided but frequencies not, compute from nQ
+    if nQ is None and frequencies is not None:
+        # Count series slower than clock
+        clock_hierarchy = FREQUENCY_HIERARCHY.get(clock, 3)
+        nQ = sum(1 for f in frequencies if FREQUENCY_HIERARCHY.get(f, 3) > clock_hierarchy)
+    elif nQ is None:
+        nQ = 0  # Default to 0 if neither provided
     
     # Create 2D boolean array for NaN indicators
     indNaN = np.isnan(xBal)
@@ -868,7 +1000,7 @@ def init_conditions(x: np.ndarray, r: np.ndarray, p: int, blocks: np.ndarray,
     # Create views/copies as needed (xNaN needs to be modifiable)
     xNaN = xBal.copy()  # Need copy for NaN assignment
     xNaN[indNaN] = np.nan
-    res = xBal  # Can use view, not modified
+    data_residuals = xBal  # Residual data after removing factors (can use view, not modified)
     resNaN = xNaN.copy()  # Need copy for modifications
     
     # Initialize model coefficient output
@@ -883,26 +1015,28 @@ def init_conditions(x: np.ndarray, r: np.ndarray, p: int, blocks: np.ndarray,
         indNaN[:pC-1, :] = True
     
     # Loop for each block
-    for i in range(n_b):
+    for i in range(n_blocks):
         r_i = int(r[i])  # r_i = 1 when block is loaded (ensure integer)
         
-        # Reset block-specific variables at start of each iteration to prevent dimension mismatch
-        # These variables are block-specific and must be reset to avoid using values from previous blocks
-        ff = None
-        A_temp = None
+        # Reset block-specific variables at start of each iteration
+        # Prevents dimension mismatch from previous block values
+        factor_projection_lagged = None
+        ar_coeffs = None
         
-        # Observation equation
-        C_i = np.zeros((N, int(r_i * ppC)))
+        # Observation equation: estimate factor loadings for this block
+        block_loadings = np.zeros((N, int(r_i * ppC)))
         idx_i = np.where(blocks[:, i] == 1)[0]  # Series loading block i
-        idx_iM = idx_i[idx_i < nM]  # Monthly series indices
-        idx_iQ = idx_i[idx_i >= nM]  # Quarterly series indices
         
-        if len(idx_iM) > 0:
+        # Group series by their actual frequency
+        freq_groups = group_series_by_frequency(idx_i, frequencies, clock)
+        idx_clock_freq = freq_groups.get(clock, np.array([], dtype=int))  # Same frequency as clock
+        
+        if len(idx_clock_freq) > 0:
             # Returns eigenvector v with largest eigenvalue d
             # Calculate covariance, handling edge cases
             try:
                 # Extract data for this block, handling NaN values
-                res_block = res[:, idx_iM].copy()
+                res_block = data_residuals[:, idx_clock_freq].copy()
                 # Remove rows with any NaN (np.cov doesn't handle NaN)
                 finite_rows = np.all(np.isfinite(res_block), axis=1)
                 n_finite = np.sum(finite_rows)
@@ -910,19 +1044,19 @@ def init_conditions(x: np.ndarray, r: np.ndarray, p: int, blocks: np.ndarray,
                 completeness_pct = (n_finite / n_total * 100) if n_total > 0 else 0.0
                 
                 # Check minimum data requirements
-                min_obs_required = max(2, len(idx_iM) + 1)  # Need at least n+1 observations for n series
+                min_obs_required = max(2, len(idx_clock_freq) + 1)  # Need at least n+1 observations for n series
                 if n_finite < min_obs_required:
                     # Not enough finite data - use identity
                     _logger.warning(
                         f"init_conditions: Block {i+1} has insufficient data for covariance calculation. "
-                        f"Series in block: {len(idx_iM)}, Finite observations: {n_finite}/{n_total} "
+                        f"Series in block: {len(idx_clock_freq)}, Finite observations: {n_finite}/{n_total} "
                         f"({completeness_pct:.1f}%), Required: {min_obs_required}. "
                         f"Using identity matrix as fallback."
                     )
                     raise ValueError(
                         f"Insufficient finite data for block {i+1}: "
                         f"found {n_finite} finite observations, but need at least {min_obs_required} "
-                        f"(number of series in block: {len(idx_iM)}). "
+                        f"(number of series in block: {len(idx_clock_freq)}). "
                         f"This may be due to excessive missing data or transformation issues. "
                         f"Consider checking data quality or adjusting nan_method."
                     )
@@ -933,13 +1067,13 @@ def init_conditions(x: np.ndarray, r: np.ndarray, p: int, blocks: np.ndarray,
                 # Handle edge cases where indexing might produce unexpected shapes
                 if res_block_clean.size == 0:
                     # No data - use identity
-                    cov_res = np.eye(len(idx_iM))
+                    cov_res = np.eye(len(idx_clock_freq))
                 elif res_block_clean.ndim == 0:
                     # 0D array - shouldn't happen, but handle it
-                    cov_res = np.eye(len(idx_iM))
+                    cov_res = np.eye(len(idx_clock_freq))
                 elif res_block_clean.ndim == 1:
                     # 1D array - reshape based on number of series
-                    if len(idx_iM) == 1:
+                    if len(idx_clock_freq) == 1:
                         # Single series: variance is just the variance
                         var_val = np.var(res_block_clean, ddof=0)
                         if np.isnan(var_val) or np.isinf(var_val) or var_val < 1e-10:
@@ -949,12 +1083,12 @@ def init_conditions(x: np.ndarray, r: np.ndarray, p: int, blocks: np.ndarray,
                         # Multiple series but 1D - reshape to (1, n_series)
                         res_block_clean = res_block_clean.reshape(1, -1)
                         if res_block_clean.shape[0] < 2:
-                            cov_res = np.eye(len(idx_iM))
+                            cov_res = np.eye(len(idx_clock_freq))
                         else:
                             cov_res = np.cov(res_block_clean.T)
                 elif res_block_clean.ndim == 2:
                     # 2D array - normal case
-                    if len(idx_iM) == 1:
+                    if len(idx_clock_freq) == 1:
                         # Single series: variance is just the variance
                         series_data = res_block_clean.flatten()
                         var_val = np.var(series_data, ddof=0)
@@ -972,87 +1106,38 @@ def init_conditions(x: np.ndarray, r: np.ndarray, p: int, blocks: np.ndarray,
                         # Multiple series: compute covariance matrix
                         if res_block_clean.shape[0] < 2:
                             # Not enough observations for covariance - use identity
-                            cov_res = np.eye(len(idx_iM))
+                            cov_res = np.eye(len(idx_clock_freq))
                         else:
                             cov_res = np.cov(res_block_clean.T)
                 else:
                     # 3D+ array - shouldn't happen, but use identity
-                    cov_res = np.eye(len(idx_iM))
+                    cov_res = np.eye(len(idx_clock_freq))
                 
                 # Check for NaN/Inf in covariance
                 if np.any(np.isnan(cov_res)) or np.any(np.isinf(cov_res)):
                     # Replace with identity if covariance invalid
                     _logger.warning(
                         f"init_conditions: Block {i+1} covariance contains NaN/Inf values. "
-                        f"Series in block: {len(idx_iM)}, Finite observations: {n_finite}/{n_total}. "
+                        f"Series in block: {len(idx_clock_freq)}, Finite observations: {n_finite}/{n_total}. "
                         f"Using identity matrix as fallback."
                     )
-                    cov_res = np.eye(len(idx_iM))
+                    cov_res = np.eye(len(idx_clock_freq))
                 # Check for constant series (zero variance) and regularize
                 var_diag = np.diag(cov_res)
                 if np.any(var_diag < 1e-10):
-                    cov_res = cov_res + np.eye(len(idx_iM)) * 1e-8
+                    cov_res = cov_res + np.eye(len(idx_clock_freq)) * 1e-8
             except (ValueError, np.linalg.LinAlgError) as e:
                 # Covariance calculation failed - use identity as fallback
                 # This can happen with insufficient data or numerical issues
                 _logger.warning(
                     f"init_conditions: Covariance calculation failed for block {i+1}. "
-                    f"Series in block: {len(idx_iM)}, Series indices: {idx_iM.tolist()}. "
+                    f"Series in block: {len(idx_clock_freq)}, Series indices: {idx_clock_freq.tolist()}. "
                     f"Error: {type(e).__name__}: {str(e)}. Using identity matrix as fallback."
                 )
-                cov_res = np.eye(len(idx_iM))
+                cov_res = np.eye(len(idx_clock_freq))
             
-            if cov_res.size == 1:
-                # Single series case
-                v = np.array([[1.0]])
-                d = cov_res[0, 0] if not (np.isnan(cov_res[0, 0]) or np.isinf(cov_res[0, 0])) else 1.0
-            else:
-                n_series = len(idx_iM)
-                # Use eigs only if k < n_series - 1, otherwise use regular eig
-                if int(r_i) < n_series - 1:
-                    try:
-                        # Use sparse matrix for eigs
-                        cov_sparse = csc_matrix(cov_res)
-                        d, v = eigs(cov_sparse, k=int(r_i), which='LM')
-                        v = v.real
-                        # Check for NaN/Inf in results
-                        if np.any(np.isnan(d)) or np.any(np.isinf(d)) or np.any(np.isnan(v)) or np.any(np.isinf(v)):
-                            raise ValueError("Invalid eigenvalue results")
-                    except (ValueError, np.linalg.LinAlgError, RuntimeError) as e:
-                        # Sparse eigendecomposition failed - fallback to regular eig
-                        # This can happen if matrix is too small for sparse methods or has numerical issues
-                        _logger.warning(
-                            f"init_conditions: Sparse eigendecomposition failed for block {i+1}, "
-                            f"falling back to np.linalg.eig. Error: {type(e).__name__}"
-                        )
-                        d, v = np.linalg.eig(cov_res)
-                        # Sort by eigenvalue magnitude and take top r_i
-                        idx = np.argsort(np.abs(d))[::-1][:int(r_i)]
-                        d = d[idx]
-                        v = v[:, idx]
-                        v = v.real
-                else:
-                    # Use regular eig for full eigendecomposition
-                    try:
-                        d, v = np.linalg.eig(cov_res)
-                        # Check for NaN/Inf
-                        valid = ~(np.isnan(d) | np.isinf(d))
-                        if np.sum(valid) < int(r_i):
-                            raise ValueError("Not enough valid eigenvalues")
-                        # Sort by eigenvalue magnitude and take top r_i
-                        idx = np.argsort(np.abs(d[valid]))[::-1][:int(r_i)]
-                        d = d[valid][idx]
-                        v = v[:, valid][:, idx]
-                        v = v.real
-                    except (IndexError, ValueError, np.linalg.LinAlgError) as e:
-                        # Eigendecomposition or indexing failed - use identity as ultimate fallback
-                        # This indicates severe numerical issues, but allows initialization to continue
-                        _logger.warning(
-                            f"init_conditions: Eigendecomposition failed for block {i+1}, "
-                            f"using identity matrix as ultimate fallback. Error: {type(e).__name__}"
-                        )
-                        v = np.eye(len(idx_iM))[:, :int(r_i)]
-                        d = np.ones(int(r_i))
+            # Compute principal components via eigendecomposition
+            d, v = _compute_principal_components(cov_res, int(r_i), block_idx=i)
             
             # Flip sign for cleaner output
             if np.sum(v) < 0:
@@ -1085,8 +1170,8 @@ def init_conditions(x: np.ndarray, r: np.ndarray, p: int, blocks: np.ndarray,
                         v_scaled[:, col_idx] = v_scaled[:, col_idx] / col_norm * np.sqrt(d_val)
             
             # For monthly series with loaded blocks, use scaled eigenvectors
-            C_i[idx_iM, :int(r_i)] = v_scaled
-            f = res[:, idx_iM] @ v_scaled  # Data projection for scaled eigenvector direction
+            block_loadings[idx_clock_freq, :int(r_i)] = v_scaled
+            f = data_residuals[:, idx_clock_freq] @ v_scaled  # Data projection for scaled eigenvector direction
             
             # Lag matrix using loading
             F = None
@@ -1098,117 +1183,169 @@ def init_conditions(x: np.ndarray, r: np.ndarray, p: int, blocks: np.ndarray,
                 else:
                     F = np.hstack([F, lag_data])
             
-            # Handle aggregation constraints (only if Rcon is provided)
-            if Rcon is not None and q is not None:
-                Rcon_i = np.kron(Rcon, np.eye(int(r_i)))  # Quarterly-monthly aggregation
-                q_i = np.kron(q, np.zeros(int(r_i)))
-            else:
-                Rcon_i = None
-                q_i = None
+            # Projected data with lag structure (for slower frequency series)
+            factor_projection_lagged = F[:, :int(r_i * pC)]
             
-            # Projected data with lag structure
-            ff = F[:, :int(r_i * pC)]
-            
-            # Loop for quarterly variables
-            for j in idx_iQ:
-                # For series j, values are dropped to accommodate lag structure
-                xx_j = resNaN[pC:, j]
+            # Process series with frequencies different from clock (need tent kernel)
+            # Process each frequency group separately
+            for freq, idx_iFreq in freq_groups.items():
+                if freq == clock:
+                    continue  # Already processed above
                 
-                if len(xx_j) < ff.shape[0]:
-                    # Align dimensions: pad or trim as needed
-                    if len(xx_j) > 0:
-                        xx_j_padded = np.full(ff.shape[0], np.nan)
-                        xx_j_padded[:len(xx_j)] = xx_j
-                        xx_j = xx_j_padded
-                
-                if np.sum(~np.isnan(xx_j)) < ff.shape[1] + 2:
-                    xx_j = res[pC:, j]  # Replace with spline if too many NaNs
-                
-                ff_j = ff[~np.isnan(xx_j), :]
-                xx_j_clean = xx_j[~np.isnan(xx_j)]
-                
-                if len(xx_j_clean) > 0 and ff_j.shape[0] > 0:
-                    try:
-                        iff_j = inv(ff_j.T @ ff_j)
-                        Cc = iff_j @ ff_j.T @ xx_j_clean  # Least squares
+                # Get tent weights for this frequency
+                if tent_weights_dict is not None and freq in tent_weights_dict:
+                    tent_weights = tent_weights_dict[freq]
+                else:
+                    # Try to get from lookup
+                    tent_weights = get_tent_weights_for_pair(freq, clock)
+                    if tent_weights is None:
+                        # Fallback: generate symmetric tent weights based on frequency gap
+                        clock_hierarchy = FREQUENCY_HIERARCHY.get(clock, 3)
+                        freq_hierarchy = FREQUENCY_HIERARCHY.get(freq, 3)
+                        n_periods_est = freq_hierarchy - clock_hierarchy + 1
+                        if n_periods_est > 0 and n_periods_est <= 12:
+                            tent_weights = generate_tent_weights(n_periods_est, 'symmetric')
+                            _logger.warning(
+                                f"init_conditions: No tent weights found for frequency '{freq}' "
+                                f"with clock '{clock}', generating symmetric tent weights with {n_periods_est} periods."
+                            )
+                        else:
+                            raise ValueError(
+                                f"init_conditions: Cannot determine tent weights for frequency '{freq}' "
+                                f"with clock '{clock}'. Please provide tent_weights_dict or ensure "
+                                f"the frequency pair is supported."
+                            )
+                    
+                    # Generate R_mat for this frequency
+                    R_mat_freq, q_freq = generate_R_mat(tent_weights)
+                    pC_freq = len(tent_weights)
+                    
+                    # Ensure factor projection has enough columns for this frequency
+                    if factor_projection_lagged.shape[1] < r_i * pC_freq:
+                        # Pad if needed
+                        factor_projection_freq = np.hstack([
+                            factor_projection_lagged, 
+                            np.zeros((factor_projection_lagged.shape[0], r_i * pC_freq - factor_projection_lagged.shape[1]))
+                        ])
+                    else:
+                        factor_projection_freq = factor_projection_lagged[:, :int(r_i * pC_freq)]
+                    
+                    # Create constraint matrix for this frequency
+                    Rcon_i = np.kron(R_mat_freq, np.eye(int(r_i)))
+                    q_i = np.kron(q_freq, np.zeros(int(r_i)))
+                    
+                    # Loop for series of this frequency
+                    for j in idx_iFreq:
+                        # For series j, values are dropped to accommodate lag structure
+                        series_data = resNaN[pC_freq:, j]
                         
-                        # Monthly to quarterly conversion with constraints (if using aggregation)
-                        if Rcon_i is not None and q_i is not None:
-                            constraint_term = iff_j @ Rcon_i.T @ inv(Rcon_i @ iff_j @ Rcon_i.T) @ (Rcon_i @ Cc - q_i)
-                            Cc = Cc - constraint_term
+                        if len(series_data) < factor_projection_freq.shape[0]:
+                            # Align dimensions: pad or trim as needed
+                            if len(series_data) > 0:
+                                series_data_padded = np.full(factor_projection_freq.shape[0], np.nan)
+                                series_data_padded[:len(series_data)] = series_data
+                                series_data = series_data_padded
                         
-                        C_i[j, :int(pC * r_i)] = Cc
-                    except (np.linalg.LinAlgError, ValueError, IndexError) as e:
-                        # Matrix inversion or constraint application failed - set to zero
-                        # This can happen if constraint matrix is singular or dimensions mismatch
-                        _logger.debug(
-                            f"init_conditions: C matrix update failed for series {j} in block {i+1}, "
-                            f"setting to zero. Error: {type(e).__name__}"
-                        )
-                        C_i[j, :int(pC * r_i)] = 0.0
+                        if np.sum(~np.isnan(series_data)) < factor_projection_freq.shape[1] + 2:
+                            # Replace with spline if too many NaNs
+                            series_data = data_residuals[pC_freq:, j]
+                        
+                        # Extract finite values for regression
+                        finite_mask = ~np.isnan(series_data)
+                        factor_projection_clean = factor_projection_freq[finite_mask, :]
+                        series_data_clean = series_data[finite_mask]
+                        
+                        if len(series_data_clean) > 0 and factor_projection_clean.shape[0] > 0:
+                            try:
+                                # Least squares: C = inv(X'X) * X'y
+                                gram_matrix = factor_projection_clean.T @ factor_projection_clean
+                                gram_inv = inv(gram_matrix)
+                                loadings = gram_inv @ factor_projection_clean.T @ series_data_clean
+                                
+                                # Apply constraints (tent kernel aggregation)
+                                if Rcon_i is not None and q_i is not None and Rcon_i.size > 0:
+                                    constraint_term = gram_inv @ Rcon_i.T @ inv(Rcon_i @ gram_inv @ Rcon_i.T) @ (Rcon_i @ loadings - q_i)
+                                    loadings = loadings - constraint_term
+                                
+                                # Place in block_loadings matrix (use appropriate columns)
+                                block_loadings[j, :int(pC_freq * r_i)] = loadings[:int(pC_freq * r_i)]
+                            except (np.linalg.LinAlgError, ValueError, IndexError) as e:
+                                # Matrix inversion or constraint application failed - set to zero
+                                _logger.debug(
+                                    f"init_conditions: C matrix update failed for series {j} in block {i+1}, "
+                                    f"setting to zero. Error: {type(e).__name__}"
+                                )
+                                block_loadings[j, :int(pC_freq * r_i)] = 0.0
         
-        # Pad ff with zeros to match res dimensions (T x N) - BLOCK-SPECIFIC
+        # Pad factor projection with zeros to match data dimensions (T x N)
         # This must be inside the block loop to handle different r_i per block
-        if ff is not None:
+        if factor_projection_lagged is not None:
             # Validate dimensions match before stacking (safety check)
             expected_width = int(pC * r_i)
-            if ff.shape[1] != expected_width:
-                # This should not happen if ff is properly reset, but add safety check
+            if factor_projection_lagged.shape[1] != expected_width:
                 _logger.warning(
-                    f"init_conditions: Block {i+1} ff dimension mismatch detected. "
-                    f"Expected width {expected_width}, got {ff.shape[1]}. Resetting ff."
+                    f"init_conditions: Block {i+1} factor projection dimension mismatch. "
+                    f"Expected width {expected_width}, got {factor_projection_lagged.shape[1]}. Resetting."
                 )
-                ff = None
+                factor_projection_lagged = None
         
-        if ff is not None:
-            # ff has shape (T - pC + 1, r_i * pC) from lag_data
-            # Need to pad to match res shape (T, r_i * pC)
-            ff_padded_i = np.vstack([np.zeros((pC - 1, int(pC * r_i))), ff])
+        if factor_projection_lagged is not None:
+            # factor_projection_lagged has shape (T - pC + 1, r_i * pC) from lag_data
+            # Pad to match data_residuals shape (T, r_i * pC)
+            factor_projection_padded = np.vstack([
+                np.zeros((pC - 1, int(pC * r_i))), 
+                factor_projection_lagged
+            ])
             # Ensure it matches T exactly
-            if ff_padded_i.shape[0] < T:
-                ff_padded_i = np.vstack([ff_padded_i, np.zeros((T - ff_padded_i.shape[0], int(pC * r_i)))])
+            if factor_projection_padded.shape[0] < T:
+                factor_projection_padded = np.vstack([
+                    factor_projection_padded, 
+                    np.zeros((T - factor_projection_padded.shape[0], int(pC * r_i)))
+                ])
         else:
-            # If no monthly series, create dummy ff
-            ff_padded_i = np.zeros((T, int(pC * r_i)))
-            # Note: If we're in this else branch, len(idx_iM) == 0, so the condition below is unreachable
-            # but kept for safety in case of edge cases
+            # If no clock-frequency series, create dummy projection
+            factor_projection_padded = np.zeros((T, int(pC * r_i)))
         
-        # Residual calculations - ensure shapes match (only for this block's series)
-        # C_i has shape (N, r_i * ppC), but we only use the first r_i * pC columns for residuals
-        # ff_padded_i has shape (T, r_i * pC)
-        # We need to extract the relevant columns from C_i
-        C_i_residual = C_i[:, :int(pC * r_i)]  # Only use first pC * r_i columns
-        if ff_padded_i.shape[0] == res.shape[0]:
-            # Update residuals only for series in this block
-            res[:, idx_i] = res[:, idx_i] - ff_padded_i @ C_i_residual[idx_i, :].T
+        # Update residuals by removing factor projections (only for this block's series)
+        # block_loadings has shape (N, r_i * ppC), but we only use the first r_i * pC columns for residuals
+        # factor_projection_padded has shape (T, r_i * pC)
+        block_loadings_residual = block_loadings[:, :int(pC * r_i)]  # Extract relevant columns
+        if factor_projection_padded.shape[0] == data_residuals.shape[0]:
+            # Dimensions match - subtract factor projection
+            data_residuals[:, idx_i] = data_residuals[:, idx_i] - factor_projection_padded @ block_loadings_residual[idx_i, :].T
         else:
-            # Trim or pad to match
-            if ff_padded_i.shape[0] > res.shape[0]:
-                ff_padded_i = ff_padded_i[:res.shape[0], :]
+            # Trim or pad to match dimensions
+            if factor_projection_padded.shape[0] > data_residuals.shape[0]:
+                factor_projection_padded = factor_projection_padded[:data_residuals.shape[0], :]
             else:
-                ff_padded_i = np.vstack([ff_padded_i, np.zeros((res.shape[0] - ff_padded_i.shape[0], ff_padded_i.shape[1]))])
-            res[:, idx_i] = res[:, idx_i] - ff_padded_i @ C_i_residual[idx_i, :].T
+                factor_projection_padded = np.vstack([
+                    factor_projection_padded, 
+                    np.zeros((data_residuals.shape[0] - factor_projection_padded.shape[0], factor_projection_padded.shape[1]))
+                ])
+            data_residuals[:, idx_i] = data_residuals[:, idx_i] - factor_projection_padded @ block_loadings_residual[idx_i, :].T
         
-        resNaN = res.copy()
+        resNaN = data_residuals.copy()
         resNaN[indNaN] = np.nan
         
-        # Combine loadings
+        # Combine loadings from all blocks
         if C is None:
-            C = C_i
+            C = block_loadings
         else:
-            C = np.hstack([C, C_i])
+            C = np.hstack([C, block_loadings])
         
         # Transition equation
-        if len(idx_iM) > 0:
+        if len(idx_clock_freq) > 0:
             z = F[:, :int(r_i)]  # Projected data (no lag)
             Z_lag = F[:, int(r_i):int(r_i * (p + 1))]  # Data with lag 1
             
-            A_i = np.zeros((int(r_i * ppC), int(r_i * ppC)))
+            # Transition equation: estimate AR coefficients for this block
+            block_transition = np.zeros((int(r_i * ppC), int(r_i * ppC)))
             
             if Z_lag.shape[0] > 0 and Z_lag.shape[1] > 0:
                 try:
-                    A_temp = inv(Z_lag.T @ Z_lag) @ Z_lag.T @ z  # OLS: AR(p) process
-                    A_i[:int(r_i), :int(r_i * p)] = A_temp.T
+                    # OLS regression: estimate AR coefficients from lagged factors
+                    ar_coeffs = inv(Z_lag.T @ Z_lag) @ Z_lag.T @ z
+                    block_transition[:int(r_i), :int(r_i * p)] = ar_coeffs.T
                 except (np.linalg.LinAlgError, ValueError) as e:
                     # OLS regression failed - set AR coefficients to zero
                     # This can happen if Z_lag is singular or has insufficient rank
@@ -1216,141 +1353,204 @@ def init_conditions(x: np.ndarray, r: np.ndarray, p: int, blocks: np.ndarray,
                         f"init_conditions: OLS regression failed for block {i+1}, "
                         f"setting AR coefficients to zero. Error: {type(e).__name__}"
                     )
-                    A_i[:int(r_i), :int(r_i * p)] = 0.0
+                    block_transition[:int(r_i), :int(r_i * p)] = 0.0
             
-            # Identity matrix for lag structure
+            # Identity matrix for lag structure (shift operator)
             if r_i * (ppC - 1) > 0:
-                A_i[int(r_i):, :int(r_i * (ppC - 1))] = np.eye(int(r_i * (ppC - 1)))
+                block_transition[int(r_i):, :int(r_i * (ppC - 1))] = np.eye(int(r_i * (ppC - 1)))
             
-            Q_i = np.zeros((int(ppC * r_i), int(ppC * r_i)))
+            # Innovation covariance for this block
+            block_innovation_cov = np.zeros((int(ppC * r_i), int(ppC * r_i)))
             if len(z) > 0:
-                e = z - Z_lag @ A_temp if A_temp is not None else z
-                # Clean e before covariance calculation
-                e_clean = e.copy()
-                e_clean[np.isnan(e_clean)] = 0.0
-                e_clean[np.isinf(e_clean)] = 0.0
+                innovation_residuals = z - Z_lag @ ar_coeffs if ar_coeffs is not None else z
+                # Clean innovation residuals before covariance calculation
+                innovation_residuals = np.nan_to_num(innovation_residuals, nan=0.0, posinf=0.0, neginf=0.0)
                 
-                if e_clean.shape[1] > 1:
-                    # Use np.cov but check for NaN/Inf
+                if innovation_residuals.shape[1] > 1:
+                    # Use np.cov for multiple series
                     try:
-                        Q_block = np.cov(e_clean.T)
-                        # Check for NaN/Inf in result
-                        if np.any(np.isnan(Q_block)) or np.any(np.isinf(Q_block)):
+                        Q_block = np.cov(innovation_residuals.T)
+                        # Validate result
+                        if np.any(~np.isfinite(Q_block)):
                             Q_block = np.eye(int(r_i)) * 0.1
                     except (ValueError, np.linalg.LinAlgError):
                         Q_block = np.eye(int(r_i)) * 0.1
                 else:
-                    var_val = np.var(e_clean)
-                    Q_block = np.array([[var_val]]) if not (np.isnan(var_val) or np.isinf(var_val)) else np.eye(int(r_i)) * 0.1
+                    # Single series: use variance
+                    variance = np.var(innovation_residuals)
+                    if not np.isfinite(variance) or variance <= 0:
+                        variance = 0.1
+                    Q_block = np.array([[variance]]) if innovation_residuals.ndim > 1 else np.eye(int(r_i)) * variance
                 
-                Q_i[:int(r_i), :int(r_i)] = Q_block
+                block_innovation_cov[:int(r_i), :int(r_i)] = Q_block
             
-            # Clean A_i and Q_i before kron operation
-            A_i_clean = _clean_matrix(A_i, 'loading')
-            Q_i_clean = _clean_matrix(Q_i, 'covariance', default_nan=0.0)
+            # Clean block matrices before kron operation
+            block_transition_clean = _clean_matrix(block_transition, 'loading')
+            block_innovation_cov_clean = _clean_matrix(block_innovation_cov, 'covariance', default_nan=0.0)
             
             # Initial covariance
             try:
-                # Check A_i_clean for invalid values before kron
-                if np.any(np.isnan(A_i_clean)) or np.any(np.isinf(A_i_clean)):
-                    raise ValueError("Invalid values in A_i")
+                # Check block_transition_clean for invalid values before kron
+                if np.any(~np.isfinite(block_transition_clean)):
+                    raise ValueError("Invalid values in block_transition")
                 
-                kron_matrix = np.kron(A_i_clean, A_i_clean)
+                kron_transition = np.kron(block_transition_clean, block_transition_clean)
                 # Check kron result
-                if np.any(np.isnan(kron_matrix)) or np.any(np.isinf(kron_matrix)):
-                    raise ValueError("Invalid values in kron(A_i, A_i)")
+                if np.any(~np.isfinite(kron_transition)):
+                    raise ValueError("Invalid values in kron(block_transition, block_transition)")
                 
-                inv_matrix = np.eye(int((r_i * ppC)**2)) - kron_matrix
+                identity_kron = np.eye(int((r_i * ppC)**2)) - kron_transition
                 # Check before inversion
-                if np.any(np.isnan(inv_matrix)) or np.any(np.isinf(inv_matrix)):
+                if np.any(~np.isfinite(identity_kron)):
                     raise ValueError("Invalid values in (I - kron(A, A))")
                 
-                Q_flat = Q_i_clean.flatten()
-                # Check Q_flat
-                if np.any(np.isnan(Q_flat)) or np.any(np.isinf(Q_flat)):
-                    raise ValueError("Invalid values in Q_i")
+                innovation_cov_flat = block_innovation_cov_clean.flatten()
+                # Check innovation_cov_flat
+                if np.any(~np.isfinite(innovation_cov_flat)):
+                    raise ValueError("Invalid values in block_innovation_cov")
                 
-                initV_i = np.reshape(
-                    inv(inv_matrix) @ Q_flat,
+                init_cov_block = np.reshape(
+                    inv(identity_kron) @ innovation_cov_flat,
                     (int(r_i * ppC), int(r_i * ppC))
                 )
                 # Verify result is valid
-                if np.any(np.isnan(initV_i)) or np.any(np.isinf(initV_i)):
-                    raise ValueError("NaN/Inf in initV_i")
+                if np.any(~np.isfinite(init_cov_block)):
+                    raise ValueError("NaN/Inf in init_cov_block")
             except (np.linalg.LinAlgError, ValueError, IndexError) as e:
                 # Matrix inversion failed or result invalid - use diagonal fallback
-                # This can happen if (I - kron(A, A)) is singular or numerical issues occur
                 _logger.warning(
                     f"init_conditions: Initial covariance calculation failed for block {i+1}, "
                     f"using diagonal fallback (0.1 * I). Error: {type(e).__name__}"
                 )
-                initV_i = np.eye(int(r_i * ppC)) * 0.1
+                init_cov_block = np.eye(int(r_i * ppC)) * 0.1
             
-            # Block diagonal matrices
+            # Combine transition and innovation matrices for all blocks
             if A is None:
-                A = A_i
-                Q = Q_i
-                V_0 = initV_i
+                A = block_transition
+                Q = block_innovation_cov
+                V_0 = init_cov_block
             else:
                 # Ensure all matrices are square before block_diag
-                if A_i.shape[0] == A_i.shape[1] and Q_i.shape[0] == Q_i.shape[1] and initV_i.shape[0] == initV_i.shape[1]:
-                    A = block_diag(A, A_i)
-                    Q = block_diag(Q, Q_i)
-                    V_0 = block_diag(V_0, initV_i)
+                if (block_transition.shape[0] == block_transition.shape[1] and 
+                    block_innovation_cov.shape[0] == block_innovation_cov.shape[1] and 
+                    init_cov_block.shape[0] == init_cov_block.shape[1]):
+                    A = block_diag(A, block_transition)
+                    Q = block_diag(Q, block_innovation_cov)
+                    V_0 = block_diag(V_0, init_cov_block)
                 else:
                     # Fallback: concatenate if dimensions don't match
                     _logger.debug(
                         f"init_conditions: block_diag dimensions mismatch for block {i+1}, "
                         f"using np.block concatenation fallback"
                     )
-                    A = np.block([[A, np.zeros((A.shape[0], A_i.shape[1]))], 
-                                  [np.zeros((A_i.shape[0], A.shape[1])), A_i]])
-                    Q = np.block([[Q, np.zeros((Q.shape[0], Q_i.shape[1]))], 
-                                  [np.zeros((Q_i.shape[0], Q.shape[1])), Q_i]])
-                    V_0 = np.block([[V_0, np.zeros((V_0.shape[0], initV_i.shape[1]))], 
-                                    [np.zeros((initV_i.shape[0], V_0.shape[1])), initV_i]])
+                    A = np.block([[A, np.zeros((A.shape[0], block_transition.shape[1]))], 
+                                  [np.zeros((block_transition.shape[0], A.shape[1])), block_transition]])
+                    Q = np.block([[Q, np.zeros((Q.shape[0], block_innovation_cov.shape[1]))], 
+                                  [np.zeros((block_innovation_cov.shape[0], Q.shape[1])), block_innovation_cov]])
+                    V_0 = np.block([[V_0, np.zeros((V_0.shape[0], init_cov_block.shape[1]))], 
+                                    [np.zeros((init_cov_block.shape[0], V_0.shape[1])), init_cov_block]])
         else:
-            # Dummy if no monthly series
-            A_i = np.eye(int(r_i * ppC)) * 0.9
-            Q_i = np.eye(int(r_i * ppC)) * 0.1
-            initV_i = np.eye(int(r_i * ppC)) * 0.1
+            # Dummy if no clock-frequency series
+            block_transition = np.eye(int(r_i * ppC)) * 0.9
+            block_innovation_cov = np.eye(int(r_i * ppC)) * 0.1
+            init_cov_block = np.eye(int(r_i * ppC)) * 0.1
             if A is None:
-                A = A_i
-                Q = Q_i
-                V_0 = initV_i
+                A = block_transition
+                Q = block_innovation_cov
+                V_0 = init_cov_block
             else:
                 # Ensure all matrices are square
-                if A_i.shape[0] == A_i.shape[1] and Q_i.shape[0] == Q_i.shape[1] and initV_i.shape[0] == initV_i.shape[1]:
-                    A = block_diag(A, A_i)
-                    Q = block_diag(Q, Q_i)
-                    V_0 = block_diag(V_0, initV_i)
+                if (block_transition.shape[0] == block_transition.shape[1] and 
+                    block_innovation_cov.shape[0] == block_innovation_cov.shape[1] and 
+                    init_cov_block.shape[0] == init_cov_block.shape[1]):
+                    A = block_diag(A, block_transition)
+                    Q = block_diag(Q, block_innovation_cov)
+                    V_0 = block_diag(V_0, init_cov_block)
                 else:
                     # Fallback: use np.block
                     _logger.debug(
                         f"init_conditions: block_diag dimensions mismatch for block {i+1} (V_0), "
                         f"using np.block concatenation fallback"
                     )
-                    A = np.block([[A, np.zeros((A.shape[0], A_i.shape[1]))], 
-                                  [np.zeros((A_i.shape[0], A.shape[1])), A_i]])
-                    Q = np.block([[Q, np.zeros((Q.shape[0], Q_i.shape[1]))], 
-                                  [np.zeros((Q_i.shape[0], Q.shape[1])), Q_i]])
-                    V_0 = np.block([[V_0, np.zeros((V_0.shape[0], initV_i.shape[1]))], 
-                                    [np.zeros((initV_i.shape[0], V_0.shape[1])), initV_i]])
+                    A = np.block([[A, np.zeros((A.shape[0], block_transition.shape[1]))], 
+                                  [np.zeros((block_transition.shape[0], A.shape[1])), block_transition]])
+                    Q = np.block([[Q, np.zeros((Q.shape[0], block_innovation_cov.shape[1]))], 
+                                  [np.zeros((block_innovation_cov.shape[0], Q.shape[1])), block_innovation_cov]])
+                    V_0 = np.block([[V_0, np.zeros((V_0.shape[0], init_cov_block.shape[1]))], 
+                                    [np.zeros((init_cov_block.shape[0], V_0.shape[1])), init_cov_block]])
     
     # Add idiosyncratic components
+    # i_idio indicates which series have idiosyncratic components
+    # For clock frequency: 1 (have idiosyncratic)
+    # For slower frequencies: 0 (no direct idiosyncratic, use tent kernel structure)
     eyeN = np.eye(N)
-    eyeN = eyeN[:, i_idio.astype(bool)]  # Keep only monthly columns
+    eyeN = eyeN[:, i_idio.astype(bool)]  # Keep only series with idiosyncratic components
     
     if C is None:
         C = eyeN
     else:
         C = np.hstack([C, eyeN])
     
-    # Monthly-quarterly aggregation scheme for quarterly idiosyncratic
-    quarterly_idio = np.zeros((nM, 5 * nQ))
-    quarterly_idio_q = np.kron(np.eye(nQ), np.array([[1], [2], [3], [2], [1]]))
-    quarterly_idio_full = np.vstack([quarterly_idio, quarterly_idio_q.T])
-    C = np.hstack([C, quarterly_idio_full])
+    # Add idiosyncratic components for slower frequency series
+    # Each slower frequency series needs tent kernel structure
+    if nQ > 0 and frequencies is not None:
+        # Count series by slower frequency
+        clock_hierarchy = FREQUENCY_HIERARCHY.get(clock, 3)
+        slower_series_count = {}  # freq -> count
+        slower_series_indices = {}  # freq -> list of indices
+        
+        for j in range(N):
+            if j < len(frequencies):
+                freq = frequencies[j]
+                freq_hierarchy = FREQUENCY_HIERARCHY.get(freq, 3)
+                if freq_hierarchy > clock_hierarchy:
+                    if freq not in slower_series_count:
+                        slower_series_count[freq] = 0
+                        slower_series_indices[freq] = []
+                    slower_series_count[freq] += 1
+                    slower_series_indices[freq].append(j)
+        
+        # Build idiosyncratic structure for each slower frequency
+        n_same_freq = N - nQ  # Series with same frequency as clock
+        slower_idio_blocks = []
+        
+        for freq, count in slower_series_count.items():
+            # Get tent weights for this frequency
+            if tent_weights_dict is not None and freq in tent_weights_dict:
+                tent_weights = tent_weights_dict[freq]
+            else:
+                tent_weights = get_tent_weights_for_pair(freq, clock)
+                if tent_weights is None:
+                    # Fallback: generate symmetric tent weights based on frequency gap
+                    clock_hierarchy = FREQUENCY_HIERARCHY.get(clock, 3)
+                    freq_hierarchy = FREQUENCY_HIERARCHY.get(freq, 3)
+                    n_periods_est = freq_hierarchy - clock_hierarchy + 1
+                    if n_periods_est > 0 and n_periods_est <= 12:
+                        tent_weights = generate_tent_weights(n_periods_est, 'symmetric')
+                    else:
+                        raise ValueError(
+                            f"init_conditions: Cannot determine tent weights for frequency '{freq}' "
+                            f"with clock '{clock}'. Please provide tent_weights_dict or ensure "
+                            f"the frequency pair is supported."
+                        )
+            
+            n_periods = len(tent_weights)
+            
+            # Create block: zeros for same freq series, tent structure for slower freq series
+            idio_block = np.zeros((N, n_periods * count))
+            
+            # Place tent structure for this frequency's series
+            for idx, j in enumerate(slower_series_indices[freq]):
+                col_start = idx * n_periods
+                col_end = (idx + 1) * n_periods
+                idio_block[j, col_start:col_end] = tent_weights
+            
+            slower_idio_blocks.append(idio_block)
+        
+        # Combine all slower frequency idiosyncratic blocks
+        if slower_idio_blocks:
+            slower_idio_full = np.hstack(slower_idio_blocks)
+            C = np.hstack([C, slower_idio_full])
     
     # Initialize covariance matrix
     # Calculate variance, handling NaN/Inf cases
@@ -1371,7 +1571,7 @@ def init_conditions(x: np.ndarray, r: np.ndarray, p: int, blocks: np.ndarray,
         R[i, i] = 1e-4
         
         res_i = resNaN[:, i]
-        res_i_full = res[:, i]
+        res_i_full = data_residuals[:, i]
         
         # Count leading/ending NaNs
         leadZero = 0
@@ -1427,60 +1627,130 @@ def init_conditions(x: np.ndarray, r: np.ndarray, p: int, blocks: np.ndarray,
             BM[idx, idx] = 0.1
             SM[idx, idx] = 0.1
     
-    # Quarterly idiosyncratic
+    # Slower frequency idiosyncratic
     Rdiag = np.diag(R).copy()  # Copy to avoid read-only array
     # Handle division by zero and NaN/Inf
     # Validate Rdiag values before division
-    Rdiag_quarterly = Rdiag[nM:N]
-    if len(Rdiag_quarterly) > 0:
-        # Ensure no invalid values before division
-        Rdiag_quarterly = np.where(
-            (np.isnan(Rdiag_quarterly) | np.isinf(Rdiag_quarterly) | (Rdiag_quarterly < 0)),
-            1e-4, Rdiag_quarterly
-        )
-        sig_e = _safe_divide(Rdiag_quarterly, QUARTERLY_VARIANCE_DIVISOR, default=1e-4)
-        sig_e = np.where((np.isnan(sig_e) | np.isinf(sig_e) | (sig_e < 1e-6)), 1e-4, sig_e)
+    # Get indices of slower frequency series
+    if frequencies is not None:
+        clock_hierarchy = FREQUENCY_HIERARCHY.get(clock, 3)
+        slower_indices = [j for j in range(N) if j < len(frequencies) and 
+                         FREQUENCY_HIERARCHY.get(frequencies[j], 3) > clock_hierarchy]
     else:
-        sig_e = np.array([])
-    Rdiag[nM:N] = 1e-4
+        # Fallback: assume last nQ series are slower
+        slower_indices = list(range(N - nQ, N)) if nQ > 0 else []
+    
+    Rdiag_slower = Rdiag[slower_indices] if slower_indices else np.array([])
+    # Process slower frequency idiosyncratic components
+    # Group by frequency and create AR structure for each
+    BQ_blocks = []
+    SQ_blocks = []
+    initViQ_blocks = []
+    
+    if len(slower_indices) > 0 and frequencies is not None:
+        # Group slower series by frequency
+        slower_freq_groups = {}
+        for j in slower_indices:
+            if j < len(frequencies):
+                freq = frequencies[j]
+                if freq not in slower_freq_groups:
+                    slower_freq_groups[freq] = []
+                slower_freq_groups[freq].append(j)
+        
+        for freq, idx_list in slower_freq_groups.items():
+            n_freq = len(idx_list)
+            
+            # Get tent weights for this frequency
+            if tent_weights_dict is not None and freq in tent_weights_dict:
+                tent_weights = tent_weights_dict[freq]
+            else:
+                tent_weights = get_tent_weights_for_pair(freq, clock)
+                if tent_weights is None:
+                    # Fallback: generate symmetric tent weights based on frequency gap
+                    clock_hierarchy = FREQUENCY_HIERARCHY.get(clock, 3)
+                    freq_hierarchy = FREQUENCY_HIERARCHY.get(freq, 3)
+                    n_periods_est = freq_hierarchy - clock_hierarchy + 1
+                    if n_periods_est > 0 and n_periods_est <= 12:
+                        tent_weights = generate_tent_weights(n_periods_est, 'symmetric')
+                    else:
+                        raise ValueError(
+                            f"init_conditions: Cannot determine tent weights for frequency '{freq}' "
+                            f"with clock '{clock}'. Please provide tent_weights_dict or ensure "
+                            f"the frequency pair is supported."
+                        )
+            
+            n_periods = len(tent_weights)
+            
+            # Get variance for this frequency's series
+            Rdiag_freq = Rdiag[idx_list]
+            if len(Rdiag_freq) > 0:
+                Rdiag_freq = np.where(
+                    (np.isnan(Rdiag_freq) | np.isinf(Rdiag_freq) | (Rdiag_freq < 0)),
+                    1e-4, Rdiag_freq
+                )
+                # Use appropriate variance divisor based on tent kernel size
+                # For quarterly (5 periods), divisor is 19.0
+                # For other frequencies, use a similar scaling
+                variance_divisor = np.sum(tent_weights**2)  # Sum of squares of tent weights
+                sig_e = _safe_divide(Rdiag_freq, variance_divisor, default=1e-4)
+                sig_e = np.where((np.isnan(sig_e) | np.isinf(sig_e) | (sig_e < 1e-6)), 1e-4, sig_e)
+            else:
+                sig_e = np.ones(n_freq) * 1e-4
+            
+            # Set Rdiag for these series
+            Rdiag[idx_list] = 1e-4
+            
+            # AR structure for this frequency
+            rho0 = 0.1
+            temp = np.zeros((n_periods, n_periods))
+            temp[0, 0] = 1
+            
+            SQ_freq = np.kron(np.diag((1 - rho0**2) * sig_e), temp)
+            
+            # BQ template for this frequency
+            BQ_template = np.vstack([
+                np.hstack([rho0, np.zeros(n_periods - 1)]),
+                np.hstack([np.eye(n_periods - 1), np.zeros((n_periods - 1, 1))])
+            ])
+            BQ_freq = np.kron(np.eye(int(n_freq)), BQ_template)
+            
+            BQ_blocks.append(BQ_freq)
+            SQ_blocks.append(SQ_freq)
+            
+            # Initial covariance for this frequency
+            try:
+                I_kron = np.eye((n_periods * n_freq)**2)
+                kron_mat = np.kron(BQ_freq, BQ_freq)
+                inv_mat = I_kron - kron_mat
+                if np.any(np.isnan(inv_mat)) or np.any(np.isinf(inv_mat)):
+                    raise ValueError("NaN/Inf in inversion matrix")
+                initViQ_freq = np.reshape(
+                    inv(inv_mat) @ SQ_freq.flatten(),
+                    (n_periods * n_freq, n_periods * n_freq)
+                )
+                if np.any(np.isnan(initViQ_freq)) or np.any(np.isinf(initViQ_freq)):
+                    raise ValueError("NaN/Inf in initViQ result")
+                initViQ_blocks.append(initViQ_freq)
+            except (np.linalg.LinAlgError, ValueError, IndexError) as e:
+                _logger.warning(
+                    f"init_conditions: {freq} idiosyncratic initial covariance calculation failed, "
+                    f"using diagonal fallback. Error: {type(e).__name__}"
+                )
+                initViQ_blocks.append(np.eye(n_periods * n_freq) * 0.1)
+    
     R = np.diag(Rdiag)
     
-    # Quarterly AR structure
-    rho0 = 0.1
-    temp = np.zeros((5, 5))
-    temp[0, 0] = 1
+    # Combine all slower frequency blocks
+    if BQ_blocks:
+        BQ = block_diag(*BQ_blocks) if len(BQ_blocks) > 1 else BQ_blocks[0]
+        SQ = block_diag(*SQ_blocks) if len(SQ_blocks) > 1 else SQ_blocks[0]
+        initViQ = block_diag(*initViQ_blocks) if len(initViQ_blocks) > 1 else initViQ_blocks[0]
+    else:
+        # No slower frequency series
+        BQ = np.array([]).reshape(0, 0)
+        SQ = np.array([]).reshape(0, 0)
+        initViQ = np.array([]).reshape(0, 0)
     
-    SQ = np.kron(np.diag((1 - rho0**2) * sig_e), temp)
-    # BQ should be (5*nQ) x (5*nQ) - build properly
-    BQ_template = np.vstack([
-        np.hstack([rho0, np.zeros(4)]),
-        np.hstack([np.eye(4), np.zeros((4, 1))])
-    ])
-    BQ = np.kron(np.eye(int(nQ)), BQ_template)  # Ensure nQ is int
-    
-    try:
-        # Check if matrix is invertible before inversion
-        I_kron = np.eye((5 * nQ)**2)
-        kron_mat = np.kron(BQ, BQ)
-        inv_mat = I_kron - kron_mat
-        # Check for NaN/Inf in matrix
-        if np.any(np.isnan(inv_mat)) or np.any(np.isinf(inv_mat)):
-            raise ValueError("NaN/Inf in inversion matrix")
-        initViQ = np.reshape(
-            inv(inv_mat) @ SQ.flatten(),
-            (5 * nQ, 5 * nQ)
-        )
-        # Check result for NaN/Inf
-        if np.any(np.isnan(initViQ)) or np.any(np.isinf(initViQ)):
-            raise ValueError("NaN/Inf in initViQ result")
-    except (np.linalg.LinAlgError, ValueError, IndexError) as e:
-        # Matrix inversion failed or result invalid - use diagonal fallback for quarterly idiosyncratic
-        # This can happen if (I - kron(BQ, BQ)) is singular or nQ is zero
-        _logger.warning(
-            f"init_conditions: Quarterly idiosyncratic initial covariance calculation failed, "
-            f"using diagonal fallback (0.1 * I). Error: {type(e).__name__}"
-        )
-        initViQ = np.eye(5 * nQ) * 0.1
     
     try:
         # Calculate denominator, handling division by zero
@@ -1580,7 +1850,7 @@ def init_conditions(x: np.ndarray, r: np.ndarray, p: int, blocks: np.ndarray,
 def em_step(y: np.ndarray, A: np.ndarray, C: np.ndarray, Q: np.ndarray,
            R: np.ndarray, Z_0: np.ndarray, V_0: np.ndarray,
            r: np.ndarray, p: int, R_mat: Optional[np.ndarray], q: Optional[np.ndarray],
-           nQ: int, i_idio: np.ndarray, blocks: np.ndarray,
+           nQ: Optional[int], i_idio: np.ndarray, blocks: np.ndarray,
            tent_weights_dict: Optional[Dict[str, np.ndarray]] = None,
            clock: str = 'm',
            frequencies: Optional[np.ndarray] = None,
@@ -1689,7 +1959,6 @@ def em_step(y: np.ndarray, A: np.ndarray, C: np.ndarray, Q: np.ndarray,
     >>> # Update parameters for next iteration
     >>> A, C, Q, R, Z_0, V_0 = A_new, C_new, Q_new, R_new, Z_0_new, V_0_new
     """
-    # Validate inputs (note: validation disabled during iterations for performance)
     # Uncomment if debugging: _validate_em_step_inputs(y, A, C, Q, R, Z_0, V_0, r, p, blocks, nQ)
     
     # Numerical stability: check and clean parameter matrices before Kalman filter
@@ -1719,18 +1988,28 @@ def em_step(y: np.ndarray, A: np.ndarray, C: np.ndarray, Q: np.ndarray,
         V_0 = np.eye(V_0.shape[0]) * 0.1
     
     n, T = y.shape  # n series, T time periods
-    nM = n - nQ
-    # Handle missing_data method (no aggregation constraints)
-    if R_mat is None or q is None:
-        pC = 1  # No tent structure
-    else:
+    
+    # Determine nQ if not provided
+    if nQ is None and frequencies is not None:
+        clock_hierarchy = FREQUENCY_HIERARCHY.get(clock, 3)
+        nQ = sum(1 for f in frequencies if FREQUENCY_HIERARCHY.get(f, 3) > clock_hierarchy)
+    elif nQ is None:
+        nQ = 0
+    
+    # Determine pC from tent_weights_dict if available, otherwise use R_mat
+    pC = 1
+    if tent_weights_dict is not None and len(tent_weights_dict) > 0:
+        # Find maximum tent kernel size
+        for tent_weights in tent_weights_dict.values():
+            if tent_weights is not None and len(tent_weights) > pC:
+                pC = len(tent_weights)
+    elif R_mat is not None:
         pC = R_mat.shape[1]
+    
     ppC = int(max(p, pC))  # Ensure integer
     num_blocks = blocks.shape[1]
     
     # Get config defaults if not provided
-    # Create a minimal config object with defaults for backward compatibility
-    # We use a simple object to avoid DFMConfig validation which requires series
     if config is None:
         from types import SimpleNamespace
         config = SimpleNamespace(
@@ -1752,13 +2031,12 @@ def em_step(y: np.ndarray, A: np.ndarray, C: np.ndarray, Q: np.ndarray,
         )
     
     # E-step: Run Kalman filter and smoother
-    # Note: y is n x T (series x time), need to transpose for Kalman filter
     # Kalman filter expects k x nobs, so we pass y as-is
     zsmooth, vsmooth, vvsmooth, loglik = run_kf(y, A, C, Q, R, Z_0, V_0)
     
     # zsmooth is m x (T+1) from run_kf (factors x time)
     # MATLAB: Zsmooth = runKF(y, A, C, Q, R, Z_0, V_0)' - transpose makes it (T+1) x m
-    # So Zsmooth(t+1, bl_idxM(i,:)) selects time t+1, factors indicated by bl_idxM(i,:)
+    # So Zsmooth(t+1, bl_idx_same_freq(i,:)) selects time t+1, factors indicated by bl_idx_same_freq(i,:)
     # In Python: transpose to match MATLAB: (T+1) x m (time x factors)
     # Keep initial state (column 0) since MATLAB uses t+1 indexing (skips initial)
     Zsmooth = zsmooth.T  # m x (T+1) -> (T+1) x m
@@ -1772,49 +2050,48 @@ def em_step(y: np.ndarray, A: np.ndarray, C: np.ndarray, Q: np.ndarray,
     # Update factor parameters for each block
     for i in range(num_blocks):
         r_i = int(r[i])
-        rp = r_i * p
-        # MATLAB: rp1 = sum(r(1:i-1))*ppC (1-based, so we use sum of previous blocks)
-        rp1 = int(np.sum(r[:i]) * ppC)  # Python 0-based: sum of r[0] to r[i-1]
-        # MATLAB: b_subset = rp1+1:rp1+rp (1-based indexing)
-        b_subset = slice(rp1, rp1 + rp)  # Python 0-based: rp1 to rp1+rp-1
-        t_start = rp1  # Python 0-based
-        t_end = int(rp1 + r_i * ppC)  # Ensure integer
+        factor_lag_size = r_i * p  # Number of lagged factors for this block
+        # Calculate starting index for this block's factors in the state vector
+        # Sum of factors from all previous blocks, scaled by max_lag_size
+        factor_start_idx = int(np.sum(r[:i]) * ppC)  # Python 0-based: sum of r[0] to r[i-1]
+        # Subset of state vector for this block's factors (current and lagged)
+        b_subset = slice(factor_start_idx, factor_start_idx + factor_lag_size)  # Python 0-based
+        t_start = factor_start_idx  # Starting index for this block
+        t_end = int(factor_start_idx + r_i * ppC)  # Ending index for this block
         
-        # E[f_t * f_t' | Omega_T]
-        # MATLAB: Zsmooth(b_subset, 2:end) means columns 2 to end (skip initial state)
-        # Python: Zsmooth[b_subset, 1:] is equivalent (skip column 0)
-        EZZ = Zsmooth[b_subset, 1:] @ Zsmooth[b_subset, 1:].T + np.sum(vsmooth[b_subset, :, :][:, b_subset, 1:], axis=2)
+        # E[f_t * f_t' | Omega_T] - Expected value of factor outer product at time t
+        # Zsmooth[b_subset, 1:] selects factors for this block, skipping initial state (column 0)
+        expected_factor_outer = Zsmooth[b_subset, 1:] @ Zsmooth[b_subset, 1:].T + np.sum(vsmooth[b_subset, :, :][:, b_subset, 1:], axis=2)
         
-        # E[f_{t-1} * f_{t-1}' | Omega_T]
-        # MATLAB: Zsmooth(b_subset, 1:end-1) means columns 1 to end-1
-        EZZ_BB = Zsmooth[b_subset, :-1] @ Zsmooth[b_subset, :-1].T + np.sum(vsmooth[b_subset, :, :][:, b_subset, :-1], axis=2)
+        # E[f_{t-1} * f_{t-1}' | Omega_T] - Expected value of lagged factor outer product
+        # Zsmooth[b_subset, :-1] selects factors for this block, excluding last time period
+        expected_factor_lag_outer = Zsmooth[b_subset, :-1] @ Zsmooth[b_subset, :-1].T + np.sum(vsmooth[b_subset, :, :][:, b_subset, :-1], axis=2)
         
-        # E[f_t * f_{t-1}' | Omega_T]
-        # MATLAB: Zsmooth(b_subset, 2:end) * Zsmooth(b_subset, 1:end-1)'
-        EZZ_FB = Zsmooth[b_subset, 1:] @ Zsmooth[b_subset, :-1].T + np.sum(vvsmooth[b_subset, :, :][:, b_subset, :], axis=2)
+        # E[f_t * f_{t-1}' | Omega_T] - Expected value of factor-lag cross product
+        expected_factor_lag_cross = Zsmooth[b_subset, 1:] @ Zsmooth[b_subset, :-1].T + np.sum(vvsmooth[b_subset, :, :][:, b_subset, :], axis=2)
         
-        # Clean EZZ_BB and EZZ_FB before matrix operations
-        EZZ_BB = _clean_matrix(EZZ_BB, 'covariance', default_nan=0.0)
-        EZZ_FB = _clean_matrix(EZZ_FB, 'general', default_nan=0.0)
+        # Clean expected values before matrix operations
+        expected_factor_lag_outer = _clean_matrix(expected_factor_lag_outer, 'covariance', default_nan=0.0)
+        expected_factor_lag_cross = _clean_matrix(expected_factor_lag_cross, 'general', default_nan=0.0)
         
-        # Update A and Q for block i
-        A_i = A[t_start:t_end, t_start:t_end].copy()
-        Q_i = Q[t_start:t_end, t_start:t_end].copy()
+        # Update transition and innovation matrices for block i
+        block_transition = A[t_start:t_end, t_start:t_end].copy()
+        block_innovation_cov = Q[t_start:t_end, t_start:t_end].copy()
         
         try:
-            # Check EZZ_BB before inversion
-            EZZ_BB_sub = EZZ_BB[:rp, :rp]
-            if np.any(np.isnan(EZZ_BB_sub)) or np.any(np.isinf(EZZ_BB_sub)):
-                raise ValueError("Invalid values in EZZ_BB")
+            # Check expected_factor_lag_outer before inversion
+            expected_lag_sub = expected_factor_lag_outer[:factor_lag_size, :factor_lag_size]
+            if np.any(np.isnan(expected_lag_sub)) or np.any(np.isinf(expected_lag_sub)):
+                raise ValueError("Invalid values in expected_factor_lag_outer")
             
             # Regularize if needed (ensure positive definite)
             min_eigenval = config.min_eigenvalue if config else 1e-8
             warn_reg = config.warn_on_regularization if config else True
-            EZZ_BB_sub, _ = _ensure_positive_definite(EZZ_BB_sub, min_eigenval, warn_reg)
+            expected_lag_sub, _ = _ensure_positive_definite(expected_lag_sub, min_eigenval, warn_reg)
             
             # Check if matrix is too ill-conditioned
             try:
-                eigenvals = np.linalg.eigvals(EZZ_BB_sub)
+                eigenvals = np.linalg.eigvals(expected_lag_sub)
                 max_eigenval = np.max(eigenvals)
                 min_eigenval = np.min(eigenvals)
                 
@@ -1823,60 +2100,66 @@ def em_step(y: np.ndarray, A: np.ndarray, C: np.ndarray, Q: np.ndarray,
                     if cond_num > 1e12:
                         # Use pseudo-inverse for ill-conditioned matrices
                         try:
-                            EZZ_BB_inv = pinv(EZZ_BB_sub, cond=1e-8)
+                            expected_lag_inv = pinv(expected_lag_sub, cond=1e-8)
                         except TypeError:
                             # Fallback for older scipy versions
-                            EZZ_BB_inv = pinv(EZZ_BB_sub)
+                            expected_lag_inv = pinv(expected_lag_sub)
                     else:
-                        EZZ_BB_inv = inv(EZZ_BB_sub)
+                        expected_lag_inv = inv(expected_lag_sub)
                 else:
                     # All eigenvalues are zero or negative - use identity
-                    EZZ_BB_inv = np.eye(rp) * (1.0 / max(1e-8, np.trace(EZZ_BB_sub) / rp))
+                    expected_lag_inv = np.eye(factor_lag_size) * (1.0 / max(1e-8, np.trace(expected_lag_sub) / factor_lag_size))
             except (np.linalg.LinAlgError, ValueError):
                 # Eigendecomposition failed - use pseudo-inverse
-                EZZ_BB_inv = pinv(EZZ_BB_sub)
+                expected_lag_inv = pinv(expected_lag_sub)
             
-            # MATLAB: A_i(1:r_i,1:rp) = EZZ_FB(1:r_i,1:rp) * inv(EZZ_BB(1:rp,1:rp))
-            A_i_update = EZZ_FB[:r_i, :rp] @ EZZ_BB_inv
+            # Compute AR coefficients: block_transition = E[f_t * f_{t-1}'] * inv(E[f_{t-1} * f_{t-1}'])
+            transition_update = expected_factor_lag_cross[:r_i, :factor_lag_size] @ expected_lag_inv
             
             # Cap AR coefficients to reasonable bounds (configurable)
-            A_i_update, _ = _apply_ar_clipping(A_i_update, config)
-            A_i[:r_i, :rp] = A_i_update
+            transition_update, _ = _apply_ar_clipping(transition_update, config)
+            block_transition[:r_i, :factor_lag_size] = transition_update
             
-            # MATLAB: Q_i(1:r_i,1:r_i) = (EZZ(1:r_i,1:r_i) - A_i(1:r_i,1:rp)* EZZ_FB(1:r_i,1:rp)') / T
-            Q_i[:r_i, :r_i] = (EZZ[:r_i, :r_i] - A_i[:r_i, :rp] @ EZZ_FB[:r_i, :rp].T) / T
+            # Compute innovation covariance: block_innovation_cov = (E[f_t * f_t'] - block_transition * E[f_t * f_{t-1}']) / T
+            block_innovation_cov[:r_i, :r_i] = (
+                expected_factor_outer[:r_i, :r_i] - 
+                block_transition[:r_i, :factor_lag_size] @ expected_factor_lag_cross[:r_i, :factor_lag_size].T
+            ) / T
             
-            # Clean Q_i result and ensure positive semi-definite
-            Q_i = _clean_matrix(Q_i, 'covariance', default_nan=0.0)
+            # Clean innovation covariance and ensure positive semi-definite
+            block_innovation_cov = _clean_matrix(block_innovation_cov, 'covariance', default_nan=0.0)
             
             # Ensure positive semi-definite for the factor block
             min_eigenval = config.min_eigenvalue if config else 1e-8
-            Q_i_reg, reg_stats = _apply_regularization(Q_i[:r_i, :r_i], 'covariance', config)
-            Q_i[:r_i, :r_i] = Q_i_reg
+            innovation_cov_reg, reg_stats = _apply_regularization(
+                block_innovation_cov[:r_i, :r_i], 'covariance', config
+            )
+            block_innovation_cov[:r_i, :r_i] = innovation_cov_reg
             
             # Cap maximum eigenvalue to prevent explosion
             max_eigenval = config.max_eigenvalue if config else 1e6
-            Q_i[:r_i, :r_i] = _cap_max_eigenvalue(Q_i[:r_i, :r_i], max_eigenval=max_eigenval)
+            block_innovation_cov[:r_i, :r_i] = _cap_max_eigenvalue(
+                block_innovation_cov[:r_i, :r_i], max_eigenval=max_eigenval
+            )
         except (np.linalg.LinAlgError, ValueError) as e:
-            # If update fails, use damped version of previous A_i to prevent complete collapse
-            # Don't set to zero - use small random perturbation or keep previous with damping
-            if np.allclose(A_i[:r_i, :rp], 0):
-                # If A_i is all zeros, initialize with small random values
-                A_i[:r_i, :rp] = np.random.randn(r_i, rp) * 0.1
+            # If update fails, use damped version of previous block_transition to prevent collapse
+            if np.allclose(block_transition[:r_i, :factor_lag_size], 0):
+                # If all zeros, initialize with small random values
+                block_transition[:r_i, :factor_lag_size] = np.random.randn(r_i, factor_lag_size) * 0.1
             else:
                 # Damp previous values slightly
-                A_i[:r_i, :rp] = A_i[:r_i, :rp] * 0.95
-            _logger.debug(f"em_step: A update failed for block {i+1}, using fallback: {type(e).__name__}")
+                block_transition[:r_i, :factor_lag_size] = block_transition[:r_i, :factor_lag_size] * 0.95
+            _logger.debug(f"em_step: Transition update failed for block {i+1}, using fallback: {type(e).__name__}")
         
-        # Clean NaN/Inf from A_i with reasonable bounds
-        if np.any(~np.isfinite(A_i)):
-            A_i = _clean_matrix(A_i, 'loading', default_nan=0.0, default_inf=0.99)
+        # Clean NaN/Inf from block_transition with reasonable bounds
+        if np.any(~np.isfinite(block_transition)):
+            block_transition = _clean_matrix(block_transition, 'loading', default_nan=0.0, default_inf=0.99)
             # Ensure AR coefficients are within stability bounds
-            A_i, _ = _apply_ar_clipping(A_i, config)
-        A_new[t_start:t_end, t_start:t_end] = A_i
+            block_transition, _ = _apply_ar_clipping(block_transition, config)
         
-        Q_new[t_start:t_end, t_start:t_end] = Q_i
-        # MATLAB: Vsmooth(t_start:t_end, t_start:t_end, 1) - note MATLAB uses 1-based indexing
+        # Place updated block matrices in output
+        A_new[t_start:t_end, t_start:t_end] = block_transition
+        Q_new[t_start:t_end, t_start:t_end] = block_innovation_cov
         V_0_block = vsmooth[t_start:t_end, t_start:t_end, 0]
         # Ensure V_0_block is positive semi-definite
         V_0_block = _clean_matrix(V_0_block, 'covariance', default_nan=0.0)
@@ -1886,10 +2169,15 @@ def em_step(y: np.ndarray, A: np.ndarray, C: np.ndarray, Q: np.ndarray,
         V_0_new[t_start:t_end, t_start:t_end] = V_0_block
     
     # Update idiosyncratic component
-    rp1 = int(np.sum(r) * ppC)
-    niM = int(np.sum(i_idio[:nM]))
-    t_start = rp1
-    i_subset = slice(t_start, t_start + niM)
+    # i_idio indicates which series have idiosyncratic components
+    # For clock frequency: 1 (have idiosyncratic)
+    # For slower frequencies: 0 (no direct idiosyncratic, use tent kernel structure)
+    # Calculate starting index for idiosyncratic components in state vector
+    # All factors come first, so idiosyncratic starts after all block factors
+    idio_start_idx = int(np.sum(r) * ppC)
+    n_idio = int(np.sum(i_idio))  # All series with idiosyncratic components
+    idio_block_start = idio_start_idx
+    i_subset = slice(idio_block_start, idio_block_start + n_idio)
     
     # E[f_t*f_t' | Omega_T] for idiosyncratic (diagonal only)
     # MATLAB: Zsmooth(t_start:end, 2:end) * Zsmooth(t_start:end, 2:end)'
@@ -1901,92 +2189,70 @@ def em_step(y: np.ndarray, A: np.ndarray, C: np.ndarray, Q: np.ndarray,
     # We want diagonal only: diag(diag(...))
     # 
     # t_start is the start of idiosyncratic component index
-    # i_subset = t_start:rp1+niM selects the monthly idiosyncratic factors only
+    # i_subset = idio_block_start:idio_block_start+n_idio selects the clock-frequency idiosyncratic factors only
     # So we should use i_subset to select rows, not t_start:end
     i_subset_slice = slice(i_subset.start, i_subset.stop)
-    Z_idio = Zsmooth[i_subset_slice, 1:]  # niM x T, monthly idiosyncratic factors only
-    ni_idio = Z_idio.shape[0]  # Number of idiosyncratic factors (should be niM)
+    Z_idio = Zsmooth[i_subset_slice, 1:]  # n_idio x T, clock-frequency idiosyncratic factors only
+    n_idio_actual = Z_idio.shape[0]  # Number of idiosyncratic factors (should be n_idio)
     
-    # Z_idio @ Z_idio.T gives ni_idio x ni_idio (sum over time)
-    # Extract diagonal only
-    EZZ_idio_diag_vals = np.sum(Z_idio**2, axis=1)  # Sum over time, gives ni_idio values
-    # vsmooth is m x m x (T+1), sum over time dimension (axis 2) for idiosyncratic rows/cols
-    vsmooth_idio_sum = np.sum(vsmooth[i_subset_slice, :, :][:, i_subset_slice, 1:], axis=2)  # ni_idio x ni_idio
-    EZZ_idio_diag = np.diag(EZZ_idio_diag_vals) + np.diag(np.diag(vsmooth_idio_sum))
+    # Compute expected values for idiosyncratic components (diagonal only, since they're independent)
+    # E[z_t^2 | Omega_T] = sum(Z_idio^2) + diagonal of smoothed covariance
+    expected_idio_current_sq = np.sum(Z_idio**2, axis=1)  # Sum over time
+    vsmooth_idio_sum = np.sum(vsmooth[i_subset_slice, :, :][:, i_subset_slice, 1:], axis=2)
+    vsmooth_idio_diag = np.diag(vsmooth_idio_sum)
+    expected_idio_current_sq = expected_idio_current_sq + vsmooth_idio_diag
     
-    # E[f_{t-1}*f_{t-1}' | Omega_T] for idiosyncratic (diagonal only)
-    # MATLAB: Zsmooth(t_start:end, 1:end-1) means columns 1 to T (periods 0 to T-1)
-    Z_idio_BB = Zsmooth[i_subset_slice, :-1]  # ni_idio x T, time periods 0 to T-1
-    EZZ_BB_idio_diag_vals = np.sum(Z_idio_BB**2, axis=1)  # Sum over time
-    vsmooth_BB_sum = np.sum(vsmooth[i_subset_slice, :, :][:, i_subset_slice, :-1], axis=2)
-    EZZ_BB_idio_diag = np.diag(EZZ_BB_idio_diag_vals) + np.diag(np.diag(vsmooth_BB_sum))
+    # E[z_{t-1}^2 | Omega_T] for idiosyncratic (periods 0 to T-1)
+    Z_idio_lag = Zsmooth[i_subset_slice, :-1]  # Time periods 0 to T-1
+    expected_idio_lag_sq = np.sum(Z_idio_lag**2, axis=1)  # Sum over time
+    vsmooth_lag_sum = np.sum(vsmooth[i_subset_slice, :, :][:, i_subset_slice, :-1], axis=2)
+    vsmooth_lag_diag = np.diag(vsmooth_lag_sum)
+    expected_idio_lag_sq = expected_idio_lag_sq + vsmooth_lag_diag
     
-    # E[f_t*f_{t-1}' | Omega_T] for idiosyncratic (diagonal only)
-    # MATLAB: Zsmooth(t_start:end, 2:end) * Zsmooth(t_start:end, 1:end-1)'
-    # Z_idio is ni_idio x T (periods 1 to T)
-    # Z_idio_BB is ni_idio x T (periods 0 to T-1)
-    # Element-wise product: Z_idio[:, t] * Z_idio_BB[:, t] for t=0 to T-1 (aligned)
-    min_cols = min(Z_idio.shape[1], Z_idio_BB.shape[1])
-    EZZ_FB_idio_diag_vals = np.sum(Z_idio[:, :min_cols] * Z_idio_BB[:, :min_cols], axis=1)  # Element-wise, sum over time
+    # E[z_t * z_{t-1} | Omega_T] for idiosyncratic (element-wise product, sum over time)
+    min_cols = min(Z_idio.shape[1], Z_idio_lag.shape[1])
+    expected_idio_cross = np.sum(Z_idio[:, :min_cols] * Z_idio_lag[:, :min_cols], axis=1)
     vvsmooth_sum = np.sum(vvsmooth[i_subset_slice, :, :][:, i_subset_slice, :], axis=2)
-    EZZ_FB_idio_diag = np.diag(EZZ_FB_idio_diag_vals) + np.diag(np.diag(vvsmooth_sum))
+    vvsmooth_diag = np.diag(vvsmooth_sum)
+    expected_idio_cross = expected_idio_cross + vvsmooth_diag
     
-    # Update A and Q for idiosyncratic monthly component
-    # Idiosyncratic components are independent AR(1) processes, so A_i and Q_i should be diagonal
+    # Update A and Q for idiosyncratic components
+    # Idiosyncratic components are independent AR(1) processes, so A_i and Q_i are diagonal
     # Theoretical formula: A_i[i,i] = E[z_t * z_{t-1}] / E[z_{t-1}^2] for each series i
     
-    # Extract diagonal elements (these are the expectations for each idiosyncratic component)
-    EZZ_BB_diag_vals = np.diag(EZZ_BB_idio_diag).copy()
-    EZZ_FB_diag_vals = np.diag(EZZ_FB_idio_diag).copy()
-    EZZ_idio_diag_vals = np.diag(EZZ_idio_diag).copy()
-    
-    # Add smoothed covariance to denominators
-    vsmooth_BB_diag = np.diag(vsmooth_BB_sum)
-    
     # Estimate AR coefficients using helper function
-    A_i_diag, _ = _estimate_ar_coefficient(
-        EZZ_FB_diag_vals, EZZ_BB_diag_vals, vsmooth_sum=vsmooth_BB_diag
+    ar_coeffs_diag, _ = _estimate_ar_coefficient(
+        expected_idio_cross, expected_idio_lag_sq, vsmooth_sum=vsmooth_lag_diag
     )
     
-    # Create diagonal A_i matrix
-    A_i = np.diag(A_i_diag)
+    # Create diagonal transition matrix
+    block_transition_idio = np.diag(ar_coeffs_diag)
     
-    # Compute Q_i: Q_i[i,i] = (E[z_t^2] - A_i[i,i] * E[z_t * z_{t-1}]) / T
-    # For diagonal matrices, this simplifies to element-wise operations
-    vsmooth_idio_diag = np.diag(vsmooth_idio_sum)
-    EZZ_idio_diag_vals = EZZ_idio_diag_vals + vsmooth_idio_diag
-    # Clean EZZ_idio_diag_vals (1D array, so use direct cleaning)
-    EZZ_idio_diag_vals = np.nan_to_num(EZZ_idio_diag_vals, nan=0.0, posinf=1e6, neginf=-1e6)
+    # Compute innovation covariance: Q_i[i,i] = (E[z_t^2] - A_i[i,i] * E[z_t * z_{t-1}]) / T
+    # Clean expected values before computation
+    expected_idio_current_sq = np.nan_to_num(expected_idio_current_sq, nan=0.0, posinf=1e6, neginf=-1e6)
+    innovation_cov_diag = (expected_idio_current_sq - ar_coeffs_diag * expected_idio_cross) / T
     
-    Q_i_diag = (EZZ_idio_diag_vals - A_i_diag * EZZ_FB_diag_vals) / T
+    # Ensure innovation covariance is positive (variance must be non-negative)
+    innovation_cov_diag = np.maximum(innovation_cov_diag, 1e-8)
     
-    # Ensure Q_i is positive (variance must be non-negative)
-    Q_i_diag = np.maximum(Q_i_diag, 1e-8)
+    # Create diagonal innovation covariance matrix
+    block_innovation_cov_idio = np.diag(innovation_cov_diag)
     
-    # Create diagonal Q_i matrix
-    # Since Q_i is diagonal, it's already symmetric and positive semi-definite
-    Q_i = np.diag(Q_i_diag)
-    
-    # Final validation: ensure A_i and Q_i are well-behaved
-    # A_i is already diagonal and clipped to stability bounds
-    # Q_i is already diagonal and positive
-    # No additional regularization needed for diagonal matrices
-    
-    # Place in output matrices (only monthly idiosyncratic)
-    # MATLAB: A_new(i_subset, i_subset) = A_i(1:niM, 1:niM)
-    # A_i should be ni_idio x ni_idio, and we extract niM x niM (they should be equal)
-    if ni_idio == niM:
-        A_new[i_subset, i_subset] = A_i
-        Q_new[i_subset, i_subset] = Q_i
+    # Place in output matrices (only clock-frequency idiosyncratic)
+    # block_transition_idio and block_innovation_cov_idio are n_idio_actual x n_idio_actual
+    if n_idio_actual == n_idio:
+        A_new[i_subset, i_subset] = block_transition_idio
+        Q_new[i_subset, i_subset] = block_innovation_cov_idio
     else:
         # If sizes don't match, take the appropriate slice
-        A_new[i_subset, i_subset] = A_i[:niM, :niM]
-        Q_new[i_subset, i_subset] = Q_i[:niM, :niM]
+        A_new[i_subset, i_subset] = block_transition_idio[:n_idio, :n_idio]
+        Q_new[i_subset, i_subset] = block_innovation_cov_idio[:n_idio, :n_idio]
     
     # V_0_new: MATLAB uses diag(diag(Vsmooth(i_subset, i_subset, 1)))
     # Extract diagonal only and place on diagonal of submatrix
-    vsmooth_sub = vsmooth[i_subset_slice, :, :][:, i_subset_slice, 0]  # ni_idio x ni_idio
-    vsmooth_diag = np.diag(vsmooth_sub)  # ni_idio values
+    vsmooth_sub = vsmooth[i_subset_slice, :, :][:, i_subset_slice, 0]  # n_idio_actual x n_idio_actual
+    vsmooth_diag = np.diag(vsmooth_sub)  # n_idio_actual values
     # Place diagonal values on the diagonal of V_0_new submatrix
     for idx, val in enumerate(vsmooth_diag):
         V_0_new[i_subset.start + idx, i_subset.start + idx] = val
@@ -2007,34 +2273,34 @@ def em_step(y: np.ndarray, A: np.ndarray, C: np.ndarray, Q: np.ndarray,
     
     # Initialize indices: These help with subsetting
     # Initialize as None - will be set to numpy arrays on first iteration
-    bl_idxM = None  # Indicator for monthly factor loadings
-    bl_idxQ = None  # Indicator for quarterly factor loadings
+    bl_idx_same_freq = None  # Indicator for same-frequency factor loadings
+    bl_idx_slower_freq = None  # Indicator for slower-frequency factor loadings
     R_con_list = []  # List to build block diagonal
     
     # Loop through each block to build indices
     # MATLAB: for i = 1:num_blocks
-    #   bl_idxQ = [bl_idxQ repmat(bl(:,i),1,r(i)*ppC)];
-    #   bl_idxM = [bl_idxM repmat(bl(:,i),1,r(i)) zeros(n_bl,r(i)*(ppC-1))];
+    #   bl_idx_slower_freq = [bl_idx_slower_freq repmat(bl(:,i),1,r(i)*ppC)];
+    #   bl_idx_same_freq = [bl_idx_same_freq repmat(bl(:,i),1,r(i)) zeros(n_bl,r(i)*(ppC-1))];
     # end
     # This builds column by column - each column represents a factor position
     # bl(:,i) is n_bl x 1, repmat makes it n_bl x r(i)*ppC
     for i in range(num_blocks):
         r_i = int(r[i])
-        # bl[:, i] repeated r(i) times horizontally for monthly (lag 0 only)
+        # bl[:, i] repeated r(i) times horizontally for clock frequency (lag 0 only)
         # Then zeros for remaining ppC-1 lags
-        bl_col_monthly = np.repeat(bl[:, i:i+1], r_i, axis=1)  # n_bl x r_i
-        bl_col_monthly = np.hstack([bl_col_monthly, np.zeros((n_bl, r_i * (ppC - 1)))])  # n_bl x (r_i * ppC)
+        bl_col_clock_freq = np.repeat(bl[:, i:i+1], r_i, axis=1)  # n_bl x r_i
+        bl_col_clock_freq = np.hstack([bl_col_clock_freq, np.zeros((n_bl, r_i * (ppC - 1)))])  # n_bl x (r_i * ppC)
         
-        # bl[:, i] repeated r(i)*ppC times for quarterly (all lags)
-        bl_col_quarterly = np.repeat(bl[:, i:i+1], r_i * ppC, axis=1)  # n_bl x (r_i * ppC)
+        # bl[:, i] repeated r(i)*ppC times for slower frequencies (all lags)
+        bl_col_slower_freq = np.repeat(bl[:, i:i+1], r_i * ppC, axis=1)  # n_bl x (r_i * ppC)
         
         # Append columns (MATLAB uses horizontal concatenation)
-        if bl_idxM is None:
-            bl_idxM = bl_col_monthly
-            bl_idxQ = bl_col_quarterly
+        if bl_idx_same_freq is None:
+            bl_idx_same_freq = bl_col_clock_freq
+            bl_idx_slower_freq = bl_col_slower_freq
         else:
-            bl_idxM = np.hstack([bl_idxM, bl_col_monthly])
-            bl_idxQ = np.hstack([bl_idxQ, bl_col_quarterly])
+            bl_idx_same_freq = np.hstack([bl_idx_same_freq, bl_col_clock_freq])
+            bl_idx_slower_freq = np.hstack([bl_idx_slower_freq, bl_col_slower_freq])
         
         # Build constraint matrix: kron(R_mat, eye(r(i))) - only if R_mat is provided
         if R_mat is not None:
@@ -2042,13 +2308,13 @@ def em_step(y: np.ndarray, A: np.ndarray, C: np.ndarray, Q: np.ndarray,
     
     # Convert to boolean (MATLAB: logical)
     # Handle case where no blocks were processed (shouldn't happen, but be safe)
-    if bl_idxM is not None:
-        bl_idxM = bl_idxM.astype(bool)
-        bl_idxQ = bl_idxQ.astype(bool)
+    if bl_idx_same_freq is not None:
+        bl_idx_same_freq = bl_idx_same_freq.astype(bool)
+        bl_idx_slower_freq = bl_idx_slower_freq.astype(bool)
     else:
         # No blocks processed - create empty boolean arrays
-        bl_idxM = np.array([]).reshape(n_bl, 0).astype(bool)
-        bl_idxQ = np.array([]).reshape(n_bl, 0).astype(bool)
+        bl_idx_same_freq = np.array([]).reshape(n_bl, 0).astype(bool)
+        bl_idx_slower_freq = np.array([]).reshape(n_bl, 0).astype(bool)
     
     # Build block diagonal constraint matrix
     if len(R_con_list) > 0:
@@ -2062,9 +2328,12 @@ def em_step(y: np.ndarray, A: np.ndarray, C: np.ndarray, Q: np.ndarray,
     else:
         q_con = np.array([])
     
-    # Monthly/quarterly indicators
-    i_idio_M = i_idio[:nM]
-    n_idio_M = int(np.sum(i_idio_M))
+    # Idiosyncratic indicators
+    # i_idio indicates which series have idiosyncratic components
+    # For clock frequency: 1 (have idiosyncratic)
+    # For slower frequencies: 0 (no direct idiosyncratic, use tent kernel structure)
+    i_idio_same = i_idio  # All series with idiosyncratic components
+    n_idio_same = int(np.sum(i_idio_same))
     c_i_idio = np.cumsum(i_idio.astype(int))
     
     # Initialize C_new
@@ -2075,19 +2344,23 @@ def em_step(y: np.ndarray, A: np.ndarray, C: np.ndarray, Q: np.ndarray,
         bl_i = bl[i, :]
         rs = int(np.sum(r[bl_i.astype(bool)]))  # Total factors for this block pattern
         idx_i = np.where((blocks == bl_i).all(axis=1))[0]  # Series with this pattern
-        idx_iM = idx_i[idx_i < nM]  # Only monthly
-        n_i = len(idx_iM)
+        
+        # Group series by their actual frequency
+        freq_groups = group_series_by_frequency(idx_i, frequencies, clock)
+        idx_clock_freq = freq_groups.get(clock, np.array([], dtype=int))  # Same frequency as clock
+        
+        n_i = len(idx_clock_freq)
         
         if n_i == 0:
             continue
         
-        # Get bl_idxM indices for this block pattern (monthly: lag 0 only)
-        bl_idxM_i = np.where(bl_idxM[i, :])[0]
-        if len(bl_idxM_i) == 0:
+        # Get bl_idx_same_freq indices for this block pattern (same frequency: lag 0 only)
+        bl_idx_same_freq_i = np.where(bl_idx_same_freq[i, :])[0]
+        if len(bl_idx_same_freq_i) == 0:
             continue
         
-        # Verify rs matches bl_idxM_i length
-        rs_actual = len(bl_idxM_i)
+        # Verify rs matches bl_idx_same_freq_i length
+        rs_actual = len(bl_idx_same_freq_i)
         if rs_actual != rs:
             # If mismatch, use actual length
             rs = rs_actual
@@ -2098,55 +2371,51 @@ def em_step(y: np.ndarray, A: np.ndarray, C: np.ndarray, Q: np.ndarray,
         denom = np.zeros((denom_size, denom_size))
         nom = np.zeros((n_i, rs))
         
-        # Monthly indices for idiosyncratic
-        i_idio_i = i_idio_M[idx_iM]
-        i_idio_ii = c_i_idio[idx_iM]
+        # Clock-frequency indices for idiosyncratic
+        i_idio_i = i_idio_same[idx_clock_freq]
+        i_idio_ii = c_i_idio[idx_clock_freq]
         i_idio_ii = i_idio_ii[i_idio_i.astype(bool)]
         
-        # Loop through each period for monthly variables
+        # Loop through each period for clock-frequency variables
         for t in range(T):
             # Wt is diagonal selection matrix: n_i x n_i
-            nan_mask = ~nanY[idx_iM, t]
+            nan_mask = ~nanY[idx_clock_freq, t]
             Wt = np.diag(nan_mask.astype(float))
             
             # Ensure Wt is correct size
             if Wt.shape[0] != n_i:
-                # This shouldn't happen, but handle it
                 Wt = np.diag(np.ones(n_i))
             
             # E[f_t*f_t' | Omega_T]
-            # MATLAB: Zsmooth(bl_idxM(i, :), t+1)
-            # Zsmooth is (T+1) x m (time x factors)
-            # bl_idxM(i, :) is logical 1 x m indicating which factor columns
-            # Zsmooth(bl_idxM(i, :), t+1) selects row t+1, columns where bl_idxM(i,:) is True
+            # Zsmooth(bl_idx_same_freq(i, :), t+1) selects row t+1, columns where bl_idx_same_freq(i,:) is True
             # This gives 1 x rs (row vector)
             # Then Zsmooth(...)' * Zsmooth(...) = (rs x 1) * (1 x rs) = rs x rs
             
-            # Zsmooth is (T+1) x m, so Zsmooth[t+1, bl_idxM_i] gives 1 x rs
+            # Zsmooth is (T+1) x m, so Zsmooth[t+1, bl_idx_same_freq_i] gives 1 x rs
             if t + 1 < Zsmooth.shape[0]:
-                Z_block_M_row = Zsmooth[t + 1, bl_idxM_i]  # 1 x rs (row vector)
-                ZZZ = Z_block_M_row.reshape(-1, 1) @ Z_block_M_row.reshape(1, -1)  # rs x 1 * 1 x rs = rs x rs
+                Z_block_same_freq_row = Zsmooth[t + 1, bl_idx_same_freq_i]  # 1 x rs (row vector)
+                ZZZ = Z_block_same_freq_row.reshape(-1, 1) @ Z_block_same_freq_row.reshape(1, -1)  # rs x 1 * 1 x rs = rs x rs
             else:
                 ZZZ = np.zeros((rs, rs))
             
-            # V_block_M: vsmooth is m x m x (T+1), so vsmooth[bl_idxM_i, bl_idxM_i, t+1] is rs x rs
+            # V_block_same_freq: vsmooth is m x m x (T+1), so vsmooth[bl_idx_same_freq_i, bl_idx_same_freq_i, t+1] is rs x rs
             if t + 1 < vsmooth.shape[2]:
-                V_block_M = vsmooth[np.ix_(bl_idxM_i, bl_idxM_i, [t + 1])]
-                if V_block_M.ndim == 3:
-                    V_block_M = V_block_M[:, :, 0]  # Extract 2D slice
-                if V_block_M.shape != (rs, rs):
-                    V_block_M = np.zeros((rs, rs))
+                V_block_same_freq = vsmooth[np.ix_(bl_idx_same_freq_i, bl_idx_same_freq_i, [t + 1])]
+                if V_block_same_freq.ndim == 3:
+                    V_block_same_freq = V_block_same_freq[:, :, 0]  # Extract 2D slice
+                if V_block_same_freq.shape != (rs, rs):
+                    V_block_same_freq = np.zeros((rs, rs))
             else:
-                V_block_M = np.zeros((rs, rs))
+                V_block_same_freq = np.zeros((rs, rs))
             
             # kron should produce (n_i * rs) x (n_i * rs)
-            # Wt is n_i x n_i, ZZZ + V_block_M is rs x rs
+            # Wt is n_i x n_i, ZZZ + V_block_same_freq is rs x rs
             # kron((rs x rs), (n_i x n_i)) = (rs * n_i) x (rs * n_i) = (n_i * rs) x (n_i * rs)
             # Ensure dimensions match before kron
             expected_shape = (denom_size, denom_size)
-            if ZZZ.shape == (rs, rs) and V_block_M.shape == (rs, rs) and Wt.shape == (n_i, n_i):
+            if ZZZ.shape == (rs, rs) and V_block_same_freq.shape == (rs, rs) and Wt.shape == (n_i, n_i):
                 try:
-                    kron_result = np.kron(ZZZ + V_block_M, Wt)
+                    kron_result = np.kron(ZZZ + V_block_same_freq, Wt)
                     if kron_result.shape == expected_shape:
                         denom += kron_result
                     else:
@@ -2157,30 +2426,29 @@ def em_step(y: np.ndarray, A: np.ndarray, C: np.ndarray, Q: np.ndarray,
                     pass
             
             # E[y_t*f_t' | Omega_T]
-            # MATLAB: y(idx_iM, t) * Zsmooth(bl_idxM(i, :), t+1)'
-            # y is N x T, so y(idx_iM, t) is n_i x 1 (column vector)
-            # Zsmooth(bl_idxM(i, :), t+1) is 1 x rs, so transpose gives rs x 1
-            # y(idx_iM, t) * Zsmooth(...)' gives n_i x 1 * rs x 1 = n_i x rs (outer product? No, matrix mult)
+            # y is N x T, so y(idx_clock_freq, t) is n_i x 1 (column vector)
+            # Zsmooth(bl_idx_same_freq(i, :), t+1) is 1 x rs, so transpose gives rs x 1
+            # y(idx_clock_freq, t) * Zsmooth(...)' gives n_i x 1 * rs x 1 = n_i x rs
             # Actually: (n_i x 1) * (1 x rs) = n_i x rs
             if t + 1 < Zsmooth.shape[0]:
-                y_vec = y_clean[idx_iM, t].reshape(-1, 1)  # n_i x 1
-                Z_vec_row = Zsmooth[t + 1, bl_idxM_i].reshape(1, -1)  # 1 x rs
+                y_vec = y_clean[idx_clock_freq, t].reshape(-1, 1)  # n_i x 1
+                Z_vec_row = Zsmooth[t + 1, bl_idx_same_freq_i].reshape(1, -1)  # 1 x rs
                 y_term = y_vec @ Z_vec_row  # n_i x 1 * 1 x rs = n_i x rs
             else:
-                y_term = np.zeros((len(idx_iM), rs_actual))
+                y_term = np.zeros((len(idx_clock_freq), rs_actual))
             
             # Idiosyncratic component
-            # MATLAB: Wt(:, i_idio_i) * (Zsmooth(rp1 + i_idio_ii, t+1) * Zsmooth(bl_idxM(i, :), t+1)' + ...)
-            # Zsmooth(rp1 + i_idio_ii, t+1) is len(i_idio_ii) x 1, Zsmooth(bl_idxM(i, :), t+1)' is rs x 1
+            # Wt(:, i_idio_i) * (Zsmooth(idio_start_idx + i_idio_ii, t+1) * Zsmooth(bl_idx_same_freq(i, :), t+1)' + ...)
+            # Zsmooth(idio_start_idx + i_idio_ii, t+1) is len(i_idio_ii) x 1, Zsmooth(bl_idx_same_freq(i, :), t+1)' is rs x 1
             # So product is len(i_idio_ii) x rs
             if len(i_idio_ii) > 0 and t + 1 < Zsmooth.shape[0]:
-                idio_idx = (rp1 + i_idio_ii).astype(int)
+                idio_idx = (idio_start_idx + i_idio_ii).astype(int)
                 if idio_idx.max() < Zsmooth.shape[1]:  # Zsmooth is (T+1) x m
                     idio_Z_col = Zsmooth[t + 1, idio_idx].reshape(-1, 1)  # len(i_idio_ii) x 1
                     idio_Z_outer = idio_Z_col @ Z_vec_row  # len(i_idio_ii) x 1 * 1 x rs = len(i_idio_ii) x rs
                     
                     if t + 1 < vsmooth.shape[2]:
-                        idio_V = vsmooth[np.ix_(idio_idx, bl_idxM_i, [t + 1])]
+                        idio_V = vsmooth[np.ix_(idio_idx, bl_idx_same_freq_i, [t + 1])]
                         if idio_V.ndim == 3:
                             idio_V = idio_V[:, :, 0]  # len(i_idio_ii) x rs
                     else:
@@ -2188,9 +2456,9 @@ def em_step(y: np.ndarray, A: np.ndarray, C: np.ndarray, Q: np.ndarray,
                     
                     idio_term = Wt[:, i_idio_i.astype(bool)] @ (idio_Z_outer + idio_V)  # n_i x len(i_idio_i) * len(i_idio_i) x rs = n_i x rs
                 else:
-                    idio_term = np.zeros((len(idx_iM), rs_actual))
+                    idio_term = np.zeros((len(idx_clock_freq), rs_actual))
             else:
-                idio_term = np.zeros((len(idx_iM), rs_actual))
+                idio_term = np.zeros((len(idx_clock_freq), rs_actual))
             
             nom += y_term - idio_term
         
@@ -2219,8 +2487,8 @@ def em_step(y: np.ndarray, A: np.ndarray, C: np.ndarray, Q: np.ndarray,
             C_max = max(10.0, C_scale * 5)  # Adaptive bound: 5 standard deviations or 10, whichever is larger
             C_update = np.clip(C_update, -C_max, C_max)
             
-            for i, row_idx in enumerate(idx_iM):
-                for j, col_idx in enumerate(bl_idxM_i):
+            for i, row_idx in enumerate(idx_clock_freq):
+                for j, col_idx in enumerate(bl_idx_same_freq_i):
                     C_new[row_idx, col_idx] = C_update[i, j]
         except (np.linalg.LinAlgError, ValueError) as e:
             # Matrix inversion failed or dimension mismatch - skip this block
@@ -2228,267 +2496,311 @@ def em_step(y: np.ndarray, A: np.ndarray, C: np.ndarray, Q: np.ndarray,
             # Log would be helpful but keeping silent for now to match MATLAB behavior
             pass
         
-        # Update quarterly variables
-        idx_iQ = idx_i[idx_i >= nM]
-        if len(idx_iQ) == 0:
-            continue  # No quarterly series for this block pattern
-        
-        rps = rs * ppC
-        
-        # Get constraint matrix for this block pattern
-        # Verify i is within bl_idxQ bounds
-        if i >= bl_idxQ.shape[0]:
-            continue  # Block pattern index out of bounds
-        
-        if R_con.size > 0:
-            bl_idxQ_i = np.where(bl_idxQ[i, :])[0]
-            if len(bl_idxQ_i) > 0 and bl_idxQ_i.max() < R_con.shape[1]:
-                R_con_i = R_con[:, bl_idxQ_i]
-                q_con_i = q_con
-                
-                # Remove empty constraints
+        # Process series with frequencies different from clock (need tent kernel)
+        # Process each frequency group separately
+        for freq, idx_iFreq in freq_groups.items():
+            if freq == clock:
+                continue  # Already processed above
+            # Get tent weights for this frequency
+            if tent_weights_dict is not None and freq in tent_weights_dict:
+                tent_weights = tent_weights_dict[freq]
+            else:
+                tent_weights = get_tent_weights_for_pair(freq, clock)
+                if tent_weights is None:
+                    # Fallback: generate symmetric tent weights based on frequency gap
+                    clock_hierarchy = FREQUENCY_HIERARCHY.get(clock, 3)
+                    freq_hierarchy = FREQUENCY_HIERARCHY.get(freq, 3)
+                    n_periods_est = freq_hierarchy - clock_hierarchy + 1
+                    if n_periods_est > 0 and n_periods_est <= 12:
+                        tent_weights = generate_tent_weights(n_periods_est, 'symmetric')
+                        _logger.warning(
+                            f"em_step: No tent weights found for frequency '{freq}' "
+                            f"with clock '{clock}', generating symmetric tent weights with {n_periods_est} periods."
+                        )
+                    else:
+                        raise ValueError(
+                            f"em_step: Cannot determine tent weights for frequency '{freq}' "
+                            f"with clock '{clock}'. Please provide tent_weights_dict or ensure "
+                            f"the frequency pair is supported."
+                        )
+            
+            pC_freq = len(tent_weights)
+            rps = rs * pC_freq
+            
+            # Generate R_mat for this frequency
+            R_mat_freq, q_freq = generate_R_mat(tent_weights)
+            
+            # Build constraint matrix for this frequency and block pattern
+            R_con_i = np.kron(R_mat_freq, np.eye(int(rs)))
+            q_con_i = np.kron(q_freq, np.zeros(int(rs)))
+            
+            # Get bl_idx_slower_freq indices for this frequency
+            # bl_idx_slower_freq contains all slower frequency factors (all lags)
+            # We need to select the appropriate columns for this frequency
+            # For now, we'll use the full bl_idx_slower_freq and let the constraint matrix handle it
+            if i < bl_idx_slower_freq.shape[0]:
+                # Select columns corresponding to this block pattern and frequency
+                # bl_idx_slower_freq[i, :] gives all slower frequency factors for block pattern i
+                # We need to select the first rps columns (for this frequency)
+                bl_idx_slower_freq_i = np.where(bl_idx_slower_freq[i, :])[0]
+                if len(bl_idx_slower_freq_i) >= rps:
+                    bl_idx_slower_freq_i = bl_idx_slower_freq_i[:rps]  # Take first rps columns
+                elif len(bl_idx_slower_freq_i) > 0:
+                    # Pad if needed
+                    bl_idx_slower_freq_i = np.pad(bl_idx_slower_freq_i, (0, rps - len(bl_idx_slower_freq_i)), mode='edge')
+                else:
+                    # No slower frequency factors - skip
+                    continue
+            else:
+                continue
+            
+            # Remove empty constraints
+            if R_con_i.size > 0:
                 no_c = ~np.any(R_con_i, axis=1)
                 R_con_i = R_con_i[~no_c, :]
                 q_con_i = q_con_i[~no_c]
-            else:
-                # Handle empty bl_idxQ_i case
-                if len(bl_idxQ_i) > 0:
-                    R_con_i = np.array([]).reshape(0, len(bl_idxQ_i))
+            
+            # Loop through series of this frequency in this block pattern
+            for j in idx_iFreq:
+                # Determine actual size based on bl_idx_slower_freq_i
+                if len(bl_idx_slower_freq_i) > 0:
+                    rps_actual = len(bl_idx_slower_freq_i)
                 else:
-                    R_con_i = np.array([]).reshape(0, 1)  # Default to 1 column for empty case
-                q_con_i = np.array([])
-        else:
-            bl_idxQ_i = np.where(bl_idxQ[i, :])[0]
-            # Handle empty bl_idxQ_i case
-            if len(bl_idxQ_i) > 0:
-                R_con_i = np.array([]).reshape(0, len(bl_idxQ_i))
-            else:
-                R_con_i = np.array([]).reshape(0, 1)  # Default to 1 column for empty case
-            q_con_i = np.array([])
-        
-        # Loop through quarterly series in this block pattern
-        for j in idx_iQ:
-            # Determine actual size based on bl_idxQ_i (quarterly factor indices for this block)
-            # bl_idxQ_i contains the indices of quarterly factors for block i
-            if len(bl_idxQ_i) > 0:
-                rps_actual = len(bl_idxQ_i)
-            else:
-                rps_actual = rps  # Fallback to rps if bl_idxQ_i is empty
-            
-            denom = np.zeros((rps_actual, rps_actual))
-            nom = np.zeros((1, rps_actual))
-            
-            idx_jQ = j - nM  # Ordinal position of quarterly variable
-            # Location of factor structure for quarterly var residuals
-            i_idio_jQ = np.arange(rp1 + n_idio_M + 5 * idx_jQ, rp1 + n_idio_M + 5 * (idx_jQ + 1))
-            
-            # Update V_0, A, Q for quarterly idiosyncratic
-            # Each quarterly series has 5 idiosyncratic components (tent structure: [1,2,3,2,1])
-            # These 5 components represent the same underlying quarterly idiosyncratic process,
-            # so they should share the same AR coefficient, estimated from their aggregate behavior
-            
-            if len(i_idio_jQ) > 0 and i_idio_jQ[-1] < V_0_new.shape[0]:
-                # Update V_0 for quarterly idiosyncratic
-                vsmooth_Q = vsmooth[i_idio_jQ, :, :][:, i_idio_jQ, 0]  # Extract submatrix
-                # Place values explicitly to avoid broadcasting issues
-                for idx1, i1 in enumerate(i_idio_jQ):
-                    for idx2, i2 in enumerate(i_idio_jQ):
-                        V_0_new[i1, i2] = vsmooth_Q[idx1, idx2]
+                    rps_actual = rps
                 
-                # Estimate AR coefficient for this quarterly series from its smoothed idiosyncratic factors
-                # Extract smoothed idiosyncratic factors for this quarterly series (5 components)
-                # Zsmooth is (T+1) x m, so Zsmooth[:, i_idio_jQ] gives (T+1) x 5
-                if i_idio_jQ[0] < Zsmooth.shape[1] and i_idio_jQ[-1] < Zsmooth.shape[1]:
-                    Z_idio_Q = Zsmooth[1:, i_idio_jQ]  # T x 5, skip initial state
-                    Z_idio_Q_BB = Zsmooth[:-1, i_idio_jQ]  # T x 5, periods 0 to T-1
-                    
-                    # Aggregate the 5 components using tent weights to get a single quarterly idiosyncratic series
-                    # This represents the underlying quarterly process
-                    tent_weights = np.array([1, 2, 3, 2, 1]) / 9.0  # Normalize tent weights
-                    z_Q_agg = (Z_idio_Q @ tent_weights)  # T x 1, aggregated quarterly idiosyncratic
-                    z_Q_agg_BB = (Z_idio_Q_BB @ tent_weights)  # T x 1, lagged
-                    
-                    # Estimate AR coefficient: A_Q = E[z_t * z_{t-1}] / E[z_{t-1}^2]
-                    # This is the same formula as for monthly idiosyncratic, but applied to aggregated quarterly
-                    EZZ_BB_Q = np.sum(z_Q_agg_BB**2)  # Scalar
-                    EZZ_FB_Q = np.sum(z_Q_agg * z_Q_agg_BB)  # Scalar
-                    
-                    # Add variance from smoothed covariance
-                    vsmooth_Q_sum = np.sum(vsmooth[i_idio_jQ, :, :][:, i_idio_jQ, :-1], axis=(0, 1, 2))
-                    EZZ_BB_Q += vsmooth_Q_sum * np.sum(tent_weights**2)  # Scale by tent weights
-                    
-                    # Estimate AR coefficient for quarterly series
-                    # Regularize denominator to prevent division by zero
-                    min_denom_Q = max(abs(EZZ_BB_Q) * 1e-6, 1e-10)
-                    EZZ_BB_Q = max(EZZ_BB_Q, min_denom_Q)
-                    
-                    # Compute AR coefficient: A_Q = E[z_t * z_{t-1}] / E[z_{t-1}^2]
-                    A_Q = EZZ_FB_Q / EZZ_BB_Q
-                    A_Q, _ = _apply_ar_clipping(A_Q, config)  # Stability bounds
-                    
-                    # Compute innovation variance: Q_Q = (E[z_t^2] - A_Q * E[z_t * z_{t-1}]) / T
-                    EZZ_Q = np.sum(z_Q_agg**2)
-                    vsmooth_Q_sum_current = np.sum(vsmooth[i_idio_jQ, :, :][:, i_idio_jQ, 1:], axis=(0, 1, 2))
-                    EZZ_Q += vsmooth_Q_sum_current * np.sum(tent_weights**2)
-                    Q_Q = (EZZ_Q - A_Q * EZZ_FB_Q) / T
-                    Q_Q = max(Q_Q, 1e-8)  # Ensure positive
-                    
-                    # Apply the same AR coefficient and variance to all 5 components of this quarterly series
-                    # This is theoretically correct: they represent the same underlying process
-                    for idx_Q in i_idio_jQ:
-                        if idx_Q < A_new.shape[0] and idx_Q < A_new.shape[1]:
-                            A_new[idx_Q, idx_Q] = A_Q
-                            Q_new[idx_Q, idx_Q] = Q_Q
-            
-            # Loop through each period for quarterly variables
-            for t in range(T):
-                # MATLAB: Wt = diag(~nanY(j, t)) where j is scalar, nanY(j, t) is scalar
-                # In MATLAB, diag(scalar) gives 1x1 matrix
-                # In Python, np.diag() requires 1D array, so wrap scalar in array
-                nan_val = ~nanY[j, t]
-                if np.isscalar(nan_val):
-                    # Scalar case: create 1x1 matrix
-                    Wt = np.array([[float(nan_val)]])
-                else:
-                    # Array case: use np.diag() normally
-                    Wt = np.diag(nan_val.astype(float))
+                denom = np.zeros((rps_actual, rps_actual))
+                nom = np.zeros((1, rps_actual))
                 
-                # MATLAB: Zsmooth(bl_idxQ(i,:), t+1) - Zsmooth is (T+1) x m
-                # Ensure bl_idxQ_i indices are valid
-                if len(bl_idxQ_i) == 0:
-                    # No quarterly factors for this block - skip
-                    continue
+                # Find ordinal position of this slower frequency series
+                # Count how many slower frequency series come before this one
+                idx_j_slower = sum(1 for k in idx_iFreq if k < j and 
+                                 (frequencies is None or k >= len(frequencies) or frequencies[k] == freq))
                 
-                # Ensure indices are within bounds
-                valid_bl_idxQ_i = bl_idxQ_i[bl_idxQ_i < Zsmooth.shape[1]]
-                if len(valid_bl_idxQ_i) == 0:
-                    # No valid indices - skip
-                    continue
-                
-                if t + 1 < Zsmooth.shape[0]:
-                    Z_block_Q_row = Zsmooth[t + 1, valid_bl_idxQ_i]  # 1 x rps_actual
-                    Z_block_Q_col = Z_block_Q_row.reshape(-1, 1)  # rps_actual x 1
-                    ZZZ_Q = Z_block_Q_col @ Z_block_Q_row.reshape(1, -1)  # rps_actual x 1 * 1 x rps_actual = rps_actual x rps_actual
-                    
-                    # Ensure vsmooth indices are valid
-                    valid_vsmooth_idx = valid_bl_idxQ_i[valid_bl_idxQ_i < vsmooth.shape[0]]
-                    if len(valid_vsmooth_idx) > 0:
-                        V_block_Q = vsmooth[np.ix_(valid_vsmooth_idx, valid_vsmooth_idx, [t + 1])]
-                        if V_block_Q.ndim == 3:
-                            V_block_Q = V_block_Q[:, :, 0]
-                        # Ensure V_block_Q matches ZZZ_Q size
-                        if V_block_Q.shape != ZZZ_Q.shape:
-                            # Resize to match
-                            min_size = min(V_block_Q.shape[0], ZZZ_Q.shape[0])
-                            V_block_Q = V_block_Q[:min_size, :min_size]
-                            ZZZ_Q = ZZZ_Q[:min_size, :min_size]
+                # Location of factor structure for slower frequency var residuals
+                # Each slower frequency series has n_periods idiosyncratic components
+                # Count total idiosyncratic components for all previous slower frequency series
+                n_idio_slower_before = 0
+                for prev_freq, prev_idx_list in slower_freqs.items():
+                    if prev_freq == freq:
+                        # Count only series before j in this frequency group
+                        n_idio_slower_before += sum(1 for k in prev_idx_list if k < j) * pC_freq
+                        break
                     else:
-                        V_block_Q = np.zeros_like(ZZZ_Q)
-                else:
-                    # t+1 is out of bounds - use zeros
-                    Z_block_Q_row = np.zeros(rps_actual)
-                    Z_block_Q_col = np.zeros((rps_actual, 1))
-                    ZZZ_Q = np.zeros((rps_actual, rps_actual))
-                    V_block_Q = np.zeros((rps_actual, rps_actual))
-                
-                # E[f_t*f_t' | Omega_T]
-                # MATLAB: kron(Zsmooth(...)*Zsmooth(...)' + Vsmooth(...), Wt)
-                # Wt is 1x1 matrix for single quarterly series, so kron((rps x rps), (1 x 1)) = rps x rps
-                # Since Wt is 1x1, kron(A, Wt) = A * Wt[0,0]
-                if Wt.shape == (1, 1):
-                    denom += (ZZZ_Q + V_block_Q) * Wt[0, 0]
-                else:
-                    denom += np.kron(ZZZ_Q + V_block_Q, Wt)
-                
-                # E[y_t*f_t' | Omega_T]
-                # MATLAB: y(j, t) * Zsmooth(bl_idxQ(i,:), t+1)' - y is scalar, Zsmooth(...)' is rps x 1
-                # Result is 1 x rps
-                nom += y_clean[j, t] * Z_block_Q_row.reshape(1, -1)  # 1 x rps
-                
-                # Subtract idiosyncratic component
-                # MATLAB: Wt * ([1 2 3 2 1] * Zsmooth(i_idio_jQ, t+1) * Zsmooth(bl_idxQ(i,:), t+1)' + ...)
-                # tent is 1 x n_periods, Zsmooth(i_idio_jQ, t+1) is n_periods x 1, so tent * Zsmooth gives scalar
-                if len(i_idio_jQ) > 0 and t + 1 < Zsmooth.shape[0] and i_idio_jQ[-1] < Zsmooth.shape[1]:
-                    # Determine frequency of this series and use appropriate tent weights
-                    series_freq = None
-                    if frequencies is not None and j < len(frequencies):
-                        series_freq = frequencies[j]
-                    
-                    # Use tent weights from lookup if available
-                    if tent_weights_dict is not None and series_freq and series_freq in tent_weights_dict:
-                        tent = tent_weights_dict[series_freq].reshape(1, -1)
-                    elif tent_weights_dict is not None and 'q' in tent_weights_dict:
-                        # Fallback to quarterly if frequency-specific not found
-                        tent = tent_weights_dict['q'].reshape(1, -1)
-                    else:
-                        # Default quarterly tent structure (assumes 5 periods) - FRBNY standard
-                        tent = np.array([1, 2, 3, 2, 1]).reshape(1, -1)  # 1 x 5
-                    
-                    # Ensure tent matches i_idio_jQ length
-                    n_periods_actual = len(i_idio_jQ)
-                    if tent.shape[1] != n_periods_actual:
-                        # Adjust tent to match actual periods (truncate or pad)
-                        if tent.shape[1] > n_periods_actual:
-                            tent = tent[:, :n_periods_actual]
+                        # Count all series in previous frequency groups
+                        if tent_weights_dict is not None and prev_freq in tent_weights_dict:
+                            prev_tent = tent_weights_dict[prev_freq]
                         else:
-                            # Pad with last value
-                            pad_width = n_periods_actual - tent.shape[1]
-                            tent = np.hstack([tent, np.tile(tent[:, -1:], (1, pad_width))])
+                            prev_tent = get_tent_weights_for_pair(prev_freq, clock)
+                            if prev_tent is None:
+                                # Fallback: generate symmetric tent weights
+                                clock_hierarchy = FREQUENCY_HIERARCHY.get(clock, 3)
+                                prev_freq_hierarchy = FREQUENCY_HIERARCHY.get(prev_freq, 3)
+                                n_periods_est = prev_freq_hierarchy - clock_hierarchy + 1
+                                if n_periods_est > 0 and n_periods_est <= 12:
+                                    prev_tent = generate_tent_weights(n_periods_est, 'symmetric')
+                                else:
+                                    # If cannot generate, use empty array (will cause error downstream)
+                                    prev_tent = np.array([])
+                        n_idio_slower_before += len(prev_idx_list) * len(prev_tent)
+                
+                i_idio_jQ = np.arange(idio_start_idx + n_idio_same + n_idio_slower_before, 
+                                      idio_start_idx + n_idio_same + n_idio_slower_before + pC_freq)
+                
+                # Update V_0, A, Q for slower frequency idiosyncratic
+                # Each slower frequency series has n_periods idiosyncratic components (tent structure)
+                # These components represent the same underlying slower frequency idiosyncratic process,
+                # so they should share the same AR coefficient, estimated from their aggregate behavior
+                
+                if len(i_idio_jQ) > 0 and i_idio_jQ[-1] < V_0_new.shape[0]:
+                    # Update V_0 for slower frequency idiosyncratic
+                    vsmooth_Q = vsmooth[i_idio_jQ, :, :][:, i_idio_jQ, 0]  # Extract submatrix
+                    # Place values explicitly to avoid broadcasting issues
+                    for idx1, i1 in enumerate(i_idio_jQ):
+                        for idx2, i2 in enumerate(i_idio_jQ):
+                            if i1 < V_0_new.shape[0] and i2 < V_0_new.shape[1]:
+                                V_0_new[i1, i2] = vsmooth_Q[idx1, idx2]
                     
-                    idio_Z_col = Zsmooth[t + 1, i_idio_jQ].reshape(-1, 1)  # n_periods x 1
-                    idio_term_scalar = (tent @ idio_Z_col) * Z_block_Q_row  # scalar * 1 x rps = 1 x rps
-                    
-                    if t + 1 < vsmooth.shape[2]:
-                        idio_V = vsmooth[np.ix_(i_idio_jQ, bl_idxQ_i, [t + 1])]
-                        if idio_V.ndim == 3:
-                            idio_V = idio_V[:, :, 0]  # n_periods x rps
-                        idio_term_V = tent @ idio_V  # 1 x n_periods * n_periods x rps = 1 x rps
+                    # Estimate AR coefficient for this slower frequency series from its smoothed idiosyncratic factors
+                    # Extract smoothed idiosyncratic factors for this slower frequency series (n_periods components)
+                    # Zsmooth is (T+1) x m, so Zsmooth[:, i_idio_jQ] gives (T+1) x n_periods
+                    if i_idio_jQ[0] < Zsmooth.shape[1] and i_idio_jQ[-1] < Zsmooth.shape[1]:
+                        Z_idio_Q = Zsmooth[1:, i_idio_jQ]  # T x n_periods, skip initial state
+                        Z_idio_Q_BB = Zsmooth[:-1, i_idio_jQ]  # T x n_periods, periods 0 to T-1
+                        
+                        # Aggregate the n_periods components using tent weights to get a single slower frequency idiosyncratic series
+                        # This represents the underlying slower frequency process
+                        tent_weights_norm = tent_weights / np.sum(tent_weights)  # Normalize tent weights
+                        z_Q_agg = (Z_idio_Q @ tent_weights_norm)  # T x 1, aggregated slower frequency idiosyncratic
+                        z_Q_agg_BB = (Z_idio_Q_BB @ tent_weights_norm)  # T x 1, lagged
+                        
+                        # Estimate AR coefficient: A_Q = E[z_t * z_{t-1}] / E[z_{t-1}^2]
+                        # This is the same formula as for same frequency idiosyncratic, but applied to aggregated slower frequency
+                        EZZ_BB_Q = np.sum(z_Q_agg_BB**2)  # Scalar
+                        EZZ_FB_Q = np.sum(z_Q_agg * z_Q_agg_BB)  # Scalar
+                        
+                        # Add variance from smoothed covariance
+                        vsmooth_Q_sum = np.sum(vsmooth[i_idio_jQ, :, :][:, i_idio_jQ, :-1], axis=(0, 1, 2))
+                        EZZ_BB_Q += vsmooth_Q_sum * np.sum(tent_weights_norm**2)  # Scale by normalized tent weights
+                        
+                        # Estimate AR coefficient for slower frequency series
+                        # Regularize denominator to prevent division by zero
+                        min_denom_Q = max(abs(EZZ_BB_Q) * 1e-6, 1e-10)
+                        EZZ_BB_Q = max(EZZ_BB_Q, min_denom_Q)
+                        
+                        # Compute AR coefficient: A_Q = E[z_t * z_{t-1}] / E[z_{t-1}^2]
+                        A_Q = EZZ_FB_Q / EZZ_BB_Q
+                        A_Q, _ = _apply_ar_clipping(A_Q, config)  # Stability bounds
+                        
+                        # Compute innovation variance: Q_Q = (E[z_t^2] - A_Q * E[z_t * z_{t-1}]) / T
+                        EZZ_Q = np.sum(z_Q_agg**2)
+                        vsmooth_Q_sum_current = np.sum(vsmooth[i_idio_jQ, :, :][:, i_idio_jQ, 1:], axis=(0, 1, 2))
+                        EZZ_Q += vsmooth_Q_sum_current * np.sum(tent_weights_norm**2)
+                        Q_Q = (EZZ_Q - A_Q * EZZ_FB_Q) / T
+                        Q_Q = max(Q_Q, 1e-8)  # Ensure positive
+                        
+                        # Apply the same AR coefficient and variance to all n_periods components of this slower frequency series
+                        # This is theoretically correct: they represent the same underlying process
+                        for idx_Q in i_idio_jQ:
+                            if idx_Q < A_new.shape[0] and idx_Q < A_new.shape[1]:
+                                A_new[idx_Q, idx_Q] = A_Q
+                                Q_new[idx_Q, idx_Q] = Q_Q
+                
+                # Loop through each period for slower frequency variables
+                for t in range(T):
+                    # MATLAB: Wt = diag(~nanY(j, t)) where j is scalar, nanY(j, t) is scalar
+                    # In MATLAB, diag(scalar) gives 1x1 matrix
+                    # In Python, np.diag() requires 1D array, so wrap scalar in array
+                    nan_val = ~nanY[j, t]
+                    if np.isscalar(nan_val):
+                        # Scalar case: create 1x1 matrix
+                        Wt = np.array([[float(nan_val)]])
                     else:
-                        idio_term_V = np.zeros((1, len(bl_idxQ_i)))
+                        # Array case: use np.diag() normally
+                        Wt = np.diag(nan_val.astype(float))
                     
-                    # Wt is 1x1 matrix for quarterly, extract scalar value
-                    wt_scalar = Wt[0, 0] if Wt.shape == (1, 1) else Wt
-                    nom -= wt_scalar * (idio_term_scalar + idio_term_V)  # Scalar * 1 x rps
-            
-            # Solve for C (with constraints if applicable)
-            # Use regularized least squares for better numerical stability
-            try:
-                # Compute regularization parameter based on data scale
-                scale_factor = config.regularization_scale if config else 1e-6
-                warn_reg = config.warn_on_regularization if config else True
-                reg_param, reg_stats = _compute_regularization_param(denom, scale_factor, warn_reg)
+                    # Zsmooth(bl_idx_slower_freq(i,:), t+1) - Zsmooth is (T+1) x m
+                    # Ensure bl_idx_slower_freq_i indices are valid
+                    if len(bl_idx_slower_freq_i) == 0:
+                        # No slower frequency factors for this block - skip
+                        continue
+                    
+                    # Ensure indices are within bounds
+                    valid_bl_idx_slower_freq_i = bl_idx_slower_freq_i[bl_idx_slower_freq_i < Zsmooth.shape[1]]
+                    if len(valid_bl_idx_slower_freq_i) == 0:
+                        # No valid indices - skip
+                        continue
+                    
+                    if t + 1 < Zsmooth.shape[0]:
+                        Z_block_slower_freq_row = Zsmooth[t + 1, valid_bl_idx_slower_freq_i]  # 1 x rps_actual
+                        Z_block_slower_freq_col = Z_block_slower_freq_row.reshape(-1, 1)  # rps_actual x 1
+                        ZZZ_slower_freq = Z_block_slower_freq_col @ Z_block_slower_freq_row.reshape(1, -1)  # rps_actual x 1 * 1 x rps_actual = rps_actual x rps_actual
+                        
+                        # Ensure vsmooth indices are valid
+                        valid_vsmooth_idx = valid_bl_idx_slower_freq_i[valid_bl_idx_slower_freq_i < vsmooth.shape[0]]
+                        if len(valid_vsmooth_idx) > 0:
+                            V_block_slower_freq = vsmooth[np.ix_(valid_vsmooth_idx, valid_vsmooth_idx, [t + 1])]
+                            if V_block_slower_freq.ndim == 3:
+                                V_block_slower_freq = V_block_slower_freq[:, :, 0]
+                            # Ensure V_block_slower_freq matches ZZZ_slower_freq size
+                            if V_block_slower_freq.shape != ZZZ_slower_freq.shape:
+                                # Resize to match
+                                min_size = min(V_block_slower_freq.shape[0], ZZZ_slower_freq.shape[0])
+                                V_block_slower_freq = V_block_slower_freq[:min_size, :min_size]
+                                ZZZ_slower_freq = ZZZ_slower_freq[:min_size, :min_size]
+                        else:
+                            V_block_slower_freq = np.zeros_like(ZZZ_slower_freq)
+                    else:
+                        # t+1 is out of bounds - use zeros
+                        Z_block_slower_freq_row = np.zeros(rps_actual)
+                        Z_block_slower_freq_col = np.zeros((rps_actual, 1))
+                        ZZZ_slower_freq = np.zeros((rps_actual, rps_actual))
+                        V_block_slower_freq = np.zeros((rps_actual, rps_actual))
+                    
+                    # E[f_t*f_t' | Omega_T]
+                    # kron(Zsmooth(...)*Zsmooth(...)' + Vsmooth(...), Wt)
+                    # Wt is 1x1 matrix for single slower frequency series, so kron((rps x rps), (1 x 1)) = rps x rps
+                    # Since Wt is 1x1, kron(A, Wt) = A * Wt[0,0]
+                    if Wt.shape == (1, 1):
+                        denom += (ZZZ_slower_freq + V_block_slower_freq) * Wt[0, 0]
+                    else:
+                        denom += np.kron(ZZZ_slower_freq + V_block_slower_freq, Wt)
+                    
+                    # E[y_t*f_t' | Omega_T]
+                    # y(j, t) * Zsmooth(bl_idx_slower_freq(i,:), t+1)' - y is scalar, Zsmooth(...)' is rps x 1
+                    # Result is 1 x rps
+                    nom += y_clean[j, t] * Z_block_slower_freq_row.reshape(1, -1)  # 1 x rps
+                    
+                    # Subtract idiosyncratic component
+                    # Use the tent weights for this frequency
+                    if len(i_idio_jQ) > 0 and t + 1 < Zsmooth.shape[0] and i_idio_jQ[-1] < Zsmooth.shape[1]:
+                        # Use tent weights for this frequency (already determined above)
+                        tent = tent_weights.reshape(1, -1)
+                        
+                        # Ensure tent matches i_idio_jQ length
+                        n_periods_actual = len(i_idio_jQ)
+                        if tent.shape[1] != n_periods_actual:
+                            # Adjust tent to match actual periods (truncate or pad)
+                            if tent.shape[1] > n_periods_actual:
+                                tent = tent[:, :n_periods_actual]
+                            else:
+                                # Pad with last value
+                                pad_width = n_periods_actual - tent.shape[1]
+                                tent = np.hstack([tent, np.tile(tent[:, -1:], (1, pad_width))])
+                        
+                        idio_Z_col = Zsmooth[t + 1, i_idio_jQ].reshape(-1, 1)  # n_periods x 1
+                        idio_term_scalar = (tent @ idio_Z_col) * Z_block_slower_freq_row  # scalar * 1 x rps = 1 x rps
+                        
+                        if t + 1 < vsmooth.shape[2]:
+                            idio_V = vsmooth[np.ix_(i_idio_jQ, bl_idx_slower_freq_i, [t + 1])]
+                            if idio_V.ndim == 3:
+                                idio_V = idio_V[:, :, 0]  # n_periods x rps
+                            idio_term_V = tent @ idio_V  # 1 x n_periods * n_periods x rps = 1 x rps
+                        else:
+                            idio_term_V = np.zeros((1, len(bl_idx_slower_freq_i)))
+                        
+                        # Wt is 1x1 matrix for slower frequency, extract scalar value
+                        wt_scalar = Wt[0, 0] if Wt.shape == (1, 1) else Wt
+                        nom -= wt_scalar * (idio_term_scalar + idio_term_V)  # Scalar * 1 x rps
                 
-                # Regularized solution before constraints
-                denom_reg = denom + np.eye(denom.shape[0]) * reg_param
-                C_i = inv(denom_reg) @ nom.T
-                
-                # Clean invalid values
-                C_i = _clean_matrix(C_i, 'loading', default_nan=0.0, default_inf=0.0)
-                
-                # Apply quarterly constraints
-                if R_con_i.size > 0 and len(q_con_i) == R_con_i.shape[0]:
-                    denom_inv = inv(denom_reg)  # Use regularized inverse for constraints too
-                    constraint_term = denom_inv @ R_con_i.T @ inv(R_con_i @ denom_inv @ R_con_i.T) @ (R_con_i @ C_i - q_con_i)
-                    C_i_constr = C_i - constraint_term
-                else:
-                    C_i_constr = C_i
-                
-                # Clean and apply adaptive bounds after constraints
-                C_i_constr = _clean_matrix(C_i_constr, 'loading', default_nan=0.0, default_inf=0.0)
-                C_scale = np.std(C_i_constr[C_i_constr != 0]) if np.any(C_i_constr != 0) else 1.0
-                C_max = max(10.0, C_scale * 5)
-                C_i_constr = np.clip(C_i_constr, -C_max, C_max)
-                
-                # Place in output matrix
-                # Assign using explicit indexing to avoid read-only issues
-                if len(bl_idxQ_i) > 0:
-                    C_update = C_i_constr.flatten()[:len(bl_idxQ_i)]
-                    for k, col_idx in enumerate(bl_idxQ_i):
-                        C_new[j, col_idx] = C_update[k]
-            except (np.linalg.LinAlgError, ValueError, IndexError) as e:
-                # Matrix inversion failed, dimension mismatch, or index error - skip this series
-                # This can happen if denom is singular, constraints are inconsistent, or indices invalid
-                pass
+                # Solve for C (with constraints if applicable)
+                # Use regularized least squares for better numerical stability
+                try:
+                    # Compute regularization parameter based on data scale
+                    scale_factor = config.regularization_scale if config else 1e-6
+                    warn_reg = config.warn_on_regularization if config else True
+                    reg_param, reg_stats = _compute_regularization_param(denom, scale_factor, warn_reg)
+                    
+                    # Regularized solution before constraints
+                    denom_reg = denom + np.eye(denom.shape[0]) * reg_param
+                    C_i = inv(denom_reg) @ nom.T
+                    
+                    # Clean invalid values
+                    C_i = _clean_matrix(C_i, 'loading', default_nan=0.0, default_inf=0.0)
+                    
+                    # Apply constraints (tent kernel aggregation)
+                    if R_con_i.size > 0 and len(q_con_i) == R_con_i.shape[0]:
+                        denom_inv = inv(denom_reg)  # Use regularized inverse for constraints too
+                        constraint_term = denom_inv @ R_con_i.T @ inv(R_con_i @ denom_inv @ R_con_i.T) @ (R_con_i @ C_i - q_con_i)
+                        C_i_constr = C_i - constraint_term
+                    else:
+                        C_i_constr = C_i
+                    
+                    # Clean and apply adaptive bounds after constraints
+                    C_i_constr = _clean_matrix(C_i_constr, 'loading', default_nan=0.0, default_inf=0.0)
+                    C_scale = np.std(C_i_constr[C_i_constr != 0]) if np.any(C_i_constr != 0) else 1.0
+                    C_max = max(10.0, C_scale * 5)
+                    C_i_constr = np.clip(C_i_constr, -C_max, C_max)
+                    
+                    # Place in output matrix
+                    # Assign using explicit indexing to avoid read-only issues
+                    if len(bl_idx_slower_freq_i) > 0:
+                        C_update = C_i_constr.flatten()[:len(bl_idx_slower_freq_i)]
+                        for k, col_idx in enumerate(bl_idx_slower_freq_i):
+                            C_new[j, col_idx] = C_update[k]
+                except (np.linalg.LinAlgError, ValueError, IndexError) as e:
+                    # Matrix inversion failed, dimension mismatch, or index error - skip this series
+                    # This can happen if denom is singular, constraints are inconsistent, or indices invalid
+                    pass
     
     # Update R (covariance of observation residuals)
     # R is diagonal, so we compute diagonal elements directly (more efficient and theoretically cleaner)
@@ -2655,9 +2967,9 @@ def dfm(X: np.ndarray, config: DFMConfig, threshold: Optional[float] = None, max
     --------
     >>> from dfm_python import load_config, load_data, dfm
     >>> import pandas as pd
-    >>> # Load configuration (CSV or YAML both work)
-    >>> config = load_config('config.yaml')  # or 'config.csv'
-    >>> # Load data from CSV file
+    >>> # Load configuration from YAML or create DFMConfig directly
+    >>> config = load_config('config.yaml')
+    >>> # Load data from file
     >>> X, Time, Z = load_data('data.csv', config, sample_start=pd.Timestamp('2000-01-01'))
     >>> # Estimate DFM
     >>> Res = dfm(X, config, threshold=1e-4)
@@ -2671,10 +2983,6 @@ def dfm(X: np.ndarray, config: DFMConfig, threshold: Optional[float] = None, max
     >>> series_idx = 0
     >>> series_factor = Res.Z @ Res.C[series_idx, :].T
     """
-    # Validate inputs
-    # Input validation is done inline or skipped for now
-    # _validate_inputs(X, config, threshold)
-    
     print('Estimating the dynamic factor model (DFM) ... \n')
     
     # Additional check: ensure no NaN/Inf in input data that could cause issues
@@ -2687,7 +2995,7 @@ def dfm(X: np.ndarray, config: DFMConfig, threshold: Optional[float] = None, max
     
     # Store model parameters
     blocks = config.Blocks
-    nQ = np.sum(np.array(config.Frequency) == 'q')  # Number of quarterly series
+    # nQ will be computed from frequencies if needed, but we use frequencies directly
     
     # Get configurable parameters from unified DFMConfig
     p = config.ar_lag
@@ -2699,10 +3007,10 @@ def dfm(X: np.ndarray, config: DFMConfig, threshold: Optional[float] = None, max
     threshold = threshold if threshold is not None else config.threshold
     max_iter = max_iter if max_iter is not None else config.max_iter
     
-    # Display blocks (Table 3: Block Loading Structure)
+    # Display blocks (Block Loading Structure)
     try:
         print('\n\n\n')
-        print('Table 3: Block Loading Structure')
+        print('Block Loading Structure')
         import pandas as pd
         # Create DataFrame similar to MATLAB's array2table
         df = pd.DataFrame(blocks,
@@ -2729,10 +3037,8 @@ def dfm(X: np.ndarray, config: DFMConfig, threshold: Optional[float] = None, max
     tent_weights_dict = agg_info.get('tent_weights', {})
     
     # Determine which series need tent kernels (slower than clock)
-    # For now, we'll use the most common case: if we have quarterly series and clock is monthly
-    # We'll determine R_mat and pC based on the slowest frequency that needs tent kernel
-    frequencies = np.array(config.Frequency)
-    nQ = np.sum(frequencies == 'q')
+    # Get frequencies array for use in init_conditions and em_step
+    frequencies = np.array(config.Frequency) if hasattr(config, 'Frequency') else None
     
     # Find the slowest frequency that has a tent kernel
     # This determines the R_mat and pC to use
@@ -2753,9 +3059,6 @@ def dfm(X: np.ndarray, config: DFMConfig, threshold: Optional[float] = None, max
                     R_mat = R
                     q = q_vec
                     pC = n_periods
-    
-    # Get frequencies array for use in init_conditions and em_step (compute once)
-    frequencies_array = np.array(config.Frequency) if hasattr(config, 'Frequency') else None
     
     # Prepare data with robust standardization
     Mx = np.nanmean(X, axis=0)
@@ -2802,11 +3105,25 @@ def dfm(X: np.ndarray, config: DFMConfig, threshold: Optional[float] = None, max
     
     # Initial conditions - use configurable nan_method and nan_k
     optNaN = {'method': nan_method, 'k': nan_k}
-    i_idio = np.concatenate([np.ones(N - nQ), np.zeros(nQ)])
+    
+    # Compute i_idio: 1 for clock frequency, 0 for slower frequencies
+    # Slower frequencies use tent kernel structure instead of direct idiosyncratic components
+    if frequencies is not None:
+        clock_hierarchy = FREQUENCY_HIERARCHY.get(clock, 3)
+        i_idio = np.array([
+            1 if j >= len(frequencies) or FREQUENCY_HIERARCHY.get(frequencies[j], 3) <= clock_hierarchy
+            else 0
+            for j in range(N)
+        ])
+    else:
+        # Fallback: assume all series have idiosyncratic components
+        i_idio = np.ones(N)
+    
+    nQ = N - np.sum(i_idio) if frequencies is not None else 0
     
     A, C, Q, R, Z_0, V_0 = init_conditions(
         xNaN, r, p, blocks, optNaN, R_mat, q, nQ, i_idio,
-        clock=clock, tent_weights_dict=tent_weights_dict, frequencies=frequencies_array
+        clock=clock, tent_weights_dict=tent_weights_dict, frequencies=frequencies
     )
     
     # Verify initial conditions are valid (should already be cleaned by init_conditions)
@@ -2834,7 +3151,7 @@ def dfm(X: np.ndarray, config: DFMConfig, threshold: Optional[float] = None, max
             y_est, A, C, Q, R, Z_0, V_0, r, p, R_mat, q, nQ, i_idio, blocks,
             tent_weights_dict=tent_weights_dict,
             clock=clock,
-            frequencies=frequencies_array,
+            frequencies=frequencies,
             config=config
         )
         
@@ -2846,7 +3163,6 @@ def dfm(X: np.ndarray, config: DFMConfig, threshold: Optional[float] = None, max
             # Damping factor: use 80% of new, 20% of old (conservative)
             damping = 0.8
             
-            # Store previous parameters before updating
             C_prev = C.copy()
             R_prev = R.copy()
             A_prev = A.copy()
@@ -2952,6 +3268,12 @@ def dfm(X: np.ndarray, config: DFMConfig, threshold: Optional[float] = None, max
     # Only use non-missing observations for comparison
     rmse_overall, rmse_per_series = calculate_rmse(X, X_sm, mask=None)
     
+    # Calculate standardized RMSE for better comparison across series
+    # Standardize both actual and predicted using the same Wx and Mx
+    X_std = (X - Mx_clean) / np.where(Wx_clean != 0, Wx_clean, 1.0)
+    x_sm_std = x_sm  # Already standardized
+    rmse_std_overall, rmse_std_per_series = calculate_rmse(X_std, x_sm_std, mask=None)
+    
     # Create result structure
     Res = DFMResult(
         x_sm=x_sm,
@@ -2971,7 +3293,9 @@ def dfm(X: np.ndarray, config: DFMConfig, threshold: Optional[float] = None, max
         num_iter=num_iter,
         loglik=loglik,
         rmse=rmse_overall,
-        rmse_per_series=rmse_per_series
+        rmse_per_series=rmse_per_series,
+        rmse_std=rmse_std_overall,
+        rmse_std_per_series=rmse_std_per_series
     )
     
     # Display output tables (optional - can be disabled for cleaner output)
@@ -2985,45 +3309,49 @@ def dfm(X: np.ndarray, config: DFMConfig, threshold: Optional[float] = None, max
 
 def _display_dfm_tables(Res: DFMResult, config, nQ: int) -> None:
     """Display DFM estimation output tables."""
-    nM = len(config.SeriesID) - nQ
-    nLags = max(Res.p, 5)  # 5 comes from monthly-quarterly aggregation
+    # nQ: number of slower-frequency series (e.g., quarterly when clock is monthly)
+    # n_same_freq: number of same-frequency series (e.g., monthly when clock is monthly)
+    n_same_freq = len(config.SeriesID) - nQ
+    nLags = max(Res.p, 5)  # Minimum 5 lags for mixed-frequency aggregation
     nFactors = int(np.sum(Res.r))
     
     try:
         print('\n\n\n')
         
-        # Table 4: Factor Loadings for Monthly Series
-        print('Table 4: Factor Loadings for Monthly Series')
+        # Factor Loadings for Same-Frequency Series
+        print('Factor Loadings for Same-Frequency Series')
         # Only select lag(0) terms - every 5th column starting from 0
-        C_monthly = Res.C[:nM, ::5][:, :nFactors]
+        C_same_freq = Res.C[:n_same_freq, ::5][:, :nFactors]
         try:
             import pandas as pd
-            df = pd.DataFrame(C_monthly, 
-                            index=[name.replace(' ', '_') for name in config.SeriesName[:nM]],
+            df = pd.DataFrame(C_same_freq, 
+                            index=[name.replace(' ', '_') for name in config.SeriesName[:n_same_freq]],
                             columns=config.BlockNames[:nFactors] if len(config.BlockNames) >= nFactors else [f'Block{i+1}' for i in range(nFactors)])
             print(df.to_string())
         except (ValueError, IndexError, AttributeError) as e:
             # DataFrame creation or display failed - show shape instead
             # This can happen if indices/columns don't match or pandas unavailable
-            print(f'Monthly loadings shape: {C_monthly.shape}')
+            print(f'Same-frequency loadings shape: {C_same_freq.shape}')
         print('\n\n\n')
         
-        # Table 5: Quarterly Loadings Sample (Global Factor)
-        print('Table 5: Quarterly Loadings Sample (Global Factor)')
-        # Select only quarterly series and first 5 columns (lag 0-4)
-        C_quarterly = Res.C[-nQ:, :5]
+        # Slower-Frequency Loadings Sample (First Factor)
+        print('Slower-Frequency Loadings Sample (First Factor)')
+        # Select only slower-frequency series and first 5 columns (lag 0-4)
+        C_slower_freq = Res.C[-nQ:, :5]
         try:
-            df = pd.DataFrame(C_quarterly,
+            n_lags = min(5, C_slower_freq.shape[1])
+            lag_cols = [f'factor1_lag{i}' for i in range(n_lags)]
+            df = pd.DataFrame(C_slower_freq,
                             index=[name.replace(' ', '_') for name in config.SeriesName[-nQ:]],
-                            columns=['f1_lag0', 'f1_lag1', 'f1_lag2', 'f1_lag3', 'f1_lag4'])
+                            columns=lag_cols)
             print(df.to_string())
         except (ValueError, IndexError, AttributeError) as e:
             # DataFrame creation or display failed - show shape instead
-            print(f'Quarterly loadings shape: {C_quarterly.shape}')
+            print(f'Slower-frequency loadings shape: {C_slower_freq.shape}')
         print('\n\n\n')
         
-        # Table 6: Autoregressive Coefficients on Factors
-        print('Table 6: Autoregressive Coefficients on Factors')
+        # Autoregressive Coefficients on Factors
+        print('Autoregressive Coefficients on Factors')
         A_terms = np.diag(Res.A)
         Q_terms = np.diag(Res.Q)
         # Only select lag(0) terms - every 5th element
@@ -3040,17 +3368,14 @@ def _display_dfm_tables(Res: DFMResult, config, nQ: int) -> None:
             print(f'Factor AR coefficients: {A_terms_factors}')
         print('\n\n\n')
         
-        # Table 7: Autoregressive Coefficients on Idiosyncratic Component
-        print('Table 7: Autoregressive Coefficients on Idiosyncratic Component')
-        # MATLAB: A_terms([nFactors*5+1:nFactors*5+nM nFactors*5+nM+1:5:end])
-        # Note: MATLAB is 1-indexed, Python is 0-indexed
-        # MATLAB nFactors*5+1 corresponds to Python index nFactors*5
+        # Autoregressive Coefficients on Idiosyncratic Component
+        print('Autoregressive Coefficients on Idiosyncratic Component')
         rp1 = nFactors * 5  # Start of idiosyncratic component (0-indexed)
-        # Monthly idiosyncratic: indices rp1 to rp1+nM-1 (inclusive)
-        monthly_idx = np.arange(rp1, rp1 + nM)
-        # Quarterly idiosyncratic: every 5th index starting from rp1+nM
-        quarterly_idx = np.arange(rp1 + nM, len(A_terms), 5)
-        combined_idx = np.concatenate([monthly_idx, quarterly_idx])
+        # Same-frequency idiosyncratic: indices rp1 to rp1+n_same_freq-1 (inclusive)
+        same_freq_idx = np.arange(rp1, rp1 + n_same_freq)
+        # Slower-frequency idiosyncratic: every 5th index starting from rp1+n_same_freq
+        slower_freq_idx = np.arange(rp1 + n_same_freq, len(A_terms), 5)
+        combined_idx = np.concatenate([same_freq_idx, slower_freq_idx])
         
         # Ensure indices are within bounds
         combined_idx = combined_idx[combined_idx < len(A_terms)]
@@ -3059,23 +3384,23 @@ def _display_dfm_tables(Res: DFMResult, config, nQ: int) -> None:
         Q_idio = Q_terms[combined_idx]
         try:
             # Map indices back to series names
-            # Monthly series: direct mapping (0 to nM-1)
-            # Quarterly series: need to map to quarterly series index
+            # Same-frequency series: direct mapping (0 to n_same_freq-1)
+            # Slower-frequency series: need to map to slower-frequency series index
             series_indices = []
             for idx in combined_idx:
-                if idx < rp1 + nM:
-                    # Monthly idiosyncratic - map to monthly series
-                    series_idx = idx - rp1
-                    if series_idx < nM:
+                if idx < idio_start_display + n_same_freq:
+                    # Same-frequency idiosyncratic - map to same-frequency series
+                    series_idx = idx - idio_start_display
+                    if series_idx < n_same_freq:
                         series_indices.append(series_idx)
                     else:
                         series_indices.append(None)
                 else:
-                    # Quarterly idiosyncratic - map to quarterly series
-                    # (idx - (rp1 + nM)) / 5 gives which quarterly series
-                    q_idx = (idx - (rp1 + nM)) // 5
-                    if q_idx < nQ:
-                        series_indices.append(nM + q_idx)
+                    # Slower-frequency idiosyncratic - map to slower-frequency series
+                    # (idx - (idio_start_display + n_same_freq)) / 5 gives which slower-frequency series
+                    slower_idx = (idx - (idio_start_display + n_same_freq)) // 5
+                    if slower_idx < nQ:
+                        series_indices.append(n_same_freq + slower_idx)
                     else:
                         series_indices.append(None)
             
@@ -3095,25 +3420,245 @@ def _display_dfm_tables(Res: DFMResult, config, nQ: int) -> None:
                 print(f'... (total {len(A_idio)} coefficients)')
         print('\n\n\n')
         
-        # Table 8: Model Fit Statistics (RMSE)
+        # Model Fit Statistics (RMSE)
         if Res.rmse is not None and not np.isnan(Res.rmse):
-            print('Table 8: Model Fit Statistics')
-            print(f'  Overall RMSE (averaged across all series): {Res.rmse:.6f}')
+            print('Model Fit Statistics')
+            print(f'  Overall RMSE (original scale): {Res.rmse:.6f}')
+            if Res.rmse_std is not None and not np.isnan(Res.rmse_std):
+                print(f'  Overall RMSE (standardized scale): {Res.rmse_std:.6f}')
             if Res.rmse_per_series is not None and len(Res.rmse_per_series) > 0:
-                print('\n  RMSE per Series:')
+                print('\n  RMSE per Series (Original Scale):')
                 try:
                     series_names = config.SeriesName if hasattr(config, 'SeriesName') else [f"Series_{i}" for i in range(len(Res.rmse_per_series))]
                     for i, (name, rmse_val) in enumerate(zip(series_names, Res.rmse_per_series)):
                         if not np.isnan(rmse_val):
-                            print(f'    {name:40s}: {rmse_val:.6f}')
+                            # Calculate RMSE as percentage of mean if available
+                            mean_val = Res.Mx[i] if i < len(Res.Mx) else np.nan
+                            if not np.isnan(mean_val) and abs(mean_val) > 1e-6:
+                                pct = 100.0 * rmse_val / abs(mean_val)
+                                print(f'    {name:40s}: {rmse_val:.6f} ({pct:.2f}% of mean)')
+                            else:
+                                print(f'    {name:40s}: {rmse_val:.6f}')
                 except Exception:
                     # Fallback if series names not available
                     for i, rmse_val in enumerate(Res.rmse_per_series):
                         if not np.isnan(rmse_val):
                             print(f'    Series {i:3d}: {rmse_val:.6f}')
+            
+            # Show standardized RMSE per series
+            if Res.rmse_std_per_series is not None and len(Res.rmse_std_per_series) > 0:
+                print('\n  RMSE per Series (Standardized Scale):')
+                try:
+                    series_names = config.SeriesName if hasattr(config, 'SeriesName') else [f"Series_{i}" for i in range(len(Res.rmse_std_per_series))]
+                    for i, (name, rmse_std_val) in enumerate(zip(series_names, Res.rmse_std_per_series)):
+                        if not np.isnan(rmse_std_val):
+                            print(f'    {name:40s}: {rmse_std_val:.6f} std dev')
+                except Exception:
+                    # Fallback if series names not available
+                    for i, rmse_std_val in enumerate(Res.rmse_std_per_series):
+                        if not np.isnan(rmse_std_val):
+                            print(f'    Series {i:3d}: {rmse_std_val:.6f} std dev')
+            
+            # Diagnostic warnings for high RMSE
+            if Res.rmse_per_series is not None and Res.Mx is not None:
+                print('\n  Diagnostic Warnings:')
+                try:
+                    series_names = config.SeriesName if hasattr(config, 'SeriesName') else [f"Series_{i}" for i in range(len(Res.rmse_per_series))]
+                    warnings_count = 0
+                    for i, (name, rmse_val) in enumerate(zip(series_names, Res.rmse_per_series)):
+                        if not np.isnan(rmse_val) and i < len(Res.Mx):
+                            mean_val = Res.Mx[i]
+                            std_val = Res.Wx[i] if i < len(Res.Wx) else np.nan
+                            if not np.isnan(mean_val) and abs(mean_val) > 1e-6:
+                                pct_of_mean = 100.0 * rmse_val / abs(mean_val)
+                                # Warn if RMSE > 50% of mean or > 10 standard deviations
+                                if pct_of_mean > 50.0 or (not np.isnan(std_val) and rmse_val > 10.0 * std_val):
+                                    warnings_count += 1
+                                    if warnings_count <= 5:  # Limit to first 5 warnings
+                                        print(f'    ⚠ {name:40s}: RMSE is {pct_of_mean:.1f}% of mean')
+                                        if not np.isnan(std_val):
+                                            print(f'      (RMSE={rmse_val:.2e}, Mean={mean_val:.2e}, Std={std_val:.2e})')
+                    if warnings_count > 5:
+                        print(f'    ... and {warnings_count - 5} more series with high RMSE')
+                except Exception:
+                    pass
             print('\n\n\n')
         
     except Exception as e:
         print(f'Error displaying tables: {e}')
         pass
+
+
+def diagnose_series(Res: DFMResult, config: DFMConfig, series_name: Optional[str] = None, 
+                    series_idx: Optional[int] = None) -> Dict[str, Any]:
+    """Diagnose model fit issues for a specific series.
+    
+    This function provides detailed diagnostics to help identify why a series
+    may have high RMSE, including factor loadings, standardization values,
+    and reconstruction errors.
+    
+    Parameters
+    ----------
+    Res : DFMResult
+        DFM estimation results
+    config : DFMConfig
+        DFM configuration
+    series_name : str, optional
+        Name of the series to diagnose. If provided, series_idx is ignored.
+    series_idx : int, optional
+        Index of the series to diagnose (0-based). Used if series_name is not provided.
+        
+    Returns
+    -------
+    dict
+        Dictionary containing diagnostic information:
+        - 'series_name': Name of the series
+        - 'series_idx': Index of the series
+        - 'rmse_original': RMSE on original scale
+        - 'rmse_standardized': RMSE on standardized scale
+        - 'mean': Series mean (Mx)
+        - 'std': Series standard deviation (Wx)
+        - 'rmse_pct_of_mean': RMSE as percentage of mean
+        - 'rmse_in_std_devs': RMSE in standard deviations
+        - 'factor_loadings': Factor loadings for this series
+        - 'max_loading': Maximum absolute loading
+        - 'loading_sum_sq': Sum of squared loadings
+        - 'reconstruction_error_mean': Mean reconstruction error
+        - 'reconstruction_error_std': Std of reconstruction error
+        
+    Examples
+    --------
+    >>> Res = dfm(X, config)
+    >>> diag = diagnose_series(Res, config, series_name="Series_A")
+    >>> print(f"Standardized RMSE: {diag['rmse_standardized']:.4f}")
+    """
+    # Find series index
+    if series_name is not None:
+        try:
+            series_names = config.SeriesName if hasattr(config, 'SeriesName') else []
+            if series_name in series_names:
+                series_idx = series_names.index(series_name)
+            else:
+                # Try case-insensitive match
+                series_idx = next((i for i, name in enumerate(series_names) 
+                                 if name.lower() == series_name.lower()), None)
+                if series_idx is None:
+                    raise ValueError(f"Series '{series_name}' not found in configuration")
+        except (AttributeError, ValueError) as e:
+            raise ValueError(f"Cannot find series '{series_name}': {e}")
+    
+    if series_idx is None:
+        raise ValueError("Must provide either series_name or series_idx")
+    
+    if series_idx < 0 or series_idx >= Res.C.shape[0]:
+        raise ValueError(f"Series index {series_idx} out of range [0, {Res.C.shape[0]})")
+    
+    # Get series name
+    try:
+        series_names = config.SeriesName if hasattr(config, 'SeriesName') else []
+        name = series_names[series_idx] if series_idx < len(series_names) else f"Series_{series_idx}"
+    except (AttributeError, IndexError):
+        name = f"Series_{series_idx}"
+    
+    # Get RMSE values
+    rmse_original = None
+    rmse_standardized = None
+    if Res.rmse_per_series is not None and series_idx < len(Res.rmse_per_series):
+        rmse_original = Res.rmse_per_series[series_idx]
+    if Res.rmse_std_per_series is not None and series_idx < len(Res.rmse_std_per_series):
+        rmse_standardized = Res.rmse_std_per_series[series_idx]
+    
+    # Get standardization values
+    mean_val = Res.Mx[series_idx] if series_idx < len(Res.Mx) else np.nan
+    std_val = Res.Wx[series_idx] if series_idx < len(Res.Wx) else np.nan
+    
+    # Calculate RMSE metrics
+    rmse_pct_of_mean = None
+    rmse_in_std_devs = None
+    if not np.isnan(rmse_original) and not np.isnan(mean_val) and abs(mean_val) > 1e-6:
+        rmse_pct_of_mean = 100.0 * rmse_original / abs(mean_val)
+    if not np.isnan(rmse_original) and not np.isnan(std_val) and std_val > 1e-6:
+        rmse_in_std_devs = rmse_original / std_val
+    
+    # Get factor loadings
+    factor_loadings = Res.C[series_idx, :] if series_idx < Res.C.shape[0] else np.array([])
+    max_loading = np.max(np.abs(factor_loadings)) if len(factor_loadings) > 0 else np.nan
+    loading_sum_sq = np.sum(factor_loadings ** 2) if len(factor_loadings) > 0 else np.nan
+    
+    # Calculate reconstruction errors (if we have original data)
+    reconstruction_error_mean = None
+    reconstruction_error_std = None
+    # This would require passing X to the function or storing it in Res
+    
+    return {
+        'series_name': name,
+        'series_idx': series_idx,
+        'rmse_original': rmse_original,
+        'rmse_standardized': rmse_standardized,
+        'mean': mean_val,
+        'std': std_val,
+        'rmse_pct_of_mean': rmse_pct_of_mean,
+        'rmse_in_std_devs': rmse_in_std_devs,
+        'factor_loadings': factor_loadings,
+        'max_loading': max_loading,
+        'loading_sum_sq': loading_sum_sq,
+        'reconstruction_error_mean': reconstruction_error_mean,
+        'reconstruction_error_std': reconstruction_error_std
+    }
+
+
+def print_series_diagnosis(Res: DFMResult, config: DFMConfig, 
+                          series_name: Optional[str] = None, 
+                          series_idx: Optional[int] = None) -> None:
+    """Print a formatted diagnosis report for a specific series.
+    
+    Parameters
+    ----------
+    Res : DFMResult
+        DFM estimation results
+    config : DFMConfig
+        DFM configuration
+    series_name : str, optional
+        Name of the series to diagnose
+    series_idx : int, optional
+        Index of the series to diagnose
+        
+    Examples
+    --------
+    >>> Res = dfm(X, config)
+    >>> print_series_diagnosis(Res, config, series_name="Series_A")
+    """
+    diag = diagnose_series(Res, config, series_name=series_name, series_idx=series_idx)
+    
+    print(f"\n{'='*70}")
+    print(f"DIAGNOSTIC REPORT: {diag['series_name']}")
+    print(f"{'='*70}\n")
+    
+    print("RMSE Statistics:")
+    print(f"  Original scale:     {diag['rmse_original']:.6e}" if diag['rmse_original'] is not None else "  Original scale:     N/A")
+    print(f"  Standardized scale: {diag['rmse_standardized']:.6f} std dev" if diag['rmse_standardized'] is not None else "  Standardized scale: N/A")
+    if diag['rmse_pct_of_mean'] is not None:
+        print(f"  As % of mean:       {diag['rmse_pct_of_mean']:.2f}%")
+    if diag['rmse_in_std_devs'] is not None:
+        print(f"  In std deviations: {diag['rmse_in_std_devs']:.2f}x")
+    
+    print("\nStandardization Values:")
+    print(f"  Mean:  {diag['mean']:.6e}" if not np.isnan(diag['mean']) else "  Mean:  N/A")
+    print(f"  Std:   {diag['std']:.6e}" if not np.isnan(diag['std']) else "  Std:   N/A")
+    
+    print("\nFactor Loadings:")
+    if len(diag['factor_loadings']) > 0:
+        print(f"  Number of loadings: {len(diag['factor_loadings'])}")
+        print(f"  Max absolute:       {diag['max_loading']:.6f}" if not np.isnan(diag['max_loading']) else "  Max absolute:       N/A")
+        print(f"  Sum of squares:     {diag['loading_sum_sq']:.6f}" if not np.isnan(diag['loading_sum_sq']) else "  Sum of squares:     N/A")
+        # Show top 5 loadings
+        abs_loadings = np.abs(diag['factor_loadings'])
+        top_indices = np.argsort(abs_loadings)[-5:][::-1]
+        print(f"  Top 5 loadings:")
+        for idx in top_indices:
+            print(f"    Factor {idx:3d}: {diag['factor_loadings'][idx]:8.4f}")
+    else:
+        print("  No loadings available")
+    
+    print(f"\n{'='*70}\n")
 

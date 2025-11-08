@@ -6,19 +6,7 @@ from typing import Tuple, Dict
 from dataclasses import dataclass
 import logging
 
-# Set up logger (optional - only if logging is enabled)
 _logger = logging.getLogger(__name__)
-if not _logger.handlers:
-    # Only configure if logging is enabled (avoid overhead if disabled)
-    root_logger = logging.getLogger()
-    if root_logger.level <= logging.WARNING:
-        _logger.setLevel(logging.WARNING)
-        handler = logging.StreamHandler()
-        handler.setFormatter(logging.Formatter(
-            '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S'
-        ))
-        _logger.addHandler(handler)
 
 
 @dataclass
