@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.3] - 2025-01-XX
+
+### Changed
+
+- **Matplotlib Version Requirement**: Relaxed matplotlib version requirement from `>=3.10.7` to `>=3.5.0`
+  - Improves compatibility with other packages (e.g., `ydata-profiling`) that require `matplotlib<=3.10`
+  - Reduces dependency conflicts in Kaggle and other environments
+
 ## [0.2.2] - 2025-01-XX
 
 ### Changed

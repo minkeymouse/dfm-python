@@ -1,6 +1,6 @@
 [project]
 name = "dfm-python"
-version = "0.2.2"
+version = "0.2.3"
 description = "Dynamic Factor Model (DFM) estimation and nowcasting in Python"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -21,7 +21,7 @@ classifiers = [
 ]
 dependencies = [
     "hydra-core>=1.3.2",
-    "matplotlib>=3.10.7",
+    "matplotlib>=3.5.0",
     "numpy>=1.24.0",
     "pandas>=2.0.0",
     "scipy>=1.10.0",
