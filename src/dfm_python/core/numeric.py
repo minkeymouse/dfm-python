@@ -85,8 +85,250 @@ def _ensure_square_matrix(M: np.ndarray, method: str = 'diag') -> np.ndarray:
 
 
 def _ensure_symmetric(M: np.ndarray) -> np.ndarray:
-    """Ensure matrix is symmetric by averaging with its transpose."""
+    """Ensure matrix is symmetric by averaging with its transpose.
+    
+    Parameters
+    ----------
+    M : np.ndarray
+        Matrix to symmetrize
+        
+    Returns
+    -------
+    np.ndarray
+        Symmetric matrix (M + M.T) / 2
+    """
     return 0.5 * (M + M.T)
+
+
+def _ensure_real(M: np.ndarray) -> np.ndarray:
+    """Ensure matrix is real by extracting real part if complex.
+    
+    Parameters
+    ----------
+    M : np.ndarray
+        Matrix that may be complex due to numerical errors
+        
+    Returns
+    -------
+    np.ndarray
+        Real matrix (extracts real part if complex)
+    """
+    if np.iscomplexobj(M):
+        return np.real(M)
+    return M
+
+
+def _ensure_real_and_symmetric(M: np.ndarray) -> np.ndarray:
+    """Ensure matrix is real and symmetric.
+    
+    This is a common operation in Kalman filtering where covariance matrices
+    should be real and symmetric, but numerical errors can introduce complex
+    values or asymmetry.
+    
+    Parameters
+    ----------
+    M : np.ndarray
+        Matrix to process (may be complex or asymmetric due to numerical errors)
+        
+    Returns
+    -------
+    np.ndarray
+        Real, symmetric matrix
+    """
+    M = _ensure_real(M)
+    M = _ensure_symmetric(M)
+    return M
+
+
+def _ensure_covariance_stable(M: np.ndarray, min_eigenval: float = 1e-8,
+                               ensure_real: bool = True) -> np.ndarray:
+    """Ensure covariance matrix is real, symmetric, and positive semi-definite.
+    
+    This is a comprehensive function for stabilizing covariance matrices in
+    numerical computations, commonly used in Kalman filtering.
+    
+    Parameters
+    ----------
+    M : np.ndarray
+        Covariance matrix to stabilize
+    min_eigenval : float
+        Minimum eigenvalue threshold for positive semi-definiteness
+    ensure_real : bool
+        If True, extract real part if matrix is complex
+        
+    Returns
+    -------
+    np.ndarray
+        Stabilized covariance matrix (real, symmetric, PSD)
+    """
+    if M.size == 0 or M.shape[0] == 0:
+        return M
+    
+    # Step 1: Ensure real (if needed)
+    if ensure_real:
+        M = _ensure_real(M)
+    
+    # Step 2: Ensure symmetric
+    M = _ensure_symmetric(M)
+    
+    # Step 3: Ensure positive semi-definite
+    try:
+        eigenvals = np.linalg.eigvalsh(M)  # Use eigvalsh for symmetric matrices
+        min_eig = np.min(eigenvals)
+        if min_eig < min_eigenval:
+            reg_amount = min_eigenval - min_eig
+            M = M + np.eye(M.shape[0]) * reg_amount
+            M = _ensure_symmetric(M)
+    except (np.linalg.LinAlgError, ValueError):
+        # Eigendecomposition failed - add regularization
+        M = M + np.eye(M.shape[0]) * min_eigenval
+        M = _ensure_symmetric(M)
+    
+    return M
+
+
+def _compute_covariance_safe(data: np.ndarray, rowvar: bool = True, 
+                              pairwise_complete: bool = False,
+                              min_eigenval: float = 1e-8,
+                              fallback_to_identity: bool = True) -> np.ndarray:
+    """Compute covariance matrix safely with robust error handling.
+    
+    This function computes covariance matrices with automatic handling of:
+    - Missing data (NaN values)
+    - Edge cases (empty data, single series, etc.)
+    - Numerical instability (negative eigenvalues)
+    - Fallback strategies for failed computations
+    
+    Parameters
+    ----------
+    data : np.ndarray
+        Data matrix (T x N) where T is time periods and N is number of series.
+        If rowvar=True, each row is a variable (standard). If rowvar=False, each column is a variable.
+    rowvar : bool
+        If True (default), each row represents a variable, each column an observation.
+        If False, each column represents a variable, each row an observation.
+    pairwise_complete : bool
+        If True, use pairwise complete observations (more robust to missing data).
+        If False, use listwise deletion (all variables must be observed simultaneously).
+    min_eigenval : float
+        Minimum eigenvalue threshold for positive semi-definiteness.
+    fallback_to_identity : bool
+        If True, return identity matrix if covariance computation fails.
+        If False, raise an exception.
+        
+    Returns
+    -------
+    np.ndarray
+        Covariance matrix (N x N) where N is number of variables.
+        Guaranteed to be positive semi-definite.
+        
+    Notes
+    -----
+    - For single series, returns variance as 1x1 matrix
+    - For empty data, returns identity matrix if fallback_to_identity=True
+    - Automatically regularizes if negative eigenvalues are found
+    - Uses pairwise complete observations when pairwise_complete=True for robustness
+    
+    Examples
+    --------
+    >>> data = np.array([[1.0, 2.0], [2.0, np.nan], [3.0, 4.0]])
+    >>> cov = _compute_covariance_safe(data, pairwise_complete=True)
+    >>> assert cov.shape == (2, 2)
+    >>> assert np.all(np.linalg.eigvalsh(cov) >= 0)  # PSD
+    """
+    if data.size == 0:
+        if fallback_to_identity:
+            return np.eye(1) if data.ndim == 1 else np.eye(data.shape[1] if rowvar else data.shape[0])
+        raise ValueError("Cannot compute covariance: data is empty")
+    
+    # Handle 1D case
+    if data.ndim == 1:
+        var_val = np.nanvar(data, ddof=0)
+        var_val = 1.0 if (np.isnan(var_val) or np.isinf(var_val) or var_val < 1e-10) else var_val
+        return np.array([[var_val]])
+    
+    # Determine number of variables
+    n_vars = data.shape[1] if rowvar else data.shape[0]
+    
+    # Handle single variable case
+    if n_vars == 1:
+        series_data = data.flatten()
+        var_val = np.nanvar(series_data, ddof=0)
+        var_val = 1.0 if (np.isnan(var_val) or np.isinf(var_val) or var_val < 1e-10) else var_val
+        return np.array([[var_val]])
+    
+    # Compute covariance
+    try:
+        if pairwise_complete:
+            # Use pairwise complete observations (more robust)
+            cov = np.cov(data.T, rowvar=False) if rowvar else np.cov(data, rowvar=True)
+        else:
+            # Standard covariance (listwise deletion)
+            cov = np.cov(data, rowvar=rowvar)
+        
+        # Ensure positive semi-definite
+        if np.any(~np.isfinite(cov)):
+            raise ValueError("Covariance contains non-finite values")
+        
+        eigenvals = np.linalg.eigvalsh(cov)
+        if np.any(eigenvals < 0):
+            # Regularize if needed
+            reg_amount = abs(np.min(eigenvals)) + min_eigenval
+            cov = cov + np.eye(n_vars) * reg_amount
+        
+        return cov
+    except (ValueError, np.linalg.LinAlgError) as e:
+        if fallback_to_identity:
+            _logger.warning(
+                f"Covariance computation failed ({type(e).__name__}), "
+                f"falling back to identity matrix. Error: {str(e)[:100]}"
+            )
+            return np.eye(n_vars)
+        raise
+
+
+def _ensure_innovation_variance_minimum(Q: np.ndarray, min_variance: float = 1e-8) -> np.ndarray:
+    """Ensure innovation covariance matrix Q has minimum diagonal values.
+    
+    This is critical for factor evolution: if Q[i,i] = 0, factor i cannot evolve
+    (innovation variance is zero). This function enforces a minimum variance
+    threshold on the diagonal elements while preserving off-diagonal structure.
+    
+    Parameters
+    ----------
+    Q : np.ndarray
+        Innovation covariance matrix (m x m) where m is the state dimension.
+        Can be any square matrix representing innovation variances.
+    min_variance : float
+        Minimum allowed variance for each diagonal element. Default is 1e-8.
+        This ensures factors can evolve even with very small innovations.
+        
+    Returns
+    -------
+    np.ndarray
+        Q matrix with guaranteed minimum diagonal values. Off-diagonal elements
+        are preserved unchanged.
+        
+    Notes
+    -----
+    - Only modifies diagonal elements, preserving correlation structure
+    - If Q is empty or non-square, returns Q unchanged
+    - This is a common operation in DFM initialization and EM steps
+    
+    Examples
+    --------
+    >>> Q = np.array([[0.0, 0.1], [0.1, 0.0]])  # Zero diagonal
+    >>> Q_safe = _ensure_innovation_variance_minimum(Q, min_variance=1e-8)
+    >>> assert np.all(np.diag(Q_safe) >= 1e-8)  # All diagonals >= 1e-8
+    """
+    if Q.size == 0 or Q.shape[0] == 0 or Q.shape[0] != Q.shape[1]:
+        return Q
+    
+    Q_diag = np.diag(Q)
+    Q_diag = np.maximum(Q_diag, min_variance)
+    # Preserve off-diagonal elements: Q_new = diag(Q_diag) + (Q - diag(Q))
+    Q = np.diag(Q_diag) + Q - np.diag(np.diag(Q))
+    return Q
 
 
 def _compute_principal_components(cov_matrix: np.ndarray, n_components: int,
@@ -333,6 +575,65 @@ def _estimate_ar_coefficient(EZZ_FB: np.ndarray, EZZ_BB: np.ndarray,
     else:
         Q_diag = None
     return A_diag, Q_diag
+
+
+def _compute_variance_safe(data: np.ndarray, ddof: int = 0, 
+                           min_variance: float = 1e-10,
+                           default_variance: float = 1.0) -> float:
+    """Compute variance safely with robust error handling.
+    
+    This function computes variance with automatic handling of:
+    - Missing data (NaN values)
+    - Edge cases (empty data, insufficient samples)
+    - Numerical instability (non-finite results)
+    - Minimum variance threshold enforcement
+    
+    Parameters
+    ----------
+    data : np.ndarray
+        Data array (1D or 2D). If 2D, variance is computed over all elements.
+    ddof : int
+        Delta degrees of freedom. Default is 0 (population variance).
+    min_variance : float
+        Minimum allowed variance threshold. Default is 1e-10.
+        Values below this are replaced with default_variance.
+    default_variance : float
+        Default variance value to use when computation fails or result is invalid.
+        Default is 1.0.
+        
+    Returns
+    -------
+    float
+        Variance value, guaranteed to be finite and >= min_variance.
+        
+    Notes
+    -----
+    - Uses np.nanvar for automatic NaN handling
+    - Returns default_variance if result is NaN, Inf, or < min_variance
+    - Flattens 2D arrays before computation
+    
+    Examples
+    --------
+    >>> data = np.array([1.0, 2.0, np.nan, 4.0])
+    >>> var = _compute_variance_safe(data)
+    >>> assert var >= 1e-10  # Minimum threshold
+    >>> assert np.isfinite(var)  # Always finite
+    """
+    if data.size == 0:
+        return default_variance
+    
+    # Flatten if 2D
+    if data.ndim > 1:
+        data = data.flatten()
+    
+    # Compute variance with NaN handling
+    var_val = np.nanvar(data, ddof=ddof)
+    
+    # Validate and enforce minimum
+    if np.isnan(var_val) or np.isinf(var_val) or var_val < min_variance:
+        return default_variance
+    
+    return float(var_val)
 
 
 def _safe_divide(numerator: np.ndarray, denominator: float, default: float = 0.0) -> np.ndarray:

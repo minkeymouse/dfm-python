@@ -224,9 +224,12 @@ class Params:
     max_iter : int
         Maximum EM iterations (default: 5000)
     nan_method : int
-        Missing data handling method (1-5, default: 2 = spline interpolation)
+        Missing data handling method (1-5, default: 2 = spline interpolation).
+        This preprocessing step is followed by Kalman Filter-based missing data
+        handling during DFM estimation, following standard practice in state-space
+        models (Mariano & Murasawa 2003, Harvey 1989).
     nan_k : int
-        Spline parameter for NaN interpolation (default: 3)
+        Spline parameter for NaN interpolation (default: 3 for cubic spline)
     clock : str
         Base frequency for all latent factors (default: 'm' for monthly)
     clip_ar_coefficients : bool
@@ -340,8 +343,8 @@ class DFMConfig:
     ar_lag: int = 1  # Number of lags in AR transition equation (lookback window)
     threshold: float = 1e-5  # EM convergence threshold
     max_iter: int = 5000  # Maximum EM iterations
-    nan_method: int = 2  # Missing data handling method (1-5)
-    nan_k: int = 3  # Spline parameter for NaN interpolation
+    nan_method: int = 2  # Missing data handling method (1-5). Preprocessing step before Kalman Filter-based handling
+    nan_k: int = 3  # Spline parameter for NaN interpolation (cubic spline)
     clock: str = 'm'  # Base frequency for nowcasting (global clock): 'd', 'w', 'm', 'q', 'sa', 'a' (defaults to 'm' for monthly)
     
     # ========================================================================

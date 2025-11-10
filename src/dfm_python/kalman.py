@@ -9,6 +9,16 @@ import logging
 _logger = logging.getLogger(__name__)
 
 
+def _get_numeric_utils():
+    """Lazy import to avoid circular dependency."""
+    from dfm_python.core.numeric import (
+        _ensure_real_and_symmetric,
+        _ensure_covariance_stable,
+        _ensure_real
+    )
+    return _ensure_real_and_symmetric, _ensure_covariance_stable, _ensure_real
+
+
 @dataclass
 class KalmanFilterState:
     """Kalman filter state structure.
@@ -197,27 +207,15 @@ def skf(Y: np.ndarray, A: np.ndarray, C: np.ndarray, Q: np.ndarray,
         # Prior covariance matrix of Z (i.e. V = V_t|t-1)
         # Var(Z) = Var(A*Z + u_t) = Var(A*Z) + Var(u) = A*Vu*A' + Q
         V = A @ Vu @ A.T + Q
-        V = 0.5 * (V + V.T)  # Trick to make symmetric
         
-        # Numerical stability: ensure V is positive semi-definite
-        # Add small regularization if needed
-        try:
-            eigenvals = np.linalg.eigvals(V)
-            min_eigenval = np.min(eigenvals)
-            if min_eigenval < 1e-8:
-                # Add regularization to ensure positive semi-definiteness
-                V = V + np.eye(V.shape[0]) * (1e-8 - min_eigenval)
-                V = 0.5 * (V + V.T)  # Re-symmetrize
-        except (np.linalg.LinAlgError, ValueError):
-            # Eigendecomposition failed - add small regularization
-            V = V + np.eye(V.shape[0]) * 1e-8
-            V = 0.5 * (V + V.T)
-        
-        # Check for NaN/Inf
+        # Check for NaN/Inf before stabilization
         if np.any(np.isnan(V)) or np.any(np.isinf(V)):
             # Fallback: use previous covariance with regularization
             V = Vu + np.eye(V.shape[0]) * 1e-6
-            V = 0.5 * (V + V.T)
+        
+        # Ensure V is real, symmetric, and positive semi-definite
+        _, _ensure_covariance_stable, _ = _get_numeric_utils()
+        V = _ensure_covariance_stable(V, min_eigenval=1e-8, ensure_real=True)
         
         # Calculate posterior distribution
         # Remove missing series: These are removed from Y, C, and R
@@ -234,18 +232,10 @@ def skf(Y: np.ndarray, A: np.ndarray, C: np.ndarray, Q: np.ndarray,
             
             # Compute innovation covariance F = C_t @ V @ C_t.T + R_t
             F = C_t @ VC + R_t
-            F = 0.5 * (F + F.T)  # Ensure symmetry
             
-            # Numerical stability: regularize F if needed
-            try:
-                F_eigenvals = np.linalg.eigvals(F)
-                min_F_eigenval = np.min(F_eigenvals)
-                if min_F_eigenval < 1e-8:
-                    F = F + np.eye(F.shape[0]) * (1e-8 - min_F_eigenval)
-                    F = 0.5 * (F + F.T)
-            except (np.linalg.LinAlgError, ValueError):
-                F = F + np.eye(F.shape[0]) * 1e-8
-                F = 0.5 * (F + F.T)
+            # Ensure F is real, symmetric, and positive semi-definite
+            _, _ensure_covariance_stable, _ = _get_numeric_utils()
+            F = _ensure_covariance_stable(F, min_eigenval=1e-8, ensure_real=True)
             
             # Check for NaN/Inf before inversion
             if np.any(np.isnan(F)) or np.any(np.isinf(F)):
@@ -282,27 +272,19 @@ def skf(Y: np.ndarray, A: np.ndarray, C: np.ndarray, Q: np.ndarray,
                 
                 # Update covariance matrix (posterior) for time t
                 Vu = V - VCF @ VC.T
-                Vu = 0.5 * (Vu + Vu.T)  # Approximation trick to make symmetric
                 
-                # Clean NaN/Inf only (keep regularization for PSD)
+                # Clean NaN/Inf before stabilization
                 if np.any(~np.isfinite(Vu)):
                     Vu = np.nan_to_num(Vu, nan=1e-8, posinf=1e6, neginf=1e-8)
                 
-                # Ensure Vu is positive semi-definite
-                try:
-                    Vu_eigenvals = np.linalg.eigvals(Vu)
-                    min_Vu_eigenval = np.min(Vu_eigenvals)
-                    if min_Vu_eigenval < 1e-8:
-                        Vu = Vu + np.eye(Vu.shape[0]) * (1e-8 - min_Vu_eigenval)
-                        Vu = 0.5 * (Vu + Vu.T)
-                except (np.linalg.LinAlgError, ValueError):
-                    Vu = Vu + np.eye(Vu.shape[0]) * 1e-8
-                    Vu = 0.5 * (Vu + Vu.T)
-                
-                # Check for NaN/Inf in Vu
+                # Check for NaN/Inf after cleaning
                 if np.any(np.isnan(Vu)) or np.any(np.isinf(Vu)):
                     _logger.warning(f"skf: Vu contains NaN/Inf at t={t}, using V as fallback")
                     Vu = V.copy()
+                
+                # Ensure Vu is real, symmetric, and positive semi-definite
+                _, _ensure_covariance_stable, _ = _get_numeric_utils()
+                Vu = _ensure_covariance_stable(Vu, min_eigenval=1e-8, ensure_real=True)
                 
                 # Update log-likelihood (with safeguards)
                 try:
@@ -321,11 +303,17 @@ def skf(Y: np.ndarray, A: np.ndarray, C: np.ndarray, Q: np.ndarray,
         
         # Store output
         # Store covariance and observation values for t (priors)
+        # Ensure Z and V are real before storing
+        _ensure_real_and_symmetric, _, _ensure_real = _get_numeric_utils()
+        Z = _ensure_real(Z)
+        V = _ensure_real_and_symmetric(V)
         Zm[:, t] = Z
         Vm[:, :, t] = V
         
         # Store covariance and state values for t (posteriors)
         # i.e. Zu = Z_t|t   & Vu = V_t|t
+        Zu = _ensure_real(Zu)
+        Vu = _ensure_real_and_symmetric(Vu)
         ZmU[:, t + 1] = Zu
         VmU[:, :, t + 1] = Vu
     
@@ -369,7 +357,9 @@ def fis(A: np.ndarray, S: KalmanFilterState) -> KalmanFilterState:
     
     # Initialize VmT_1 lag 1 covariance matrix for final period
     VmT_1 = np.zeros((m, m, nobs))
-    VmT_1[:, :, nobs - 1] = (np.eye(m) - S.k_t) @ A @ S.VmU[:, :, nobs - 1]
+    VmT_1_temp = (np.eye(m) - S.k_t) @ A @ S.VmU[:, :, nobs - 1]
+    _ensure_real_and_symmetric, _, _ = _get_numeric_utils()
+    VmT_1[:, :, nobs - 1] = _ensure_real_and_symmetric(VmT_1_temp)
     
     # Used for recursion process
     J_2 = S.VmU[:, :, nobs - 1] @ A.T @ pinv(S.Vm[:, :, nobs - 1])
@@ -395,8 +385,9 @@ def fis(A: np.ndarray, S: KalmanFilterState) -> KalmanFilterState:
             ZmT[:, t] = np.nan_to_num(ZmT[:, t], nan=0.0, posinf=0.0, neginf=0.0)
         
         # Update smoothed factor covariance matrix
-        VmT[:, :, t] = VmU + J_1 @ (V_T - Vm1) @ J_1.T
-        VmT[:, :, t] = 0.5 * (VmT[:, :, t] + VmT[:, :, t].T)  # Ensure symmetry
+        VmT_temp = VmU + J_1 @ (V_T - Vm1) @ J_1.T
+        _ensure_real_and_symmetric, _, _ = _get_numeric_utils()
+        VmT[:, :, t] = _ensure_real_and_symmetric(VmT_temp)
         
         # Clean NaN/Inf and ensure PSD (keep only critical regularization)
         if np.any(~np.isfinite(VmT[:, :, t])):
@@ -406,8 +397,10 @@ def fis(A: np.ndarray, S: KalmanFilterState) -> KalmanFilterState:
             # Update weight
             J_2 = S.VmU[:, :, t - 1] @ A.T @ pinv(S.Vm[:, :, t - 1])
             
-            # Update lag 1 factor covariance matrix
-            VmT_1[:, :, t - 1] = VmU @ J_2.T + J_1 @ (V_T1 - A @ VmU) @ J_2.T
+            # Update lag 1 factor covariance matrix 
+            VmT_1_temp = VmU @ J_2.T + J_1 @ (V_T1 - A @ VmU) @ J_2.T
+            _ensure_real_and_symmetric, _, _ = _get_numeric_utils()
+            VmT_1[:, :, t - 1] = _ensure_real_and_symmetric(VmT_1_temp)
     
     # Add smoothed estimates as attributes
     S.ZmT = ZmT
@@ -460,6 +453,12 @@ def run_kf(Y: np.ndarray, A: np.ndarray, C: np.ndarray, Q: np.ndarray,
     Vsmooth = S.VmT
     VVsmooth = S.VmT_1
     loglik = S.loglik
+    
+    # Ensure loglik is real and finite
+    _, _, _ensure_real = _get_numeric_utils()
+    loglik = _ensure_real(np.array([loglik]))[0] if np.iscomplexobj(loglik) else loglik
+    if not np.isfinite(loglik):
+        loglik = -np.inf
     
     return zsmooth, Vsmooth, VVsmooth, loglik
 

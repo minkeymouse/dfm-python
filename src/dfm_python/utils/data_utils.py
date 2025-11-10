@@ -21,7 +21,40 @@ _logger = logging.getLogger(__name__)
 
 
 def rem_nans_spline(X: np.ndarray, method: int = 2, k: int = 3) -> Tuple[np.ndarray, np.ndarray]:
-    """Treat NaNs in dataset for DFM estimation."""
+    """Treat NaNs in dataset for DFM estimation using standard interpolation methods.
+    
+    This function implements standard econometric practice for handling missing data
+    in time series, following the approach used in FRBNY Nowcasting Model and similar
+    DFM implementations. The Kalman Filter in the DFM will handle remaining missing
+    values during estimation (see miss_data function in kalman.py).
+    
+    Parameters
+    ----------
+    X : np.ndarray
+        Input data matrix (T x N)
+    method : int
+        Missing data handling method:
+        - 1: Replace all missing values with spline interpolation
+        - 2: Remove >80% NaN rows, then fill (default, recommended)
+        - 3: Only remove all-NaN rows
+        - 4: Remove all-NaN rows, then fill
+        - 5: Fill missing values
+    k : int
+        Spline interpolation order (default: 3 for cubic spline)
+        
+    Returns
+    -------
+    X : np.ndarray
+        Data with NaNs treated
+    indNaN : np.ndarray
+        Boolean mask indicating original NaN positions
+        
+    Notes
+    -----
+    This preprocessing step is followed by Kalman Filter-based missing data handling
+    during DFM estimation, which is the standard approach in state-space models.
+    See Mariano & Murasawa (2003) and Harvey (1989) for theoretical background.
+    """
     T, N = X.shape
     indNaN = np.isnan(X)
     

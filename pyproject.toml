@@ -1,6 +1,6 @@
 [project]
 name = "dfm-python"
-version = "0.2.3"
+version = "0.2.4"
 description = "Dynamic Factor Model (DFM) estimation and nowcasting in Python"
 readme = "README.md"
 requires-python = ">=3.10"

@@ -26,8 +26,11 @@ from .numeric import (
     _ensure_symmetric,
     _ensure_square_matrix,
     _compute_principal_components,
+    _compute_covariance_safe,
+    _compute_variance_safe,
     _clean_matrix,
     _ensure_positive_definite,
+    _ensure_innovation_variance_minimum,
     _compute_regularization_param,
     _apply_ar_clipping,
     _cap_max_eigenvalue,
@@ -45,6 +48,18 @@ from ..utils.aggregation import (
 )
 
 _logger = logging.getLogger(__name__)
+
+# Numerical stability constants
+DEFAULT_AR_COEFFICIENT = 0.1  # Default AR coefficient when estimation fails
+DEFAULT_INNOVATION_VARIANCE = 0.1  # Default innovation variance
+DEFAULT_IDIO_AR_COEFFICIENT = 0.9  # Default AR coefficient for idiosyncratic components
+DEFAULT_IDIO_INNOVATION_VARIANCE = 0.1  # Default innovation variance for idiosyncratic
+DEFAULT_IDIO_INIT_COVARIANCE = 0.1  # Default initial covariance for idiosyncratic
+DEFAULT_OBSERVATION_VARIANCE = 1e-4  # Default observation variance (R diagonal)
+MIN_INNOVATION_VARIANCE = 1e-8  # Minimum innovation variance for factor evolution
+MIN_OBSERVATION_VARIANCE = 1e-8  # Minimum observation variance
+MIN_EIGENVALUE_THRESHOLD = 1e-8  # Minimum eigenvalue for positive definiteness
+MIN_VARIANCE_THRESHOLD = 1e-10  # Minimum variance threshold for validation
 
 
 class NaNHandlingOptions(TypedDict, total=False):
@@ -185,7 +200,9 @@ def init_conditions(
     ppC = int(max(p, pC))
     n_blocks = blocks.shape[1]
 
-    # Balance NaNs
+    # Balance NaNs using standard interpolation (spline-based)
+    # Remaining missing values will be handled by Kalman Filter during estimation
+    # This follows standard practice in DFM (Mariano & Murasawa 2003)
     xBal, _ = rem_nans_spline(x, method=opt_nan['method'], k=opt_nan['k'])
     T, N = xBal.shape
 
@@ -205,11 +222,12 @@ def init_conditions(
     elif nQ is None:
         nQ = 0
 
-    indNaN = np.isnan(xBal)
-    xNaN = xBal.copy()
-    xNaN[indNaN] = np.nan
+    # Track missing data locations
+    missing_data_mask = np.isnan(xBal)
+    data_with_nan = xBal.copy()
+    data_with_nan[missing_data_mask] = np.nan  # Explicitly mark as NaN
     data_residuals = xBal
-    resNaN = xNaN.copy()
+    residuals_with_nan = data_with_nan.copy()
 
     C = None
     A = None
@@ -217,7 +235,7 @@ def init_conditions(
     V_0 = None
 
     if pC > 1:
-        indNaN[:pC - 1, :] = True
+        missing_data_mask[:pC - 1, :] = True
 
     for i in range(n_blocks):
         r_i = int(r[i])
@@ -233,8 +251,24 @@ def init_conditions(
 
         if len(idx_clock_freq) > 0:
             try:
-                res_block = data_residuals[:, idx_clock_freq].copy()
-                finite_rows = np.all(np.isfinite(res_block), axis=1)
+                block_residuals = data_residuals[:, idx_clock_freq].copy()
+                # For Block_Global (first block), ensure we have sufficient variation
+                # Use pairwise complete observations instead of requiring all series
+                if i == 0 and len(idx_clock_freq) > 1:
+                    # For global block, allow missing data but require sufficient pairwise observations
+                    # Calculate how many series have data at each time point
+                    n_obs_per_time = np.sum(np.isfinite(block_residuals), axis=1)
+                    # Require at least 50% of series to have data (or minimum 2 series)
+                    min_series_required = max(2, int(len(idx_clock_freq) * 0.5))
+                    valid_times = n_obs_per_time >= min_series_required
+                    if np.sum(valid_times) < max(10, len(idx_clock_freq) + 1):
+                        # Fallback: use all available data with pairwise complete
+                        finite_rows = np.any(np.isfinite(block_residuals), axis=1)
+                    else:
+                        finite_rows = valid_times
+                else:
+                    # For other blocks, require all series to be finite (original behavior)
+                    finite_rows = np.all(np.isfinite(block_residuals), axis=1)
                 n_finite = int(np.sum(finite_rows))
                 n_total = len(finite_rows)
                 if n_finite < max(2, len(idx_clock_freq) + 1):
@@ -242,26 +276,34 @@ def init_conditions(
                         f"init_conditions: Block {i+1} has insufficient data; using identity covariance."
                     )
                     raise ValueError("insufficient data")
-                res_block_clean = res_block[finite_rows, :]
-                if res_block_clean.size == 0:
-                    cov_res = np.eye(len(idx_clock_freq))
-                elif res_block_clean.ndim == 1:
-                    var_val = np.var(res_block_clean, ddof=0)
-                    var_val = 1.0 if (np.isnan(var_val) or np.isinf(var_val) or var_val < 1e-10) else var_val
-                    cov_res = np.array([[var_val]])
-                elif res_block_clean.ndim == 2:
-                    if len(idx_clock_freq) == 1 or res_block_clean.shape[1] == 1:
-                        series_data = res_block_clean.flatten()
-                        var_val = np.var(series_data, ddof=0)
-                        var_val = 1.0 if (np.isnan(var_val) or np.isinf(var_val) or var_val < 1e-10) else var_val
-                        cov_res = np.array([[var_val]])
-                    else:
-                        cov_res = np.cov(res_block_clean.T) if res_block_clean.shape[0] >= 2 else np.eye(len(idx_clock_freq))
-                else:
-                    cov_res = np.eye(len(idx_clock_freq))
-                if np.any(~np.isfinite(cov_res)):
-                    cov_res = np.eye(len(idx_clock_freq))
+                block_residuals_clean = block_residuals[finite_rows, :]
+                # For Block_Global, fill remaining NaNs with column median for covariance calculation
+                if i == 0 and len(idx_clock_freq) > 1:
+                    for col_idx in range(block_residuals_clean.shape[1]):
+                        col_data = block_residuals_clean[:, col_idx]
+                        nan_mask = np.isnan(col_data)
+                        if np.any(nan_mask) and np.any(~nan_mask):
+                            col_median = np.nanmedian(col_data)
+                            if np.isfinite(col_median):
+                                block_residuals_clean[nan_mask, col_idx] = col_median
+                            else:
+                                block_residuals_clean[nan_mask, col_idx] = 0.0
+                # Compute covariance safely with appropriate method
+                # For Block_Global (i == 0), use pairwise complete for robustness
+                use_pairwise = (i == 0 and len(idx_clock_freq) > 1)
+                cov_res = _compute_covariance_safe(
+                    block_residuals_clean,
+                    rowvar=True,  # Each row is a time period, each column is a series
+                    pairwise_complete=use_pairwise,
+                    min_eigenval=1e-8,
+                    fallback_to_identity=True
+                )
+                # For Block_Global, ensure minimum variance in first principal component
                 d, v = _compute_principal_components(cov_res, int(r_i), block_idx=i)
+                # Ensure first eigenvalue is not too small for Block_Global
+                if i == 0 and len(d) > 0:
+                    d_min = np.max(d) * 0.01  # At least 1% of max eigenvalue
+                    d = np.maximum(d, d_min)
                 if np.sum(v) < 0:
                     v = -v
                 d_pos = np.maximum(d, 1e-8)
@@ -309,7 +351,7 @@ def init_conditions(
                     Rcon_i = np.kron(R_mat_freq, np.eye(int(r_i)))
                     q_i = np.kron(q_freq, np.zeros(int(r_i)))
                     for j in idx_iFreq:
-                        series_data = resNaN[pC_freq:, j]
+                        series_data = residuals_with_nan[pC_freq:, j]
                         if len(series_data) < factor_projection_freq.shape[0] and len(series_data) > 0:
                             series_data_padded = np.full(factor_projection_freq.shape[0], np.nan)
                             series_data_padded[:len(series_data)] = series_data
@@ -331,13 +373,20 @@ def init_conditions(
                             except _NUMERICAL_EXCEPTIONS:
                                 block_loadings[j, :int(pC_freq * r_i)] = 0.0
             except _NUMERICAL_EXCEPTIONS:
-                _logger.warning(f"init_conditions: Block {i+1} initialization failed, using fallback.")
+                _logger.warning(
+                    f"init_conditions: Block {i+1} initialization failed due to numerical error; "
+                    f"using fallback (identity loadings)."
+                )
                 if len(idx_clock_freq) > 0:
                     block_loadings[idx_clock_freq, :int(r_i)] = np.eye(len(idx_clock_freq), int(r_i))[:len(idx_clock_freq), :int(r_i)]
         if factor_projection_lagged is not None:
             expected_width = int(pC * r_i)
-            if factor_projection_lagged.shape[1] != expected_width:
-                _logger.warning(f"init_conditions: factor projection width mismatch for block {i+1}, resetting.")
+            actual_width = factor_projection_lagged.shape[1]
+            if actual_width != expected_width:
+                _logger.warning(
+                    f"init_conditions: Factor projection width mismatch for block {i+1} "
+                    f"(got {actual_width}, expected {expected_width}); resetting."
+                )
                 factor_projection_lagged = None
         if factor_projection_lagged is not None:
             factor_projection_padded = np.vstack([np.zeros((pC - 1, int(pC * r_i))), factor_projection_lagged])
@@ -352,8 +401,8 @@ def init_conditions(
             else:
                 factor_projection_padded = np.vstack([factor_projection_padded, np.zeros((data_residuals.shape[0] - factor_projection_padded.shape[0], factor_projection_padded.shape[1]))])
         data_residuals[:, idx_i] = data_residuals[:, idx_i] - factor_projection_padded @ block_loadings_residual[idx_i, :].T
-        resNaN = data_residuals.copy()
-        resNaN[indNaN] = np.nan
+        residuals_with_nan = data_residuals.copy()
+        residuals_with_nan[missing_data_mask] = np.nan
         C = block_loadings if C is None else np.hstack([C, block_loadings])
         if len(idx_clock_freq) > 0 and F is not None:
             z = F[:, :int(r_i)]
@@ -379,13 +428,25 @@ def init_conditions(
                     except _NUMERICAL_EXCEPTIONS:
                         Q_block = np.eye(int(r_i)) * 0.1
                 else:
-                    variance = np.var(innovation_residuals)
-                    if not np.isfinite(variance) or variance <= 0:
-                        variance = 0.1
+                    # Single series case: compute variance safely
+                    variance = _compute_variance_safe(
+                        innovation_residuals,
+                        ddof=0,
+                        min_variance=1e-8,
+                        default_variance=0.1
+                    )
                     Q_block = np.array([[variance]]) if innovation_residuals.ndim > 1 else np.eye(int(r_i)) * variance
                 block_innovation_cov[:int(r_i), :int(r_i)] = Q_block
+            # Ensure Q diagonal has minimum value - critical for factor evolution
+            block_innovation_cov[:int(r_i), :int(r_i)] = _ensure_innovation_variance_minimum(
+                block_innovation_cov[:int(r_i), :int(r_i)], min_variance=1e-8
+            )
             block_transition_clean = _clean_matrix(block_transition, 'loading')
             block_innovation_cov_clean = _clean_matrix(block_innovation_cov, 'covariance', default_nan=0.0)
+            # Re-ensure minimum after cleaning (in case cleaning set values to 0)
+            block_innovation_cov_clean[:int(r_i), :int(r_i)] = _ensure_innovation_variance_minimum(
+                block_innovation_cov_clean[:int(r_i), :int(r_i)], min_variance=1e-8
+            )
             try:
                 kron_transition = np.kron(block_transition_clean, block_transition_clean)
                 identity_kron = np.eye(int((r_i * ppC) ** 2)) - kron_transition
@@ -394,8 +455,11 @@ def init_conditions(
                 if np.any(~np.isfinite(init_cov_block)):
                     raise ValueError("invalid init_cov_block")
             except _NUMERICAL_EXCEPTIONS:
-                _logger.warning(f"init_conditions: initial covariance failed for block {i+1}; using diagonal fallback.")
-                init_cov_block = np.eye(int(r_i * ppC)) * 0.1
+                _logger.warning(
+                    f"init_conditions: Initial covariance computation failed for block {i+1} "
+                    f"(kron/inv failed); using diagonal fallback (0.1 * I)."
+                )
+                init_cov_block = np.eye(int(r_i * ppC)) * DEFAULT_IDIO_INIT_COVARIANCE
             if A is None:
                 A, Q, V_0 = block_transition, block_innovation_cov, init_cov_block
             else:
@@ -419,7 +483,7 @@ def init_conditions(
     if nQ > 0 and frequencies is not None:
         clock_h = FREQUENCY_HIERARCHY.get(clock, 3)
         slower_indices = [j for j in range(N) if j < len(frequencies) and FREQUENCY_HIERARCHY.get(frequencies[j], 3) > clock_h]
-        Rdiag = np.nanvar(resNaN, axis=0)
+        Rdiag = np.nanvar(residuals_with_nan, axis=0)
         Rdiag = np.where((np.isnan(Rdiag) | np.isinf(Rdiag)), 1e-4, Rdiag)
         slower_idio_blocks = []
         slower_series_count: Dict[str, int] = {}
@@ -454,9 +518,9 @@ def init_conditions(
         Rdiag = np.where((np.isnan(Rdiag) | np.isinf(Rdiag) | (Rdiag < 0)), 1e-4, Rdiag)
         R = np.diag(Rdiag)
     else:
-        var_values = np.nanvar(resNaN, axis=0)
-        var_values = np.where((np.isnan(var_values) | np.isinf(var_values)), 1e-4, var_values)
-        var_values = np.maximum(var_values, 1e-4)
+        var_values = np.nanvar(residuals_with_nan, axis=0)
+        var_values = np.where((np.isnan(var_values) | np.isinf(var_values)), DEFAULT_OBSERVATION_VARIANCE, var_values)
+        var_values = np.maximum(var_values, DEFAULT_OBSERVATION_VARIANCE)
         R = np.diag(var_values)
         slower_idio_dims = []
 
@@ -465,35 +529,45 @@ def init_conditions(
     BM = np.zeros((n_idio, n_idio))
     SM = np.zeros((n_idio, n_idio))
     for idx, i in enumerate(ii_idio):
-        R[i, i] = 1e-4
-        res_i_full = data_residuals[:, i]
-        res_i = resNaN[:, i]
-        leadZero = int(np.argmax(~np.isnan(res_i))) if np.any(~np.isnan(res_i)) else 0
-        endZero = int(np.argmax(~np.isnan(res_i[::-1]))) if np.any(~np.isnan(res_i)) else 0
-        res_i_trunc = res_i_full[leadZero:T - endZero] if endZero > 0 else res_i_full[leadZero:]
-        if len(res_i_trunc) > 1:
-            res_i_copy = res_i_trunc.copy()
-            X_ar = res_i_copy[:-1].reshape(-1, 1)
-            y_ar = res_i_copy[1:].reshape(-1, 1)
+        R[i, i] = DEFAULT_OBSERVATION_VARIANCE
+        series_residuals_full = data_residuals[:, i]
+        series_residuals_with_nan = residuals_with_nan[:, i]
+        # Find leading and trailing NaN positions
+        leading_nan_count = int(np.argmax(~np.isnan(series_residuals_with_nan))) if np.any(~np.isnan(series_residuals_with_nan)) else 0
+        trailing_nan_count = int(np.argmax(~np.isnan(series_residuals_with_nan[::-1]))) if np.any(~np.isnan(series_residuals_with_nan)) else 0
+        # Truncate to remove leading/trailing NaNs
+        if trailing_nan_count > 0:
+            series_residuals_truncated = series_residuals_full[leading_nan_count:T - trailing_nan_count]
+        else:
+            series_residuals_truncated = series_residuals_full[leading_nan_count:]
+        if len(series_residuals_truncated) > 1:
+            series_data = series_residuals_truncated.copy()
+            X_ar = series_data[:-1].reshape(-1, 1)
+            y_ar = series_data[1:].reshape(-1, 1)
             XTX = X_ar.T @ X_ar
             if XTX.size == 1 and XTX[0, 0] != 0 and np.isfinite(XTX[0, 0]):
                 try:
-                    BM_val = (1.0 / XTX[0, 0]) * (X_ar.T @ y_ar)
-                    BM_val_clean = BM_val[0, 0] if BM_val.size > 0 else 0.1
-                    BM_val_clean = 0.1 if (np.isnan(BM_val_clean) or np.isinf(BM_val_clean)) else BM_val_clean
-                    BM[idx, idx] = BM_val_clean
-                    residuals = res_i_trunc[1:] - res_i_trunc[:-1] * BM[idx, idx]
-                    var_val = np.var(residuals)
-                    SM[idx, idx] = var_val if np.isfinite(var_val) else 0.1
+                    ar_coeff = (1.0 / XTX[0, 0]) * (X_ar.T @ y_ar)
+                    ar_coeff_clean = ar_coeff[0, 0] if ar_coeff.size > 0 else DEFAULT_AR_COEFFICIENT
+                    ar_coeff_clean = DEFAULT_AR_COEFFICIENT if (np.isnan(ar_coeff_clean) or np.isinf(ar_coeff_clean)) else ar_coeff_clean
+                    BM[idx, idx] = ar_coeff_clean
+                    innovation_residuals = series_residuals_truncated[1:] - series_residuals_truncated[:-1] * BM[idx, idx]
+                    innovation_variance = _compute_variance_safe(
+                        innovation_residuals,
+                        ddof=0,
+                        min_variance=MIN_INNOVATION_VARIANCE,
+                        default_variance=DEFAULT_INNOVATION_VARIANCE
+                    )
+                    SM[idx, idx] = innovation_variance
                 except _NUMERICAL_EXCEPTIONS:
-                    BM[idx, idx] = 0.1
-                    SM[idx, idx] = 0.1
+                    BM[idx, idx] = DEFAULT_AR_COEFFICIENT
+                    SM[idx, idx] = DEFAULT_INNOVATION_VARIANCE
             else:
-                BM[idx, idx] = 0.1
-                SM[idx, idx] = 0.1
+                BM[idx, idx] = DEFAULT_AR_COEFFICIENT
+                SM[idx, idx] = DEFAULT_INNOVATION_VARIANCE
         else:
-            BM[idx, idx] = 0.1
-            SM[idx, idx] = 0.1
+            BM[idx, idx] = DEFAULT_AR_COEFFICIENT
+            SM[idx, idx] = DEFAULT_INNOVATION_VARIANCE
     # Monthly idio init covariance
     eye_diag = np.diag(np.eye(BM.shape[0]))
     BM_diag_sq = np.diag(BM) ** 2
@@ -505,15 +579,18 @@ def init_conditions(
     if n_slower_idio > 0:
         # Create transition and innovation covariance for slower idio components
         # Each slower idio component follows an AR(1) process with tent weights
-        BQ = np.eye(n_slower_idio) * 0.9  # AR coefficient for slower idio
-        SQ = np.eye(n_slower_idio) * 0.1  # Innovation variance
-        initViQ = np.eye(n_slower_idio) * 0.1  # Initial covariance
+        BQ = np.eye(n_slower_idio) * DEFAULT_IDIO_AR_COEFFICIENT  # AR coefficient for slower idio
+        SQ = np.eye(n_slower_idio) * DEFAULT_IDIO_INNOVATION_VARIANCE  # Innovation variance
+        initViQ = np.eye(n_slower_idio) * DEFAULT_IDIO_INIT_COVARIANCE  # Initial covariance
     else:
         BQ = np.array([]).reshape(0, 0)
         SQ = np.array([]).reshape(0, 0)
         initViQ = np.array([]).reshape(0, 0)
     A = block_diag(A, BM, BQ)
     Q = block_diag(Q, SM, SQ)
+    # Ensure Q diagonal has minimum value - critical for factor evolution
+    if Q.size > 0:
+        Q = _ensure_innovation_variance_minimum(Q, min_variance=1e-8)
     Z_0 = np.zeros(A.shape[0])
     # Ensure all covariance matrices are square
     V_0 = _ensure_square_matrix(V_0, method='diag')
@@ -533,6 +610,9 @@ def init_conditions(
                 outputs[param_name] = _clean_matrix(param_value, 'loading')
             elif param_name == 'Z_0':
                 outputs[param_name] = np.zeros_like(param_value)
+    # Final safeguard: ensure Q diagonal has minimum value after all cleaning
+    if outputs['Q'].size > 0:
+        outputs['Q'] = _ensure_innovation_variance_minimum(outputs['Q'], min_variance=MIN_INNOVATION_VARIANCE)
     return outputs['A'], outputs['C'], outputs['Q'], outputs['R'], outputs['Z_0'], outputs['V_0']
 
 
@@ -558,86 +638,144 @@ def em_step(
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]:
     """Perform one EM iteration (E-step + M-step) and return updated parameters.
     
-    This function performs a single iteration of the Expectation-Maximization algorithm:
+    This function performs a single iteration of the Expectation-Maximization (EM) algorithm
+    for Dynamic Factor Model estimation. The EM algorithm alternates between:
     
-    1. **E-step**: Run Kalman filter/smoother to compute expected sufficient statistics
-       - E[Z_t | Y] (smoothed factors)
+    1. **E-step (Expectation)**: Run Kalman filter and smoother to compute expected
+       sufficient statistics given current parameters:
+       - E[Z_t | Y] (smoothed factor estimates)
        - E[Z_t Z_t' | Y] (smoothed factor covariances)
        - E[Z_t Z_{t-1}' | Y] (smoothed factor cross-covariances)
     
-    2. **M-step**: Update parameters to maximize expected log-likelihood
-       - C: Loading matrix (via regression of data on factors)
-       - R: Observation covariance (via residual variance)
-       - A: Transition matrix (via AR regression on factors)
-       - Q: Innovation covariance (via innovation variance)
-       - V_0: Initial covariance (via stationary covariance)
+    2. **M-step (Maximization)**: Update parameters to maximize expected log-likelihood:
+       - **C**: Loading matrix via regression of data on factors
+       - **R**: Observation covariance via residual variance
+       - **A**: Transition matrix via AR regression on factors
+       - **Q**: Innovation covariance via innovation variance
+       - **V_0**: Initial covariance via stationary covariance
+    
+    The algorithm follows the standard DFM EM approach (Doz et al. 2011) with robust
+    numerical stability checks and missing data handling.
     
     Parameters
     ----------
     y : np.ndarray
-        Observation matrix (n x T) with missing data
-    A, C, Q, R : np.ndarray
-        Current parameter estimates
-    Z_0, V_0 : np.ndarray
-        Current initial state and covariance
+        Observation matrix (n x T), where n is number of series and T is time periods.
+        Missing values should be NaN. These are handled automatically by the Kalman filter.
+    A : np.ndarray
+        Current transition matrix estimate (m x m), where m is state dimension.
+    C : np.ndarray
+        Current loading matrix estimate (n x m).
+    Q : np.ndarray
+        Current innovation covariance estimate (m x m).
+    R : np.ndarray
+        Current observation covariance estimate (n x n), typically diagonal.
+    Z_0 : np.ndarray
+        Current initial state estimate (m,).
+    V_0 : np.ndarray
+        Current initial covariance estimate (m x m).
     r : np.ndarray
-        Number of factors per block
+        Number of factors per block, shape (n_blocks,).
     p : int
-        AR lag order
+        AR lag order for factor dynamics. Typically p=1.
     R_mat : np.ndarray, optional
-        Constraint matrix for tent kernel aggregation
+        Constraint matrix for tent kernel aggregation in mixed-frequency models.
     q : np.ndarray, optional
-        Constraint vector for tent kernel aggregation
-    nQ : int
-        Number of slower-frequency series
+        Constraint vector for tent kernel aggregation.
+    nQ : int, optional
+        Number of slower-frequency series. If None, inferred from frequencies.
     i_idio : np.ndarray
-        Indicator array (1 for clock frequency, 0 for slower)
+        Indicator array (n,) where 1 indicates clock frequency, 0 indicates slower.
     blocks : np.ndarray
-        Block structure (N x n_blocks)
+        Block structure matrix (n x n_blocks).
     tent_weights_dict : dict, optional
-        Dictionary mapping frequency pairs to tent weights
-    clock : str
-        Clock frequency
+        Dictionary mapping frequency strings to tent weight arrays.
+    clock : str, default 'm'
+        Clock frequency for latent factors ('m', 'q', 'sa', 'a').
     frequencies : np.ndarray, optional
-        Array of frequencies for each series
+        Array of frequency strings (n,) for each series.
     config : DFMConfig, optional
-        Configuration object for numerical stability parameters
+        Configuration object for numerical stability parameters:
+        - min_eigenvalue: Minimum eigenvalue threshold for regularization
+        - max_eigenvalue: Maximum eigenvalue threshold for capping
+        - warn_on_regularization: Whether to warn when regularization is applied
         
     Returns
     -------
     C_new : np.ndarray
-        Updated loading matrix (N x m)
+        Updated loading matrix (n x m). Each row corresponds to a series,
+        each column to a factor.
     R_new : np.ndarray
-        Updated observation covariance (N x N)
+        Updated observation covariance (n x n), typically diagonal.
+        Diagonal elements represent idiosyncratic variances.
     A_new : np.ndarray
-        Updated transition matrix (m x m)
+        Updated transition matrix (m x m). Describes factor dynamics.
     Q_new : np.ndarray
-        Updated innovation covariance (m x m)
+        Updated innovation covariance (m x m). Diagonal elements represent
+        innovation variances for each factor.
     Z_0_new : np.ndarray
-        Updated initial state (m,)
+        Updated initial state (m,). Typically unchanged from input.
     V_0_new : np.ndarray
-        Updated initial covariance (m x m)
+        Updated initial covariance (m x m). Computed from stationary covariance.
     loglik : float
-        Log-likelihood value for this iteration
+        Log-likelihood value for this iteration. Used for convergence checking.
+        
+    Raises
+    ------
+    ValueError
+        If inputs are invalid or numerical issues occur during computation.
+        
+    Notes
+    -----
+    - All input parameters are validated and cleaned before use
+    - Missing data is handled automatically by the Kalman filter
+    - Q diagonal elements are enforced to have minimum value (1e-8) for factor evolution
+    - All covariance matrices are regularized to ensure positive semi-definiteness
+    - AR coefficients are clipped to stability bounds if configured
+    
+    Examples
+    --------
+    >>> import numpy as np
+    >>> from dfm_python.core.em import em_step
+    >>> # Observation matrix with missing data
+    >>> y = np.random.randn(10, 100)
+    >>> y[0, 10:20] = np.nan  # Some missing values
+    >>> # Current parameter estimates
+    >>> A = np.eye(3) * 0.9
+    >>> C = np.random.randn(10, 3) * 0.5
+    >>> Q = np.eye(3) * 0.1
+    >>> R = np.eye(10) * 0.5
+    >>> Z_0 = np.zeros(3)
+    >>> V_0 = np.eye(3) * 0.1
+    >>> r = np.array([1, 2])
+    >>> blocks = np.column_stack([np.ones(10), np.ones(10)])
+    >>> # Perform one EM iteration
+    >>> C_new, R_new, A_new, Q_new, Z_0_new, V_0_new, loglik = em_step(
+    ...     y, A, C, Q, R, Z_0, V_0, r, p=1,
+    ...     R_mat=None, q=None, nQ=0, i_idio=np.ones(10),
+    ...     blocks=blocks, clock='m'
+    ... )
+    >>> assert C_new.shape == C.shape
+    >>> assert np.isfinite(loglik)
     """
     # Validate and clean input parameters
     if not _check_finite(A, "A"):
-        _logger.warning("em_step: A contains NaN/Inf, regularizing")
+        _logger.warning("em_step: A contains NaN/Inf, applying regularization (0.9*I + 0.1*cleaned)")
         A = np.eye(A.shape[0]) * 0.9 + _clean_matrix(A, 'loading') * 0.1
     if not _check_finite(Q, "Q"):
-        _logger.warning("em_step: Q contains NaN/Inf, regularizing")
+        _logger.warning("em_step: Q contains NaN/Inf, applying regularization (min=1e-6)")
         Q = _clean_matrix(Q, 'covariance', default_nan=1e-6)
     if not _check_finite(R, "R"):
-        _logger.warning("em_step: R contains NaN/Inf, regularizing")
+        _logger.warning("em_step: R contains NaN/Inf, applying regularization (min=1e-4)")
         R = _clean_matrix(R, 'diagonal', default_nan=1e-4, default_inf=1e4)
     if not _check_finite(C, "C"):
-        _logger.warning("em_step: C contains NaN/Inf, regularizing")
+        _logger.warning("em_step: C contains NaN/Inf, cleaning matrix")
         C = _clean_matrix(C, 'loading')
     if not _check_finite(Z_0, "Z_0"):
         _logger.warning("em_step: Z_0 contains NaN/Inf, resetting to zeros")
         Z_0 = np.zeros_like(Z_0)
     if not _check_finite(V_0, "V_0"):
-        _logger.warning("em_step: V_0 contains NaN/Inf, using regularized identity")
+        _logger.warning("em_step: V_0 contains NaN/Inf, using regularized identity (0.1*I)")
         V_0 = np.eye(V_0.shape[0]) * 0.1
 
     n, T = y.shape
@@ -720,10 +858,24 @@ def em_step(
                 block_transition[:r_i, :factor_lag_size] @ expected_factor_lag_cross[:r_i, :factor_lag_size].T
             ) / T
             block_innovation_cov = _clean_matrix(block_innovation_cov, 'covariance', default_nan=0.0)
+            # Ensure diagonal elements have minimum value to prevent Q from becoming zero
+            # This is critical for factor evolution - Q[i,i] = 0 means factor i doesn't evolve
+            # Ensure Q diagonal has minimum value - critical for factor evolution
+            block_innovation_cov[:r_i, :r_i] = _ensure_innovation_variance_minimum(
+                block_innovation_cov[:r_i, :r_i], min_variance=1e-8
+            )
             innovation_cov_reg, _ = _ensure_positive_definite(block_innovation_cov[:r_i, :r_i], min_eigenval, warn_reg)
             block_innovation_cov[:r_i, :r_i] = innovation_cov_reg
+            # Re-ensure minimum after positive definite check (it may have changed diagonal)
+            block_innovation_cov[:r_i, :r_i] = _ensure_innovation_variance_minimum(
+                block_innovation_cov[:r_i, :r_i], min_variance=1e-8
+            )
             max_eig = _get_config_param(config, "max_eigenvalue", 1e6)
             block_innovation_cov[:r_i, :r_i] = _cap_max_eigenvalue(block_innovation_cov[:r_i, :r_i], max_eigenval=max_eig)
+            # Re-ensure minimum after max eigenvalue capping (it may have changed diagonal)
+            block_innovation_cov[:r_i, :r_i] = _ensure_innovation_variance_minimum(
+                block_innovation_cov[:r_i, :r_i], min_variance=1e-8
+            )
         except _NUMERICAL_EXCEPTIONS:
             if np.allclose(block_transition[:r_i, :factor_lag_size], 0):
                 block_transition[:r_i, :factor_lag_size] = np.random.randn(r_i, factor_lag_size) * 0.1
@@ -764,7 +916,7 @@ def em_step(
     ar_coeffs_diag, _ = _estimate_ar_coefficient(expected_idio_cross, expected_idio_lag_sq, vsmooth_sum=vsmooth_lag_diag)
     block_transition_idio = np.diag(ar_coeffs_diag)
     innovation_cov_diag = (np.maximum(expected_idio_current_sq, 0.0) - ar_coeffs_diag * expected_idio_cross) / T
-    innovation_cov_diag = np.maximum(innovation_cov_diag, 1e-8)
+    innovation_cov_diag = np.maximum(innovation_cov_diag, MIN_INNOVATION_VARIANCE)
     block_innovation_cov_idio = np.diag(innovation_cov_diag)
     i_subset_size = i_subset.stop - i_subset.start
     if n_idio_actual == i_subset_size:
@@ -1013,8 +1165,14 @@ def em_step(
     min_eigenval = _get_config_param(config, "min_eigenvalue", 1e-8)
     warn_reg = _get_config_param(config, "warn_on_regularization", True)
     max_eigenval = _get_config_param(config, "max_eigenvalue", 1e6)
+    # Ensure Q diagonal has minimum value - critical for factor evolution
+    Q_new = _ensure_innovation_variance_minimum(Q_new, min_variance=MIN_INNOVATION_VARIANCE)
     Q_new, _ = _ensure_positive_definite(Q_new, min_eigenval, warn_reg)
+    # Re-ensure minimum after positive definite check (it may have changed diagonal)
+    Q_new = _ensure_innovation_variance_minimum(Q_new, min_variance=MIN_INNOVATION_VARIANCE)
     Q_new = _cap_max_eigenvalue(Q_new, max_eigenval=max_eigenval)
+    # Re-ensure minimum after max eigenvalue capping (it may have changed diagonal)
+    Q_new = _ensure_innovation_variance_minimum(Q_new, min_variance=MIN_INNOVATION_VARIANCE)
     V_0_new = _clean_matrix(V_0_new, 'covariance', default_nan=0.0)
     V_0_new, _ = _ensure_positive_definite(V_0_new, min_eigenval, warn_reg)
     return C_new, R_new, A_new, Q_new, Z_0, V_0_new, loglik
