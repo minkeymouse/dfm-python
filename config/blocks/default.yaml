@@ -1,0 +1,48 @@
+# ============================================================================
+# DFM Block Structure Configuration
+# ============================================================================
+# Each block corresponds to a set of series defined in config/series/default.yaml
+# and represents one latent factor (or more) capturing that sector's dynamics.
+#
+# Each block has:
+#   - factors: number of latent factors in this block
+#   - ar_lag: autoregressive lag order for the block-level factor
+#   - clock: optional, if block frequency differs from global clock
+#   - notes: optional comments
+# ============================================================================
+
+Block_Global:
+  factors: 1
+  ar_lag: 1
+  clock: m
+  notes: "Global (aggregate) factor driving all blocks"
+
+Block_Consumption:
+  factors: 1
+  ar_lag: 1
+  clock: m
+  notes: "Consumption-related indicators (retail sales, CSI, etc.)"
+
+Block_Investment:
+  factors: 1
+  ar_lag: 1
+  clock: m
+  notes: "Investment-related indicators (GFCF, BSI Investment, etc.)"
+
+Block_Export:
+  factors: 1
+  ar_lag: 1
+  clock: m
+  notes: "Export and external demand (goods & services, terms of trade, etc.)"
+
+Block_Labor:
+  factors: 1
+  ar_lag: 1
+  clock: m
+  notes: "Employment, unemployment, participation, labor expectations"
+
+Block_Nominal:
+  factors: 1
+  ar_lag: 1
+  clock: m
+  notes: "Nominal price-level or value indicators (PPI, CPI, trade prices, credit, etc.)"

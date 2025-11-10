@@ -1,0 +1,69 @@
+# DFM Configuration - Main Settings
+# 
+# This is the main configuration file for Dynamic Factor Model (DFM).
+# It references series definitions from config/series/default.yaml
+#
+# To modify:
+# - Estimation parameters: Edit values below
+# - Series definitions: Edit config/series/default.yaml
+# - Block structure: Edit config/blocks/default.yaml
+
+defaults:
+  - series: default  # Load series definitions from config/series/default.yaml
+  - blocks: default # Load block structure from config/blocks/default.yaml
+  - _self_
+
+# ============================================================================
+# Estimation Parameters
+# ============================================================================
+# Control how the EM algorithm runs
+
+# AR lag for factor transition equation (typically 1)
+ar_lag: 1
+
+# EM convergence threshold (smaller = more precise but slower)
+# Typical range: 1e-5 to 1e-3
+threshold: 1e-5
+
+# Maximum EM iterations (increase for better convergence)
+max_iter: 5000
+
+# Missing data handling
+nan_method: 2  # Method for handling NaN (1-5, 2 = spline interpolation)
+nan_k: 3       # Spline parameter for interpolation
+
+# Clock frequency: base frequency for all latent factors
+# Options: 'd' (daily), 'w' (weekly), 'm' (monthly), 'q' (quarterly), 
+#          'sa' (semi-annual), 'a' (annual)
+# Note: All series must have frequency <= clock frequency
+clock: m  # Monthly (most common)
+
+# ============================================================================
+# Numerical Stability Parameters
+# ============================================================================
+# These parameters help ensure numerical stability during estimation.
+# All are enabled by default but can be disabled for research purposes.
+
+# AR Coefficient Clipping (ensures stationarity)
+clip_ar_coefficients: true
+ar_clip_min: -0.99  # Minimum AR coefficient
+ar_clip_max: 0.99   # Maximum AR coefficient
+warn_on_ar_clip: true
+
+# Data Value Clipping (handles extreme outliers)
+clip_data_values: true
+data_clip_threshold: 100.0  # Clip values beyond this many standard deviations
+warn_on_data_clip: true
+
+# Regularization (prevents ill-conditioned matrices)
+use_regularization: true
+regularization_scale: 1e-5  # Scale factor for ridge regularization
+min_eigenvalue: 1e-8        # Minimum eigenvalue for positive definite matrices
+max_eigenvalue: 1e6         # Maximum eigenvalue cap
+warn_on_regularization: true
+
+# Damped Updates (prevents likelihood decreases)
+use_damped_updates: true
+damping_factor: 0.8  # 80% new, 20% old when likelihood decreases
+warn_on_damped_update: true
+
