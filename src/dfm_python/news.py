@@ -46,8 +46,21 @@ def _check_config_consistency(saved_config: Any, current_config: DFMConfig) -> N
     Issues a UserWarning if configs differ. Logs warnings if comparison fails.
     """
     try:
-        if hasattr(saved_config, 'SeriesID') and hasattr(current_config, 'SeriesID'):
-            if saved_config.SeriesID != current_config.SeriesID:
+        # Compare series IDs using new API
+        if hasattr(saved_config, 'get_series_ids'):
+            saved_ids = saved_config.get_series_ids()
+        elif hasattr(saved_config, 'SeriesID'):
+            saved_ids = saved_config.SeriesID
+        else:
+            saved_ids = []
+        
+        if hasattr(current_config, 'get_series_ids'):
+            current_ids = current_config.get_series_ids()
+        elif hasattr(current_config, 'SeriesID'):
+            current_ids = current_config.SeriesID
+        else:
+            current_ids = []
+        if saved_ids != current_ids:
                 import warnings
                 warnings.warn(
                     "Config used in estimation differs from current config. "
@@ -158,7 +171,7 @@ def news_dfm(X_old: np.ndarray, X_new: np.ndarray, Res: Union[DFMResult, Dict[st
     v_news : Union[int, np.ndarray, List[int]]
         Target variable index(s) (0-based). Specifies which series to forecast.
         Can be:
-        - int: Single target variable (backward compatible)
+        - int: Single target variable
         - np.ndarray or List[int]: Multiple target variables (MATLAB-compatible)
         All indices must be in range [0, N) where N is number of series.
         
@@ -523,15 +536,29 @@ def update_nowcast(X_old: np.ndarray, X_new: np.ndarray, Time: pd.DatetimeIndex,
         raise ValueError(f"update_nowcast: series must be a string, got {type(series)}")
     if not isinstance(period, str):
         raise ValueError(f"update_nowcast: period must be a string, got {type(period)}")
-    if not hasattr(config, 'SeriesID'):
-        raise ValueError(f"update_nowcast: config must have 'SeriesID' attribute")
-    if series not in config.SeriesID:
-        raise ValueError(f"update_nowcast: series '{series}' not found in config.SeriesID")
+    # Get series IDs and find index
+    if hasattr(config, 'get_series_ids'):
+        series_ids = config.get_series_ids()
+    elif hasattr(config, 'SeriesID'):
+        series_ids = config.SeriesID
+    else:
+        series_ids = []
+    
+    if not series_ids:
+        raise ValueError(f"update_nowcast: config must have series definitions")
+    if series not in series_ids:
+        raise ValueError(f"update_nowcast: series '{series}' not found in config")
     
     # Validate period format
     try:
-        i_series = config.SeriesID.index(series)
-        freq = config.Frequency[i_series]
+        i_series = series_ids.index(series)
+        if hasattr(config, 'get_frequencies'):
+            frequencies = config.get_frequencies()
+        elif hasattr(config, 'Frequency'):
+            frequencies = config.Frequency
+        else:
+            frequencies = []
+        freq = frequencies[i_series] if i_series < len(frequencies) else 'm'
         if freq == 'm':
             # Format: YYYYmMM (e.g., "2016m12")
             parts = period.split('m')
@@ -565,7 +592,7 @@ def update_nowcast(X_old: np.ndarray, X_new: np.ndarray, Time: pd.DatetimeIndex,
             Res = Res['Res']
     
     # Check config consistency if Res has Config attribute
-    if hasattr(Res, 'Config') and hasattr(config, 'SeriesID'):
+    if hasattr(Res, 'Config'):
         _check_config_consistency(Res.Config, config)
     
     # Make sure datasets are same size
@@ -604,13 +631,33 @@ def update_nowcast(X_old: np.ndarray, X_new: np.ndarray, Time: pd.DatetimeIndex,
         Time = pd.concat([Time, pd.Index(new_dates)])
     
     # Find series index
+    if hasattr(config, 'get_series_ids'):
+        series_ids = config.get_series_ids()
+    elif hasattr(config, 'SeriesID'):
+        series_ids = config.SeriesID
+    else:
+        series_ids = []
+    
     try:
-        i_series = config.SeriesID.index(series)
+        i_series = series_ids.index(series)
     except ValueError:
         raise ValueError(f"Series {series} not found in configuration")
     
-    series_name = config.SeriesName[i_series]
-    freq = config.Frequency[i_series]
+    if hasattr(config, 'get_series_names'):
+        series_names = config.get_series_names()
+    elif hasattr(config, 'SeriesName'):
+        series_names = config.SeriesName
+    else:
+        series_names = []
+    
+    if hasattr(config, 'get_frequencies'):
+        frequencies = config.get_frequencies()
+    elif hasattr(config, 'Frequency'):
+        frequencies = config.Frequency
+    else:
+        frequencies = []
+    series_name = series_names[i_series] if i_series < len(series_names) else series
+    freq = frequencies[i_series] if i_series < len(frequencies) else 'm'
     
     # Parse period
     if freq == 'm':
@@ -658,7 +705,14 @@ def update_nowcast(X_old: np.ndarray, X_new: np.ndarray, Time: pd.DatetimeIndex,
     else:
         period_str = pd.Timestamp(Time[t_nowcast]).strftime('%Y-%m')
     
-    print(f'Nowcast for {series_name} ({config.UnitsTransformed[i_series]}), {period_str}')
+    # Get units
+    if hasattr(config, 'series') and i_series < len(config.series):
+        units = config.series[i_series].units
+    elif hasattr(config, 'UnitsTransformed') and i_series < len(config.UnitsTransformed):
+        units = config.UnitsTransformed[i_series]
+    else:
+        units = ""
+    print(f'Nowcast for {series_name} ({units}), {period_str}')
     
     if len(forecast) == 0 or np.all(np.isnan(forecast)):
         print('\n  No forecast was made.\n')
@@ -683,7 +737,13 @@ def update_nowcast(X_old: np.ndarray, X_new: np.ndarray, Time: pd.DatetimeIndex,
         print('\n  Nowcast Detail Table \n')
         for i in range(N):
             if data_released[i] and not np.isnan(forecast[i]):
-                series_id = config.SeriesID[i]
+                if hasattr(config, 'get_series_ids'):
+                    series_ids = config.get_series_ids()
+                elif hasattr(config, 'SeriesID'):
+                    series_ids = config.SeriesID
+                else:
+                    series_ids = []
+                series_id = series_ids[i] if i < len(series_ids) else f"series_{i}"
                 print(f'{series_id:20s}  Forecast: {forecast[i]:8.2f}  Actual: {actual[i]:8.2f}  '
                       f'Weight: {weight[i]:8.4f}  Impact: {impact_releases[i]:8.2f}')
         

@@ -1,0 +1,85 @@
+series_id,series_name,frequency,transformation,category,units,Block_Global,Block_Consumption,Block_Investment,Block-Export,Block-Nominal,Block-Labor,Release
+KOGDP...D,"Gross Domestic Product, at Market Price, Constant Prices, SA, KRW, 2020 Chained Prices",q,pca,Others,"Chained W, Billions",1,0,0,0,0,0,25
+KOCNPER.D,"Final Consumption Expenditure, Private, Total, Constant Prices, SA, KRW, 2020 Chained Prices",q,pca,Others,"Chained W, Billions",1,1,0,0,0,0,25
+KOCNGOV.D,"Final Consumption Expenditure, General Government, Total, Constant Prices, SA, KRW, 2020 Chained Prices",q,pca,Others,"Chained W, Billions",1,0,0,0,0,0,25
+KOGFCF..D,"Gross Capital Formation, Fixed, Total, Constant Prices, SA, KRW, 2020 Chained Prices",q,pca,Others,"Chained W, Billions",1,0,1,0,0,0,25
+KOEXNGS.D,"Exports, Goods and Services, Total, Constant Prices, SA, KRW, 2020 Chained Prices",q,pca,Others,"Chained W, Billions",1,0,0,1,0,0,25
+KOIMNGS.D,"Imports, Goods and Services, Total, Constant Prices, SA, KRW, 2020 Chained Prices",q,pca,Others,"Chained W, Billions",1,0,0,0,0,0,25
+KOUNPTOTO,"Unemployed, Total, SA",m,pch,Labor,Thousands of Persons,1,0,0,0,0,1,11
+KOEMPTOTO,"Employment, Total, SA",m,pch,Labor,Thousands of Persons,1,0,0,0,0,1,11
+KOEMPMANF,"Employment, by Industry, Mining and Manufacturing",m,pch,Labor,Thousands of Persons,1,0,0,0,0,1,11
+KOEMPCONF,"Employment, by Industry, Construction",m,pch,Labor,Thousands of Persons,1,0,0,0,0,1,11
+KOEMPWREP,"Employment, by Industry, Wholesale and Retail Trade",m,pch,Labor,Thousands of Persons,1,0,0,0,0,1,11
+KOPOPACTE,"Economic Active Population, Total, SA",m,pch,Labor,Thousands of Persons,1,0,0,0,0,1,11
+KOEXPGDSA,"Exports, Free on Board, USD",m,pch,International trade,"$, Millions",1,0,0,1,1,0,1
+KOEXCHINA,"Exports, China, USD",m,pch,International trade,"$, Millions",1,0,0,1,1,0,1
+KOEXPSCOH,"Exports, Semi-Conductors, Volume, Index, 2020 = 100",m,pch,International trade,Index,1,0,0,1,0,0,28
+KOEXPMOVH,"Exports, Motor Vehicles, Volume, Index, 2020 = 100",m,pch,International trade,Index,1,0,0,1,0,0,28
+KOIMPGDSA,"Imports Cost Insurance Freight (Customs Clearance Basis), USD",m,pch,International trade,"$, Millions",1,0,0,0,1,0,1
+KOEXPPRCF,"Export Prices, Basic Groups, All Items, Index, 2020 = 100",m,pch,International trade,Index,1,0,0,0,1,0,14
+KOIMPPRCF,"Import Prices, Basic Groups, All Items, Index, 2020 = 100",m,pch,International trade,Index,1,0,0,0,1,0,14
+KONETTRDF,"Terms of Trade, Net Barter, Index, 2020 = 100",m,pch,International trade,Index,1,0,0,1,1,0,14
+KOWRCCNSE,"Retail Sales, Total, All Consumer Goods, SA, Index, 2020 = 100",m,pch,Consumption,Index,1,1,0,0,0,0,28
+KOWRCDURE,"Wholesale and Retail Trade, Total, Durable Goods, SA, Index, 2020 = 100",m,pch,Consumption,Index,1,1,0,0,0,0,28
+KOWRCSEME,"Wholesale and Retail Trade, Total, Semi-Durable Goods, SA, Index, 2020 = 100",m,pch,Consumption,Index,1,1,0,0,0,0,28
+KOWRCNODE,"Wholesale and Retail Trade, Total, Non-Durable Goods, SA, Index, 2020 = 100",m,pch,Consumption,Index,1,1,0,0,0,0,28
+KOCREU..A,"Consumer Credit : Credit Card, KRW",m,pch,Consumption,Index,1,1,0,0,1,0,85
+KOCSMTTOA,"Cyber Shopping Mall, Transaction Amount, Total, Total, KRW",m,pch,Consumption,Index,1,1,0,0,1,0,32
+KOCONPRCF,"Consumer Prices, Total, Index, 2020 = 100",m,pch,Price,Index,1,0,0,0,1,0,3
+KOPROPRCF,"Producer Prices, All Items, Index, 2020 = 100",m,pch,Price,Index,1,0,0,0,1,0,20
+KOCPCOREF,"Consumer Prices, Excluding Agricultural Products and Oils, Index, 2020 = 100",m,pch,Price,Index,1,0,0,0,1,0,3
+KOCPEXFEF,"Consumer Prices, Excluding Food and Energy, Index, 2020 = 100",m,pch,Price,Index,1,0,0,0,1,0,3
+KOEQUIPTE,"Investment, Equipment, Estimation, SA, Index, 2020 = 100",m,pch,Investment,Index,1,0,1,0,0,0,30
+KOEQUIMAE,"Investment, Machinery, SA, Index, 2020 = 100",m,pch,Investment,Index,1,0,1,0,0,0,30
+KOEQUITTE,"Investment, Transportation Equipment, SA, Index, 2020 = 100",m,pch,Investment,Index,1,0,1,0,0,0,30
+KONEWCONA,"New Orders, Construction, Total, Value, KRW",m,pch,Investment,Index,1,0,1,0,1,0,30
+KOCONPMTH,"Building Permits, Floor Area",m,pch,Investment,Index,1,0,1,0,0,0,31
+KOCONSTRP,"Construction Started, Floor Area",m,pch,Investment,Index,1,0,1,0,0,0,31
+KOVALCONA,"Construction Completed, Total, KRW",m,pch,Investment,Index,1,0,1,0,1,0,30
+KOPSMANUG,"Shipments, Manufacturing, SA, Index, 2020 = 100",m,pch,Production and Manufacturing,Index,1,0,0,0,0,0,30
+KOMSCAPGG,"Manufacturing Shipment - Capital Goods, SA, Index, 2020 = 100",m,pch,Production and Manufacturing,Index,1,0,1,0,0,0,30
+KOMSCONGG,"Manufacturing Shipment - Consumer Goods, SA, Index, 2020 = 100",m,pch,Production and Manufacturing,Index,1,1,0,0,0,0,30
+KOPIMANUG,"Inventories, Manufacturing, SA, Index, 2020 = 100",m,pch,Production and Manufacturing,Index,1,0,0,0,0,0,30
+KOPICAPGG,"Producers Inventory - Capital Goods, SA, Index, 2020 = 100",m,pch,Production and Manufacturing,Index,1,0,1,0,0,0,30
+KOPICONGG,"Producers Inventory - Consumer Goods, SA, Index, 2020 = 100",m,pch,Production and Manufacturing,Index,1,1,0,0,0,0,30
+KOSIAI..E,"Service Sector, Total, SA, Index, 2020 = 100",m,pch,Production and Manufacturing,Index,1,1,0,0,0,0,30
+KOIPMIMAG,"Production, Mining and Manufacturing, SA, Index, 2020 = 100",m,pch,Production and Manufacturing,Index,1,0,0,0,0,0,30
+KOMPCAPGG,"Production, Capital Goods, SA, Index, 2020 = 100",m,pch,Production and Manufacturing,Index,1,0,1,0,0,0,30
+KOMPCONGG,"Manufacturing Production - Consumer Goods, SA, Index, 2020 = 100",m,pch,Production and Manufacturing,Index,1,1,0,0,0,0,30
+KOCYLEADR,"Leading Index, Index, 2020 = 100",m,pch,Production and Manufacturing,Index,1,0,0,0,0,0,30
+KOROCOINF,"Coincident Index, Index, 2020 = 100",m,pch,Production and Manufacturing,Index,1,0,0,0,0,0,30
+KOBSESI.R,"BoK, BSI, Economic Sentiment Index",m,lin,Surveys,Index,1,0,0,0,0,0,-5
+KOCOBUSIR,"BoK, BSI, Business Conditions, Composite Business Sentiment Index, KRW",m,lin,Surveys,Index,1,0,0,0,0,0,-5
+KOBSIBAPR,"BoK, BSI, Business Conditions, All Industries, Actual",m,lin,Surveys,Index,1,0,0,0,0,0,-5
+KOBSISAPR,"BoK, BSI, Sales Growth, All Industries, Actual",m,lin,Surveys,Index,1,0,0,0,0,0,-5
+KOBSIHAPR,"BoK, BSI, Employment Conditions, All Industries, Actual",m,lin,Surveys,Index,1,0,0,0,0,1,-5
+KOBSIYAPR,"BoK, BSI, Profitability, All Industries, Actual",m,lin,Surveys,Index,1,0,0,0,0,0,-5
+KOBSIFAPR,"BoK, BSI, Financial Conditions, All Industries, Actual",m,lin,Surveys,Index,1,0,0,0,0,0,-5
+KOBSIBMPR,"BoK, BSI, Business Conditions, Manufacturing, Actual",m,lin,Surveys,Index,1,0,0,0,0,0,-5
+KOBSIIMPR,"BoK, BSI, Facility Investment, Manufacturing, Actual",m,lin,Surveys,Index,1,0,1,0,0,0,-5
+KOBSIBNPR,"BoK, BSI, Business Conditions, Non-Manufacturing, Actual",m,lin,Surveys,Index,1,0,0,0,0,0,-5
+KOCNFBUSR,"BoK, BSI, Business Conditions, All Industries, Forecast",m,lin,Surveys,Index,1,0,0,0,0,0,-35
+KOBSIIMER,"BoK, BSI, Facility Investment, Manufacturing, Forecast",m,lin,Surveys,Index,1,0,1,0,0,0,-35
+KOBSIXMER,"BoK, BSI, Export Sales Growth, Manufacturing, Forecast",m,lin,Surveys,Index,1,0,0,1,0,0,-35
+KOBSIRMER,"BoK, BSI, Operation Rate, Manufacturing, Forecast",m,lin,Surveys,Index,1,0,0,0,0,0,-35
+KOBSIBNER,"BoK, BSI, Business Conditions, Non-Manufacturing, Forecast",m,lin,Surveys,Index,1,0,0,0,0,0,-35
+KOBSIBCOQ,"FKI, Business Conditions, All Industries, Actual, SA",m,lin,Surveys,Index,1,0,0,0,0,0,-5
+KOBSIBMAR,"FKI, Business Conditions, Manufacturing, Actual",m,lin,Surveys,Index,1,0,0,0,0,0,-5
+KOBSIBNMR,"FKI, Business Conditions, Non-Manufacturing, Actual",m,lin,Surveys,Index,1,0,0,0,0,0,-5
+KOBFDSAAF,"FKI, Domestic Demand, All Industries, Actual",m,lin,Surveys,Index,1,0,0,0,0,0,-5
+KOBFXSAAF,"FKI, Export, All Industries, Actual",m,lin,Surveys,Index,1,0,0,1,0,0,-5
+KOBFINAAF,"FKI, Investment, All Industries, Actual",m,lin,Surveys,Index,1,0,1,0,0,0,-5
+KOBSIEMAR,"FKI, Employment, All Industries, Actual",m,lin,Surveys,Index,1,0,0,0,0,1,-5
+KOBFPRAAF,"FKI, Profitability, All Industries, Actual",m,lin,Surveys,Index,1,0,0,0,0,0,-5
+KOBSIBCEQ,"FKI, Business Conditions, All Industries, Prospects, SA",m,lin,Surveys,Index,1,0,0,0,0,0,-35
+KOBUSINVR,"FKI, Investment, All Industries, Prospects",m,lin,Surveys,Index,1,0,1,0,0,0,-35
+KOCNFCONR,"CSI, Composite Consumer Sentiment Index, Total",m,lin,"Surveys, Consumer",Index,1,1,0,0,0,0,-5
+KOCSHHLMR,"CSI, Living Standard of Household, Total",m,lin,"Surveys, Consumer",Index,1,1,0,0,0,0,-5
+KOCSHHEMR,"CSI, Expectations of Living Standard of Household, Total",m,lin,"Surveys, Consumer",Index,1,1,0,0,0,0,-5
+KOCSPHIMR,"CSI, Expected Change in Total Household Income, Total",m,lin,"Surveys, Consumer",Index,1,1,0,0,0,0,-5
+KOCSPSPMR,"CSI, Spending Plan, Total",m,lin,"Surveys, Consumer",Index,1,1,0,0,0,0,-5
+KOCSECDMR,"CSI, Domestic Economic Situation, Total",m,lin,"Surveys, Consumer",Index,1,1,0,0,0,0,-5
+KOCSECEMR,"CSI, Domestic Economic Situation, Next 6 Months",m,lin,"Surveys, Consumer",Index,1,1,0,0,0,0,-5
+KOCSEMEMR,"CSI, Expectations of Employment Situation, Total",m,lin,"Surveys, Consumer",Index,1,1,0,0,0,1,-5
+KOCSEOHSR,"CSI, Expectations of Household Saving, Total",m,lin,"Surveys, Consumer",Index,1,1,0,0,0,0,-5
+KOCSEOHDR,"CSI, Expectations of Household Debt, Total",m,lin,"Surveys, Consumer",Index,1,1,0,0,0,0,-5

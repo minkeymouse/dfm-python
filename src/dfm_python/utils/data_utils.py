@@ -122,21 +122,52 @@ def summarize(X: np.ndarray, Time, config, vintage: Optional[str] = None) -> Non
         t_obs = ~np.isnan(X[:, i])
         obs_idx = np.where(t_obs)[0]
         
-        name = config.SeriesName[i][:27] + "..." if len(config.SeriesName[i]) > 30 else config.SeriesName[i]
-        sid = f"[{config.SeriesID[i][:25]}...]" if len(config.SeriesID[i]) > 28 else f"[{config.SeriesID[i]}]"
+        # Use new API with fallback for backward compatibility
+        if hasattr(config, 'get_series_names'):
+            series_names = config.get_series_names()
+        elif hasattr(config, 'SeriesName'):
+            series_names = config.SeriesName
+        else:
+            series_names = []
+        
+        from ..core.helpers import safe_get_method
+        series_ids = safe_get_method(config, 'get_series_ids', [])
+        if not series_ids and hasattr(config, 'SeriesID'):
+            series_ids = config.SeriesID
+        
+        if hasattr(config, 'get_frequencies'):
+            frequencies = config.get_frequencies()
+        elif hasattr(config, 'Frequency'):
+            frequencies = config.Frequency
+        else:
+            frequencies = []
+        
+        if hasattr(config, 'series'):
+            transformations = [s.transformation for s in config.series]
+        elif hasattr(config, 'Transformation'):
+            transformations = config.Transformation
+        else:
+            transformations = []
+        
+        name = series_names[i][:27] + "..." if i < len(series_names) and len(series_names[i]) > 30 else (series_names[i] if i < len(series_names) else f"series_{i}")
+        sid = f"[{series_ids[i][:25]}...]" if i < len(series_ids) and len(series_ids[i]) > 28 else f"[{series_ids[i] if i < len(series_ids) else f'series_{i}'}]"
         
         # Map frequency codes to readable names
         freq_map = {'m': 'Monthly', 'q': 'Quarterly', 'sa': 'Semi-annual', 'a': 'Annual'}
-        freq = freq_map.get(config.Frequency[i], config.Frequency[i].upper())
-        trans = config.Transformation[i]
-        units_t = 'MoM%' if trans == 'pch' and config.Frequency[i] == 'm' else \
-                  'QoQ% AR' if trans == 'pca' and config.Frequency[i] == 'q' else \
-                  config.UnitsTransformed[i]
+        series_freq = frequencies[i] if i < len(frequencies) else 'm'
+        freq = freq_map.get(series_freq, series_freq.upper())
+        trans = transformations[i] if i < len(transformations) else 'lin'
+        
+        # Get transformation units
+        from ..config import _TRANSFORM_UNITS_MAP
+        units_t = 'MoM%' if trans == 'pch' and series_freq == 'm' else \
+                  'QoQ% AR' if trans == 'pca' and series_freq == 'q' else \
+                  _TRANSFORM_UNITS_MAP.get(trans, trans)
         
         date_range = "N/A"
         if len(obs_idx) > 0:
             try:
-                fmt = '%b %Y' if config.Frequency[i] == 'm' else '%Y-%m'
+                fmt = '%b %Y' if series_freq == 'm' else '%Y-%m'
                 # Use iloc for positional indexing
                 if hasattr(Time, 'iloc'):
                     date_range = f"{Time.iloc[obs_idx[0]].strftime(fmt)}-{Time.iloc[obs_idx[-1]].strftime(fmt)}"

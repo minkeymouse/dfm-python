@@ -20,7 +20,6 @@ Data Loading:
       the same interface: (X, Time, Z) arrays
 """
 
-import io
 import logging
 from pathlib import Path
 from typing import List, Optional, Tuple, Union
@@ -30,24 +29,21 @@ import pandas as pd
 
 from .config import DFMConfig
 
-ModelConfig = DFMConfig
-
 logger = logging.getLogger(__name__)
-
-try:
-    from omegaconf import OmegaConf
-    OMEGACONF_AVAILABLE = True
-except ImportError:
-    OMEGACONF_AVAILABLE = False
 
 
 def load_config_from_yaml(configfile: Union[str, Path]) -> DFMConfig:
     """Load model configuration from YAML file.
     
+    This function loads the config structure:
+    - Main settings (estimation parameters) from config/default.yaml
+    - Series definitions from config/series/default.yaml
+    - Block definitions from config/blocks/default.yaml
+    
     Parameters
     ----------
     configfile : str or Path
-        Path to YAML configuration file
+        Path to main YAML configuration file (e.g., config/default.yaml)
         
     Returns
     -------
@@ -57,94 +53,26 @@ def load_config_from_yaml(configfile: Union[str, Path]) -> DFMConfig:
     Raises
     ------
     FileNotFoundError
-        If configfile does not exist
+        If configfile or referenced files do not exist
     ImportError
         If omegaconf is not available
     ValueError
         If configuration is invalid
     """
-    if not OMEGACONF_AVAILABLE:
-        raise ImportError("omegaconf is required for YAML config loading. Install with: pip install omegaconf")
-    
-    configfile = Path(configfile)
-    if not configfile.exists():
-        raise FileNotFoundError(f"Configuration file not found: {configfile}")
-    
-    cfg = OmegaConf.load(configfile)
-    cfg_dict = OmegaConf.to_container(cfg, resolve=True)
-    
-    # Extract model config and dfm parameters
-    model_dict = None
-    dfm_params = {}
-    
-    # Handle nested structure (if config has @package model: directive)
-    if 'series' in cfg_dict and 'block_names' in cfg_dict:
-        # Direct model config structure
-        model_dict = cfg_dict
-    elif 'model' in cfg_dict:
-        # Nested under 'model' key (from @package model:)
-        model_dict = cfg_dict['model'].copy() if isinstance(cfg_dict['model'], dict) else {}
-        # If series is at top level, merge it into model_dict
-        if 'series' in cfg_dict and 'series' not in model_dict:
-            model_dict['series'] = cfg_dict['series']
-    elif 'series' in cfg_dict:
-        # Series at top level, construct model_dict from top-level keys
-        model_dict = {k: v for k, v in cfg_dict.items() if k not in ['dfm', 'data', 'experiment_name', 'output_dir', 'defaults']}
-    else:
-        # Try to construct from top-level keys
-        model_dict = cfg_dict
-    
-    # Extract dfm parameters (estimation parameters like clock)
-    if 'dfm' in cfg_dict:
-        dfm_params = cfg_dict['dfm']
-    
-    # Merge dfm parameters into model config
-    if dfm_params:
-        if isinstance(model_dict, dict):
-            model_dict = {**model_dict, **dfm_params}
-        else:
-            # If model_dict is not a dict, create new dict
-            model_dict = {'series': model_dict, **dfm_params} if model_dict else dfm_params
-    
-    return DFMConfig.from_dict(model_dict)
+    from .config import YamlSource
+    return YamlSource(configfile).load()
 
 
-def load_config_from_csv(configfile: Union[str, Path]) -> DFMConfig:
-    """DEPRECATED: Load model configuration from CSV file.
-    
-    This function is deprecated. CSV config loading has been removed to make
-    the package more generic. Users should:
-    - Use YAML config files with Hydra/OmegaConf
-    - Create DFMConfig objects directly in code
-    - Use application-specific adapters for custom formats
-    
-    This function is kept for backward compatibility but will be removed in a future version.
-    """
-    import warnings
-    warnings.warn(
-        "load_config_from_csv is deprecated. Use YAML config files or create DFMConfig objects directly. "
-        "For CSV configs, implement an application-specific adapter.",
-        DeprecationWarning,
-        stacklevel=2
-    )
-    
-    configfile = Path(configfile)
-    if not configfile.exists():
-        raise FileNotFoundError(f"Configuration file not found: {configfile}")
-    
-    try:
-        df = pd.read_csv(configfile)
-    except Exception as e:
-        raise ValueError(f"Failed to read CSV file {configfile}: {e}")
-    
-    return _load_config_from_dataframe(df)
+# Note: Historical CSV config loading has been removed for simplicity and to keep
+# the package generic. Use YAML configs, Hydra DictConfigs, dictionaries, or
+# the Spec CSV adapter (load_config_from_spec) for series definitions.
 
 
 def _load_config_from_dataframe(df: pd.DataFrame) -> DFMConfig:
-    """Load DFMConfig from a pandas DataFrame.
+    """Load DFMConfig from a pandas DataFrame (used by spec CSV adapter).
     
-    This is a helper function for deprecated CSV config loading.
-    Converts tabular configuration data into DFMConfig format.
+    Converts tabular configuration data (series metadata + block loadings)
+    into a validated DFMConfig object.
     
     Parameters
     ----------
@@ -155,25 +83,14 @@ def _load_config_from_dataframe(df: pd.DataFrame) -> DFMConfig:
     -------
     DFMConfig
         Model configuration object
-        
-    Note
-    ----
-    This function is used internally by deprecated load_config_from_csv.
-    For new code, use YAML configs or create DFMConfig objects directly.
     """
-    # Handle series_id generation from various column combinations
-    # Otherwise, use 'id' as fallback
-    if 'id' in df.columns and 'series_id' not in df.columns:
-        # Try to generate series_id from data_code, item_id, api_source if available
-        if all(col in df.columns for col in ['data_code', 'item_id', 'api_source']):
-            # Generate series_id: {api_source}_{data_code}_{item_id}
-            df['series_id'] = df.apply(
-                lambda row: f"{row.get('api_source', '')}_{row.get('data_code', '')}_{row.get('item_id', '')}",
-                axis=1
-            )
-        else:
-            # Fallback: use 'id' as series_id if series_id column doesn't exist
+    # Handle series_id generation: use 'id' as fallback if 'series_id' not present
+    if 'series_id' not in df.columns:
+        if 'id' in df.columns:
             df['series_id'] = df['id'].astype(str)
+        else:
+            # Generate sequential IDs if neither exists
+            df['series_id'] = [f'series_{i}' for i in range(len(df))]
     elif 'id' in df.columns and 'series_id' in df.columns:
         # Both exist - prefer series_id, but if it's empty, use id
         df['series_id'] = df['series_id'].fillna(df['id'].astype(str))
@@ -185,11 +102,11 @@ def _load_config_from_dataframe(df: pd.DataFrame) -> DFMConfig:
     if missing:
         raise ValueError(f"Missing required columns: {', '.join(missing)}")
     
-    # Detect block columns (all columns not in required fields or excluded metadata)
-    # Exclude application-specific metadata fields that are not part of core DFM config
+    # Detect block columns (all columns not in required fields)
+    # Exclude common metadata fields that are not part of core DFM config
     excluded_fields = set(required_fields) | {
-        'id', 'country', 'data_code', 'item_id', 'api_source', 'api_code', 
-        'api_group_id', 'is_kpi', 'description', 'priority', 'is_active', 'metadata'
+        'id',  # Generic ID field (used as fallback for series_id)
+        'Release', 'release',  # Release date/metadata column
     }
     # Preserve original column order from DataFrame
     block_columns = [col for col in df.columns if col not in excluded_fields]
@@ -213,7 +130,7 @@ def _load_config_from_dataframe(df: pd.DataFrame) -> DFMConfig:
     blocks_data = df[block_columns].values.astype(int)
     
     # Convert to DFMConfig format
-    from .config import SeriesConfig
+    from .config import SeriesConfig, BlockConfig
     
     series_list = []
     for idx, row in df.iterrows():
@@ -232,9 +149,68 @@ def _load_config_from_dataframe(df: pd.DataFrame) -> DFMConfig:
             blocks=blocks
         ))
     
-    return DFMConfig(series=series_list, block_names=block_columns)
+    # Create blocks dictionary from block column names
+    # Each block gets default BlockConfig (1 factor, monthly clock)
+    blocks_dict = {}
+    for block_name in block_columns:
+        blocks_dict[block_name] = BlockConfig(
+            factors=1,
+            clock='m'  # Default to monthly, can be overridden in config
+        )
+    
+    return DFMConfig(series=series_list, blocks=blocks_dict)
 
 
+
+
+def load_config_from_spec(specfile: Union[str, Path]) -> DFMConfig:
+    """Load DFMConfig from a spec CSV file.
+    
+    This function reads a spec file (CSV format) that contains series definitions
+    with their configurations and block memberships. The spec file should have:
+    
+    Required columns:
+    - series_id: Unique identifier for the series
+    - series_name: Human-readable name
+    - frequency: Frequency code ('m', 'q', 'sa', 'a')
+    - transformation: Transformation code ('lin', 'pch', 'pca', etc.)
+    - category: Category/group name
+    - units: Units of measurement
+    
+    Block columns (one per block, containing 0 or 1):
+    - Block_Global (or first block), Block_Consumption, Block_Investment, etc.
+    - All series must load on the first block (global block) = 1
+    
+    Only these columns are read - all other columns (e.g., Release, metadata) are ignored.
+    
+    Parameters
+    ----------
+    specfile : str or Path
+        Path to spec CSV file
+        
+    Returns
+    -------
+    DFMConfig
+        Model configuration object
+        
+    Raises
+    ------
+    FileNotFoundError
+        If specfile does not exist
+    ValueError
+        If required columns are missing or data is invalid
+        
+    Examples
+    --------
+    >>> from dfm_python.data_loader import load_config_from_spec
+    >>> from dfm_python import DFM
+    >>> config = load_config_from_spec('data/sample_spec.csv')
+    >>> # Use config for DFM estimation
+    >>> model = DFM()
+    >>> result = model.fit(X, config)
+    """
+    from .config import SpecCSVSource
+    return SpecCSVSource(specfile).load()
 
 
 def load_config(configfile: Union[str, Path, DFMConfig]) -> DFMConfig:
@@ -251,6 +227,8 @@ def load_config(configfile: Union[str, Path, DFMConfig]) -> DFMConfig:
     configfile : str, Path, or DFMConfig
         - Path to YAML configuration file (.yaml, .yml)
         - Or existing DFMConfig object (returned as-is)
+        - Relative paths are resolved relative to current working directory
+        - If not found, tries to resolve relative to package installation directory
         
     Returns
     -------
@@ -271,13 +249,41 @@ def load_config(configfile: Union[str, Path, DFMConfig]) -> DFMConfig:
         return configfile
     
     # Handle file paths
-    configfile = Path(configfile)
-    if not configfile.exists():
-        raise FileNotFoundError(f"Configuration file not found: {configfile}")
+    configfile_path = Path(configfile)
     
-    suffix = configfile.suffix.lower()
+    # If path is relative and doesn't exist, try to find it relative to common locations
+    if not configfile_path.is_absolute() and not configfile_path.exists():
+        # Try current working directory first (already checked above)
+        # Try relative to package directory
+        import os
+        package_dir = Path(__file__).parent.parent.parent  # Go up from src/dfm_python/data_loader.py
+        potential_paths = [
+            configfile_path,  # Original path (relative to cwd)
+            package_dir / configfile_path,  # Relative to package root
+            Path.cwd() / configfile_path,  # Relative to current working directory
+        ]
+        
+        for path in potential_paths:
+            if path.exists():
+                configfile_path = path
+                break
+        else:
+            # If still not found, raise error with helpful message
+            raise FileNotFoundError(
+                f"Configuration file not found: {configfile}\n"
+                f"Tried paths:\n"
+                f"  - {configfile_path}\n"
+                f"  - {package_dir / configfile_path}\n"
+                f"  - {Path.cwd() / configfile_path}\n"
+                f"Current working directory: {Path.cwd()}\n"
+                f"Please provide an absolute path or ensure the file exists relative to the current working directory."
+            )
+    elif not configfile_path.exists():
+        raise FileNotFoundError(f"Configuration file not found: {configfile_path}")
+    
+    suffix = configfile_path.suffix.lower()
     if suffix in ['.yaml', '.yml']:
-        return load_config_from_yaml(configfile)
+        return load_config_from_yaml(configfile_path)
     else:
         raise ValueError(
             f"Unsupported file format: {suffix}. Use .yaml or .yml files, "
@@ -389,11 +395,13 @@ def transform_data(Z: np.ndarray, Time: pd.DatetimeIndex, config: DFMConfig) -> 
     clock = getattr(config, 'clock', 'm')
     clock_hierarchy = FREQUENCY_HIERARCHY.get(clock, 3)
     
-    for i, freq in enumerate(config.Frequency):
+    frequencies = config.get_frequencies()
+    series_ids = config.get_series_ids()
+    for i, freq in enumerate(frequencies):
         freq_hierarchy = FREQUENCY_HIERARCHY.get(freq, 3)
         if freq_hierarchy < clock_hierarchy:
             raise ValueError(
-                f"Series '{config.SeriesID[i]}' has frequency '{freq}' which is faster than clock '{clock}'. "
+                f"Series '{series_ids[i]}' has frequency '{freq}' which is faster than clock '{clock}'. "
                 f"Higher frequencies (daily, weekly) are not supported. "
                 f"Please use monthly, quarterly, semi-annual, or annual frequencies only."
             )
@@ -408,13 +416,15 @@ def transform_data(Z: np.ndarray, Time: pd.DatetimeIndex, config: DFMConfig) -> 
     }
     
     for i in range(N):
-        freq = config.Frequency[i]
+        freq = frequencies[i]
         step = freq_to_step.get(freq, 1)  # Default to 1 if unknown frequency
-        X[:, i] = _transform_series(Z[:, i], config.Transformation[i], freq, step)
+        transformations = [s.transformation for s in config.series]
+        trans = transformations[i] if i < len(transformations) else 'lin'
+        X[:, i] = _transform_series(Z[:, i], trans, freq, step)
     
     # Drop initial observations to handle transformation edge effects
     # Use maximum step (longest observation period) to determine drop period
-    max_step = max([freq_to_step.get(f, 1) for f in config.Frequency])
+    max_step = max([freq_to_step.get(f, 1) for f in frequencies])
     # Drop period ensures sufficient history for transformations
     drop = max(4, max_step + 1)
     
@@ -571,18 +581,20 @@ def sort_data(Z: np.ndarray, Mnem: List[str], config: DFMConfig) -> Tuple[np.nda
     Z_sorted : np.ndarray
         Filtered and sorted data matrix (T x M) where M <= N
     Mnem_sorted : List[str]
-        Sorted series identifiers matching config.SeriesID order
+        Sorted series identifiers matching config.get_series_ids() order
     """
-    in_config = [m in config.SeriesID for m in Mnem]
+    series_ids = config.get_series_ids()
+    in_config = [m in series_ids for m in Mnem]
     Mnem_filt = [m for m, in_c in zip(Mnem, in_config) if in_c]
     Z_filt = Z[:, in_config]
     
-    perm = [Mnem_filt.index(sid) for sid in config.SeriesID]
+    perm = [Mnem_filt.index(sid) for sid in series_ids]
     return Z_filt[:, perm], [Mnem_filt[i] for i in perm]
 
 
 def load_data(datafile: Union[str, Path], config: DFMConfig,
-              sample_start: Optional[Union[pd.Timestamp, str]] = None) -> Tuple[np.ndarray, pd.DatetimeIndex, np.ndarray]:
+              sample_start: Optional[Union[pd.Timestamp, str]] = None,
+              sample_end: Optional[Union[pd.Timestamp, str]] = None) -> Tuple[np.ndarray, pd.DatetimeIndex, np.ndarray]:
     """Load and transform time series data for DFM estimation.
     
     This function reads time series data, aligns it with the model configuration,
@@ -604,8 +616,11 @@ def load_data(datafile: Union[str, Path], config: DFMConfig,
     config : DFMConfig
         Model configuration object
     sample_start : pd.Timestamp or str, optional
-        Start date for sample (YYYY-MM-DD format). If None, uses all available data.
+        Start date for sample (YYYY-MM-DD). If None, uses beginning of data.
         Data before this date will be dropped.
+    sample_end : pd.Timestamp or str, optional
+        End date for sample (YYYY-MM-DD). If None, uses end of data.
+        Data after this date will be dropped.
         
     Returns
     -------
@@ -623,18 +638,46 @@ def load_data(datafile: Union[str, Path], config: DFMConfig,
     FileNotFoundError
         If datafile does not exist
     """
-    print('Loading data...')
+    logger.info('Loading data...')
     
-    datafile = Path(datafile)
-    if datafile.suffix.lower() != '.csv':
+    datafile_path = Path(datafile)
+    if datafile_path.suffix.lower() != '.csv':
         raise ValueError(
             'File-based data loading currently supports CSV format. '
             'For other formats or database-backed applications, implement '
             'an adapter that returns (X, Time, Z) arrays.'
         )
     
-    if not datafile.exists():
-        raise FileNotFoundError(f"Data file not found: {datafile}")
+    # If path is relative and doesn't exist, try to find it relative to common locations
+    if not datafile_path.is_absolute() and not datafile_path.exists():
+        # Try current working directory first (already checked above)
+        # Try relative to package directory
+        package_dir = Path(__file__).parent.parent.parent  # Go up from src/dfm_python/data_loader.py
+        potential_paths = [
+            datafile_path,  # Original path (relative to cwd)
+            package_dir / datafile_path,  # Relative to package root
+            Path.cwd() / datafile_path,  # Relative to current working directory
+        ]
+        
+        for path in potential_paths:
+            if path.exists():
+                datafile_path = path
+                break
+        else:
+            # If still not found, raise error with helpful message
+            raise FileNotFoundError(
+                f"Data file not found: {datafile}\n"
+                f"Tried paths:\n"
+                f"  - {datafile_path}\n"
+                f"  - {package_dir / datafile_path}\n"
+                f"  - {Path.cwd() / datafile_path}\n"
+                f"Current working directory: {Path.cwd()}\n"
+                f"Please provide an absolute path or ensure the file exists relative to the current working directory."
+            )
+    elif not datafile_path.exists():
+        raise FileNotFoundError(f"Data file not found: {datafile_path}")
+    
+    datafile = datafile_path
     
     # Read data from file
     Z, Time, Mnem = read_data(datafile)
@@ -651,9 +694,11 @@ def load_data(datafile: Union[str, Path], config: DFMConfig,
     # Validate frequency constraints: no series can be faster than clock
     clock_hierarchy = FREQUENCY_HIERARCHY.get(clock, 3)
     
+    series_ids = config.get_series_ids()
+    frequencies = config.get_frequencies()
     faster_series = []
-    for i, series_id in enumerate(config.SeriesID):
-        freq = config.Frequency[i] if i < len(config.Frequency) else clock
+    for i, series_id in enumerate(series_ids):
+        freq = frequencies[i] if i < len(frequencies) else clock
         series_hierarchy = FREQUENCY_HIERARCHY.get(freq, 3)
         if series_hierarchy < clock_hierarchy:
             faster_series.append((series_id, freq))
@@ -669,12 +714,84 @@ def load_data(datafile: Union[str, Path], config: DFMConfig,
     # Apply transformations (lower frequency series handled via tent kernels in dfm.py)
     X, Time, Z = transform_data(Z, Time, config)
     
-    # Apply sample_start filtering
+    # Apply sample window filtering
+    start_ts = None
+    end_ts = None
     if sample_start is not None:
-        if isinstance(sample_start, str):
-            sample_start = pd.to_datetime(sample_start)
-        mask = Time >= sample_start
+        start_ts = pd.to_datetime(sample_start) if isinstance(sample_start, str) else sample_start
+    if sample_end is not None:
+        end_ts = pd.to_datetime(sample_end) if isinstance(sample_end, str) else sample_end
+    if start_ts is not None or end_ts is not None:
+        mask = np.ones(len(Time), dtype=bool)
+        if start_ts is not None:
+            mask &= (Time >= start_ts)
+        if end_ts is not None:
+            mask &= (Time <= end_ts)
         Time, X, Z = Time[mask], X[mask], Z[mask]
+    
+    # Check T >= N per block after windowing
+    T, N = X.shape
+    blocks_array = config.get_blocks_array()  # N x n_blocks
+    block_names = config.block_names
+    
+    warnings_list = []
+    for block_idx, block_name in enumerate(block_names):
+        # Count series in this block (non-zero loadings)
+        series_in_block = blocks_array[:, block_idx] == 1
+        n_series_in_block = series_in_block.sum()
+        
+        if n_series_in_block == 0:
+            continue  # Skip empty blocks
+        
+        # Check if T >= N for this block
+        if T < n_series_in_block:
+            warnings_list.append({
+                'block_name': block_name,
+                'block_idx': block_idx,
+                'T': T,
+                'N': n_series_in_block,
+                'series_ids': [series_ids[i] for i in range(N) if series_in_block[i]],
+            })
+    
+    # Issue warnings with actionable suggestions
+    if warnings_list:
+        warning_msg = (
+            f"\n{'='*70}\n"
+            f"WARNING: Insufficient data for covariance calculation\n"
+            f"{'='*70}\n"
+            f"After applying date windowing (sample_start={sample_start}, sample_end={sample_end}),\n"
+            f"some blocks have fewer time periods (T) than series (N).\n"
+            f"This will cause singular covariance matrices during estimation.\n\n"
+        )
+        
+        for w in warnings_list:
+            warning_msg += (
+                f"Block '{w['block_name']}' (index {w['block_idx']}):\n"
+                f"  - Time periods (T): {w['T']}\n"
+                f"  - Series count (N): {w['N']}\n"
+                f"  - Series IDs: {', '.join(w['series_ids'][:5])}"
+                + (f" ... ({len(w['series_ids'])-5} more)" if len(w['series_ids']) > 5 else "")
+                + "\n\n"
+            )
+        
+        warning_msg += (
+            f"Suggested fixes:\n"
+            f"  1. Extend sample_start to include more historical data\n"
+            f"  2. Reduce the number of series in affected blocks\n"
+            f"  3. Use a different nan_method (e.g., nan_method=1 for listwise deletion)\n"
+            f"  4. Increase regularization_scale in config for numerical stability\n"
+            f"{'='*70}\n"
+        )
+        
+        logger.warning(warning_msg)
+        # Also issue a Python warning for visibility
+        import warnings
+        warnings.warn(
+            f"Insufficient data: {len(warnings_list)} block(s) have T < N. "
+            f"See log for details.",
+            UserWarning,
+            stacklevel=2
+        )
     
     return X, Time, Z
 

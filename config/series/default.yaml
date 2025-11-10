@@ -1,0 +1,699 @@
+# Series Definitions
+#
+# This file contains all time series definitions for the DFM model.
+# Each series specifies:
+#   - series_id: Unique identifier (must match data column names)
+#   - series_name: Human-readable name
+#   - frequency: 'm' (monthly), 'q' (quarterly), 'sa' (semi-annual), 'a' (annual)
+#   - transformation: 'lin' (levels), 'pch' (percent change), 'pca' (percent change annualized), etc.
+#   - category: Category/group name
+#   - units: Units of measurement
+#   - blocks: List of block names this series loads on (must include Block_Global)
+#
+# To add/modify series:
+#   1. Add a new entry with series_id as the key
+#   2. Ensure blocks list includes 'Block_Global' (first block)
+#   3. Match block names to those in config/default.yaml
+
+# GDP and National Accounts (Quarterly)
+KOGDP...D:
+  series_name: "Gross Domestic Product, at Market Price, Constant Prices, SA, KRW, 2020 Chained Prices"
+  frequency: "q"
+  transformation: "pca"
+  category: "Others"
+  units: "Chained W, Billions"
+  blocks: ['Block_Global']
+
+KOCNPER.D:
+  series_name: "Final Consumption Expenditure, Private, Total, Constant Prices, SA, KRW, 2020 Chained Prices"
+  frequency: "q"
+  transformation: "pca"
+  category: "Others"
+  units: "Chained W, Billions"
+  blocks: ['Block_Global', 'Block_Consumption']
+
+KOCNGOV.D:
+  series_name: "Final Consumption Expenditure, General Government, Total, Constant Prices, SA, KRW, 2020 Chained Prices"
+  frequency: "q"
+  transformation: "pca"
+  category: "Others"
+  units: "Chained W, Billions"
+  blocks: ['Block_Global']
+
+KOGFCF..D:
+  series_name: "Gross Capital Formation, Fixed, Total, Constant Prices, SA, KRW, 2020 Chained Prices"
+  frequency: "q"
+  transformation: "pca"
+  category: "Others"
+  units: "Chained W, Billions"
+  blocks: ['Block_Global', 'Block_Investment']
+
+KOEXNGS.D:
+  series_name: "Exports, Goods and Services, Total, Constant Prices, SA, KRW, 2020 Chained Prices"
+  frequency: "q"
+  transformation: "pca"
+  category: "Others"
+  units: "Chained W, Billions"
+  blocks: ['Block_Global', 'Block-Export']
+
+KOIMNGS.D:
+  series_name: "Imports, Goods and Services, Total, Constant Prices, SA, KRW, 2020 Chained Prices"
+  frequency: "q"
+  transformation: "pca"
+  category: "Others"
+  units: "Chained W, Billions"
+  blocks: ['Block_Global']
+
+# Labor Market (Monthly)
+KOUNPTOTO:
+  series_name: "Unemployed, Total, SA"
+  frequency: "m"
+  transformation: "pch"
+  category: "Labor"
+  units: "Thousands of Persons"
+  blocks: ['Block_Global', 'Block-Labor']
+
+KOEMPTOTO:
+  series_name: "Employment, Total, SA"
+  frequency: "m"
+  transformation: "pch"
+  category: "Labor"
+  units: "Thousands of Persons"
+  blocks: ['Block_Global', 'Block-Labor']
+
+KOEMPMANF:
+  series_name: "Employment, by Industry, Mining and Manufacturing"
+  frequency: "m"
+  transformation: "pch"
+  category: "Labor"
+  units: "Thousands of Persons"
+  blocks: ['Block_Global', 'Block-Labor']
+
+KOEMPCONF:
+  series_name: "Employment, by Industry, Construction"
+  frequency: "m"
+  transformation: "pch"
+  category: "Labor"
+  units: "Thousands of Persons"
+  blocks: ['Block_Global', 'Block-Labor']
+
+KOEMPWREP:
+  series_name: "Employment, by Industry, Wholesale and Retail Trade"
+  frequency: "m"
+  transformation: "pch"
+  category: "Labor"
+  units: "Thousands of Persons"
+  blocks: ['Block_Global', 'Block-Labor']
+
+KOPOPACTE:
+  series_name: "Economic Active Population, Total, SA"
+  frequency: "m"
+  transformation: "pch"
+  category: "Labor"
+  units: "Thousands of Persons"
+  blocks: ['Block_Global', 'Block-Labor']
+
+# International Trade (Monthly)
+KOEXPGDSA:
+  series_name: "Exports, Free on Board, USD"
+  frequency: "m"
+  transformation: "pch"
+  category: "International trade"
+  units: "$, Millions"
+  blocks: ['Block_Global', 'Block-Export', 'Block-Nominal']
+
+KOEXCHINA:
+  series_name: "Exports, China, USD"
+  frequency: "m"
+  transformation: "pch"
+  category: "International trade"
+  units: "$, Millions"
+  blocks: ['Block_Global', 'Block-Export', 'Block-Nominal']
+
+KOEXPSCOH:
+  series_name: "Exports, Semi-Conductors, Volume, Index, 2020 = 100"
+  frequency: "m"
+  transformation: "pch"
+  category: "International trade"
+  units: "Index"
+  blocks: ['Block_Global', 'Block-Export']
+
+KOEXPMOVH:
+  series_name: "Exports, Motor Vehicles, Volume, Index, 2020 = 100"
+  frequency: "m"
+  transformation: "pch"
+  category: "International trade"
+  units: "Index"
+  blocks: ['Block_Global', 'Block-Export']
+
+KOIMPGDSA:
+  series_name: "Imports Cost Insurance Freight (Customs Clearance Basis), USD"
+  frequency: "m"
+  transformation: "pch"
+  category: "International trade"
+  units: "$, Millions"
+  blocks: ['Block_Global', 'Block-Nominal']
+
+KOEXPPRCF:
+  series_name: "Export Prices, Basic Groups, All Items, Index, 2020 = 100"
+  frequency: "m"
+  transformation: "pch"
+  category: "International trade"
+  units: "Index"
+  blocks: ['Block_Global', 'Block-Nominal']
+
+KOIMPPRCF:
+  series_name: "Import Prices, Basic Groups, All Items, Index, 2020 = 100"
+  frequency: "m"
+  transformation: "pch"
+  category: "International trade"
+  units: "Index"
+  blocks: ['Block_Global', 'Block-Nominal']
+
+KONETTRDF:
+  series_name: "Terms of Trade, Net Barter, Index, 2020 = 100"
+  frequency: "m"
+  transformation: "pch"
+  category: "International trade"
+  units: "Index"
+  blocks: ['Block_Global', 'Block-Export', 'Block-Nominal']
+
+# Consumption (Monthly)
+KOWRCCNSE:
+  series_name: "Retail Sales, Total, All Consumer Goods, SA, Index, 2020 = 100"
+  frequency: "m"
+  transformation: "pch"
+  category: "Consumption"
+  units: "Index"
+  blocks: ['Block_Global', 'Block_Consumption']
+
+KOWRCDURE:
+  series_name: "Wholesale and Retail Trade, Total, Durable Goods, SA, Index, 2020 = 100"
+  frequency: "m"
+  transformation: "pch"
+  category: "Consumption"
+  units: "Index"
+  blocks: ['Block_Global', 'Block_Consumption']
+
+KOWRCSEME:
+  series_name: "Wholesale and Retail Trade, Total, Semi-Durable Goods, SA, Index, 2020 = 100"
+  frequency: "m"
+  transformation: "pch"
+  category: "Consumption"
+  units: "Index"
+  blocks: ['Block_Global', 'Block_Consumption']
+
+KOWRCNODE:
+  series_name: "Wholesale and Retail Trade, Total, Non-Durable Goods, SA, Index, 2020 = 100"
+  frequency: "m"
+  transformation: "pch"
+  category: "Consumption"
+  units: "Index"
+  blocks: ['Block_Global', 'Block_Consumption']
+
+KOCREU..A:
+  series_name: "Consumer Credit : Credit Card, KRW"
+  frequency: "m"
+  transformation: "pch"
+  category: "Consumption"
+  units: "Index"
+  blocks: ['Block_Global', 'Block_Consumption', 'Block-Nominal']
+
+KOCSMTTOA:
+  series_name: "Cyber Shopping Mall, Transaction Amount, Total, Total, KRW"
+  frequency: "m"
+  transformation: "pch"
+  category: "Consumption"
+  units: "Index"
+  blocks: ['Block_Global', 'Block_Consumption', 'Block-Nominal']
+
+# Prices (Monthly)
+KOCONPRCF:
+  series_name: "Consumer Prices, Total, Index, 2020 = 100"
+  frequency: "m"
+  transformation: "pch"
+  category: "Price"
+  units: "Index"
+  blocks: ['Block_Global', 'Block-Nominal']
+
+KOPROPRCF:
+  series_name: "Producer Prices, All Items, Index, 2020 = 100"
+  frequency: "m"
+  transformation: "pch"
+  category: "Price"
+  units: "Index"
+  blocks: ['Block_Global', 'Block-Nominal']
+
+KOCPCOREF:
+  series_name: "Consumer Prices, Excluding Agricultural Products and Oils, Index, 2020 = 100"
+  frequency: "m"
+  transformation: "pch"
+  category: "Price"
+  units: "Index"
+  blocks: ['Block_Global', 'Block-Nominal']
+
+KOCPEXFEF:
+  series_name: "Consumer Prices, Excluding Food and Energy, Index, 2020 = 100"
+  frequency: "m"
+  transformation: "pch"
+  category: "Price"
+  units: "Index"
+  blocks: ['Block_Global', 'Block-Nominal']
+
+# Investment (Monthly)
+KOEQUIPTE:
+  series_name: "Investment, Equipment, Estimation, SA, Index, 2020 = 100"
+  frequency: "m"
+  transformation: "pch"
+  category: "Investment"
+  units: "Index"
+  blocks: ['Block_Global', 'Block_Investment']
+
+KOEQUIMAE:
+  series_name: "Investment, Machinery, SA, Index, 2020 = 100"
+  frequency: "m"
+  transformation: "pch"
+  category: "Investment"
+  units: "Index"
+  blocks: ['Block_Global', 'Block_Investment']
+
+KOEQUITTE:
+  series_name: "Investment, Transportation Equipment, SA, Index, 2020 = 100"
+  frequency: "m"
+  transformation: "pch"
+  category: "Investment"
+  units: "Index"
+  blocks: ['Block_Global', 'Block_Investment']
+
+KONEWCONA:
+  series_name: "New Orders, Construction, Total, Value, KRW"
+  frequency: "m"
+  transformation: "pch"
+  category: "Investment"
+  units: "Index"
+  blocks: ['Block_Global', 'Block_Investment', 'Block-Nominal']
+
+KOCONPMTH:
+  series_name: "Building Permits, Floor Area"
+  frequency: "m"
+  transformation: "pch"
+  category: "Investment"
+  units: "Index"
+  blocks: ['Block_Global', 'Block_Investment']
+
+KOCONSTRP:
+  series_name: "Construction Started, Floor Area"
+  frequency: "m"
+  transformation: "pch"
+  category: "Investment"
+  units: "Index"
+  blocks: ['Block_Global', 'Block_Investment']
+
+KOVALCONA:
+  series_name: "Construction Completed, Total, KRW"
+  frequency: "m"
+  transformation: "pch"
+  category: "Investment"
+  units: "Index"
+  blocks: ['Block_Global', 'Block_Investment', 'Block-Nominal']
+
+# Production and Manufacturing (Monthly)
+KOPSMANUG:
+  series_name: "Shipments, Manufacturing, SA, Index, 2020 = 100"
+  frequency: "m"
+  transformation: "pch"
+  category: "Production and Manufacturing"
+  units: "Index"
+  blocks: ['Block_Global']
+
+KOMSCAPGG:
+  series_name: "Manufacturing Shipment - Capital Goods, SA, Index, 2020 = 100"
+  frequency: "m"
+  transformation: "pch"
+  category: "Production and Manufacturing"
+  units: "Index"
+  blocks: ['Block_Global', 'Block_Investment']
+
+KOMSCONGG:
+  series_name: "Manufacturing Shipment - Consumer Goods, SA, Index, 2020 = 100"
+  frequency: "m"
+  transformation: "pch"
+  category: "Production and Manufacturing"
+  units: "Index"
+  blocks: ['Block_Global', 'Block_Consumption']
+
+KOPIMANUG:
+  series_name: "Inventories, Manufacturing, SA, Index, 2020 = 100"
+  frequency: "m"
+  transformation: "pch"
+  category: "Production and Manufacturing"
+  units: "Index"
+  blocks: ['Block_Global']
+
+KOPICAPGG:
+  series_name: "Producers Inventory - Capital Goods, SA, Index, 2020 = 100"
+  frequency: "m"
+  transformation: "pch"
+  category: "Production and Manufacturing"
+  units: "Index"
+  blocks: ['Block_Global', 'Block_Investment']
+
+KOPICONGG:
+  series_name: "Producers Inventory - Consumer Goods, SA, Index, 2020 = 100"
+  frequency: "m"
+  transformation: "pch"
+  category: "Production and Manufacturing"
+  units: "Index"
+  blocks: ['Block_Global', 'Block_Consumption']
+
+KOSIAI..E:
+  series_name: "Service Sector, Total, SA, Index, 2020 = 100"
+  frequency: "m"
+  transformation: "pch"
+  category: "Production and Manufacturing"
+  units: "Index"
+  blocks: ['Block_Global', 'Block_Consumption']
+
+KOIPMIMAG:
+  series_name: "Production, Mining and Manufacturing, SA, Index, 2020 = 100"
+  frequency: "m"
+  transformation: "pch"
+  category: "Production and Manufacturing"
+  units: "Index"
+  blocks: ['Block_Global']
+
+KOMPCAPGG:
+  series_name: "Production, Capital Goods, SA, Index, 2020 = 100"
+  frequency: "m"
+  transformation: "pch"
+  category: "Production and Manufacturing"
+  units: "Index"
+  blocks: ['Block_Global', 'Block_Investment']
+
+KOMPCONGG:
+  series_name: "Manufacturing Production - Consumer Goods, SA, Index, 2020 = 100"
+  frequency: "m"
+  transformation: "pch"
+  category: "Production and Manufacturing"
+  units: "Index"
+  blocks: ['Block_Global', 'Block_Consumption']
+
+KOCYLEADR:
+  series_name: "Leading Index, Index, 2020 = 100"
+  frequency: "m"
+  transformation: "pch"
+  category: "Production and Manufacturing"
+  units: "Index"
+  blocks: ['Block_Global']
+
+KOROCOINF:
+  series_name: "Coincident Index, Index, 2020 = 100"
+  frequency: "m"
+  transformation: "pch"
+  category: "Production and Manufacturing"
+  units: "Index"
+  blocks: ['Block_Global']
+
+# Surveys - BoK BSI (Monthly)
+KOBSESI.R:
+  series_name: "BoK, BSI, Economic Sentiment Index"
+  frequency: "m"
+  transformation: "lin"
+  category: "Surveys"
+  units: "Index"
+  blocks: ['Block_Global']
+
+KOCOBUSIR:
+  series_name: "BoK, BSI, Business Conditions, Composite Business Sentiment Index, KRW"
+  frequency: "m"
+  transformation: "lin"
+  category: "Surveys"
+  units: "Index"
+  blocks: ['Block_Global']
+
+KOBSIBAPR:
+  series_name: "BoK, BSI, Business Conditions, All Industries, Actual"
+  frequency: "m"
+  transformation: "lin"
+  category: "Surveys"
+  units: "Index"
+  blocks: ['Block_Global']
+
+KOBSISAPR:
+  series_name: "BoK, BSI, Sales Growth, All Industries, Actual"
+  frequency: "m"
+  transformation: "lin"
+  category: "Surveys"
+  units: "Index"
+  blocks: ['Block_Global']
+
+KOBSIHAPR:
+  series_name: "BoK, BSI, Employment Conditions, All Industries, Actual"
+  frequency: "m"
+  transformation: "lin"
+  category: "Surveys"
+  units: "Index"
+  blocks: ['Block_Global', 'Block-Labor']
+
+KOBSIYAPR:
+  series_name: "BoK, BSI, Profitability, All Industries, Actual"
+  frequency: "m"
+  transformation: "lin"
+  category: "Surveys"
+  units: "Index"
+  blocks: ['Block_Global']
+
+KOBSIFAPR:
+  series_name: "BoK, BSI, Financial Conditions, All Industries, Actual"
+  frequency: "m"
+  transformation: "lin"
+  category: "Surveys"
+  units: "Index"
+  blocks: ['Block_Global']
+
+KOBSIBMPR:
+  series_name: "BoK, BSI, Business Conditions, Manufacturing, Actual"
+  frequency: "m"
+  transformation: "lin"
+  category: "Surveys"
+  units: "Index"
+  blocks: ['Block_Global']
+
+KOBSIIMPR:
+  series_name: "BoK, BSI, Facility Investment, Manufacturing, Actual"
+  frequency: "m"
+  transformation: "lin"
+  category: "Surveys"
+  units: "Index"
+  blocks: ['Block_Global', 'Block_Investment']
+
+KOBSIBNPR:
+  series_name: "BoK, BSI, Business Conditions, Non-Manufacturing, Actual"
+  frequency: "m"
+  transformation: "lin"
+  category: "Surveys"
+  units: "Index"
+  blocks: ['Block_Global']
+
+KOCNFBUSR:
+  series_name: "BoK, BSI, Business Conditions, All Industries, Forecast"
+  frequency: "m"
+  transformation: "lin"
+  category: "Surveys"
+  units: "Index"
+  blocks: ['Block_Global']
+
+KOBSIIMER:
+  series_name: "BoK, BSI, Facility Investment, Manufacturing, Forecast"
+  frequency: "m"
+  transformation: "lin"
+  category: "Surveys"
+  units: "Index"
+  blocks: ['Block_Global', 'Block_Investment']
+
+KOBSIXMER:
+  series_name: "BoK, BSI, Export Sales Growth, Manufacturing, Forecast"
+  frequency: "m"
+  transformation: "lin"
+  category: "Surveys"
+  units: "Index"
+  blocks: ['Block_Global', 'Block-Export']
+
+KOBSIRMER:
+  series_name: "BoK, BSI, Operation Rate, Manufacturing, Forecast"
+  frequency: "m"
+  transformation: "lin"
+  category: "Surveys"
+  units: "Index"
+  blocks: ['Block_Global']
+
+KOBSIBNER:
+  series_name: "BoK, BSI, Business Conditions, Non-Manufacturing, Forecast"
+  frequency: "m"
+  transformation: "lin"
+  category: "Surveys"
+  units: "Index"
+  blocks: ['Block_Global']
+
+# Surveys - FKI (Monthly)
+KOBSIBCOQ:
+  series_name: "FKI, Business Conditions, All Industries, Actual, SA"
+  frequency: "m"
+  transformation: "lin"
+  category: "Surveys"
+  units: "Index"
+  blocks: ['Block_Global']
+
+KOBSIBMAR:
+  series_name: "FKI, Business Conditions, Manufacturing, Actual"
+  frequency: "m"
+  transformation: "lin"
+  category: "Surveys"
+  units: "Index"
+  blocks: ['Block_Global']
+
+KOBSIBNMR:
+  series_name: "FKI, Business Conditions, Non-Manufacturing, Actual"
+  frequency: "m"
+  transformation: "lin"
+  category: "Surveys"
+  units: "Index"
+  blocks: ['Block_Global']
+
+KOBFDSAAF:
+  series_name: "FKI, Domestic Demand, All Industries, Actual"
+  frequency: "m"
+  transformation: "lin"
+  category: "Surveys"
+  units: "Index"
+  blocks: ['Block_Global']
+
+KOBFXSAAF:
+  series_name: "FKI, Export, All Industries, Actual"
+  frequency: "m"
+  transformation: "lin"
+  category: "Surveys"
+  units: "Index"
+  blocks: ['Block_Global', 'Block-Export']
+
+KOBFINAAF:
+  series_name: "FKI, Investment, All Industries, Actual"
+  frequency: "m"
+  transformation: "lin"
+  category: "Surveys"
+  units: "Index"
+  blocks: ['Block_Global', 'Block_Investment']
+
+KOBSIEMAR:
+  series_name: "FKI, Employment, All Industries, Actual"
+  frequency: "m"
+  transformation: "lin"
+  category: "Surveys"
+  units: "Index"
+  blocks: ['Block_Global', 'Block-Labor']
+
+KOBFPRAAF:
+  series_name: "FKI, Profitability, All Industries, Actual"
+  frequency: "m"
+  transformation: "lin"
+  category: "Surveys"
+  units: "Index"
+  blocks: ['Block_Global']
+
+KOBSIBCEQ:
+  series_name: "FKI, Business Conditions, All Industries, Prospects, SA"
+  frequency: "m"
+  transformation: "lin"
+  category: "Surveys"
+  units: "Index"
+  blocks: ['Block_Global']
+
+KOBUSINVR:
+  series_name: "FKI, Investment, All Industries, Prospects"
+  frequency: "m"
+  transformation: "lin"
+  category: "Surveys"
+  units: "Index"
+  blocks: ['Block_Global', 'Block_Investment']
+
+# Surveys - CSI (Consumer Sentiment Index, Monthly)
+KOCNFCONR:
+  series_name: "CSI, Composite Consumer Sentiment Index, Total"
+  frequency: "m"
+  transformation: "lin"
+  category: "Surveys, Consumer"
+  units: "Index"
+  blocks: ['Block_Global', 'Block_Consumption']
+
+KOCSHHLMR:
+  series_name: "CSI, Living Standard of Household, Total"
+  frequency: "m"
+  transformation: "lin"
+  category: "Surveys, Consumer"
+  units: "Index"
+  blocks: ['Block_Global', 'Block_Consumption']
+
+KOCSHHEMR:
+  series_name: "CSI, Expectations of Living Standard of Household, Total"
+  frequency: "m"
+  transformation: "lin"
+  category: "Surveys, Consumer"
+  units: "Index"
+  blocks: ['Block_Global', 'Block_Consumption']
+
+KOCSPHIMR:
+  series_name: "CSI, Expected Change in Total Household Income, Total"
+  frequency: "m"
+  transformation: "lin"
+  category: "Surveys, Consumer"
+  units: "Index"
+  blocks: ['Block_Global', 'Block_Consumption']
+
+KOCSPSPMR:
+  series_name: "CSI, Spending Plan, Total"
+  frequency: "m"
+  transformation: "lin"
+  category: "Surveys, Consumer"
+  units: "Index"
+  blocks: ['Block_Global', 'Block_Consumption']
+
+KOCSECDMR:
+  series_name: "CSI, Domestic Economic Situation, Total"
+  frequency: "m"
+  transformation: "lin"
+  category: "Surveys, Consumer"
+  units: "Index"
+  blocks: ['Block_Global', 'Block_Consumption']
+
+KOCSECEMR:
+  series_name: "CSI, Domestic Economic Situation, Next 6 Months"
+  frequency: "m"
+  transformation: "lin"
+  category: "Surveys, Consumer"
+  units: "Index"
+  blocks: ['Block_Global', 'Block_Consumption']
+
+KOCSEMEMR:
+  series_name: "CSI, Expectations of Employment Situation, Total"
+  frequency: "m"
+  transformation: "lin"
+  category: "Surveys, Consumer"
+  units: "Index"
+  blocks: ['Block_Global', 'Block_Consumption', 'Block-Labor']
+
+KOCSEOHSR:
+  series_name: "CSI, Expectations of Household Saving, Total"
+  frequency: "m"
+  transformation: "lin"
+  category: "Surveys, Consumer"
+  units: "Index"
+  blocks: ['Block_Global', 'Block_Consumption']
+
+KOCSEOHDR:
+  series_name: "CSI, Expectations of Household Debt, Total"
+  frequency: "m"
+  transformation: "lin"
+  category: "Surveys, Consumer"
+  units: "Index"
+  blocks: ['Block_Global', 'Block_Consumption']
+

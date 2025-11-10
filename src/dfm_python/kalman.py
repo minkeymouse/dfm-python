@@ -155,9 +155,27 @@ def skf(Y: np.ndarray, A: np.ndarray, C: np.ndarray, Q: np.ndarray,
     Zu = Z_0.copy()  # Z_0|0 (In loop, Zu gives Z_t | t)
     Vu = V_0.copy()  # V_0|0 (In loop, Vu gives V_t | t)
     
+    # Validate dimensions match
+    if Zu.shape[0] != m:
+        raise ValueError(
+            f"Dimension mismatch: Z_0 has shape {Zu.shape[0]}, but C has {m} columns. "
+            f"This usually indicates a mismatch between init_conditions and em_step. "
+            f"Z_0 should have dimension {m} to match C.shape[1]."
+        )
+    if Vu.shape[0] != m or Vu.shape[1] != m:
+        raise ValueError(
+            f"Dimension mismatch: V_0 has shape {Vu.shape}, but expected ({m}, {m}). "
+            f"This usually indicates a mismatch between init_conditions and em_step."
+        )
+    
     # Store initial values
     ZmU[:, 0] = Zu
     VmU[:, :, 0] = Vu
+    
+    # Initialize variables for final iteration (used after loop)
+    Y_t = np.array([])  # Initialize Y_t to empty array
+    C_t = None
+    VCF = None
     
     # Kalman filter procedure
     for t in range(nobs):
@@ -312,9 +330,13 @@ def skf(Y: np.ndarray, A: np.ndarray, C: np.ndarray, Q: np.ndarray,
         VmU[:, :, t + 1] = Vu
     
     # Store Kalman gain k_t (from final iteration)
+    # k_t should be m x n_obs where n_obs is number of observed series at final time
+    # VCF is m x n_obs, C_t is n_obs x m, so VCF @ C_t gives m x m
+    # However, if no observations at final time, use zeros
     if len(Y_t) == 0:
         k_t = np.zeros((m, m))
     else:
+        # VCF is m x n_obs, C_t is n_obs x m, so k_t = VCF @ C_t is m x m
         k_t = VCF @ C_t
     
     return KalmanFilterState(Zm=Zm, Vm=Vm, ZmU=ZmU, VmU=VmU, loglik=loglik, k_t=k_t)

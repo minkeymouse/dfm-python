@@ -10,7 +10,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root / 'src'))
 
-from dfm_python import load_config, load_data, dfm, update_nowcast
+from dfm_python import load_config, load_data, update_nowcast
+from dfm_python.dfm import DFM
 
 # ============================================================================
 # Core Tests
@@ -47,7 +48,8 @@ def test_update_nowcast_basic():
         # Quick DFM estimation for testing
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            Res = dfm(X_old, config, threshold=1e-3, max_iter=20)
+            model = DFM()
+            Res = model.fit(X_old, config, threshold=1e-3, max_iter=20)
         
         update_nowcast(X_old, X_new, Time, config, Res, 
                       series='GDPC1', period='2016q4',

@@ -62,7 +62,7 @@ def test_skf_basic():
     assert np.isfinite(Sf.loglik)
     
     print("✓ Kalman filter basic test passed")
-    return True
+    assert True
 
 
 def test_skf_missing_data():
@@ -84,7 +84,7 @@ def test_skf_missing_data():
     assert np.isfinite(Sf.loglik)
     
     print("✓ Kalman filter missing data test passed")
-    return True
+    assert True
 
 
 def test_fis_basic():
@@ -104,7 +104,7 @@ def test_fis_basic():
     assert Ss.VmT.shape == Sf.VmU.shape
     
     print("✓ Fixed interval smoother basic test passed")
-    return True
+    assert True
 
 
 def test_miss_data():
@@ -137,7 +137,7 @@ def test_miss_data():
     assert np.allclose(y_new, y[non_missing_idx])
     
     print("✓ Missing data elimination test passed")
-    return True
+    assert True
 
 # ============================================================================
 # Test Runner
