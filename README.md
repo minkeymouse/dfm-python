@@ -1,7 +1,7 @@
 # dfm-python: Dynamic Factor Models for Python
 
 [![PyPI version](https://img.shields.io/pypi/v/dfm-python.svg)](https://pypi.org/project/dfm-python/)
-[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 
 A Python implementation of **Dynamic Factor Models (DFM)** for nowcasting and forecasting high-dimensional time series. Implements clock-based synchronization and tent kernel aggregation for mixed-frequency data.
 
@@ -20,7 +20,7 @@ A Python implementation of **Dynamic Factor Models (DFM)** for nowcasting and fo
 pip install dfm-python
 ```
 
-**Requirements**: Python >= 3.12, numpy >= 1.24.0, pandas >= 2.0.0, scipy >= 1.10.0
+**Requirements**: Python >= 3.10, numpy >= 1.24.0, pandas >= 2.0.0, scipy >= 1.10.0
 
 ## Quick Start
 
