@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.2.2] - 2025-01-XX
+
+### Changed
+
+- **Python Version Support**: Lowered minimum Python version requirement from 3.12 to 3.10
+  - Updated `requires-python` in `pyproject.toml` to `>=3.10`
+  - Added Python 3.10 and 3.11 to package classifiers
+  - Updated README to reflect Python 3.10+ requirement
+  - Code is fully compatible with Python 3.10, 3.11, and 3.12
+
+### Fixed
+
+- **Kaggle Compatibility**: Package can now be installed in Kaggle notebooks (Python 3.10 environment)
+
 ## [0.2.1] - 2025-01-XX
 
 ### Fixed

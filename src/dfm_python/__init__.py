@@ -50,7 +50,7 @@ Example (Low-level API - For advanced usage):
 For detailed documentation, see the README.md file and the tutorial notebooks/scripts.
 """
 
-__version__ = "0.2.1"
+__version__ = "0.2.2"
 
 from .config import DFMConfig, SeriesConfig, BlockConfig, Params, DEFAULT_GLOBAL_BLOCK_NAME
 from .config import (
