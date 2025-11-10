@@ -13,6 +13,8 @@ A Python implementation of **Dynamic Factor Models (DFM)** for nowcasting and fo
 - **Robust missing data**: Spline interpolation and Kalman filter handling
 - **News decomposition**: Attribute forecast changes to data releases
 - **Generic design**: YAML configs or direct object creation, extensible via adapters
+- **Numerical stability**: Comprehensive error handling and robust matrix operations
+- **Well-documented**: Extensive docstrings and tutorials
 
 ## Installation
 
@@ -204,11 +206,18 @@ Contains all estimation outputs:
 - `news.py`: News decomposition
 
 **Core Submodules**:
-- `core/em.py`: EM algorithm core
-- `core/numeric.py`: Numerical utilities
+- `core/em.py`: EM algorithm core (init_conditions, em_step, em_converged)
+- `core/numeric.py`: Numerical utilities (matrix operations, regularization, stability)
 - `core/diagnostics.py`: Diagnostic functions
 - `core/results.py`: Result metrics
 - `core/grouping.py`: Frequency grouping utilities
+
+**Key Improvements** (v0.2.3+):
+- Consolidated covariance/variance computation functions for robustness
+- Named constants replacing magic numbers for better maintainability
+- Enhanced docstrings with comprehensive examples
+- Improved error handling and numerical stability
+- Unified logging message formats
 
 ## Testing
 
@@ -217,11 +226,13 @@ pytest src/test/ -v
 ```
 
 Tests are organized into 5 files:
-- `test_dfm.py` - Core DFM estimation
-- `test_kalman.py` - Kalman filter/smoother
+- `test_dfm.py` - Core DFM estimation (12 tests)
+- `test_kalman.py` - Kalman filter/smoother (4 tests)
 - `test_news.py` - News decomposition
-- `test_config.py` - Configuration and API
-- `test_api.py` - Edge cases and tutorials
+- `test_config.py` - Configuration and API (11 tests)
+- `test_api.py` - Edge cases and tutorials (11 tests)
+
+**Test Coverage**: 38+ tests covering core functionality, edge cases, and numerical stability.
 
 ## Tutorials
 
@@ -229,19 +240,46 @@ Tests are organized into 5 files:
    ```bash
    python tutorial/basic_tutorial.py --spec data/sample_spec.csv --data data/sample_data.csv
    ```
+   Comprehensive tutorial with detailed explanations of DFM components and practical usage examples.
 
 2. **`tutorial/hydra_tutorial.py`** - Hydra decorator approach
    ```bash
    python tutorial/hydra_tutorial.py max_iter=10 threshold=1e-4
    ```
+   Demonstrates Hydra-based configuration with CLI overrides.
 
 ## Troubleshooting
 
-**Convergence Issues**: Increase `max_iter`, relax `threshold`, check data quality
+**Convergence Issues**: 
+- Increase `max_iter` (default: 5000)
+- Relax `threshold` (default: 1e-5)
+- Check data quality and missing data patterns
+- Adjust `regularization_scale` if numerical issues occur
 
-**Dimension Mismatch**: Ensure `series_id` matches data column names, verify block structure
+**Dimension Mismatch**: 
+- Ensure `series_id` matches data column names
+- Verify block structure in configuration
+- Check that all series have valid frequency settings
 
-**Numerical Instability**: Monitor warnings, adjust thresholds, investigate data quality
+**Numerical Instability**: 
+- Monitor warnings in logs
+- Adjust `min_eigenvalue` and `max_eigenvalue` thresholds
+- Investigate data quality (extreme values, excessive missing data)
+- Use `clip_data_values=True` for extreme outliers
+
+**Factor Evolution Issues**:
+- Check that innovation variances (Q diagonal) are not zero
+- Verify sufficient data variation in each block
+- Consider increasing `regularization_scale` for sparse data
+
+## Code Quality
+
+The package has been extensively refactored for:
+- **Code deduplication**: Common patterns consolidated into reusable functions
+- **Maintainability**: Named constants replace magic numbers
+- **Documentation**: Comprehensive docstrings with examples
+- **Robustness**: Enhanced error handling and numerical stability
+- **Consistency**: Unified coding patterns and logging formats
 
 ## License
 
@@ -260,7 +298,12 @@ MIT License
 
 ---
 
-**Package Status**: Stable (v0.2.1)  
+**Package Status**: Stable (v0.2.3+)  
 **PyPI**: https://pypi.org/project/dfm-python/  
-**Python**: 3.12+  
-**Latest Changes**: See [CHANGELOG.md](CHANGELOG.md)
+**Python**: 3.10+  
+**Latest Changes**: 
+- Extensive code refactoring for maintainability and robustness
+- Consolidated covariance/variance computation functions
+- Named constants replacing magic numbers
+- Enhanced documentation and tutorials
+- See [CHANGELOG.md](CHANGELOG.md) for details

@@ -822,8 +822,10 @@ def _dfm_core(X: np.ndarray, config: DFMConfig,
         _logger.warning("Initial conditions contain NaN/Inf - this should not happen after init_conditions()")
     
     # Step 5: Prepare data for EM (with and without missing values)
-    y = x_standardized.T  # n x T (with missing data)
-    opt_nan_est = {'method': 3, 'k': nan_k}
+    # y contains missing data (NaNs) - handled by Kalman Filter during estimation
+    # y_est is used for initial conditions only (missing data removed)
+    y = x_standardized.T  # n x T (with missing data - standard DFM approach)
+    opt_nan_est = {'method': 3, 'k': nan_k}  # Remove all-NaN rows only for initial conditions
     x_est, _ = rem_nans_spline(x_standardized, method=opt_nan_est['method'], k=opt_nan_est['k'])
     y_est = x_est.T  # n x T (missing data removed)
     

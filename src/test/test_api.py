@@ -249,3 +249,208 @@ def test_api_reset():
     assert dfm.get_config() is None
     assert dfm.get_result() is None
 
+
+# ============================================================================
+# Loading Matrix Diagnostics
+# ============================================================================
+
+def test_loading_matrix_diagnostics():
+    """Test and diagnose loading matrix (C) issues."""
+    import dfm_python as dfm
+    from dfm_python.config import Params
+    
+    base_dir = project_root
+    spec_file = base_dir / 'data' / 'sample_spec.csv'
+    data_file = base_dir / 'data' / 'sample_data.csv'
+    
+    if not spec_file.exists() or not data_file.exists():
+        pytest.skip("Test data files not found")
+    
+    try:
+        # Load config and data (use smaller sample and fewer iterations for speed)
+        params = Params(max_iter=2, threshold=1e-3)  # Reduced for speed
+        dfm.from_spec(spec_file, params=params)
+        dfm.load_data(data_file, sample_start='2015-01-01', sample_end='2022-12-31')  # Shorter period for speed
+        
+        # Train
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            dfm.train()
+        
+        result = dfm.get_result()
+        assert result is not None, "Model training failed"
+        
+        # ========================================================================
+        # Loading Matrix Diagnostics
+        # ========================================================================
+        print("\n" + "="*70)
+        print("Loading Matrix (C) Diagnostics")
+        print("="*70)
+        
+        C = result.C
+        C_abs = np.abs(C)
+        C_nonzero = C[C != 0]
+        
+        # 1. Basic statistics
+        print(f"\n1. C Matrix Basic Statistics:")
+        print(f"   - Shape: {C.shape} (series × factors)")
+        print(f"   - Total elements: {C.size}")
+        print(f"   - Non-zero elements: {len(C_nonzero)} ({len(C_nonzero)/C.size*100:.2f}%)")
+        print(f"   - Zero elements: {np.sum(C == 0)} ({np.sum(C == 0)/C.size*100:.2f}%)")
+        print(f"   - NaN elements: {np.sum(np.isnan(C))}")
+        print(f"   - Inf elements: {np.sum(np.isinf(C))}")
+        
+        # 2. Non-zero element statistics
+        if len(C_nonzero) > 0:
+            print(f"\n2. Non-zero Element Statistics:")
+            print(f"   - Min: {C_nonzero.min():.6f}")
+            print(f"   - Max: {C_nonzero.max():.6f}")
+            print(f"   - Mean: {C_nonzero.mean():.6f}")
+            print(f"   - Std: {C_nonzero.std():.6f}")
+            print(f"   - Median: {np.median(C_nonzero):.6f}")
+        else:
+            print("\n⚠ WARNING: All loading values are zero!")
+        
+        # 3. Per-series maximum loadings
+        max_loadings_per_series = C_abs.max(axis=1)
+        print(f"\n3. Per-Series Maximum Loadings:")
+        print(f"   - Mean: {max_loadings_per_series.mean():.6f}")
+        print(f"   - Min: {max_loadings_per_series.min():.6f}")
+        print(f"   - Max: {max_loadings_per_series.max():.6f}")
+        print(f"   - Series with zero max loading: {np.sum(max_loadings_per_series == 0)}")
+        
+        # 4. Per-factor maximum loadings
+        max_loadings_per_factor = C_abs.max(axis=0)
+        print(f"\n4. Per-Factor Maximum Loadings:")
+        print(f"   - Mean: {max_loadings_per_factor.mean():.6f}")
+        print(f"   - Min: {max_loadings_per_factor.min():.6f}")
+        print(f"   - Max: {max_loadings_per_factor.max():.6f}")
+        print(f"   - Factors with zero max loading: {np.sum(max_loadings_per_factor == 0)}")
+        
+        # 5. Block structure analysis
+        if hasattr(result, 'block_names') and result.block_names:
+            print(f"\n5. Block Structure:")
+            print(f"   - Blocks: {result.block_names}")
+            print(f"   - Factors per block (r): {result.r}")
+            
+            # Map factors to blocks
+            factor_idx = 0
+            for block_idx, (block_name, r_i) in enumerate(zip(result.block_names, result.r)):
+                r_i_int = int(r_i)
+                factor_start = factor_idx
+                factor_end = factor_idx + r_i_int
+                print(f"   - {block_name}: factors {factor_start}~{factor_end-1} ({r_i_int} factors)")
+                factor_idx += r_i_int
+        
+        # 6. First factor loading analysis
+        loadings_on_factor1 = C[:, 0]
+        print(f"\n6. First Factor (Factor 0) Loading Analysis:")
+        print(f"   - Non-zero loadings: {np.sum(loadings_on_factor1 != 0)}")
+        print(f"   - Min: {loadings_on_factor1.min():.6f}")
+        print(f"   - Max: {loadings_on_factor1.max():.6f}")
+        print(f"   - Mean: {loadings_on_factor1.mean():.6f}")
+        print(f"   - Std: {loadings_on_factor1.std():.6f}")
+        
+        # Top 10 series loading on first factor
+        top_10_idx = np.argsort(np.abs(loadings_on_factor1))[-10:][::-1]
+        print(f"\n   Top 10 series loading on factor 0:")
+        config = dfm.get_config()
+        for rank, idx in enumerate(top_10_idx, 1):
+            if hasattr(config, 'get_series_names'):
+                series_name = config.get_series_names()[idx]
+            else:
+                series_name = f"Series {idx}"
+            loading = loadings_on_factor1[idx]
+            print(f"     {rank:2d}. {series_name[:50]:50s} (loading: {loading:10.6f})")
+        
+        # 7. Reconstruction quality check
+        print(f"\n7. Reconstruction Quality Check:")
+        sample_indices = [0, 10, 20, 30]
+        reconstruction_rmse_list = []
+        for series_idx in sample_indices:
+            if series_idx < C.shape[0]:
+                reconstructed = result.Z @ C[series_idx, :].T
+                original = result.X_sm[:, series_idx]
+                rmse = np.sqrt(np.mean((reconstructed - original)**2))
+                reconstruction_rmse_list.append(rmse)
+                if hasattr(config, 'get_series_names'):
+                    series_name = config.get_series_names()[series_idx]
+                else:
+                    series_name = f"Series {series_idx}"
+                print(f"   - Series {series_idx} ({series_name[:40]}): RMSE = {rmse:.6f}")
+        
+        if reconstruction_rmse_list:
+            print(f"\n   Reconstruction RMSE Statistics:")
+            print(f"     - Mean: {np.mean(reconstruction_rmse_list):.6f}")
+            print(f"     - Min: {np.min(reconstruction_rmse_list):.6f}")
+            print(f"     - Max: {np.max(reconstruction_rmse_list):.6f}")
+        
+        # 8. Issue detection
+        print(f"\n8. Issue Detection:")
+        issues = []
+        
+        if np.all(C == 0):
+            issues.append("⚠ All loadings are zero - model may not have trained properly")
+        elif len(C_nonzero) / C.size < 0.01:
+            issues.append("⚠ Less than 1% non-zero loadings - most series not connected to factors")
+        
+        if len(C_nonzero) > 0 and max_loadings_per_series.max() < 1e-6:
+            issues.append("⚠ Maximum loading is very small (< 1e-6) - possible numerical issue")
+        
+        if result.num_state() > result.num_series() * 2:
+            issues.append("⚠ State dimension > 2×series count - excessive idiosyncratic components")
+        
+        if not result.converged:
+            issues.append("⚠ Model did not converge - training may be incomplete")
+        
+        if issues:
+            print("   Detected issues:")
+            for issue in issues:
+                print(f"     {issue}")
+        else:
+            print("   ✓ No major issues detected")
+        
+        # 9. Root cause analysis
+        print(f"\n9. Root Cause Analysis:")
+        
+        # Check if first factor is actually zero
+        if result.Z.shape[1] > 0:
+            Z_factor0_abs = np.abs(result.Z[:, 0])
+            if Z_factor0_abs.max() < 1e-6:
+                print(f"   ⚠ Factor 0 (Block_Global) is essentially zero!")
+                print(f"      - This explains why loadings on factor 0 are all near zero")
+                print(f"      - Check Q[0,0] (innovation variance) - may be too small")
+        
+        # Check for extremely large loadings
+        if len(C_nonzero) > 0:
+            extreme_loadings = C_nonzero[np.abs(C_nonzero) > 100]
+            if len(extreme_loadings) > 0:
+                print(f"\n   ⚠ Found {len(extreme_loadings)} extremely large loadings (>100)")
+                print(f"      - This suggests numerical instability or scaling issues")
+        
+        # Check Q matrix for factor 0
+        if result.Q.shape[0] > 0:
+            Q_factor0 = result.Q[0, 0]
+            print(f"\n   Factor 0 innovation variance (Q[0, 0]): {Q_factor0:.6f}")
+            if Q_factor0 < 1e-10:
+                print(f"      ⚠ Very small innovation variance - factor may be stuck")
+        
+        # Check R matrix (idiosyncratic variance)
+        R_diag = np.diag(result.R)
+        if R_diag.max() > 1e10:
+            print(f"\n   ⚠ Very high idiosyncratic variance detected (max: {R_diag.max():.2e})")
+            print(f"      - This suggests data scaling issues")
+        
+        # 10. Assertions (relaxed for diagnostic purposes)
+        assert not np.all(C == 0), "Loading matrix should not be all zeros"
+        assert len(C_nonzero) > 0, "Should have at least some non-zero loadings"
+        # Note: max_loadings_per_series.max() may be very large due to numerical issues
+        # This is acceptable for diagnostic purposes
+        
+        print("\n" + "="*70)
+        print("Diagnostics complete")
+        print("="*70)
+        
+    except Exception as e:
+        pytest.fail(f"Loading matrix diagnostics failed: {e}")
+

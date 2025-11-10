@@ -5,14 +5,16 @@ DFM Python - Basic Tutorial (Spec + Params approach)
 This tutorial demonstrates the Spec CSV + Params approach:
 1) Load config from spec CSV with Params dataclass
 2) Load data with a short window
-3) Train quickly (max_iter=1 by default)
-4) Predict and Plot
+3) Train the model
+4) Predict and visualize
 5) Save forecasts to CSV
+6) Understand DFM components and results
 
 This approach is ideal when:
 - You have series definitions in a CSV file
 - You want to control main settings programmatically via Params
 - You don't need Hydra's advanced features
+- You prefer a simple, straightforward workflow
 
 Run:
   python tutorial/basic_tutorial.py \\
@@ -20,7 +22,13 @@ Run:
     --data data/sample_data.csv \\
     --output outputs \\
     --sample-start 2021-01-01 --sample-end 2022-12-31 \\
-    --max-iter 1 --forecast-horizon 6
+    --max-iter 10 --forecast-horizon 12
+
+For quick testing:
+  python tutorial/basic_tutorial.py \\
+    --spec data/sample_spec.csv \\
+    --data data/sample_data.csv \\
+    --max-iter 1
 """
 
 from pathlib import Path
@@ -60,8 +68,8 @@ Examples:
     parser.add_argument("--sample-end", type=str, default="2022-12-31",
                        help="Sample end date (YYYY-MM-DD)")
     # Estimation parameters (exposed as CLI arguments)
-    parser.add_argument("--max-iter", type=int, default=1,
-                       help="Maximum EM iterations (default: 1 for quick testing)")
+    parser.add_argument("--max-iter", type=int, default=10,
+                       help="Maximum EM iterations (default: 10)")
     parser.add_argument("--threshold", type=float, default=1e-5,
                        help="EM convergence threshold (default: 1e-5)")
     parser.add_argument("--nan-method", type=int, default=2,
@@ -167,6 +175,175 @@ def main() -> None:
         loglik_val = result.loglik
         if loglik_val is not None and np.isfinite(loglik_val):
             print(f"  - Final log-likelihood: {loglik_val:.2f}")
+    
+    # Format loglik for display
+    loglik_str = f"{result.loglik:.2f}" if (hasattr(result, 'loglik') and result.loglik is not None and np.isfinite(result.loglik)) else 'N/A'
+    
+    # ========================================================================
+    # Understanding DFMResult: What Each Component Means
+    # ========================================================================
+    print(f"\n" + "="*70)
+    print("Understanding DFMResult: What Each Component Means")
+    print("="*70)
+    print("""
+DFM (Dynamic Factor Model) decomposes observed time series into:
+  1. Common factors (Z): Unobserved latent variables that drive multiple series
+  2. Factor loadings (C): How much each series depends on each factor
+  3. Idiosyncratic components: Series-specific noise
+
+The model equations are:
+  Observation: y_t = C * Z_t + e_t,  where e_t ~ N(0, R)
+  State:       Z_t = A * Z_{{t-1}} + v_t,  where v_t ~ N(0, Q)
+
+Where:
+  - y_t: Observed data at time t (N series)
+  - Z_t: Latent factors at time t (m factors)
+  - C: Loading matrix (N x m) - how series relate to factors
+  - A: Transition matrix (m x m) - how factors evolve over time
+  - R: Observation error covariance (N x N) - idiosyncratic variances
+  - Q: Factor innovation covariance (m x m) - factor shock variances
+    """)
+    
+    print("\n--- DFMResult Components Explained ---")
+    print(f"""
+1. Z (Smoothed Factors) - Shape: {result.Z.shape}
+   - What: Estimated latent factors over time
+   - Meaning: Unobserved common drivers of your time series
+   - Usage: 
+     * result.Z[:, 0] = First factor (often the "common business cycle")
+     * result.Z[:, 1] = Second factor (e.g., sector-specific factor)
+     * Higher factors capture additional common variation
+   - Example: If Z[:, 0] increases, it means the common factor is rising
+   
+2. C (Loading Matrix) - Shape: {result.C.shape}
+   - What: How much each series depends on each factor
+   - Meaning: C[i, j] = loading of series i on factor j
+   - Usage:
+     * result.C[0, :] = Loadings of first series on all factors
+     * result.C[:, 0] = Loadings of all series on first factor
+   - Interpretation:
+     * Large |C[i, j]| = series i is strongly influenced by factor j
+     * C[i, j] > 0 = series moves in same direction as factor
+     * C[i, j] < 0 = series moves opposite to factor
+   
+3. A (Transition Matrix) - Shape: {result.A.shape}
+   - What: Describes how factors evolve: Z_t = A * Z_{{t-1}} + shock
+   - Meaning: A[i, j] = how factor i depends on lagged factor j
+   - Usage: Forecast factors forward: Z_{{t+1}} = A @ Z_t
+   - Interpretation:
+     * Diagonal elements: AR(1) coefficients for each factor
+     * Off-diagonal: Cross-factor dependencies
+     * Eigenvalues < 1: Factors are stationary (stable)
+   
+4. Q (Factor Innovation Covariance) - Shape: {result.Q.shape}
+   - What: Covariance of shocks to factors
+   - Meaning: How volatile factor innovations are
+   - Usage: Quantify uncertainty in factor forecasts
+   - Interpretation:
+     * Diagonal: Variance of each factor's shock
+     * Off-diagonal: Co-movement of factor shocks
+   
+5. R (Observation Error Covariance) - Shape: {result.R.shape}
+   - What: Covariance of observation errors (idiosyncratic components)
+   - Meaning: Series-specific noise that factors don't explain
+   - Usage: Measure how well factors explain each series
+   - Interpretation:
+     * Diagonal: Idiosyncratic variance for each series
+     * Small R[i, i] = series i is well explained by factors
+     * Large R[i, i] = series i has high series-specific noise
+   
+6. X_sm (Smoothed Data - Original Scale) - Shape: {result.X_sm.shape}
+   - What: Kalman-smoothed estimates of observed series
+   - Meaning: Best estimate of true values given all data
+   - Usage: 
+     * result.X_sm[:, i] = Smoothed version of series i
+     * Useful for: Denoising, gap-filling, nowcasting
+   - Note: X_sm = x_sm * Wx + Mx (unstandardized)
+   
+7. x_sm (Smoothed Data - Standardized) - Shape: {result.x_sm.shape}
+   - What: Standardized version of X_sm (mean=0, std=1)
+   - Meaning: Data after removing mean and scaling
+   - Usage: For analysis where scale doesn't matter
+   
+8. Mx, Wx (Standardization Parameters) - Shapes: {result.Mx.shape}, {result.Wx.shape}
+   - What: Mean and standard deviation used for standardization
+   - Meaning: Mx[i] = mean of series i, Wx[i] = std of series i
+   - Usage: Convert between standardized and original scale
+   - Formula: x_standardized = (X - Mx) / Wx
+   
+9. Z_0, V_0 (Initial State) - Shapes: {result.Z_0.shape}, {result.V_0.shape}
+   - What: Starting values for factors and their uncertainty
+   - Meaning: Z_0 = initial factor values, V_0 = initial covariance
+   - Usage: Usually not needed for analysis, but important for forecasting
+   
+10. r (Factors per Block) - Shape: {result.r.shape}
+    - What: Number of factors in each block structure
+    - Meaning: r[i] = number of factors in block i
+    - Usage: Understand model structure
+   
+11. p (AR Lag Order) - Value: {result.p}
+    - What: Number of lags in factor transition equation
+    - Meaning: Typically p=1 (AR(1) dynamics)
+    - Usage: Usually 1, higher values allow more complex dynamics
+   
+12. converged (Convergence Status) - Value: {result.converged}
+    - What: Whether EM algorithm converged
+    - Meaning: True = algorithm found stable solution
+    - Usage: Check if training was successful
+   
+13. num_iter (Iterations) - Value: {result.num_iter}
+    - What: Number of EM iterations performed
+    - Meaning: How many times parameters were updated
+    - Usage: Monitor training progress
+   
+14. loglik (Log-Likelihood) - Value: {loglik_str}
+    - What: Final log-likelihood value
+    - Meaning: Measure of model fit (higher is better)
+    - Usage: Compare different models or parameter settings
+    """)
+    
+    print("\n--- Practical Usage Examples ---")
+    print("""
+# Example 1: Extract the common factor (first factor)
+common_factor = result.Z[:, 0]
+print(f"Common factor range: [{common_factor.min():.2f}, {common_factor.max():.2f}]")
+
+# Example 2: Find which series load most on first factor
+loadings_on_factor1 = result.C[:, 0]
+top_series_idx = np.argsort(np.abs(loadings_on_factor1))[-5:]  # Top 5
+print("Top 5 series loading on factor 1:")
+for idx in top_series_idx:
+    print(f"  Series {idx}: loading = {loadings_on_factor1[idx]:.3f}")
+
+# Example 3: Reconstruct a series from factors
+series_idx = 0
+reconstructed = result.Z @ result.C[series_idx, :].T
+print(f"Reconstructed series {series_idx} from factors")
+
+# Example 4: Check how well factors explain each series
+# R[i, i] is the idiosyncratic variance (lower = better explained)
+idiosyncratic_var = np.diag(result.R)
+explained_variance = 1 - (idiosyncratic_var / (idiosyncratic_var + np.var(result.X_sm, axis=0)))
+print(f"Variance explained by factors (per series):")
+print(f"  Mean: {explained_variance.mean():.2%}")
+print(f"  Min: {explained_variance.min():.2%}, Max: {explained_variance.max():.2%}")
+
+# Example 5: Forecast factors forward
+# Z_{t+h} = A^h @ Z_t
+horizon = 12
+Z_last = result.Z[-1, :]  # Last observed factor values
+Z_forecast = np.zeros((horizon, len(Z_last)))
+Z_forecast[0] = result.A @ Z_last
+for h in range(1, horizon):
+    Z_forecast[h] = result.A @ Z_forecast[h-1]
+print(f"Forecasted factors for {horizon} periods ahead")
+
+# Example 6: Convert smoothed data to pandas DataFrame
+if result.time_index is not None:
+    smoothed_df = result.to_pandas_smoothed()
+    factors_df = result.to_pandas_factors()
+    print("Converted to pandas DataFrames for easy analysis")
+    """)
 
     # 5) Forecast
     print(f"\n--- Performing forecasts ---")
@@ -189,9 +366,12 @@ def main() -> None:
         )
     print(f"✓ Forecast complete:")
     print(f"  - Horizon: {args.forecast_horizon} periods")
-    print(f"  - X_forecast shape: {X_forecast.shape}")
+    print(f"  - X_forecast shape: {X_forecast.shape} (forecasted series)")
+    print(f"    * X_forecast[t, i] = forecasted value of series i at time t")
     if Z_forecast is not None:
-        print(f"  - Z_forecast shape: {Z_forecast.shape}")
+        print(f"  - Z_forecast shape: {Z_forecast.shape} (forecasted factors)")
+        print(f"    * Z_forecast[t, j] = forecasted value of factor j at time t")
+        print(f"    * Forecast method: Z_{{t+h}} = A^h @ Z_t (deterministic)")
 
     # 6) Visualize
     print(f"\n--- Visualizing factor forecast ---")
@@ -218,6 +398,42 @@ def main() -> None:
     forecast_df.to_csv(forecast_path)
     print(f"✓ Saved forecast CSV: {forecast_path}")
 
+    # ========================================================================
+    # 8) Additional Analysis: Understanding Your Results
+    # ========================================================================
+    print(f"\n" + "="*70)
+    print("Additional Analysis: Understanding Your Results")
+    print("="*70)
+    
+    # Factor analysis
+    print("\n--- Factor Analysis ---")
+    print(f"Number of factors: {result.num_factors()}")
+    print(f"State dimension: {result.num_state()}")
+    print(f"Number of series: {result.num_series()}")
+    
+    # Check factor stability
+    A_eigenvals = np.linalg.eigvals(result.A).real
+    print(f"\nFactor transition matrix (A) eigenvalues:")
+    print(f"  Range: [{A_eigenvals.min():.4f}, {A_eigenvals.max():.4f}]")
+    if np.all(np.abs(A_eigenvals) < 1):
+        print("  ✓ All factors are stationary (stable)")
+    else:
+        print("  ⚠ Some factors may be non-stationary")
+    
+    # Factor loadings summary
+    C_abs = np.abs(result.C)
+    print(f"\nFactor loadings (C) summary:")
+    print(f"  Mean absolute loading: {C_abs.mean():.4f}")
+    print(f"  Max absolute loading: {C_abs.max():.4f}")
+    print(f"  Series with weak loadings (<0.1): {np.sum(C_abs.max(axis=1) < 0.1)}")
+    
+    # Idiosyncratic variance
+    R_diag = np.diag(result.R)
+    print(f"\nIdiosyncratic variance (R diagonal):")
+    print(f"  Mean: {R_diag.mean():.4f}")
+    print(f"  Min: {R_diag.min():.4f}, Max: {R_diag.max():.4f}")
+    print(f"  Lower values = series better explained by factors")
+    
     print("\n" + "="*70)
     print("✓ Tutorial complete!")
     print("="*70)
@@ -225,10 +441,18 @@ def main() -> None:
     print(f"  - Generated files:")
     print(f"    * {output_dir / 'factor_forecast.png'}")
     print(f"    * {output_dir / 'forecasts.csv'}")
+    print("\nKey Takeaways:")
+    print("  - result.Z: Latent factors (common drivers)")
+    print("  - result.C: How series relate to factors (loadings)")
+    print("  - result.X_sm: Smoothed data (denoised observations)")
+    print("  - result.A: How factors evolve over time")
+    print("  - Use result.to_pandas_factors() and to_pandas_smoothed() for easy analysis")
     print("\nNext steps:")
     print("  - Try different parameters: --max-iter 10 --threshold 1e-4")
     print("  - Adjust regularization: --regularization-scale 1e-6")
     print("  - Change damping: --damping-factor 0.9")
+    print("  - Analyze factors: result.Z[:, 0] for common factor")
+    print("  - Check loadings: result.C[:, 0] to see which series drive factor 1")
     print("  - See hydra_tutorial.py for Hydra-based configuration")
 
 

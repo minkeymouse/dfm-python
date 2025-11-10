@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.2.4] - 2025-01-XX
+
+### Major Refactoring and Code Quality Improvements
+
+This release includes extensive refactoring focused on code maintainability, robustness, and documentation.
+
+#### Code Refactoring
+- **Consolidated covariance/variance computation**: Created `_compute_covariance_safe()` and `_compute_variance_safe()` functions to eliminate code duplication (17 patterns → 3 functions)
+- **Named constants**: Replaced 30+ magic numbers with named constants for better maintainability:
+  - `DEFAULT_AR_COEFFICIENT`, `DEFAULT_INNOVATION_VARIANCE`
+  - `MIN_INNOVATION_VARIANCE`, `MIN_OBSERVATION_VARIANCE`
+  - `DEFAULT_OBSERVATION_VARIANCE`, etc.
+- **Improved naming**: Consistent variable naming throughout codebase (e.g., `res_block` → `block_residuals`, `resNaN` → `residuals_with_nan`)
+- **Code deduplication**: Reduced code by ~80 lines through consolidation of repeated patterns
+
+#### Documentation
+- **Enhanced docstrings**: Comprehensive docstrings with examples for all major functions (`init_conditions`, `em_step`, `em_converged`)
+- **Updated README**: Added "Code Quality" section highlighting refactoring improvements
+- **Improved tutorials**: Enhanced `basic_tutorial.py` and `hydra_tutorial.py` with better explanations and examples
+
+#### Robustness
+- **Safe variance computation**: Automatic handling of edge cases (empty data, NaN values, numerical instability)
+- **Safe covariance computation**: Robust error handling with automatic fallback strategies
+- **Enhanced error messages**: More informative logging messages with context information
+
+#### Testing
+- All 38+ tests passing
+- No linter errors
+- Verified compatibility with existing functionality
+
+### Changed
+- Internal refactoring: No breaking changes to public API
+- Improved numerical stability through consolidated utility functions
+
 ## [0.2.3] - 2025-01-XX
 
 ### Changed
