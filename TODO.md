@@ -2,7 +2,8 @@
 
 ## Current Status
 - **File count: 15** (target: ≤20) ✓ **BELOW LIMIT**
-- **Iteration completed**: 
+- **Latest iteration**: Cleaned up outdated `data_loader` references in docstrings (2 files updated)
+- **Previous iterations completed**: 
   - Merged `core/helpers/` package (3 files → 1)
   - Merged `core/numeric/` package (3 files → 1)
   - Merged `data/` package (3 files → 1)
@@ -12,51 +13,61 @@
   - **Merged `utils/aggregation.py` → `utils/__init__.py`** (17 → 16 files)
   - **Merged `core/diagnostics.py` → `core/__init__.py`** (16 → 15 files)
 
+## ✅ COMPLETED: Clean Up Outdated Comments
+
+### Goal
+Remove outdated references to `data_loader` module in docstring examples. The `data_loader.py` file was removed in a previous iteration, and all functionality was moved to `data/` package. These comments were harmless but misleading.
+
+### Scope
+- **Files updated:** 2 files
+  - `src/dfm_python/__init__.py` (line 38)
+  - `src/dfm_python/dfm.py` (line 756)
+- **Change type:** Documentation cleanup (comments/docstrings only)
+- **Risk:** Very low (comments only, no code changes)
+- **Reversibility:** Easy (just restore comments)
+
+### Step-by-Step Plan
+
+#### Step 1: Update `src/dfm_python/__init__.py`
+- [x] Remove outdated comment: `# or for backward compatibility: from dfm_python.data_loader import load_data`
+- [x] Keep the preferred import example: `from dfm_python.data import load_data  # Preferred import`
+- [x] Verify docstring still makes sense after removal
+
+#### Step 2: Update `src/dfm_python/dfm.py`
+- [x] Remove outdated comment: `# or for backward compatibility: from dfm_python.data_loader import load_config, load_data`
+- [x] Keep the preferred import example: `from dfm_python.data import load_config, load_data  # Preferred import`
+- [x] Verify docstring still makes sense after removal
+
+#### Step 3: Verify
+- [x] Run syntax check: `python3 -m py_compile src/dfm_python/__init__.py src/dfm_python/dfm.py`
+- [x] Verify imports still work: `python3 -c "from dfm_python import DFM, load_data; print('OK')"`
+- [x] Check that docstrings are still clear and accurate
+
+### ✅ Outcome Achieved
+- Cleaner, more accurate documentation ✓
+- No outdated references to removed modules ✓
+- All functionality preserved (no code changes) ✓
+- File count unchanged (15 files) ✓
+- Syntax verified ✓
+- Imports verified ✓
+
+### Notes
+- This was a documentation-only change
+- No functional impact
+- Improved code clarity and accuracy
+- Safe and reversible
+
 ## Completed Iterations
 
 ### ✅ COMPLETED: Merge `core/diagnostics.py` → `core/__init__.py`
 **Result:** File count reduced from 16 → 15 ✓
 
-### Step-by-Step Plan
-
-#### Step 1: Read and understand current structure
-- [x] Read `core/diagnostics.py` (429 lines, 4 functions)
-- [x] Read `core/__init__.py` (69 lines, re-export wrapper)
-- [x] Identify all import dependencies (3 files: `dfm.py`, `__init__.py`, `core/__init__.py`)
-
-#### Step 2: Merge content into `core/__init__.py`
-- [x] Update module docstring in `core/__init__.py` to include diagnostics description
-- [x] Move all imports from `diagnostics.py` (typing, numpy, logging, pandas try/except, config)
-- [x] Move TYPE_CHECKING block and DFMResult type alias
-- [x] Move `_logger` definition
-- [x] Move all 4 functions: `calculate_rmse`, `_display_dfm_tables`, `diagnose_series`, `print_series_diagnosis`
-- [x] Remove the `from .diagnostics import ...` statement
-- [x] Keep existing imports from `em`, `numeric`, `helpers`, `utils`
-- [x] Update `__all__` list (already includes diagnostics functions, no change needed)
-
-#### Step 3: Update import statements (3 files)
-- [x] `dfm.py`: Change `from .core.diagnostics import calculate_rmse` → `from .core import calculate_rmse`
-- [x] `dfm.py`: Change `from .core.diagnostics import (_display_dfm_tables, diagnose_series, print_series_diagnosis)` → `from .core import (_display_dfm_tables, diagnose_series, print_series_diagnosis)`
-- [x] `__init__.py`: Change `from .core.diagnostics import calculate_rmse, diagnose_series, print_series_diagnosis` → `from .core import calculate_rmse, diagnose_series, print_series_diagnosis`
-- [x] `core/__init__.py`: Remove `from .diagnostics import ...` line (content now merged)
-
-#### Step 4: Verify and clean up
-- [x] Run syntax check: `python3 -m py_compile src/dfm_python/core/__init__.py`
-- [x] Verify imports work: `python3 -c "from dfm_python.core import calculate_rmse; print('OK')"`
-- [x] Verify module imports: `python3 -c "from dfm_python.dfm import DFM; from dfm_python import calculate_rmse; print('OK')"`
-- [x] Verify file count: `find src -name "*.py" -type f | wc -l` (should be 15)
-- [x] Move `core/diagnostics.py` to `trash/core_diagnostics.py`
-
-### ✅ Outcome Achieved
-- File count: 16 → 15 ✓
-- All functionality preserved ✓
-- All imports updated correctly ✓
-- No breaking changes ✓
-- `core/__init__.py` is now comprehensive module (497 lines)
+### ✅ COMPLETED: Merge `utils/aggregation.py` → `utils/__init__.py`
+**Result:** File count reduced from 17 → 16 ✓
 
 ## Next Steps (Optional - file count already well below limit)
 
-### Code Quality Improvements
+### Code Quality Improvements (Future)
 - Review for any remaining code duplication
 - Ensure consistent naming conventions across all modules
 - Verify all imports are properly organized

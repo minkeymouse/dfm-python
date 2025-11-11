@@ -35,7 +35,6 @@ Example (High-level API - Recommended):
 Example (Low-level API - For advanced usage):
     >>> from dfm_python import DFM, DFMConfig, SeriesConfig
     >>> from dfm_python.data import load_data  # Preferred import
-    >>> # or for backward compatibility: from dfm_python.data_loader import load_data
     >>> # Option 1: Load from YAML
     >>> config = load_config('config.yaml')
     >>> # Option 2: Create directly
