@@ -18,14 +18,122 @@ Iteration working agreement:
 - Never delete/move `src/test` or `tutorial/basic_tutorial.py`; never move working code to `trash/`.
 - Keep file count under `src/` (src/dfm_python + src/test) ≤ 20; consolidate only when safe and beneficial.
 
+## Functional Assessment (Current Iteration)
+
+**File Count:** 20/20 (at limit) ✓  
+**Tests:** 65 passed, 2 skipped ✓  
+**Status:** 8.5/10 criteria fully implemented, 1.5/10 partially (EM step placeholder, tent weights partial)
+
+### ✅ Fully Implemented (8.5/10)
+1. ✅ Class-oriented with DictConfig (Hydra) and Spec + class configs
+2. ✅ Plausible factors (no complex numbers, Q diag ≥ 1e-8, AR stable < 1.0) - **IMPROVED**: PCA-based initialization now functional
+3. ✅ Full, generic Block DFM with CSV data
+4. ✅ Complete pipeline APIs (init: PCA-based ✓, Kalman ✓, EM step: placeholder, nowcasting ✓, forecasting ✓)
+5. ✅ APIs mirror Nowcast MATLAB behavior
+6. ✅ Generalized clock with tent weights (structure exists, full implementation pending)
+7. ✅ Missing data handling (robust, numerically stable)
+8. ✅ Frequency constraints (series faster than clock → error)
+9. ✅ Generic naming/logic/patterns
+10. ✅ Package structure ≤ 20 files
+
+### ⚠️ Partially Implemented (1.5/10)
+4. ⚠️ Complete pipeline (init, Kalman, EM, nowcasting, forecasting)
+   - **Progress:** `init_conditions` now uses PCA-based initialization (significant improvement)
+   - **Gap:** `em_step` is placeholder (no actual parameter estimation during EM iterations)
+   - **Impact:** DFM initializes properly but doesn't refine parameters during EM
+   - **Fix:** Implement full `em_step` from `trash/core_em_iteration.py`
+
+6. ⚠️ Generalized clock with tent weights
+   - **Progress:** Structure exists, `get_tent_weights` helper added
+   - **Gap:** Tent weight handling for slower frequencies not fully implemented in `init_conditions`
+   - **Impact:** Slower-frequency series may not use proper tent kernel constraints
+   - **Fix:** Complete Step 3 of initialization plan (tent weight handling)
+
+### Critical Gaps Identified
+1. **EM Step Placeholder** (HIGHEST PRIORITY)
+   - `em_step`: Returns parameters unchanged with `loglik = 0.0`
+   - **Action:** Implement from `trash/core_em_iteration.py`
+   - **Critical:** Ensure `_ensure_innovation_variance_minimum(Q, MIN_INNOVATION_VARIANCE)` called after Q updates
+   - **Critical:** Ensure `_ensure_covariance_stable` called on all covariance matrices
+   - **Status:** `init_conditions` now functional with PCA-based initialization ✓
+
+2. **Tent Weight Handling for Slower Frequencies** (MEDIUM PRIORITY)
+   - Structure exists in `init_conditions` but not fully implemented
+   - **Action:** Complete Step 3 of initialization plan
+   - **Status:** Helper functions added, needs integration in block processing loop
+
+## Focused Plan: Implement Full `init_conditions` Function
+
+**Objective:** Replace placeholder with PCA-based initialization (most critical gap).
+
+**Steps (6):**
+1. **Add missing helper functions to `core/helpers.py`**
+   - `get_block_indices`, `infer_nQ`, `append_or_initialize`, `has_valid_data`, `get_matrix_shape`
+   - `estimate_ar_coefficients_ols`, `compute_innovation_covariance`, `update_block_diag`
+   - `clean_variance_array`, `get_tent_weights`
+   - **Acceptance:** All helpers added, tests pass, file count 20/20
+
+2. **Implement PCA-based factor initialization (clock frequency series)**
+   - Extract clock-frequency series, compute covariance, extract top `r_i` PCs
+   - Set loadings `C[idx_freq, :r_i] = eigenvectors`, compute factors `f = data @ eigenvectors`
+   - **Acceptance:** `test_init_conditions_basic` passes, factors vary, Q diag ≥ 1e-8, no complex
+
+3. **Implement tent weight handling for slower frequencies**
+   - Get tent weights, generate constraint matrices, compute constrained least squares loadings
+   - **Acceptance:** `test_mixed_frequencies` passes, tent constraints respected
+
+4. **Implement OLS-based AR coefficient estimation**
+   - Create lagged factor matrix, estimate AR via OLS, compute innovation covariance
+   - Assemble block diagonal A, Q using `update_block_diag`
+   - **Acceptance:** `test_init_conditions_large_block` passes, AR stable (max |eigenval| < 1.0)
+
+5. **Implement idiosyncratic component initialization**
+   - Initialize idiosyncratic AR coefficients and variances for clock-frequency series
+   - Create tent-based idiosyncratic blocks for slower frequencies
+   - **Acceptance:** `test_init_conditions_block_global_single_series` passes, correct dimensions
+
+6. **Final validation and Q diagonal enforcement**
+   - Call `_ensure_innovation_variance_minimum(Q, MIN_INNOVATION_VARIANCE)` on final Q
+   - Call `_ensure_covariance_stable(V_0, ...)` on final V_0
+   - Clean all outputs, verify no complex/NaN/Inf
+   - **Acceptance:** All 65+ tests pass, tutorial runs, plausibility: Q diag ≥ 1e-8, no complex, factors vary, AR stable
+
+**Success Metrics:**
+- Tests: All 65+ pass
+- Tutorial: Completes without errors
+- Plausibility: Q diag ≥ 1e-8, no complex, factors vary, AR stable
+- File count: 20/20 (no increase)
+
+## Current Iteration: PCA-Based Initialization Implementation
+
+**Status:** Steps 1, 2, 4, 6 completed; Steps 3, 5 partially completed
+
+**Completed:**
+- ✅ Step 1: Added 10 helper functions to `core/helpers.py` (get_block_indices, infer_nQ, append_or_initialize, has_valid_data, get_matrix_shape, estimate_ar_coefficients_ols, compute_innovation_covariance, update_block_diag, clean_variance_array, get_tent_weights)
+- ✅ Step 2: Implemented PCA-based factor initialization for clock-frequency series
+- ✅ Step 4: Implemented OLS-based AR coefficient estimation with stability clipping
+- ✅ Step 6: Final validation with Q diagonal ≥ 1e-8 enforcement and AR clipping
+
+**Partially Completed:**
+- ⚠️ Step 3: Tent weight handling structure exists but not fully implemented for slower frequencies
+- ⚠️ Step 5: Idiosyncratic components handled via R (observation covariance), not in state (simplified)
+
+**Results:**
+- Tests: 65 passed, 2 skipped ✓
+- Tutorial: Completes successfully ✓
+- Plausibility: Q diag ≥ 1e-8, no complex, factors vary, AR stable (0.99 < 1.0) ✓
+- File count: 20/20 (at limit) ✓
+
+**Changes Made:**
+- `core/helpers.py`: Added 10 helper functions (~450 lines)
+- `core/em.py`: Replaced placeholder `init_conditions` with PCA-based implementation (~270 lines)
+- Added AR coefficient clipping for stability (max eigenvalue < 1.0)
+
 Near-term:
-- **CRITICAL**: Implement full `init_conditions` and `em_step` functions in `src/dfm_python/core/em.py` (currently placeholders).
-  - Source: `trash/core_em_initialization.py` and `trash/core_em_iteration.py`
-  - Must maintain numerical stability (real symmetric PSD, damping, min diag(Q) ≥ 1e-8)
-  - Must handle block structure, tent weights, and mixed frequencies correctly
-- Stabilize EM/KF numerics (real symmetric PSD, damping, min diag(Q)).
-- Verify clock/tent-weight handling and frequency guardrails.
-- Ensure missing-data logic matches Nowcast expectations.
+- **NEXT**: Complete tent weight handling for slower frequencies in `init_conditions` (Step 3)
+- **NEXT**: Implement full `em_step` function (currently placeholder)
+- Verify clock/tent-weight handling with mixed-frequency tests (structure exists, needs full implementation)
+- Ensure missing-data logic matches Nowcast expectations (implemented, may need extreme case testing)
 
 ---
 
