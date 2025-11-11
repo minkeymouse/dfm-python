@@ -266,7 +266,7 @@ Iteration working agreement:
 - Robust error handling ensures stability even if constraint application fails
 
 Near-term:
-- **OPTIONAL**: Add assertion to `test_mixed_frequencies` to verify tent weight constraints are satisfied (R_con @ C ≈ q_con)
+- ✅ **COMPLETED**: Added explicit tent weight constraint verification to `test_mixed_frequencies` (constraint violations verified < 1e-6 tolerance)
 - Ensure missing-data logic matches Nowcast expectations (implemented, may need extreme case testing)
 
 ---
