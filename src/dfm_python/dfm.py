@@ -604,7 +604,7 @@ def _run_em_algorithm(
     
     while num_iter < max_iter and not converged:
         # Create EMStepParams dataclass for em_step()
-        from .core.em.iteration import EMStepParams
+        from .core.em import EMStepParams
         em_step_params = EMStepParams(
             y=y_est,
             A=A,
