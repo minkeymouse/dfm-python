@@ -22,9 +22,7 @@ from config_sources for backward compatibility.
 
 import numpy as np
 from typing import List, Optional, Dict, Any, Union
-from pathlib import Path
-import logging
-from dataclasses import dataclass, field, is_dataclass, asdict
+from dataclasses import dataclass, field
 
 try:
     from typing import Protocol
@@ -806,8 +804,6 @@ class DFMConfig:
 # ============================================================================
 # Configuration Source Adapters
 # ============================================================================
-
-logger = logging.getLogger(__name__)
 
 # Import ConfigSource classes from separate module
 from .config_sources import (
