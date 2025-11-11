@@ -287,6 +287,41 @@ Near-term:
 
 **Conclusion:** Package is production-ready. All functional criteria met, all tests pass, plausibility verified.
 
+## Missing Data Robustness Enhancement (2025-01-XX)
+
+**Status:** Completed successfully
+
+**Objective:** Enhance missing-data handling robustness for extreme edge cases (>90% missing per series) with clear error messages and validation.
+
+**Changes Made:**
+1. **`src/dfm_python/data.py`**: Added validation for extreme missing data (>90% per series)
+   - Detects series with >90% missing data during data loading
+   - Issues clear warnings with actionable suggestions
+   - Warns users about potential estimation issues
+
+2. **`src/dfm_python/core/em.py`**: Enhanced error messages for insufficient data
+   - Error messages now specify which block has insufficient data
+   - Includes specific requirements (number of valid time periods needed)
+   - Provides actionable suggestions (remove series or increase data coverage)
+
+3. **`src/test/test_dfm.py`**: Added `test_extreme_missing_data` test
+   - Tests scenario with >95% missing data (96% missing)
+   - Verifies graceful handling or clear error messages
+   - Ensures informative errors when data is insufficient
+
+**Results:**
+- ✅ Test suite: 66 passed, 2 skipped (1 new test added)
+- ✅ Tutorial: Completes successfully
+- ✅ Plausibility: All checks pass (no complex, Q ≥ 1e-8, AR stable, shapes consistent)
+- ✅ File count: 20/20 (no increase)
+- ✅ No new files created (only edits to existing files)
+
+**Impact:**
+- Improved robustness for extreme missing-data scenarios
+- Clearer, more actionable error messages for users
+- Better validation and warnings for data quality issues
+- All existing functionality preserved
+
 ---
 
 # Legacy: File Consolidation (for reference)

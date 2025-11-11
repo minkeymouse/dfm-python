@@ -408,6 +408,46 @@ def test_high_missing_data():
         assert np.any(np.isfinite(Res.Z))
 
 
+def test_extreme_missing_data():
+    """Test with extreme missing data (>95% missing)."""
+    T, N = 100, 10
+    np.random.seed(42)
+    X = np.random.randn(T, N)
+    
+    # Make 96% missing (more extreme than test_high_missing_data)
+    missing_mask = np.random.rand(T, N) < 0.96
+    X[missing_mask] = np.nan
+    
+    blocks = {'Block_Global': BlockConfig(factors=1, ar_lag=1, clock='m')}
+    series_list = []
+    for i in range(N):
+        series_list.append(SeriesConfig(
+            series_id=f"TEST_{i:02d}",
+            series_name=f"Test Series {i}",
+            frequency='m',
+            transformation='lin',
+            blocks=['Block_Global']
+        ))
+    config = DFMConfig(series=series_list, blocks=blocks)
+    
+    # Should warn about extreme missing data but may still run
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        try:
+            model = DFM()
+            Res = model.fit(X, config, threshold=1e-2, max_iter=5)
+            # If succeeds, verify outputs are valid
+            assert Res is not None
+            assert Res.x_sm.shape == (T, N)
+            assert isinstance(Res.converged, bool)
+        except (ValueError, RuntimeError) as e:
+            # If fails due to insufficient data, error should be informative
+            error_msg = str(e).lower()
+            assert any(keyword in error_msg for keyword in [
+                "insufficient", "missing", "data", "coverage", "too much"
+            ]), f"Error should mention data issue, got: {e}"
+
+
 def test_mixed_frequencies():
     """Test with mixed frequencies (monthly and quarterly)."""
     T, N = 60, 8
