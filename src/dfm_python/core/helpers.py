@@ -450,3 +450,549 @@ def clean_variance_array(
     cleaned = np.maximum(cleaned, min_val)
     
     return cleaned
+
+
+# ============================================================================
+# EM step helpers
+# ============================================================================
+
+def compute_sufficient_stats(
+    Zsmooth: np.ndarray,
+    vsmooth: np.ndarray,
+    vvsmooth: np.ndarray,
+    block_indices: slice,
+    T: int
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Compute expected sufficient statistics for EM updates.
+    
+    Computes E[Z_t Z_t'], E[Z_{t-1} Z_{t-1}'], and E[Z_t Z_{t-1}'] 
+    from Kalman smoother output.
+    
+    Parameters
+    ----------
+    Zsmooth : np.ndarray
+        Smoothed factor estimates (m x (T+1))
+    vsmooth : np.ndarray
+        Smoothed factor covariances (m x m x (T+1))
+    vvsmooth : np.ndarray
+        Smoothed lag-1 factor covariances (m x m x T)
+    block_indices : slice
+        Indices for the current block
+    T : int
+        Number of time periods
+        
+    Returns
+    -------
+    EZZ : np.ndarray
+        E[Z_t Z_t' | Y] (r x r)
+    EZZ_lag : np.ndarray
+        E[Z_{t-1} Z_{t-1}' | Y] (rp x rp)
+    EZZ_cross : np.ndarray
+        E[Z_t Z_{t-1}' | Y] (r x rp)
+    """
+    # E[Z_t Z_t' | Y] = sum over t of (Z_t @ Z_t' + V_t)
+    Z_block = Zsmooth[block_indices, 1:]
+    V_block = vsmooth[block_indices, :, :][:, block_indices, 1:]
+    EZZ = Z_block @ Z_block.T + np.sum(V_block, axis=2)
+    
+    # E[Z_{t-1} Z_{t-1}' | Y] = sum over t of (Z_{t-1} @ Z_{t-1}' + V_{t-1})
+    Z_lag_block = Zsmooth[block_indices, :-1]
+    V_lag_block = vsmooth[block_indices, :, :][:, block_indices, :-1]
+    EZZ_lag = Z_lag_block @ Z_lag_block.T + np.sum(V_lag_block, axis=2)
+    
+    # E[Z_t Z_{t-1}' | Y] = sum over t of (Z_t @ Z_{t-1}' + VV_t)
+    VV_block = vvsmooth[block_indices, :, :][:, block_indices, :]
+    EZZ_cross = Z_block @ Z_lag_block.T + np.sum(VV_block, axis=2)
+    
+    return EZZ, EZZ_lag, EZZ_cross
+
+
+def safe_time_index(
+    t: int,
+    max_index: int,
+    offset: int = 1
+) -> bool:
+    """Check if time index is valid for array access.
+    
+    Parameters
+    ----------
+    t : int
+        Current time index (0-based)
+    max_index : int
+        Maximum valid index (typically array.shape[0] or array.shape[2])
+    offset : int, default 1
+        Offset to add to t (typically 1 for t+1 access)
+        
+    Returns
+    -------
+    bool
+        True if t + offset < max_index, False otherwise
+    """
+    return (t + offset) < max_index
+
+
+def extract_3d_matrix_slice(
+    matrix_3d: np.ndarray,
+    row_indices: np.ndarray,
+    col_indices: np.ndarray,
+    time_idx: int
+) -> np.ndarray:
+    """Extract 2D slice from 3D matrix with safe indexing.
+    
+    Parameters
+    ----------
+    matrix_3d : np.ndarray
+        3D matrix (m x m x T) to extract from
+    row_indices : np.ndarray
+        Row indices to extract
+    col_indices : np.ndarray
+        Column indices to extract
+    time_idx : int
+        Time index (third dimension)
+        
+    Returns
+    -------
+    slice_2d : np.ndarray
+        2D slice (len(row_indices) x len(col_indices))
+        Returns zeros if indices are invalid
+        
+    Notes
+    -----
+    - Handles dimension reduction (3D -> 2D)
+    - Returns zeros if time_idx is out of bounds
+    - Validates that extracted slice has expected shape
+    """
+    if time_idx >= matrix_3d.shape[2]:
+        return np.zeros((len(row_indices), len(col_indices)))
+    
+    try:
+        slice_3d = matrix_3d[np.ix_(row_indices, col_indices, [time_idx])]
+        slice_2d = slice_3d[:, :, 0] if slice_3d.ndim == 3 else slice_3d
+        # Ensure correct shape
+        expected_shape = (len(row_indices), len(col_indices))
+        if slice_2d.shape != expected_shape:
+            return np.zeros(expected_shape)
+        return slice_2d
+    except (IndexError, ValueError):
+        return np.zeros((len(row_indices), len(col_indices)))
+
+
+def reg_inv(
+    denom: np.ndarray,
+    nom: np.ndarray,
+    config: Optional[Any],
+    default_scale: float = 1e-5
+) -> Tuple[np.ndarray, bool]:
+    """Compute regularized matrix inverse for loading updates.
+    
+    Parameters
+    ----------
+    denom : np.ndarray
+        Denominator matrix (typically sum of Z @ Z' terms)
+    nom : np.ndarray
+        Numerator matrix or vector (typically sum of y @ Z' terms)
+    config : Any, optional
+        Configuration object for regularization parameters
+    default_scale : float, default 1e-5
+        Default regularization scale if not in config
+        
+    Returns
+    -------
+    result : np.ndarray
+        Computed result: inv(denom_reg) @ nom
+    success : bool
+        True if computation succeeded, False if exception occurred
+        
+    Notes
+    -----
+    - Aligns with MATLAB: vec_C = inv(denom)*nom(:)
+    - Uses regularization for numerical stability (MATLAB uses direct inversion)
+    - Handles both matrix and vector numerators
+    """
+    from .numeric import _compute_regularization_param
+    
+    try:
+        scale_factor = safe_get_attr(config, "regularization_scale", default_scale)
+        warn_reg = safe_get_attr(config, "warn_on_regularization", True)
+        reg_param, _ = _compute_regularization_param(denom, scale_factor, warn_reg)
+        denom_reg = denom + np.eye(denom.shape[0]) * reg_param
+        
+        # Align with MATLAB: vec_C = inv(denom)*nom(:)
+        # MATLAB uses direct inversion, we use regularized for numerical stability
+        if nom.ndim == 1:
+            result = inv(denom_reg) @ nom
+        elif nom.ndim == 2 and nom.shape[0] == 1:
+            result = inv(denom_reg) @ nom.T
+        else:
+            result = inv(denom_reg) @ nom.flatten()
+        return result, True
+    except _NUMERICAL_EXCEPTIONS:
+        return np.zeros(denom.shape[0]), False
+
+
+def update_loadings(
+    C_new: np.ndarray,
+    C_update: np.ndarray,
+    row_indices: np.ndarray,
+    col_indices: np.ndarray
+) -> None:
+    """Update loading matrix from computed values.
+    
+    Parameters
+    ----------
+    C_new : np.ndarray
+        Loading matrix to update (modified in-place)
+    C_update : np.ndarray
+        Computed loading values (n_rows x n_cols)
+    row_indices : np.ndarray
+        Row indices in C_new to update
+    col_indices : np.ndarray
+        Column indices in C_new to update
+        
+    Notes
+    -----
+    - Updates C_new in-place
+    - Assumes C_update.shape == (len(row_indices), len(col_indices))
+    - More efficient than nested loops for large matrices
+    """
+    if len(row_indices) == 0 or len(col_indices) == 0:
+        return
+    
+    # Use vectorized assignment for efficiency
+    if C_update.shape == (len(row_indices), len(col_indices)):
+        C_new[np.ix_(row_indices, col_indices)] = C_update
+    else:
+        # Fallback to element-wise assignment if shapes don't match
+        for ii, row_idx in enumerate(row_indices):
+            for jj, col_idx in enumerate(col_indices):
+                if ii < C_update.shape[0] and jj < C_update.shape[1]:
+                    C_new[row_idx, col_idx] = C_update[ii, jj]
+
+
+def compute_obs_cov(
+    y: np.ndarray,
+    C: np.ndarray,
+    Zsmooth: np.ndarray,
+    vsmooth: np.ndarray,
+    default_variance: float = 1e-4,
+    min_variance: float = 1e-8,
+    min_diagonal_variance_ratio: float = 1e-6
+) -> np.ndarray:
+    """Compute observation covariance diagonal (R_diag) from residuals and factor uncertainty.
+    
+    Computes: R[i,i] = mean_t((y[i,t] - C[i,:] @ Z[t])^2 + C[i,:] @ V[t] @ C[i,:]')
+    
+    Parameters
+    ----------
+    y : np.ndarray
+        Observation matrix (n x T), may contain NaN
+    C : np.ndarray
+        Loading matrix (n x m)
+    Zsmooth : np.ndarray
+        Smoothed factor estimates (m x (T+1)) or (T+1) x m
+    vsmooth : np.ndarray
+        Smoothed factor covariances (m x m x (T+1))
+    default_variance : float, default 1e-4
+        Default variance if computation fails
+    min_variance : float, default 1e-8
+        Minimum variance to enforce
+    min_diagonal_variance_ratio : float, default 1e-6
+        Minimum variance as ratio of mean variance
+        
+    Returns
+    -------
+    R_diag : np.ndarray
+        Diagonal elements of R (n,)
+        
+    Notes
+    -----
+    - Handles missing data (NaN) by skipping those time points
+    - Computes both residual variance and factor uncertainty contribution
+    - Enforces minimum variance for numerical stability
+    - Uses median imputation for invalid values
+    """
+    n, T = y.shape
+    R_diag = np.zeros(n)
+    n_obs_per_series = np.zeros(n, dtype=int)
+    
+    # Handle Zsmooth shape: can be (m x (T+1)) or ((T+1) x m)
+    if Zsmooth.shape[0] == T + 1:
+        Zsmooth = Zsmooth.T  # Convert to (m x (T+1))
+    
+    for t in range(T):
+        if not safe_time_index(t, Zsmooth.shape[1], offset=1):
+            continue
+        Z_t = Zsmooth[:, t + 1].reshape(-1, 1)
+        vsmooth_t = vsmooth[:, :, t + 1]
+        y_pred = (C @ Z_t).flatten()
+        
+        for i in range(n):
+            if np.isnan(y[i, t]):
+                continue
+            n_obs_per_series[i] += 1
+            resid_sq = (y[i, t] - y_pred[i]) ** 2
+            C_i = C[i, :].reshape(1, -1)
+            var_factor = (C_i @ vsmooth_t @ C_i.T)[0, 0]
+            R_diag[i] += resid_sq + var_factor
+    
+    # Normalize by number of observations per series
+    n_obs_per_series = np.maximum(n_obs_per_series, 1)
+    R_diag = R_diag / n_obs_per_series
+    
+    # Enforce minimum variance
+    mean_var = np.mean(R_diag[R_diag > 0]) if np.any(R_diag > 0) else default_variance
+    min_var = np.maximum(mean_var * min_diagonal_variance_ratio, min_variance)
+    R_diag = np.maximum(R_diag, min_var)
+    
+    # Handle invalid values (NaN/Inf/negative)
+    valid_mask = np.isfinite(R_diag) & (R_diag > 0)
+    if np.any(valid_mask):
+        median_var = np.median(R_diag[valid_mask])
+        R_diag = np.where(valid_mask, R_diag, median_var)
+    else:
+        R_diag.fill(default_variance)
+    
+    return R_diag
+
+
+def compute_block_slice_indices(
+    r: np.ndarray,
+    block_idx: int,
+    ppC: int
+) -> Tuple[int, int]:
+    """Compute start and end indices for a block in state space.
+    
+    Parameters
+    ----------
+    r : np.ndarray
+        Number of factors per block (n_blocks,)
+    block_idx : int
+        Index of current block (0-based)
+    ppC : int
+        Maximum of p (AR lag) and pC (tent length)
+        
+    Returns
+    -------
+    t_start : int
+        Start index for block in state space
+    t_end : int
+        End index for block in state space (exclusive)
+    """
+    factor_start_idx = int(np.sum(r[:block_idx]) * ppC)
+    r_i_int = int(r[block_idx])
+    t_start = factor_start_idx
+    t_end = factor_start_idx + r_i_int * ppC
+    return t_start, t_end
+
+
+def extract_block_matrix(
+    matrix: np.ndarray,
+    t_start: int,
+    t_end: int,
+    copy: bool = True
+) -> np.ndarray:
+    """Extract block submatrix from a larger matrix.
+    
+    Parameters
+    ----------
+    matrix : np.ndarray
+        Full matrix to extract from (m x m)
+    t_start : int
+        Start index for block
+    t_end : int
+        End index for block (exclusive)
+    copy : bool, default True
+        Whether to copy the submatrix (recommended to avoid aliasing)
+        
+    Returns
+    -------
+    block_matrix : np.ndarray
+        Extracted block submatrix ((t_end-t_start) x (t_end-t_start))
+    """
+    block = matrix[t_start:t_end, t_start:t_end]
+    return block.copy() if copy else block
+
+
+def update_block_in_matrix(
+    matrix: np.ndarray,
+    block_matrix: np.ndarray,
+    t_start: int,
+    t_end: int
+) -> None:
+    """Update a block submatrix in a larger matrix.
+    
+    Parameters
+    ----------
+    matrix : np.ndarray
+        Matrix to update (modified in-place)
+    block_matrix : np.ndarray
+        Block matrix to insert
+    t_start : int
+        Start index for block
+    t_end : int
+        End index for block (exclusive)
+        
+    Notes
+    -----
+    - Updates matrix in-place
+    - Assumes block_matrix.shape == (t_end-t_start, t_end-t_start)
+    """
+    matrix[t_start:t_end, t_start:t_end] = block_matrix
+
+
+def stabilize_cov(
+    Q: np.ndarray,
+    config: Optional[Any],
+    min_variance: float = 1e-8
+) -> np.ndarray:
+    """Apply standard stability operations to innovation covariance matrix.
+    
+    Parameters
+    ----------
+    Q : np.ndarray
+        Innovation covariance matrix (m x m)
+    config : Any, optional
+        Configuration object for stability parameters
+    min_variance : float, default 1e-8
+        Minimum variance to enforce on diagonal elements
+        
+    Returns
+    -------
+    Q_stable : np.ndarray
+        Stabilized innovation covariance matrix
+        
+    Notes
+    -----
+    - Applies operations in order: clean -> PSD -> cap -> min variance
+    - Re-applies min variance after each operation that might affect diagonal
+    - Used in em_step for Q block updates
+    """
+    from .numeric import (
+        _clean_matrix,
+        _ensure_positive_definite,
+        _cap_max_eigenvalue,
+        _ensure_innovation_variance_minimum,
+    )
+    
+    # Clean matrix first
+    Q = _clean_matrix(Q, 'covariance', default_nan=0.0)
+    
+    # Get config parameters
+    min_eigenval = safe_get_attr(config, "min_eigenvalue", 1e-8)
+    warn_reg = safe_get_attr(config, "warn_on_regularization", True)
+    max_eigenval = safe_get_attr(config, "max_eigenvalue", 1e6)
+    
+    # Ensure minimum variance before PSD (critical for factor evolution)
+    Q = _ensure_innovation_variance_minimum(Q, min_variance=min_variance)
+    
+    # Ensure positive semi-definite
+    Q, _ = _ensure_positive_definite(Q, min_eigenval=min_eigenval, warn=warn_reg)
+    
+    # Cap maximum eigenvalue
+    Q = _cap_max_eigenvalue(Q, max_eigenval=max_eigenval)
+    
+    # Re-apply minimum variance after operations that might affect diagonal
+    Q = _ensure_innovation_variance_minimum(Q, min_variance=min_variance)
+    
+    return Q
+
+
+def validate_params(
+    A: np.ndarray,
+    Q: np.ndarray,
+    R: np.ndarray,
+    C: np.ndarray,
+    Z_0: np.ndarray,
+    V_0: np.ndarray,
+    fallback_transition_coeff: float = 0.9,
+    min_innovation_variance: float = 1e-8,
+    default_observation_variance: float = 1e-4,
+    default_idio_init_covariance: float = 0.1
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Validate and clean DFM parameters for numerical stability.
+    
+    Parameters
+    ----------
+    A : np.ndarray
+        Transition matrix (m x m)
+    Q : np.ndarray
+        Innovation covariance (m x m)
+    R : np.ndarray
+        Observation covariance (n x n), typically diagonal
+    C : np.ndarray
+        Loading matrix (n x m)
+    Z_0 : np.ndarray
+        Initial state (m,)
+    V_0 : np.ndarray
+        Initial covariance (m x m)
+    fallback_transition_coeff : float, default 0.9
+        Fallback coefficient for transition matrix regularization
+    min_innovation_variance : float, default 1e-8
+        Minimum innovation variance for Q matrix
+    default_observation_variance : float, default 1e-4
+        Default observation variance for R matrix
+    default_idio_init_covariance : float, default 0.1
+        Default initial covariance for V_0 matrix
+        
+    Returns
+    -------
+    A_clean : np.ndarray
+        Cleaned transition matrix
+    Q_clean : np.ndarray
+        Cleaned innovation covariance
+    R_clean : np.ndarray
+        Cleaned observation covariance
+    C_clean : np.ndarray
+        Cleaned loading matrix
+    Z_0_clean : np.ndarray
+        Cleaned initial state
+    V_0_clean : np.ndarray
+        Cleaned initial covariance
+        
+    Notes
+    -----
+    - Uses _check_finite and _clean_matrix for consistent cleaning
+    - Applies parameter-specific fallback strategies
+    - Logs warnings when cleaning is applied
+    - Used in em_step for input validation
+    """
+    from .numeric import _check_finite, _clean_matrix
+    
+    if not _check_finite(A, "A"):
+        _logger.warning(
+            f"validate_params: A contains NaN/Inf, "
+            f"applying regularization ({fallback_transition_coeff}*I + {1-fallback_transition_coeff}*cleaned)"
+        )
+        A = (np.eye(A.shape[0]) * fallback_transition_coeff + 
+             _clean_matrix(A, 'loading') * (1 - fallback_transition_coeff))
+    
+    if not _check_finite(Q, "Q"):
+        _logger.warning(
+            f"validate_params: Q contains NaN/Inf, "
+            f"applying regularization (min={min_innovation_variance})"
+        )
+        Q = _clean_matrix(Q, 'covariance', default_nan=min_innovation_variance)
+    
+    if not _check_finite(R, "R"):
+        _logger.warning(
+            f"validate_params: R contains NaN/Inf, "
+            f"applying regularization (min={default_observation_variance})"
+        )
+        R = _clean_matrix(R, 'diagonal', default_nan=default_observation_variance, default_inf=1e4)
+    
+    if not _check_finite(C, "C"):
+        _logger.warning("validate_params: C contains NaN/Inf, cleaning matrix")
+        C = _clean_matrix(C, 'loading')
+    
+    if not _check_finite(Z_0, "Z_0"):
+        _logger.warning("validate_params: Z_0 contains NaN/Inf, resetting to zeros")
+        Z_0 = np.zeros_like(Z_0)
+    
+    if not _check_finite(V_0, "V_0"):
+        _logger.warning(
+            f"validate_params: V_0 contains NaN/Inf, "
+            f"using regularized identity ({default_idio_init_covariance}*I)"
+        )
+        V_0 = np.eye(V_0.shape[0]) * default_idio_init_covariance
+    
+    return A, Q, R, C, Z_0, V_0

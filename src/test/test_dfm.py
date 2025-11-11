@@ -74,7 +74,8 @@ def test_em_step_basic():
     
     assert C_new is not None and R_new is not None
     assert A_new is not None and np.isfinite(loglik)
-    assert C_new.shape == (N, A.shape[0])
+    # C_new should match the expanded state dimension (factors + idiosyncratic components)
+    assert C_new.shape == (N, A_new.shape[0])
     assert R_new.shape == (N, N)
 
 
