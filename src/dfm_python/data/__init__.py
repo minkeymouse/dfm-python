@@ -4,6 +4,6 @@ This package provides comprehensive data handling for Dynamic Factor Models,
 organized into focused modules for better maintainability.
 """
 
-from .utils import rem_nans_spline
+from .utils import rem_nans_spline, summarize
 
-__all__ = ['rem_nans_spline']
+__all__ = ['rem_nans_spline', 'summarize']
