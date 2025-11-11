@@ -2,8 +2,12 @@
 
 from typing import Tuple
 import numpy as np
+import logging
 from scipy.linalg import inv, pinv
 from ._common import NUMERICAL_EXCEPTIONS
+from ..numeric import _clean_matrix
+
+_logger = logging.getLogger(__name__)
 
 
 def estimate_ar_coefficients_ols(
@@ -145,4 +149,118 @@ def compute_sufficient_stats(
     EZZ_cross = Z_block @ Z_lag_block.T + np.sum(VV_block, axis=2)
     
     return EZZ, EZZ_lag, EZZ_cross
+
+
+def safe_mean_std(matrix: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Compute mean and standard deviation for each column, handling missing values.
+    
+    Parameters
+    ----------
+    matrix : np.ndarray
+        Input matrix (T x N)
+        
+    Returns
+    -------
+    means : np.ndarray
+        Column means (N,)
+    stds : np.ndarray
+        Column standard deviations (N,)
+        
+    Notes
+    -----
+    - Handles missing values (NaN) by computing statistics only on finite values
+    - Returns default values (mean=0, std=1) for columns with no valid data
+    - Ensures std > 0 (minimum std = 1.0) to avoid division by zero in standardization
+    
+    Examples
+    --------
+    >>> import numpy as np
+    >>> X = np.array([[1.0, 2.0, np.nan], [3.0, 4.0, 5.0], [5.0, 6.0, 7.0]])
+    >>> means, stds = safe_mean_std(X)
+    >>> means  # Column means
+    array([3., 4., 6.])
+    >>> stds  # Column standard deviations
+    array([1.63299316, 1.63299316, 1.41421356])
+    """
+    n_series = matrix.shape[1]
+    means = np.zeros(n_series)
+    stds = np.ones(n_series)
+    for j in range(n_series):
+        col = matrix[:, j]
+        mask = np.isfinite(col)
+        if np.any(mask):
+            means[j] = float(np.nanmean(col[mask]))
+            std_val = float(np.nanstd(col[mask]))
+            stds[j] = std_val if std_val > 0 else 1.0
+        else:
+            means[j] = 0.0
+            stds[j] = 1.0
+    return means, stds
+
+
+def standardize_data(
+    X: np.ndarray,
+    clip_data_values: bool,
+    data_clip_threshold: float
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Standardize data and handle missing values.
+    
+    Parameters
+    ----------
+    X : np.ndarray
+        Input data matrix (T x N)
+    clip_data_values : bool
+        Whether to clip extreme standardized values
+    data_clip_threshold : float
+        Threshold for clipping (in standard deviations)
+    
+    Returns
+    -------
+    x_standardized : np.ndarray
+        Standardized data (T x N)
+    Mx : np.ndarray
+        Series means (N,)
+    Wx : np.ndarray
+        Series standard deviations (N,)
+    """
+    Mx, Wx = safe_mean_std(X)
+    
+    # Handle zero/near-zero standard deviations
+    min_std = 1e-6
+    Wx = np.maximum(Wx, min_std)
+    
+    # Handle NaN standard deviations
+    nan_std_mask = np.isnan(Wx) | np.isnan(Mx)
+    if np.any(nan_std_mask):
+        _logger.warning(
+            f"Series with NaN mean/std detected: {np.sum(nan_std_mask)}. "
+            f"Setting Wx=1.0, Mx=0.0 for these series."
+        )
+        Wx[nan_std_mask] = 1.0
+        Mx[nan_std_mask] = 0.0
+    
+    # Standardize
+    x_standardized = (X - Mx) / Wx
+    
+    # Clip extreme values if enabled
+    if clip_data_values:
+        n_clipped_before = np.sum(np.abs(x_standardized) > data_clip_threshold)
+        x_standardized = np.clip(x_standardized, -data_clip_threshold, data_clip_threshold)
+        if n_clipped_before > 0:
+            pct_clipped = 100.0 * n_clipped_before / x_standardized.size
+            _logger.warning(
+                f"Data value clipping applied: {n_clipped_before} values ({pct_clipped:.2f}%) "
+                f"clipped beyond ±{data_clip_threshold} standard deviations."
+            )
+    
+    # Replace any remaining NaN/Inf using consolidated utility
+    default_inf_val = data_clip_threshold if clip_data_values else 100
+    x_standardized = _clean_matrix(
+        x_standardized,
+        'general',
+        default_nan=0.0,
+        default_inf=default_inf_val
+    )
+    
+    return x_standardized, Mx, Wx
 

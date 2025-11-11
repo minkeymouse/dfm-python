@@ -46,9 +46,9 @@ from .core.em import (
     em_converged,
     NaNHandlingOptions,
 )
-from .core.helpers import safe_get_method, safe_get_attr
+from .core.helpers import safe_get_method, safe_get_attr, resolve_param, safe_mean_std, standardize_data
 
-from .data_loader import rem_nans_spline
+from .data.utils import rem_nans_spline
 from .utils.aggregation import (
     get_aggregation_structure,
     FREQUENCY_HIERARCHY,
@@ -208,6 +208,95 @@ class DFMResult:
             raise RuntimeError(f"Failed to save DFMResult to {path}: {e}")
 
 
+@dataclass
+class DFMParams:
+    """DFM estimation parameter overrides.
+    
+    All parameters are optional. If None, the corresponding value
+    from DFMConfig will be used during parameter resolution.
+    
+    This dataclass groups all parameter overrides that can be passed
+    to `_dfm_core()` and `_prepare_data_and_params()` to reduce
+    function parameter count and improve readability.
+    """
+    threshold: Optional[float] = None
+    max_iter: Optional[int] = None
+    ar_lag: Optional[int] = None
+    nan_method: Optional[int] = None
+    nan_k: Optional[int] = None
+    clock: Optional[str] = None
+    clip_ar_coefficients: Optional[bool] = None
+    ar_clip_min: Optional[float] = None
+    ar_clip_max: Optional[float] = None
+    clip_data_values: Optional[bool] = None
+    data_clip_threshold: Optional[float] = None
+    use_regularization: Optional[bool] = None
+    regularization_scale: Optional[float] = None
+    min_eigenvalue: Optional[float] = None
+    max_eigenvalue: Optional[float] = None
+    use_damped_updates: Optional[bool] = None
+    damping_factor: Optional[float] = None
+    
+    @classmethod
+    def from_kwargs(cls, **kwargs) -> 'DFMParams':
+        """Create DFMParams from keyword arguments.
+        
+        Filters kwargs to only include valid parameter names,
+        ignoring any extra arguments.
+        """
+        valid_params = {
+            'threshold', 'max_iter', 'ar_lag', 'nan_method', 'nan_k',
+            'clock', 'clip_ar_coefficients', 'ar_clip_min', 'ar_clip_max',
+            'clip_data_values', 'data_clip_threshold', 'use_regularization',
+            'regularization_scale', 'min_eigenvalue', 'max_eigenvalue',
+            'use_damped_updates', 'damping_factor'
+        }
+        filtered = {k: v for k, v in kwargs.items() if k in valid_params}
+        return cls(**filtered)
+
+
+@dataclass
+class EMAlgorithmParams:
+    """Parameters for EM algorithm execution.
+    
+    This dataclass groups all parameters required for running the EM algorithm,
+    reducing function parameter count and improving readability.
+    
+    All parameters are required (no optional fields) since the EM algorithm
+    needs all of them to execute.
+    """
+    # Data
+    y: np.ndarray
+    y_est: np.ndarray
+    
+    # Model parameters
+    A: np.ndarray
+    C: np.ndarray
+    Q: np.ndarray
+    R: np.ndarray
+    Z_0: np.ndarray
+    V_0: np.ndarray
+    r: np.ndarray
+    p: int
+    
+    # Structure parameters
+    R_mat: Optional[np.ndarray]
+    q: Optional[np.ndarray]
+    nQ: int
+    i_idio: np.ndarray
+    blocks: np.ndarray
+    tent_weights_dict: Dict[str, np.ndarray]
+    clock: str
+    frequencies: Optional[np.ndarray]
+    
+    # Config and algorithm parameters
+    config: DFMConfig
+    threshold: float
+    max_iter: int
+    use_damped_updates: bool
+    damping_factor: float
+
+
 # Core functions are imported directly from core modules - no proxy functions needed
 
 
@@ -274,9 +363,8 @@ class DFM:
         self._config = config
         self._data = X
         
-        # Call the core _dfm_core() function logic
-        result = _dfm_core(
-            X, config,
+        # Create DFMParams from individual parameters
+        params = DFMParams(
             threshold=threshold,
             max_iter=max_iter,
             ar_lag=ar_lag,
@@ -294,8 +382,24 @@ class DFM:
             max_eigenvalue=max_eigenvalue,
             use_damped_updates=use_damped_updates,
             damping_factor=damping_factor,
-            **kwargs
         )
+        
+        # Merge kwargs into params if provided
+        if kwargs:
+            # Update params with kwargs (only valid parameter names)
+            valid_params = {
+                'threshold', 'max_iter', 'ar_lag', 'nan_method', 'nan_k',
+                'clock', 'clip_ar_coefficients', 'ar_clip_min', 'ar_clip_max',
+                'clip_data_values', 'data_clip_threshold', 'use_regularization',
+                'regularization_scale', 'min_eigenvalue', 'max_eigenvalue',
+                'use_damped_updates', 'damping_factor'
+            }
+            for k, v in kwargs.items():
+                if k in valid_params and hasattr(params, k):
+                    setattr(params, k, v)
+        
+        # Call the core _dfm_core() function logic
+        result = _dfm_core(X, config, params=params)
         
         self._result = result
         return result
@@ -311,33 +415,21 @@ class DFM:
         return self._config
 
 
-def _resolve_param(override: Any, default: Any) -> Any:
-    """Resolve parameter: use override if provided, else use default."""
-    return override if override is not None else default
-
-
 def _prepare_data_and_params(
     X: np.ndarray,
     config: DFMConfig,
-    threshold: Optional[float] = None,
-    max_iter: Optional[int] = None,
-    ar_lag: Optional[int] = None,
-    nan_method: Optional[int] = None,
-    nan_k: Optional[int] = None,
-    clock: Optional[str] = None,
-    clip_ar_coefficients: Optional[bool] = None,
-    ar_clip_min: Optional[float] = None,
-    ar_clip_max: Optional[float] = None,
-    clip_data_values: Optional[bool] = None,
-    data_clip_threshold: Optional[float] = None,
-    use_regularization: Optional[bool] = None,
-    regularization_scale: Optional[float] = None,
-    min_eigenvalue: Optional[float] = None,
-    max_eigenvalue: Optional[float] = None,
-    use_damped_updates: Optional[bool] = None,
-    damping_factor: Optional[float] = None,
+    params: Optional[DFMParams] = None,
 ) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
     """Prepare data and resolve all parameters from config and overrides.
+    
+    Parameters
+    ----------
+    X : np.ndarray
+        Input data matrix (T x N)
+    config : DFMConfig
+        Configuration object
+    params : DFMParams, optional
+        Parameter overrides. If None, all values from config are used.
     
     Returns
     -------
@@ -345,7 +437,7 @@ def _prepare_data_and_params(
         Cleaned input data (Inf replaced with NaN)
     blocks : np.ndarray
         Block structure array (N x n_blocks)
-    params : dict
+    params_dict : dict
         Dictionary of resolved parameters
     """
     # Clean input data
@@ -357,28 +449,32 @@ def _prepare_data_and_params(
     blocks = config.get_blocks_array()
     T, N = X.shape
     
+    # Initialize params if not provided
+    if params is None:
+        params = DFMParams()
+    
     # Resolve all parameters
-    params = {
-        'p': _resolve_param(ar_lag, config.ar_lag),
+    params_dict = {
+        'p': resolve_param(params.ar_lag, config.ar_lag),
         'r': (np.array(config.factors_per_block) 
               if config.factors_per_block is not None 
               else np.ones(blocks.shape[1])),
-        'nan_method': _resolve_param(nan_method, config.nan_method),
-        'nan_k': _resolve_param(nan_k, config.nan_k),
-        'threshold': _resolve_param(threshold, config.threshold),
-        'max_iter': _resolve_param(max_iter, config.max_iter),
-        'clock': _resolve_param(clock, config.clock),
-        'clip_ar_coefficients': _resolve_param(clip_ar_coefficients, config.clip_ar_coefficients),
-        'ar_clip_min': _resolve_param(ar_clip_min, config.ar_clip_min),
-        'ar_clip_max': _resolve_param(ar_clip_max, config.ar_clip_max),
-        'clip_data_values': _resolve_param(clip_data_values, config.clip_data_values),
-        'data_clip_threshold': _resolve_param(data_clip_threshold, config.data_clip_threshold),
-        'use_regularization': _resolve_param(use_regularization, config.use_regularization),
-        'regularization_scale': _resolve_param(regularization_scale, config.regularization_scale),
-        'min_eigenvalue': _resolve_param(min_eigenvalue, config.min_eigenvalue),
-        'max_eigenvalue': _resolve_param(max_eigenvalue, config.max_eigenvalue),
-        'use_damped_updates': _resolve_param(use_damped_updates, config.use_damped_updates),
-        'damping_factor': _resolve_param(damping_factor, config.damping_factor),
+        'nan_method': resolve_param(params.nan_method, config.nan_method),
+        'nan_k': resolve_param(params.nan_k, config.nan_k),
+        'threshold': resolve_param(params.threshold, config.threshold),
+        'max_iter': resolve_param(params.max_iter, config.max_iter),
+        'clock': resolve_param(params.clock, config.clock),
+        'clip_ar_coefficients': resolve_param(params.clip_ar_coefficients, config.clip_ar_coefficients),
+        'ar_clip_min': resolve_param(params.ar_clip_min, config.ar_clip_min),
+        'ar_clip_max': resolve_param(params.ar_clip_max, config.ar_clip_max),
+        'clip_data_values': resolve_param(params.clip_data_values, config.clip_data_values),
+        'data_clip_threshold': resolve_param(params.data_clip_threshold, config.data_clip_threshold),
+        'use_regularization': resolve_param(params.use_regularization, config.use_regularization),
+        'regularization_scale': resolve_param(params.regularization_scale, config.regularization_scale),
+        'min_eigenvalue': resolve_param(params.min_eigenvalue, config.min_eigenvalue),
+        'max_eigenvalue': resolve_param(params.max_eigenvalue, config.max_eigenvalue),
+        'use_damped_updates': resolve_param(params.use_damped_updates, config.use_damped_updates),
+        'damping_factor': resolve_param(params.damping_factor, config.damping_factor),
         'T': T,
         'N': N,
     }
@@ -398,7 +494,7 @@ def _prepare_data_and_params(
         except Exception as e:
             _logger.debug(f'Error displaying block structure: {e}')
     
-    return X, blocks, params
+    return X, blocks, params_dict
 
 
 def _prepare_aggregation_structure(
@@ -456,121 +552,15 @@ def _prepare_aggregation_structure(
     return tent_weights_dict, R_mat, q, frequencies, i_idio, nQ
 
 
-def _safe_mean_std(matrix: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-    """Compute mean and standard deviation for each column, handling missing values.
+def _run_em_algorithm(
+    params: EMAlgorithmParams
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, float, int, bool]:
+    """Run EM algorithm until convergence.
     
     Parameters
     ----------
-    matrix : np.ndarray
-        Input matrix (T x N)
-        
-    Returns
-    -------
-    means : np.ndarray
-        Column means (N,)
-    stds : np.ndarray
-        Column standard deviations (N,)
-    """
-    n_series = matrix.shape[1]
-    means = np.zeros(n_series)
-    stds = np.ones(n_series)
-    for j in range(n_series):
-        col = matrix[:, j]
-        mask = np.isfinite(col)
-        if np.any(mask):
-            means[j] = float(np.nanmean(col[mask]))
-            std_val = float(np.nanstd(col[mask]))
-            stds[j] = std_val if std_val > 0 else 1.0
-        else:
-            means[j] = 0.0
-            stds[j] = 1.0
-    return means, stds
-
-
-def _standardize_data(
-    X: np.ndarray,
-    clip_data_values: bool,
-    data_clip_threshold: float
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Standardize data and handle missing values.
-    
-    Returns
-    -------
-    x_standardized : np.ndarray
-        Standardized data (T x N)
-    Mx : np.ndarray
-        Series means (N,)
-    Wx : np.ndarray
-        Series standard deviations (N,)
-    """
-    Mx, Wx = _safe_mean_std(X)
-    
-    # Handle zero/near-zero standard deviations
-    min_std = 1e-6
-    Wx = np.maximum(Wx, min_std)
-    
-    # Handle NaN standard deviations
-    nan_std_mask = np.isnan(Wx) | np.isnan(Mx)
-    if np.any(nan_std_mask):
-        _logger.warning(
-            f"Series with NaN mean/std detected: {np.sum(nan_std_mask)}. "
-            f"Setting Wx=1.0, Mx=0.0 for these series."
-        )
-        Wx[nan_std_mask] = 1.0
-        Mx[nan_std_mask] = 0.0
-    
-    # Standardize
-    x_standardized = (X - Mx) / Wx
-    
-    # Clip extreme values if enabled
-    if clip_data_values:
-        n_clipped_before = np.sum(np.abs(x_standardized) > data_clip_threshold)
-        x_standardized = np.clip(x_standardized, -data_clip_threshold, data_clip_threshold)
-        if n_clipped_before > 0:
-            pct_clipped = 100.0 * n_clipped_before / x_standardized.size
-            _logger.warning(
-                f"Data value clipping applied: {n_clipped_before} values ({pct_clipped:.2f}%) "
-                f"clipped beyond ±{data_clip_threshold} standard deviations."
-            )
-    
-    # Replace any remaining NaN/Inf using consolidated utility
-    default_inf_val = data_clip_threshold if clip_data_values else 100
-    x_standardized = _clean_matrix(
-        x_standardized,
-        'general',
-        default_nan=0.0,
-        default_inf=default_inf_val
-    )
-    
-    return x_standardized, Mx, Wx
-
-
-def _run_em_algorithm(
-    y: np.ndarray,
-    y_est: np.ndarray,
-    A: np.ndarray,
-    C: np.ndarray,
-    Q: np.ndarray,
-    R: np.ndarray,
-    Z_0: np.ndarray,
-    V_0: np.ndarray,
-    r: np.ndarray,
-    p: int,
-    R_mat: Optional[np.ndarray],
-    q: Optional[np.ndarray],
-    nQ: int,
-    i_idio: np.ndarray,
-    blocks: np.ndarray,
-    tent_weights_dict: Dict[str, np.ndarray],
-    clock: str,
-    frequencies: Optional[np.ndarray],
-    config: DFMConfig,
-    threshold: float,
-    max_iter: int,
-    use_damped_updates: bool,
-    damping_factor: float,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, float, int, bool]:
-    """Run EM algorithm until convergence.
+    params : EMAlgorithmParams
+        All parameters required for EM algorithm execution
     
     Returns
     -------
@@ -583,18 +573,59 @@ def _run_em_algorithm(
     converged : bool
         Whether convergence was achieved
     """
+    # Extract parameters from dataclass
+    y = params.y
+    y_est = params.y_est
+    A = params.A
+    C = params.C
+    Q = params.Q
+    R = params.R
+    Z_0 = params.Z_0
+    V_0 = params.V_0
+    r = params.r
+    p = params.p
+    R_mat = params.R_mat
+    q = params.q
+    nQ = params.nQ
+    i_idio = params.i_idio
+    blocks = params.blocks
+    tent_weights_dict = params.tent_weights_dict
+    clock = params.clock
+    frequencies = params.frequencies
+    config = params.config
+    threshold = params.threshold
+    max_iter = params.max_iter
+    use_damped_updates = params.use_damped_updates
+    damping_factor = params.damping_factor
+    
     previous_loglik = -np.inf
     num_iter = 0
     converged = False
     
     while num_iter < max_iter and not converged:
-        C_new, R_new, A_new, Q_new, Z_0_new, V_0_new, loglik = em_step(
-            y_est, A, C, Q, R, Z_0, V_0, r, p, R_mat, q, nQ, i_idio, blocks,
+        # Create EMStepParams dataclass for em_step()
+        from .core.em.iteration import EMStepParams
+        em_step_params = EMStepParams(
+            y=y_est,
+            A=A,
+            C=C,
+            Q=Q,
+            R=R,
+            Z_0=Z_0,
+            V_0=V_0,
+            r=r,
+            p=p,
+            R_mat=R_mat,
+            q=q,
+            nQ=nQ,
+            i_idio=i_idio,
+            blocks=blocks,
             tent_weights_dict=tent_weights_dict,
             clock=clock,
             frequencies=frequencies,
             config=config
         )
+        C_new, R_new, A_new, Q_new, Z_0_new, V_0_new, loglik = em_step(em_step_params)
         
         # Handle likelihood decreases with damped updates
         if num_iter > 0 and loglik < previous_loglik - 1e-3:
@@ -640,25 +671,12 @@ def _run_em_algorithm(
     return A, C, Q, R, Z_0, V_0, loglik, num_iter, converged
 
 
-def _dfm_core(X: np.ndarray, config: DFMConfig,
-        threshold: Optional[float] = None,
-        max_iter: Optional[int] = None,
-        ar_lag: Optional[int] = None,
-        nan_method: Optional[int] = None,
-        nan_k: Optional[int] = None,
-        clock: Optional[str] = None,
-        clip_ar_coefficients: Optional[bool] = None,
-        ar_clip_min: Optional[float] = None,
-        ar_clip_max: Optional[float] = None,
-        clip_data_values: Optional[bool] = None,
-        data_clip_threshold: Optional[float] = None,
-        use_regularization: Optional[bool] = None,
-        regularization_scale: Optional[float] = None,
-        min_eigenvalue: Optional[float] = None,
-        max_eigenvalue: Optional[float] = None,
-        use_damped_updates: Optional[bool] = None,
-        damping_factor: Optional[float] = None,
-        **kwargs) -> DFMResult:
+def _dfm_core(
+    X: np.ndarray,
+    config: DFMConfig,
+    params: Optional[DFMParams] = None,
+    **kwargs
+) -> DFMResult:
     """Estimate dynamic factor model using EM algorithm.
     
     This is the main function for estimating a Dynamic Factor Model (DFM). It implements
@@ -694,31 +712,15 @@ def _dfm_core(X: np.ndarray, config: DFMConfig,
           Transformation (per series), factors_per_block
         - Estimation parameters: ar_lag, threshold, max_iter, nan_method, nan_k
         Typically obtained from `load_config()`.
-    threshold : float, optional
-        EM convergence threshold. Default uses config.threshold (typically 1e-4).
-        EM iterations stop when log-likelihood improvement < threshold.
-    max_iter : int, optional
-        Maximum number of EM iterations. Default uses config.max_iter (typically 5000).
-        If convergence not reached, returns results from last iteration.
-    ar_lag : int, optional
-        AR lag order for factors. Default uses config.ar_lag (typically 1).
-        Higher values allow more complex dynamics but increase parameters.
-    nan_method : int, optional
-        Method for handling missing data during initialization:
-        - 1: Spline interpolation (default, recommended)
-        - 2: Forward fill then backward fill
-        - 3: Mean imputation
-        Default uses config.nan_method.
-    nan_k : int, optional
-        Spline interpolation order (only if nan_method=1). Default uses config.nan_k (typically 3).
-    clock : str, optional
-        Clock frequency ('m', 'q', 'sa', 'a'). Default uses config.clock.
-        Series with frequencies slower than clock use tent kernel aggregation.
+    params : DFMParams, optional
+        Parameter overrides. If None, all values from config are used.
+        All parameters in DFMParams are optional and override corresponding config values.
     **kwargs
-        Additional parameters that override config values:
-        - clip_ar_coefficients: Clip AR coefficients to stability bounds
-        - use_regularization: Apply regularization to covariance matrices
-        - use_damped_updates: Use damped parameter updates for stability
+        Additional parameter overrides (merged into params if provided).
+        Valid parameter names: threshold, max_iter, ar_lag, nan_method, nan_k,
+        clock, clip_ar_coefficients, ar_clip_min, ar_clip_max, clip_data_values,
+        data_clip_threshold, use_regularization, regularization_scale,
+        min_eigenvalue, max_eigenvalue, use_damped_updates, damping_factor.
     
     Returns
     -------
@@ -750,7 +752,8 @@ def _dfm_core(X: np.ndarray, config: DFMConfig,
     Examples
     --------
     >>> from dfm_python import DFM
-    >>> from dfm_python.data_loader import load_config, load_data
+    >>> from dfm_python.data import load_config, load_data  # Preferred import
+    >>> # or for backward compatibility: from dfm_python.data_loader import load_config, load_data
     >>> import pandas as pd
     >>> # Load configuration from YAML or create DFMConfig directly
     >>> config = load_config('config.yaml')
@@ -771,35 +774,39 @@ def _dfm_core(X: np.ndarray, config: DFMConfig,
     """
     _logger.info('Estimating the dynamic factor model (DFM)')
     
+    # Merge kwargs into params if provided
+    if kwargs:
+        if params is None:
+            params = DFMParams.from_kwargs(**kwargs)
+        else:
+            # Update params with kwargs (only valid parameter names)
+            valid_params = {
+                'threshold', 'max_iter', 'ar_lag', 'nan_method', 'nan_k',
+                'clock', 'clip_ar_coefficients', 'ar_clip_min', 'ar_clip_max',
+                'clip_data_values', 'data_clip_threshold', 'use_regularization',
+                'regularization_scale', 'min_eigenvalue', 'max_eigenvalue',
+                'use_damped_updates', 'damping_factor'
+            }
+            for k, v in kwargs.items():
+                if k in valid_params and hasattr(params, k):
+                    setattr(params, k, v)
+    
     # Step 1: Prepare data and resolve parameters
-    X, blocks, params = _prepare_data_and_params(
-        X, config,
-        threshold=threshold, max_iter=max_iter, ar_lag=ar_lag,
-        nan_method=nan_method, nan_k=nan_k, clock=clock,
-        clip_ar_coefficients=clip_ar_coefficients,
-        ar_clip_min=ar_clip_min, ar_clip_max=ar_clip_max,
-        clip_data_values=clip_data_values,
-        data_clip_threshold=data_clip_threshold,
-        use_regularization=use_regularization,
-        regularization_scale=regularization_scale,
-        min_eigenvalue=min_eigenvalue, max_eigenvalue=max_eigenvalue,
-        use_damped_updates=use_damped_updates,
-        damping_factor=damping_factor
-    )
+    X, blocks, params_dict = _prepare_data_and_params(X, config, params)
     
     # Extract parameters from dict for clarity
-    p = params['p']
-    r = params['r']
-    nan_method = params['nan_method']
-    nan_k = params['nan_k']
-    threshold = params['threshold']
-    max_iter = params['max_iter']
-    clock = params['clock']
-    clip_data_values = params['clip_data_values']
-    data_clip_threshold = params['data_clip_threshold']
-    use_damped_updates = params['use_damped_updates']
-    damping_factor = params['damping_factor']
-    T, N = params['T'], params['N']
+    p = params_dict['p']
+    r = params_dict['r']
+    nan_method = params_dict['nan_method']
+    nan_k = params_dict['nan_k']
+    threshold = params_dict['threshold']
+    max_iter = params_dict['max_iter']
+    clock = params_dict['clock']
+    clip_data_values = params_dict['clip_data_values']
+    data_clip_threshold = params_dict['data_clip_threshold']
+    use_damped_updates = params_dict['use_damped_updates']
+    damping_factor = params_dict['damping_factor']
+    T, N = params_dict['T'], params_dict['N']
     
     # Step 2: Prepare aggregation structure
     tent_weights_dict, R_mat, q, frequencies, i_idio, nQ = _prepare_aggregation_structure(
@@ -807,7 +814,7 @@ def _dfm_core(X: np.ndarray, config: DFMConfig,
     )
     
     # Step 3: Standardize data
-    x_standardized, Mx, Wx = _standardize_data(X, clip_data_values, data_clip_threshold)
+    x_standardized, Mx, Wx = standardize_data(X, clip_data_values, data_clip_threshold)
     
     # Step 4: Initial conditions
     opt_nan = {'method': nan_method, 'k': nan_k}
@@ -829,11 +836,32 @@ def _dfm_core(X: np.ndarray, config: DFMConfig,
     y_est = x_est.T  # n x T (missing data removed)
     
     # Step 6: Run EM algorithm
-    A, C, Q, R, Z_0, V_0, loglik, num_iter, converged = _run_em_algorithm(
-        y, y_est, A, C, Q, R, Z_0, V_0, r, p, R_mat, q, nQ, i_idio, blocks,
-        tent_weights_dict, clock, frequencies, config,
-        threshold, max_iter, use_damped_updates, damping_factor
+    em_params = EMAlgorithmParams(
+        y=y,
+        y_est=y_est,
+        A=A,
+        C=C,
+        Q=Q,
+        R=R,
+        Z_0=Z_0,
+        V_0=V_0,
+        r=r,
+        p=p,
+        R_mat=R_mat,
+        q=q,
+        nQ=nQ,
+        i_idio=i_idio,
+        blocks=blocks,
+        tent_weights_dict=tent_weights_dict,
+        clock=clock,
+        frequencies=frequencies,
+        config=config,
+        threshold=threshold,
+        max_iter=max_iter,
+        use_damped_updates=use_damped_updates,
+        damping_factor=damping_factor,
     )
+    A, C, Q, R, Z_0, V_0, loglik, num_iter, converged = _run_em_algorithm(em_params)
     
     # Step 7: Final Kalman smoothing
     zsmooth, _, _, _ = run_kf(y, A, C, Q, R, Z_0, V_0)
