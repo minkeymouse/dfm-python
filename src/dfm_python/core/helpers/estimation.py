@@ -1,6 +1,6 @@
 """Estimation helpers for AR coefficients, innovation covariance, and sufficient statistics."""
 
-from typing import Tuple
+from typing import Tuple, Optional
 import numpy as np
 import logging
 from scipy.linalg import inv, pinv
