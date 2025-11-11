@@ -473,7 +473,7 @@ def _apply_ar_clipping(A: np.ndarray, config: Optional[Any] = None) -> Tuple[np.
     if config is None:
         return _clip_ar_coefficients(A, -0.99, 0.99, True)
     
-    from ..core.helpers import safe_get_attr
+    from .helpers import safe_get_attr
     
     clip_enabled = safe_get_attr(config, 'clip_ar_coefficients', True)
     if not clip_enabled:
