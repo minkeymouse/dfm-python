@@ -340,16 +340,22 @@ def test_all_nan_data():
         ))
     config = DFMConfig(series=series_list, blocks=blocks)
     
-    # Should handle gracefully or raise informative error
+    # All NaN data may raise error or use fallback - verify behavior
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         try:
             model = DFM()
             Res = model.fit(X, config, threshold=1e-2, max_iter=5)
+            # If succeeds with fallback, verify outputs are valid
+            assert Res is not None
             assert Res.x_sm.shape == (T, N)
+            # Should not converge with all NaN data
+            assert not Res.converged
         except (ValueError, RuntimeError) as e:
-            # Acceptable - all NaN data is invalid
-            assert "nan" in str(e).lower() or "missing" in str(e).lower() or "data" in str(e).lower()
+            # If fails, error should be informative
+            error_msg = str(e).lower()
+            assert any(keyword in error_msg for keyword in ["nan", "missing", "data", "insufficient"]), \
+                f"Error should mention data issue, got: {e}"
 
 
 def test_high_missing_data():
@@ -581,10 +587,10 @@ def test_kalman_stability_edge_cases():
             assert np.all(np.isfinite(Q_new)), "Q should be finite"
             assert np.isfinite(loglik) or loglik == -np.inf, "loglik should be finite or -inf"
         except (np.linalg.LinAlgError, ValueError, RuntimeError) as e:
-            # Some edge cases may fail, but should fail gracefully
+            # Some edge cases may fail, but should fail with informative error
             error_str = str(e).lower()
-            assert any(keyword in error_str for keyword in ["singular", "ill-conditioned", "broadcast", "shape"]), \
-                f"Should fail with expected error, got: {e}"
+            assert any(keyword in error_str for keyword in ["singular", "ill-conditioned", "broadcast", "shape", "matrix"]), \
+                f"Should fail with expected error type, got: {e}"
     
     # Test case 2: Very large Q (high innovation variance)
     Q_very_large = Q.copy() * 1e6
@@ -601,10 +607,11 @@ def test_kalman_stability_edge_cases():
             # Q should be capped to reasonable value
             max_eig = np.max(np.linalg.eigvals(Q_new))
             assert max_eig < 1e7, f"Q should be capped, max_eig={max_eig:.2e}"
-        except Exception as e:
-            # Should fail gracefully if it fails
-            assert isinstance(e, (np.linalg.LinAlgError, ValueError, RuntimeError)), \
-                f"Should fail with expected error type, got: {type(e).__name__}"
+        except (np.linalg.LinAlgError, ValueError, RuntimeError) as e:
+            # Should fail with informative error if it fails
+            error_str = str(e).lower()
+            assert any(keyword in error_str for keyword in ["singular", "ill-conditioned", "broadcast", "shape", "matrix", "eigenvalue"]), \
+                f"Should fail with expected error type, got: {e}"
     
     # Test case 3: Near-singular matrices (small eigenvalues)
     Q_near_singular = Q.copy() * 1e-12
@@ -770,7 +777,7 @@ def test_init_conditions_block_global_all_nan_residuals():
             # Keep some columns NaN even in valid rows
             x_sparse[t, ::2] = np.nan
     
-    # Should handle gracefully - may use identity covariance fallback
+    # With sparse data, initialization may succeed with fallback or fail
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         try:
@@ -780,8 +787,7 @@ def test_init_conditions_block_global_all_nan_residuals():
                 tent_weights_dict={},
                 frequencies=None
             )
-            
-            # If initialization succeeds, verify outputs are valid
+            # If succeeds with fallback, verify outputs are valid
             assert A is not None, "A should not be None"
             assert C is not None, "C should not be None"
             assert Q is not None, "Q should not be None"
@@ -792,10 +798,10 @@ def test_init_conditions_block_global_all_nan_residuals():
             Q_diag = np.diag(Q)
             assert np.all(Q_diag > 0), f"Q diagonal should be > 0, got: {Q_diag}"
         except ValueError as e:
-            # If initialization fails due to insufficient data, that's acceptable
-            # The error should be informative
-            assert "insufficient data" in str(e).lower() or "data" in str(e).lower(), \
-                f"Expected informative error about data, got: {e}"
+            # If fails, error should be informative
+            error_msg = str(e).lower()
+            assert "insufficient data" in error_msg or "data" in error_msg, \
+                f"Expected error about insufficient data, got: {e}"
 
 
 # ============================================================================

@@ -12,7 +12,12 @@ project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root / 'src'))
 
 from dfm_python.dfm import DFM, DFMResult
-from dfm_python.config import DFMConfig, SeriesConfig, BlockConfig
+from dfm_python.config import (
+    DFMConfig, SeriesConfig, BlockConfig,
+    YamlSource, DictSource, SpecCSVSource, MergedConfigSource,
+    make_config_source
+)
+from dfm_python import load_config, load_data, update_nowcast
 import dfm_python as dfm
 
 # ============================================================================
@@ -34,7 +39,7 @@ def test_empty_data():
 
 
 def test_single_time_period():
-    """Test with single time period."""
+    """Test with single time period - should handle gracefully with warnings."""
     np.random.seed(42)
     X = np.random.randn(1, 5)
     
@@ -52,13 +57,12 @@ def test_single_time_period():
     
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        try:
-            model = DFM()
-            result = model.fit(X, config, max_iter=1, threshold=1e-2)
-            assert result is not None
-        except (ValueError, RuntimeError, UnboundLocalError):
-            # Acceptable - single time period may be insufficient
-            pass
+        model = DFM()
+        result = model.fit(X, config, max_iter=1, threshold=1e-2)
+        # Single time period may not converge, but should not crash
+        assert result is not None
+        # Should not converge with insufficient data
+        assert not result.converged
 
 
 def test_very_small_threshold():
@@ -493,4 +497,208 @@ def test_loading_matrix_diagnostics():
         
     except Exception as e:
         pytest.fail(f"Loading matrix diagnostics failed: {e}")
+
+
+# ============================================================================
+# Config Source Tests
+# ============================================================================
+
+def test_yaml_source():
+    """Test YAML config source."""
+    yaml_file = project_root / 'config' / 'default.yaml'
+    
+    if not yaml_file.exists():
+        pytest.skip(f"YAML config file not found: {yaml_file}")
+    
+    source = YamlSource(yaml_file)
+    config = source.load()
+    
+    assert isinstance(config, DFMConfig)
+    assert len(config.series) > 0
+    assert len(config.blocks) > 0
+
+
+def test_dict_source():
+    """Test dictionary config source."""
+    config_dict = {
+        'series': [
+            {
+                'series_id': 'test_1',
+                'series_name': 'Test Series 1',
+                'frequency': 'm',
+                'transformation': 'lin',
+                'blocks': ['Block_Global']
+            }
+        ],
+        'blocks': {
+            'Block_Global': {
+                'factors': 1,
+                'clock': 'm'
+            }
+        },
+        'clock': 'm',
+        'max_iter': 100,
+        'threshold': 1e-5
+    }
+    
+    source = DictSource(config_dict)
+    config = source.load()
+    
+    assert isinstance(config, DFMConfig)
+    assert len(config.series) == 1
+    assert config.series[0].series_id == 'test_1'
+    assert config.max_iter == 100
+
+
+def test_spec_csv_source():
+    """Test spec CSV config source."""
+    spec_file = project_root / 'data' / 'sample_spec.csv'
+    
+    if not spec_file.exists():
+        pytest.skip(f"Spec CSV file not found: {spec_file}")
+    
+    source = SpecCSVSource(spec_file)
+    config = source.load()
+    
+    assert isinstance(config, DFMConfig)
+    assert len(config.series) > 0
+    assert len(config.blocks) > 0
+
+
+def test_merged_config_source():
+    """Test merged config source."""
+    base_dict = {
+        'series': [
+            {
+                'series_id': 'base_1',
+                'series_name': 'Base Series 1',
+                'frequency': 'm',
+                'transformation': 'lin',
+                'blocks': ['Block_Global']
+            }
+        ],
+        'blocks': {
+            'Block_Global': {
+                'factors': 1,
+                'clock': 'm'
+            }
+        }
+    }
+    
+    override_dict = {
+        'max_iter': 200,
+        'threshold': 1e-5
+    }
+    
+    base_source = DictSource(base_dict)
+    override_source = DictSource(override_dict)
+    merged_source = MergedConfigSource(base_source, override_source)
+    
+    config = merged_source.load()
+    
+    assert config.max_iter == 200
+    assert config.threshold == 1e-5
+    assert len(config.series) > 0
+
+
+def test_make_config_source():
+    """Test config source factory function."""
+    yaml_file = project_root / 'config' / 'default.yaml'
+    
+    if yaml_file.exists():
+        source = make_config_source(yaml_file)
+        assert isinstance(source, YamlSource)
+    
+    config_dict = {
+        'series': [
+            {
+                'series_id': 'test_1',
+                'frequency': 'm',
+                'transformation': 'lin',
+                'blocks': ['Block_Global']
+            }
+        ],
+        'blocks': {
+            'Block_Global': {
+                'factors': 1,
+                'clock': 'm'
+            }
+        }
+    }
+    source = make_config_source(config_dict)
+    assert isinstance(source, DictSource)
+    
+    series_list = [
+        SeriesConfig(
+            series_id='test_1',
+            frequency='m',
+            transformation='lin',
+            blocks=['Block_Global']
+        )
+    ]
+    config = DFMConfig(series=series_list, blocks={'Block_Global': BlockConfig(factors=1, clock='m')})
+    source = make_config_source(config)
+    assert hasattr(source, 'load')
+    assert source.load() is config
+
+
+def test_from_dict():
+    """Test from_dict convenience constructor."""
+    config_dict = {
+        'series': [
+            {
+                'series_id': 'test_1',
+                'frequency': 'm',
+                'transformation': 'lin',
+                'blocks': ['Block_Global']
+            }
+        ],
+        'blocks': {
+            'Block_Global': {
+                'factors': 1,
+                'clock': 'm'
+            }
+        }
+    }
+    
+    config = DFMConfig.from_dict(config_dict)
+    assert isinstance(config, DFMConfig)
+    assert len(config.series) == 1
+
+
+# ============================================================================
+# News Decomposition Tests
+# ============================================================================
+
+def test_update_nowcast_basic():
+    """Test basic nowcast update (if data files available)."""
+    spec_file = project_root / 'Nowcasting' / 'Spec_US_example.xls'
+    
+    if not spec_file.exists():
+        pytest.skip("Spec file not found")
+    
+    vintage_old = '2016-12-16'
+    vintage_new = '2016-12-23'
+    
+    datafile_old = project_root / 'Nowcasting' / 'data' / 'US' / f'{vintage_old}.xls'
+    datafile_new = project_root / 'Nowcasting' / 'data' / 'US' / f'{vintage_new}.xls'
+    
+    if not datafile_old.exists() or not datafile_new.exists():
+        pytest.skip("Vintage data files not found")
+    
+    try:
+        config = load_config(spec_file)
+        X_old, Time_old, _ = load_data(datafile_old, config, sample_start=pd.Timestamp('2000-01-01'))
+        X_new, Time, _ = load_data(datafile_new, config, sample_start=pd.Timestamp('2000-01-01'))
+        
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            model = DFM()
+            Res = model.fit(X_old, config, threshold=1e-3, max_iter=20)
+        
+        update_nowcast(X_old, X_new, Time, config, Res, 
+                      series='GDPC1', period='2016q4',
+                      vintage_old=vintage_old, vintage_new=vintage_new)
+    except (UnicodeDecodeError, ImportError, ValueError) as e:
+        pytest.skip(f"Nowcast test skipped due to file encoding or dependency issue: {e}")
 

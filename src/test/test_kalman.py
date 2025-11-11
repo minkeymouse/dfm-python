@@ -61,8 +61,6 @@ def test_skf_basic():
     assert Sf.ZmU.shape == (z_true.shape[1], y.shape[1] + 1)
     assert np.isfinite(Sf.loglik)
     
-    print("✓ Kalman filter basic test passed")
-    assert True
 
 
 def test_skf_missing_data():
@@ -83,8 +81,6 @@ def test_skf_missing_data():
     assert Sf is not None
     assert np.isfinite(Sf.loglik)
     
-    print("✓ Kalman filter missing data test passed")
-    assert True
 
 
 def test_fis_basic():
@@ -103,8 +99,6 @@ def test_fis_basic():
     assert Ss.ZmT.shape == Sf.ZmU.shape
     assert Ss.VmT.shape == Sf.VmU.shape
     
-    print("✓ Fixed interval smoother basic test passed")
-    assert True
 
 
 def test_miss_data():
@@ -136,8 +130,6 @@ def test_miss_data():
     non_missing_idx = [i for i in range(n) if not np.isnan(y_missing[i])]
     assert np.allclose(y_new, y[non_missing_idx])
     
-    print("✓ Missing data elimination test passed")
-    assert True
 
 
 def test_skf_zero_observation_variance():
@@ -172,8 +164,6 @@ def test_skf_zero_observation_variance():
     assert np.all(np.isfinite(Sf.ZmU)) or np.any(np.isfinite(Sf.ZmU)), \
         "At least some state estimates should be finite"
     
-    print("✓ Kalman filter zero observation variance test passed")
-    assert True
 
 
 def test_fis_all_missing_observations():
@@ -212,51 +202,4 @@ def test_fis_all_missing_observations():
     assert np.all(np.isfinite(Ss.VmT)) or np.any(np.isfinite(Ss.VmT)), \
         "At least some smoothed covariances should be finite"
     
-    print("✓ Fixed interval smoother all missing observations test passed")
-    assert True
 
-# ============================================================================
-# Test Runner
-# ============================================================================
-
-def run_all_tests():
-    """Run all Kalman filter tests."""
-    print("\n" + "="*70)
-    print("KALMAN FILTER TESTS")
-    print("="*70)
-    
-    results = {}
-    
-    test_funcs = [
-        ('skf_basic', test_skf_basic),
-        ('skf_missing_data', test_skf_missing_data),
-        ('skf_zero_observation_variance', test_skf_zero_observation_variance),
-        ('fis_basic', test_fis_basic),
-        ('fis_all_missing_observations', test_fis_all_missing_observations),
-        ('miss_data', test_miss_data),
-    ]
-    
-    for name, func in test_funcs:
-        try:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                results[name] = func()
-            print(f"✓ {name} PASSED")
-        except Exception as e:
-            print(f"✗ {name} FAILED: {e}")
-            import traceback
-            traceback.print_exc()
-            results[name] = False
-    
-    passed = sum(1 for v in results.values() if v)
-    total = len(results)
-    
-    print("\n" + "="*70)
-    print(f"SUMMARY: {passed}/{total} tests passed")
-    print("="*70)
-    
-    return results
-
-
-if __name__ == '__main__':
-    run_all_tests()
