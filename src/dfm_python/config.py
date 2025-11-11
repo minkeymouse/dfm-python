@@ -370,7 +370,7 @@ class DFMConfig:
             indicating what needs to be fixed.
         """
         # Import frequency hierarchy for validation
-        from .utils.aggregation import FREQUENCY_HIERARCHY
+        from .utils import FREQUENCY_HIERARCHY
         
         if not self.series:
             raise ValueError(

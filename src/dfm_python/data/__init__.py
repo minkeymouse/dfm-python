@@ -14,7 +14,7 @@ from scipy.interpolate import CubicSpline
 from scipy.signal import lfilter
 
 from ..config import DFMConfig, SeriesConfig, BlockConfig, _TRANSFORM_UNITS_MAP
-from ..utils.aggregation import FREQUENCY_HIERARCHY
+from ..utils import FREQUENCY_HIERARCHY
 
 _logger = logging.getLogger(__name__)
 

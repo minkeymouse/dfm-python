@@ -22,7 +22,7 @@ import pandas as pd
 from .kalman import run_kf
 from .config import DFMConfig
 from .core.diagnostics import calculate_rmse
-from .utils.aggregation import group_series_by_frequency
+from .utils import group_series_by_frequency
 from .core.numeric import (
     _ensure_symmetric,
     _compute_principal_components,
@@ -49,7 +49,7 @@ from .core.em import (
 from .core.helpers import safe_get_method, safe_get_attr, resolve_param, safe_mean_std, standardize_data
 
 from .data import rem_nans_spline
-from .utils.aggregation import (
+from .utils import (
     get_aggregation_structure,
     FREQUENCY_HIERARCHY,
 )

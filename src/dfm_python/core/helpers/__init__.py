@@ -982,7 +982,7 @@ def get_tent_weights(
     - Uses FREQUENCY_HIERARCHY to determine number of periods
     - Raises ValueError if frequency pair cannot be handled
     """
-    from ...utils.aggregation import (
+    from ...utils import (
         FREQUENCY_HIERARCHY,
         get_tent_weights_for_pair,
         generate_tent_weights,
@@ -1037,7 +1037,7 @@ def infer_nQ(
     - Uses FREQUENCY_HIERARCHY to compare frequencies
     - Clock frequency is typically 'm' (monthly)
     """
-    from ...utils.aggregation import FREQUENCY_HIERARCHY
+    from ...utils import FREQUENCY_HIERARCHY
     
     if frequencies is None:
         return 0
