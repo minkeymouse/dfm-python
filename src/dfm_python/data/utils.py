@@ -4,10 +4,16 @@ This module provides utility functions for data preprocessing and handling,
 including missing value treatment and data summarization.
 """
 
-from typing import Tuple
+from typing import Tuple, Optional
 import numpy as np
+import pandas as pd
+import logging
 from scipy.interpolate import CubicSpline
 from scipy.signal import lfilter
+
+from ..config import DFMConfig, _TRANSFORM_UNITS_MAP
+
+_logger = logging.getLogger(__name__)
 
 
 def rem_nans_spline(X: np.ndarray, method: int = 2, k: int = 3) -> Tuple[np.ndarray, np.ndarray]:
@@ -119,3 +125,98 @@ def rem_nans_spline(X: np.ndarray, method: int = 2, k: int = 3) -> Tuple[np.ndar
             X[:, i] = _fill_missing(X[:, i], indNaN[:, i])
     
     return X, indNaN
+
+
+def summarize(X: np.ndarray, Time, config: DFMConfig, vintage: Optional[str] = None) -> None:
+    """Display data summary table."""
+    T, N = X.shape
+    
+    print("\n\n\nTable 2: Data Summary")
+    print(f"N = {N:4d} data series")
+    
+    try:
+        time_start = Time[0].strftime('%Y-%m-%d') if hasattr(Time[0], 'strftime') else str(Time[0])
+        time_end = Time[-1].strftime('%Y-%m-%d') if hasattr(Time[-1], 'strftime') else str(Time[-1])
+    except (AttributeError, ValueError, TypeError) as e:
+        _logger.debug(f"summarize: Failed to format time range: {type(e).__name__}: {str(e)}")
+        time_start = time_end = "N/A"
+    
+    print(f"T = {T:4d} observations from {time_start:10s} to {time_end:10s}\n")
+    print(f"{'Data Series':30s} | {'Observations':17s}    {'Units':12s}    "
+          f"{'Frequency':10s}    {'Mean':8s}    {'Std. Dev.':8s}    {'Min':8s}    {'Max':8s}")
+    print("-" * 130)
+    
+    for i in range(N):
+        t_obs = ~np.isnan(X[:, i])
+        obs_idx = np.where(t_obs)[0]
+        
+        if hasattr(config, 'get_series_names'):
+            series_names = config.get_series_names()
+        elif hasattr(config, 'SeriesName'):
+            series_names = config.SeriesName
+        else:
+            series_names = []
+        
+        from ..core.helpers import safe_get_method
+        series_ids = safe_get_method(config, 'get_series_ids', [])
+        if not series_ids and hasattr(config, 'SeriesID'):
+            series_ids = config.SeriesID
+        
+        if hasattr(config, 'get_frequencies'):
+            frequencies = config.get_frequencies()
+        elif hasattr(config, 'Frequency'):
+            frequencies = config.Frequency
+        else:
+            frequencies = []
+        
+        if hasattr(config, 'series'):
+            transformations = [s.transformation for s in config.series]
+        elif hasattr(config, 'Transformation'):
+            transformations = config.Transformation
+        else:
+            transformations = []
+        
+        name = series_names[i][:27] + "..." if i < len(series_names) and len(series_names[i]) > 30 else (series_names[i] if i < len(series_names) else f"series_{i}")
+        sid = f"[{series_ids[i][:25]}...]" if i < len(series_ids) and len(series_ids[i]) > 28 else f"[{series_ids[i] if i < len(series_ids) else f'series_{i}'}]"
+        
+        # Map frequency codes to readable names
+        freq_map = {'m': 'Monthly', 'q': 'Quarterly', 'sa': 'Semi-annual', 'a': 'Annual'}
+        series_freq = frequencies[i] if i < len(frequencies) else 'm'
+        freq = freq_map.get(series_freq, series_freq.upper())
+        trans = transformations[i] if i < len(transformations) else 'lin'
+        
+        # Get transformation units
+        units_t = 'MoM%' if trans == 'pch' and series_freq == 'm' else \
+                  'QoQ% AR' if trans == 'pca' and series_freq == 'q' else \
+                  _TRANSFORM_UNITS_MAP.get(trans, trans)
+        
+        date_range = "N/A"
+        if len(obs_idx) > 0:
+            try:
+                fmt = '%b %Y' if series_freq == 'm' else '%Y-%m'
+                if hasattr(Time, 'iloc'):
+                    date_range = f"{Time.iloc[obs_idx[0]].strftime(fmt)}-{Time.iloc[obs_idx[-1]].strftime(fmt)}"
+                else:
+                    date_range = f"{Time[obs_idx[0]].strftime(fmt)}-{Time[obs_idx[-1]].strftime(fmt)}"
+            except (AttributeError, ValueError, TypeError) as e:
+                _logger.debug(f"summarize: Failed to format date range with strftime: {type(e).__name__}: {str(e)}")
+                try:
+                    if hasattr(Time, 'iloc'):
+                        date_range = f"{Time.iloc[obs_idx[0]]}-{Time.iloc[obs_idx[-1]]}"
+                    else:
+                        date_range = f"{Time[obs_idx[0]]}-{Time[obs_idx[-1]]}"
+                except (AttributeError, ValueError, TypeError, IndexError) as e2:
+                    _logger.debug(f"summarize: Failed to format date range fallback: {type(e2).__name__}: {str(e2)}")
+                    date_range = "N/A"
+        
+        y = X[t_obs, i]
+        if len(y) == 0:
+            stats = (np.nan, np.nan, np.nan, np.nan)
+        else:
+            stats = np.nanmean(y), np.nanstd(y), np.nanmin(y) if len(y) > 0 else np.nan, np.nanmax(y) if len(y) > 0 else np.nan
+        
+        print(f"{name:30s} | {len(obs_idx):17d}    {units_t:12s}    {freq:10s}    "
+              f"{stats[0]:8.1f}    {stats[1]:8.1f}    {stats[2]:8.1f}    {stats[3]:8.1f}")
+        print(f"{sid:30s} | {date_range:17s}\n")
+    
+    print("\n\n\n")
