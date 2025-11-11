@@ -753,7 +753,6 @@ def _dfm_core(
     --------
     >>> from dfm_python import DFM
     >>> from dfm_python.data import load_config, load_data  # Preferred import
-    >>> # or for backward compatibility: from dfm_python.data_loader import load_config, load_data
     >>> import pandas as pd
     >>> # Load configuration from YAML or create DFMConfig directly
     >>> config = load_config('config.yaml')
