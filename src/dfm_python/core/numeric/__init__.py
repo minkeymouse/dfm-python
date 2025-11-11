@@ -3,9 +3,7 @@
 This package contains:
 - matrix: Matrix operations (symmetric, real, square)
 - covariance: Covariance/variance computation
-- regularization: Regularization and PSD enforcement
-- clipping: AR coefficient clipping
-- utils: General utilities
+- regularization: Regularization, PSD enforcement, AR clipping, and general utilities
 """
 
 # Matrix operations
@@ -29,25 +27,17 @@ from .covariance import (
     MIN_VARIANCE_COVARIANCE,
 )
 
-# Regularization
+# Regularization, clipping, and utilities
 from .regularization import (
     _ensure_innovation_variance_minimum,
     _ensure_positive_definite,
     _compute_regularization_param,
     _cap_max_eigenvalue,
     _estimate_ar_coefficient,
-)
-
-# Clipping
-from .clipping import (
-    _clip_ar_coefficients,
-    _apply_ar_clipping,
-)
-
-# Utilities
-from .utils import (
     _check_finite,
     _safe_divide,
+    _clip_ar_coefficients,
+    _apply_ar_clipping,
 )
 
 __all__ = [
