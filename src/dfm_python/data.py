@@ -401,13 +401,17 @@ def load_data(datafile: Union[str, Path], config: DFMConfig,
     
     if len(warnings_list) > 0:
         for series_id, T_obs, N_total in warnings_list[:5]:
-            logger.warning(f"Series '{series_id}': T={T_obs} < N={N_total} (may cause numerical issues)")
+            logger.warning(
+                f"Series '{series_id}': T={T_obs} < N={N_total} (may cause numerical issues). "
+                f"Suggested fix: increase sample size or reduce number of series."
+            )
         if len(warnings_list) > 5:
             logger.warning(f"... and {len(warnings_list) - 5} more series with T < N")
         
         import warnings
         warnings.warn(
-            f"Insufficient data: {len(warnings_list)} block(s) have T < N. "
+            f"Insufficient data: {len(warnings_list)} series have T < N (time periods < number of series). "
+            f"This may cause numerical issues. Suggested fix: increase sample size or reduce number of series. "
             f"See log for details.",
             UserWarning,
             stacklevel=2
