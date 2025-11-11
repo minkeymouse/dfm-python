@@ -5,5 +5,6 @@ organized into focused modules for better maintainability.
 """
 
 from .utils import rem_nans_spline, summarize
+from .transformer import transform_data
 
-__all__ = ['rem_nans_spline', 'summarize']
+__all__ = ['rem_nans_spline', 'summarize', 'transform_data']
