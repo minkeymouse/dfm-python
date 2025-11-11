@@ -189,7 +189,13 @@ def init_conditions(x, r, p, blocks, opt_nan, Rcon, q, nQ, i_idio, clock='m', te
                     finite_rows = np.all(np.isfinite(res), axis=1)
                 n_finite = int(np.sum(finite_rows))
                 if n_finite < max(2, n_freq + 1):
-                    raise ValueError("insufficient data")
+                    block_name = f"block {i}" if i > 0 else "Block_Global"
+                    raise ValueError(
+                        f"Insufficient data for {block_name}: only {n_finite} valid time periods "
+                        f"available, but need at least {max(2, n_freq + 1)}. "
+                        f"Series in this block have too much missing data. "
+                        f"Consider removing series with high missing data ratios or increasing data coverage."
+                    )
                 
                 res_clean = res[finite_rows, :]
                 # Fill remaining NaNs for Block_Global
