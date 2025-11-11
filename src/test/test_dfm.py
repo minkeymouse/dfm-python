@@ -13,8 +13,8 @@ sys.path.insert(0, str(project_root / 'src'))
 
 from dfm_python.dfm import DFM, DFMResult
 from dfm_python.core.em import em_step, init_conditions
-from dfm_python.data_loader import load_config, load_data
-from dfm_python.utils.data_utils import rem_nans_spline
+from dfm_python.data import load_config, load_data
+from dfm_python.data.utils import rem_nans_spline
 from dfm_python.config import DFMConfig, SeriesConfig, BlockConfig
 
 # ============================================================================
