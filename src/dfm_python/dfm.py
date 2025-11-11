@@ -46,7 +46,7 @@ from .core.em import (
     em_converged,
     NaNHandlingOptions,
 )
-from .core.helpers import safe_get_method, safe_get_attr, resolve_param, safe_mean_std
+from .core.helpers import safe_get_method, safe_get_attr, resolve_param, safe_mean_std, standardize_data
 
 from .data_loader import rem_nans_spline
 from .utils.aggregation import (
@@ -451,64 +451,6 @@ def _prepare_aggregation_structure(
     return tent_weights_dict, R_mat, q, frequencies, i_idio, nQ
 
 
-def _standardize_data(
-    X: np.ndarray,
-    clip_data_values: bool,
-    data_clip_threshold: float
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Standardize data and handle missing values.
-    
-    Returns
-    -------
-    x_standardized : np.ndarray
-        Standardized data (T x N)
-    Mx : np.ndarray
-        Series means (N,)
-    Wx : np.ndarray
-        Series standard deviations (N,)
-    """
-    Mx, Wx = safe_mean_std(X)
-    
-    # Handle zero/near-zero standard deviations
-    min_std = 1e-6
-    Wx = np.maximum(Wx, min_std)
-    
-    # Handle NaN standard deviations
-    nan_std_mask = np.isnan(Wx) | np.isnan(Mx)
-    if np.any(nan_std_mask):
-        _logger.warning(
-            f"Series with NaN mean/std detected: {np.sum(nan_std_mask)}. "
-            f"Setting Wx=1.0, Mx=0.0 for these series."
-        )
-        Wx[nan_std_mask] = 1.0
-        Mx[nan_std_mask] = 0.0
-    
-    # Standardize
-    x_standardized = (X - Mx) / Wx
-    
-    # Clip extreme values if enabled
-    if clip_data_values:
-        n_clipped_before = np.sum(np.abs(x_standardized) > data_clip_threshold)
-        x_standardized = np.clip(x_standardized, -data_clip_threshold, data_clip_threshold)
-        if n_clipped_before > 0:
-            pct_clipped = 100.0 * n_clipped_before / x_standardized.size
-            _logger.warning(
-                f"Data value clipping applied: {n_clipped_before} values ({pct_clipped:.2f}%) "
-                f"clipped beyond ±{data_clip_threshold} standard deviations."
-            )
-    
-    # Replace any remaining NaN/Inf using consolidated utility
-    default_inf_val = data_clip_threshold if clip_data_values else 100
-    x_standardized = _clean_matrix(
-        x_standardized,
-        'general',
-        default_nan=0.0,
-        default_inf=default_inf_val
-    )
-    
-    return x_standardized, Mx, Wx
-
-
 def _run_em_algorithm(
     y: np.ndarray,
     y_est: np.ndarray,
@@ -771,7 +713,7 @@ def _dfm_core(X: np.ndarray, config: DFMConfig,
     )
     
     # Step 3: Standardize data
-    x_standardized, Mx, Wx = _standardize_data(X, clip_data_values, data_clip_threshold)
+    x_standardized, Mx, Wx = standardize_data(X, clip_data_values, data_clip_threshold)
     
     # Step 4: Initial conditions
     opt_nan = {'method': nan_method, 'k': nan_k}

@@ -11,6 +11,7 @@ from .estimation import (
     compute_innovation_covariance,
     compute_sufficient_stats,
     safe_mean_std,
+    standardize_data,
 )
 from .validation import validate_params, stabilize_cov
 from .matrix import (
@@ -54,6 +55,7 @@ __all__ = [
     'compute_innovation_covariance',
     'compute_sufficient_stats',
     'safe_mean_std',
+    'standardize_data',
     # Validation
     'validate_params',
     'stabilize_cov',
