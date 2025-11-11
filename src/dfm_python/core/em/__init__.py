@@ -1,14 +1,12 @@
 """Expectation-Maximization core routines (initialization and one EM iteration).
 
 This package contains:
-- convergence: EM convergence checking
 - initialization: Initial parameter estimation via PCA and OLS
-- iteration: Single EM iteration (E-step via Kalman, M-step updates)
+- iteration: Single EM iteration (E-step via Kalman, M-step updates) and convergence checking
 """
 
-from .convergence import em_converged
 from .initialization import init_conditions, NaNHandlingOptions
-from .iteration import em_step, EMStepParams
+from .iteration import em_step, EMStepParams, em_converged
 
 # Re-export constants for backward compatibility
 from .initialization import (
@@ -32,7 +30,7 @@ from .initialization import (
     FALLBACK_SCALE,
 )
 
-from .convergence import (
+from .iteration import (
     MIN_LOG_LIKELIHOOD_DELTA,
     DAMPING,
     MAX_LOADING_REPLACE,
