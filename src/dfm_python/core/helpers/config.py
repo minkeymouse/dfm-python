@@ -1,11 +1,7 @@
-"""Helper functions for common patterns across the package.
-
-This module provides utility functions for common code patterns to reduce
-duplication and improve maintainability.
-"""
+"""Configuration access helpers."""
 
 from typing import Optional, Any
-from ..config import DFMConfig
+from ...config import DFMConfig
 
 
 def safe_get_method(config: Optional[DFMConfig], method_name: str, default: Any = None) -> Any:

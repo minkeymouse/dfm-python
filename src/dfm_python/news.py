@@ -22,7 +22,8 @@ import logging
 
 from .kalman import skf, fis, miss_data
 from .config import DFMConfig
-from .dfm import DFMResult, calculate_rmse
+from .dfm import DFMResult
+from .core.diagnostics import calculate_rmse
 
 # Set up logger
 _logger = logging.getLogger(__name__)

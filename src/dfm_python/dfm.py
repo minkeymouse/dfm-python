@@ -21,8 +21,8 @@ import pandas as pd
 
 from .kalman import run_kf
 from .config import DFMConfig
-from .core.results import calculate_rmse
-from .core.grouping import group_series_by_frequency
+from .core.diagnostics import calculate_rmse
+from .utils.aggregation import group_series_by_frequency
 from .core.numeric import (
     _ensure_symmetric,
     _compute_principal_components,
@@ -48,7 +48,7 @@ from .core.em import (
 )
 from .core.helpers import safe_get_method, safe_get_attr
 
-from .utils.data_utils import rem_nans_spline
+from .data_loader import rem_nans_spline
 from .utils.aggregation import (
     get_aggregation_structure,
     FREQUENCY_HIERARCHY,
@@ -222,8 +222,6 @@ class DFM:
         """Initialize DFM instance."""
         self._config: Optional[DFMConfig] = None
         self._data: Optional[np.ndarray] = None
-        self._time: Optional[np.ndarray] = None
-        self._original_data: Optional[np.ndarray] = None
         self._result: Optional[DFMResult] = None
     
     def fit(self,
