@@ -434,6 +434,48 @@ def test_mixed_frequencies():
         
         assert Res.x_sm.shape == (T, N)
         assert np.any(np.isfinite(Res.Z))
+        
+        # Verify tent weight constraints for quarterly series
+        from dfm_python.utils import get_tent_weights_for_pair, generate_R_mat
+        
+        clock = 'm'
+        slower_freq = 'q'
+        r_i = 1  # Number of factors in Block_Global
+        
+        # Get tent weights for quarterly -> monthly
+        tent_weights = get_tent_weights_for_pair(slower_freq, clock)
+        assert tent_weights is not None, f"Tent weights should be available for {slower_freq} -> {clock}"
+        
+        # Generate constraint matrices
+        R_mat, q_vec = generate_R_mat(tent_weights)
+        pC_freq = len(tent_weights)  # Number of periods in tent (5 for quarterly->monthly)
+        
+        # For block with r_i factors, R_con_i = kron(R_mat, eye(r_i))
+        R_con_i = np.kron(R_mat, np.eye(r_i))
+        q_con_i = np.kron(q_vec, np.zeros(r_i))
+        
+        # Verify constraints for each quarterly series (indices 5-7)
+        quarterly_series_indices = [i for i in range(N) if series_list[i].frequency == 'q']
+        assert len(quarterly_series_indices) == 3, "Should have 3 quarterly series"
+        
+        max_violation = 0.0
+        for i in quarterly_series_indices:
+            # Extract loadings for this series (first pC_freq * r_i columns for tent weights)
+            C_i = Res.C[i, :pC_freq * r_i]
+            
+            # Compute constraint violation: R_con_i @ C_i - q_con_i
+            constraint_violation = R_con_i @ C_i - q_con_i
+            
+            # Track maximum violation
+            max_violation = max(max_violation, np.max(np.abs(constraint_violation)))
+        
+        # Verify constraints are satisfied (within numerical tolerance)
+        tolerance = 1e-6
+        assert max_violation < tolerance, (
+            f"Tent weight constraints violated for quarterly series. "
+            f"Max violation: {max_violation:.2e} (tolerance: {tolerance:.2e}). "
+            f"This indicates tent weight constraints are not being correctly enforced."
+        )
 
 
 # ============================================================================
