@@ -154,10 +154,10 @@
 - All major consolidation goals achieved
 - Codebase is production-ready with excellent organization
 
-## Latest Assessment (2025-01-XX)
+## Latest Assessment (2025-01-XX - Updated)
 
 ### File Structure Analysis
-**Current Count: 15 files** (Target: ≤20) ✓ **BELOW LIMIT**
+**Current Count: 15 files** (Target: ≤20) ✓ **BELOW LIMIT** (25% below maximum)
 
 **File Size Distribution:**
 - Very Large (1000+ lines): 4 files - already consolidated
@@ -182,47 +182,29 @@
 
 ### Code Quality Issues Found
 
-**Priority 1: Code Duplication (HIGH IMPACT)**
+**✅ RESOLVED: Function Duplication (Previously Priority 1)**
 
-**Issue:** Partial duplication of module-level convenience functions between `api.py` and `__init__.py`
+**Status:** Fixed in previous iteration
+- Removed 6 duplicate function definitions from `__init__.py` (`load_config`, `load_data`, `train`, `predict`, `plot`, `reset`)
+- Updated imports to use single source of truth in `api.py`
+- Reduced `__init__.py` from 185 → 141 lines
+- All functions verified accessible and working
 
-**Location:**
-- `src/dfm_python/api.py` (lines 314-362): Defines `load_config`, `load_data`, `train`, `predict`, `plot`, `reset` (also `from_yaml`, `from_spec`, `from_spec_df`, `from_dict`)
-- `src/dfm_python/__init__.py` (lines 77-145): Redefines the same 6 functions, plus `get_config`, `get_data`, `get_time`, `get_result`, `get_original_data`
-
-**Impact:**
-- ~70 lines of duplicate code (6 functions: `load_config`, `load_data`, `train`, `predict`, `plot`, `reset`)
-- Maintenance burden: changes must be made in two places for these 6 functions
-- Inconsistency risk: `__init__.py` `load_config` has unused `config=None` parameter
-- Note: `get_*` functions are only in `__init__.py` (not duplicated, but could also be added to `api.py` for consistency)
-
-**Recommendation:**
-- **Option A (Preferred):** Import duplicated functions from `api.py` into `__init__.py`
-  - Change: `from .api import DFM, _dfm_instance, from_yaml, from_spec, from_spec_df, from_dict, load_config, load_data, train, predict, plot, reset`
-  - Remove: Lines 77-121 from `__init__.py` (duplicate function definitions for `load_config`, `load_data`, `train`, `predict`, `plot`, `reset`)
-  - Keep: `get_config`, `get_data`, `get_time`, `get_result`, `get_original_data`, `__getattr__` in `__init__.py` (these are unique to `__init__.py`)
-  - **Impact:** Reduces `__init__.py` from 185 → ~115 lines, eliminates ~70 lines of duplication
-
-**Priority 2: Minor Inconsistencies (LOW IMPACT)**
-
-**Issue:** `__init__.py` `load_config` has unused `config` parameter
-- `api.py` `load_config` doesn't have `config` parameter
-- `__init__.py` `load_config` accepts `config=None` but doesn't use it (just passes through to `_dfm_instance.load_config()` which doesn't accept it)
-
-**Recommendation:**
-- Remove `config` parameter from `__init__.py` `load_config` if consolidating with Option A above
-- OR add `config` parameter support to `api.py` `load_config` if keeping both
+**Current State:**
+- `api.py`: Defines all module-level convenience functions (420 lines)
+- `__init__.py`: Imports functions from `api.py`, defines unique `get_*` functions and `__getattr__` (141 lines)
+- No duplication remaining ✓
 
 ### Consolidation Opportunities
 
 **Already Analyzed:**
 - `config.py` + `config_sources.py`: **DO NOT MERGE** (distinct responsibilities, would create 1462-line file)
 
-**New Opportunity:**
-- **`api.py` module-level functions + `__init__.py` module-level functions**: **CONSOLIDATE** (duplication, see Priority 1 above)
-  - **Action:** Import functions from `api.py` into `__init__.py` instead of redefining
-  - **Impact:** Eliminates ~70 lines of duplicate code, reduces maintenance burden
-  - **Risk:** Low - both already delegate to same `_dfm_instance`
+**✅ COMPLETED:**
+- **`api.py` module-level functions + `__init__.py` module-level functions**: **CONSOLIDATED** ✓
+  - **Action:** Functions now imported from `api.py` into `__init__.py` instead of redefining
+  - **Impact:** Eliminated ~44 lines of duplicate code, reduced maintenance burden
+  - **Status:** Completed in previous iteration
 
 ### Code Organization Assessment
 
@@ -234,28 +216,23 @@
 5. ✅ File count optimal (15, well below 20 limit)
 
 **Areas for Improvement:**
-1. ⚠️ Code duplication: Module-level functions duplicated between `api.py` and `__init__.py`
-2. ⚠️ Minor inconsistency: Unused `config` parameter in `__init__.py` `load_config`
+1. ✅ Code duplication: **RESOLVED** - Functions now imported from single source
+2. ✅ Minor inconsistency: **RESOLVED** - Unused `config` parameter removed during consolidation
 
-### Recommended Refactoring Plan
+### Current Assessment Summary
 
-**Iteration 1: Eliminate Function Duplication (HIGH PRIORITY)**
-- **Target:** `src/dfm_python/__init__.py`
-- **Action:** Remove duplicate module-level function definitions (lines 77-121: `load_config`, `load_data`, `train`, `predict`, `plot`, `reset`)
-- **Action:** Import these 6 functions directly from `api.py` instead
-- **Action:** Keep unique functions in `__init__.py` (`get_*`, `__getattr__`)
-- **Action:** Update `api.py` `__all__` to include `predict` and `plot` (currently missing)
-- **Action:** Remove unused `config` parameter from `load_config` signature (if consolidating)
-- **Impact:** 
-  - Eliminates ~70 lines of duplicate code
-  - Reduces `__init__.py` from 185 → ~115 lines
-  - Single source of truth for duplicated functions
-  - No file count change (still 15 files)
-- **Risk:** Low - functions already delegate to same singleton instance
-- **Testing:** Verify all module-level API calls still work (`load_config`, `load_data`, `train`, `predict`, `plot`, `reset`, `get_*`)
+**✅ All Major Issues Resolved:**
+- Function duplication eliminated ✓
+- Code quality excellent ✓
+- File count optimal (15, below 20 limit) ✓
+- All files have distinct, logical responsibilities ✓
 
-**No Further Consolidation Needed:**
-- File count (15) is optimal
-- All other files have distinct, logical responsibilities
-- File sizes are reasonable
+**No Further Refactoring Needed:**
+- File count (15) is optimal and well below 20 limit
+- All major consolidations completed (reduced from 33 → 15 files, 54% reduction)
+- Code quality is excellent: consistent naming, clear logic, no duplication
+- Module boundaries are clear: each file has distinct responsibility
+- File sizes are reasonable: largest is 1473 lines (already consolidated), all others are well-sized
 - Further consolidation would not improve clarity/structure
+
+**Recommendation:** Codebase is production-ready. No further refactoring needed at this time.
