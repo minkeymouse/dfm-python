@@ -272,7 +272,7 @@ class DFM(_DFMCore):
         if forecast_horizon is not None and forecast_horizon > 0:
             Z_fore = self.predict(forecast_horizon, return_series=False, return_factors=True)
             # Build forecast dates
-            last_date = time_hist[-1]
+            last_date = time_hist.iloc[-1] if hasattr(time_hist, 'iloc') else time_hist[-1]
             # Use same monthly-end spacing; if freq missing, fallback to monthly-end
             try:
                 forecast_dates = pd.date_range(start=last_date + pd.tseries.frequencies.to_offset('ME'),
