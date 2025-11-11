@@ -353,6 +353,38 @@ Near-term:
 - All existing functionality preserved
 - Error messages now provide specific suggestions (e.g., valid frequencies, fix options)
 
+## Validation Helper Method Enhancement (2025-01-XX)
+
+**Status:** Completed successfully
+
+**Objective:** Add `validate_and_report()` method to `DFMConfig` for structured configuration debugging without raising exceptions.
+
+**Changes Made:**
+1. **`src/dfm_python/config.py`**: Added `validate_and_report()` method to `DFMConfig` class
+   - Returns structured report dictionary with `valid`, `errors`, `warnings`, `suggestions` keys
+   - Performs validation checks without raising exceptions (useful for debugging)
+   - Includes actionable suggestions for configuration issues
+   - Comprehensive docstring with usage examples
+
+2. **`src/test/test_dfm.py`**: Added `test_config_validation_report` test
+   - Tests that validation report returns correct structure
+   - Verifies report format and content for valid configurations
+   - Ensures method works correctly
+
+**Results:**
+- ✅ Test suite: 67 passed, 2 skipped (1 new test added)
+- ✅ Tutorial: Completes successfully
+- ✅ Plausibility: All checks pass (no complex, Q ≥ 1e-8, AR stable, shapes consistent)
+- ✅ File count: 20/20 (no increase)
+- ✅ No new files created (only edits to existing files)
+- ✅ Validation helper method verified to work correctly
+
+**Impact:**
+- Improved developer experience with structured validation reports
+- Better debugging capabilities for configuration issues
+- Non-exception-based validation for programmatic checking
+- All existing functionality preserved
+
 ---
 
 # Legacy: File Consolidation (for reference)
