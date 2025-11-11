@@ -10,6 +10,7 @@ from .estimation import (
     estimate_ar_coefficients_ols,
     compute_innovation_covariance,
     compute_sufficient_stats,
+    safe_mean_std,
 )
 from .validation import validate_params, stabilize_cov
 from .matrix import (
@@ -52,6 +53,7 @@ __all__ = [
     'estimate_ar_coefficients_ols',
     'compute_innovation_covariance',
     'compute_sufficient_stats',
+    'safe_mean_std',
     # Validation
     'validate_params',
     'stabilize_cov',

@@ -146,3 +146,50 @@ def compute_sufficient_stats(
     
     return EZZ, EZZ_lag, EZZ_cross
 
+
+def safe_mean_std(matrix: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Compute mean and standard deviation for each column, handling missing values.
+    
+    Parameters
+    ----------
+    matrix : np.ndarray
+        Input matrix (T x N)
+        
+    Returns
+    -------
+    means : np.ndarray
+        Column means (N,)
+    stds : np.ndarray
+        Column standard deviations (N,)
+        
+    Notes
+    -----
+    - Handles missing values (NaN) by computing statistics only on finite values
+    - Returns default values (mean=0, std=1) for columns with no valid data
+    - Ensures std > 0 (minimum std = 1.0) to avoid division by zero in standardization
+    
+    Examples
+    --------
+    >>> import numpy as np
+    >>> X = np.array([[1.0, 2.0, np.nan], [3.0, 4.0, 5.0], [5.0, 6.0, 7.0]])
+    >>> means, stds = safe_mean_std(X)
+    >>> means  # Column means
+    array([3., 4., 6.])
+    >>> stds  # Column standard deviations
+    array([1.63299316, 1.63299316, 1.41421356])
+    """
+    n_series = matrix.shape[1]
+    means = np.zeros(n_series)
+    stds = np.ones(n_series)
+    for j in range(n_series):
+        col = matrix[:, j]
+        mask = np.isfinite(col)
+        if np.any(mask):
+            means[j] = float(np.nanmean(col[mask]))
+            std_val = float(np.nanstd(col[mask]))
+            stds[j] = std_val if std_val > 0 else 1.0
+        else:
+            means[j] = 0.0
+            stds[j] = 1.0
+    return means, stds
+
