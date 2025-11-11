@@ -1,5 +1,6 @@
 from typing import Optional, Tuple, Dict, Any
 import logging
+import warnings
 import numpy as np
 
 try:
@@ -1007,7 +1008,10 @@ def _compute_variance_safe(data: np.ndarray, ddof: int = 0,
         data = data.flatten()
     
     # Compute variance with NaN handling
-    var_val = np.nanvar(data, ddof=ddof)
+    # Suppress warning when ddof >= number of non-NaN values
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        var_val = np.nanvar(data, ddof=ddof)
     
     # Validate and enforce minimum
     if np.isnan(var_val) or np.isinf(var_val) or var_val < min_variance:
