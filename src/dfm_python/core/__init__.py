@@ -17,6 +17,7 @@ from .numeric import (
     _ensure_covariance_stable,
     _ensure_innovation_variance_minimum,
     _compute_covariance_safe,
+    _compute_variance_safe,
     _compute_principal_components,
     _clean_matrix,
     _ensure_positive_definite,

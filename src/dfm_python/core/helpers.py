@@ -4,7 +4,7 @@ This module provides utility functions for common code patterns to reduce
 duplication and improve maintainability.
 """
 
-from typing import Optional, Callable, Any
+from typing import Optional, Any
 from ..config import DFMConfig
 
 
@@ -24,6 +24,13 @@ def safe_get_method(config: Optional[DFMConfig], method_name: str, default: Any 
     -------
     Any
         Method result if callable, else default value
+        
+    Notes
+    -----
+    - Use this for config methods that need to be called (e.g., `get_series_ids()`)
+    - Returns default if method doesn't exist or isn't callable
+    - Used throughout package for safe config method access
+    - Prefer `safe_get_attr()` for simple attribute access (no method call needed)
     """
     if config is None:
         return default
@@ -49,6 +56,13 @@ def safe_get_attr(config: Optional[DFMConfig], attr_name: str, default: Any = No
     -------
     Any
         Attribute value or default
+        
+    Notes
+    -----
+    - Use this for simple attribute access (e.g., `min_eigenvalue`, `ar_clip_max`)
+    - Returns default if attribute doesn't exist
+    - Used throughout package for safe config attribute access
+    - Prefer `safe_get_method()` for methods that need to be called
     """
     if config is None:
         return default

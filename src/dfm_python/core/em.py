@@ -37,7 +37,9 @@ from .numeric import (
     _estimate_ar_coefficient,
     _safe_divide,
     _check_finite,
+    MIN_DIAGONAL_VARIANCE,
 )
+from .helpers import safe_get_attr
 from .grouping import group_series_by_frequency
 from ..utils.data_utils import rem_nans_spline
 from ..utils.aggregation import (
@@ -61,6 +63,21 @@ MIN_OBSERVATION_VARIANCE = 1e-8  # Minimum observation variance
 MIN_EIGENVALUE_THRESHOLD = 1e-8  # Minimum eigenvalue for positive definiteness
 MIN_VARIANCE_THRESHOLD = 1e-10  # Minimum variance threshold for validation
 
+# Initialization constants
+MIN_DATA_COVERAGE_RATIO = 0.5  # Minimum ratio of series required for block initialization (50%)
+MIN_EIGENVALUE_ABSOLUTE = 0.1  # Absolute minimum eigenvalue for Block_Global (ensures factor can evolve)
+MIN_EIGENVALUE_RELATIVE = 0.1  # Relative minimum eigenvalue (10% of max)
+MIN_LOADING_ABS_THRESHOLD = 0.1  # Minimum absolute loading value before scaling
+TARGET_LOADING_ABS_MAX = 0.5  # Target maximum absolute loading after scaling
+MIN_AR_COEFF_ABSOLUTE = 0.1  # Minimum AR coefficient for Block_Global
+FALLBACK_TRANSITION_COEFF = 0.9  # Fallback transition matrix coefficient
+FALLBACK_RANDOM_SCALE = 0.1  # Scale for random fallback values
+
+# Convergence and stability constants
+LIKELIHOOD_DECREASE_THRESHOLD = -1e-3  # Threshold for detecting likelihood decrease (warns if decrease > this)
+TRANSITION_DAMPING_FACTOR = 0.95  # Damping factor for transition matrix when numerical errors occur
+DEFAULT_LOADING_INF_REPLACEMENT = 0.99  # Default replacement value for Inf in loading matrices (close to AR clip max)
+
 
 class NaNHandlingOptions(TypedDict, total=False):
     """Options for handling missing data (NaN values).
@@ -80,41 +97,41 @@ class NaNHandlingOptions(TypedDict, total=False):
     k: int
 
 
-def _get_config_param(config: Optional[DFMConfig], param_name: str, default: Any) -> Any:
-    """Get configuration parameter with fallback to default.
-    
-    This helper function provides a clean way to access config parameters
-    that may not exist, with type-safe defaults.
-    
-    Parameters
-    ----------
-    config : DFMConfig, optional
-        Configuration object
-    param_name : str
-        Name of the parameter to retrieve
-    default : Any
-        Default value if parameter doesn't exist
-        
-    Returns
-    -------
-    Any
-        Parameter value or default
-    """
-    if config is None:
-        return default
-    return getattr(config, param_name, default)
-
-
 def em_converged(loglik: float, previous_loglik: float, threshold: float = 1e-4,
                  check_decreased: bool = True) -> Tuple[bool, bool]:
     """Check whether EM algorithm has converged.
     
-    Returns (converged, decreased).
+    Convergence is determined by relative change in log-likelihood:
+    |loglik - previous_loglik| / avg(|loglik|, |previous_loglik|) < threshold
+    
+    Parameters
+    ----------
+    loglik : float
+        Current iteration log-likelihood
+    previous_loglik : float
+        Previous iteration log-likelihood
+    threshold : float, default 1e-4
+        Convergence threshold (relative change)
+    check_decreased : bool, default True
+        If True, check for likelihood decreases and log warning
+        
+    Returns
+    -------
+    converged : bool
+        True if algorithm has converged
+    decreased : bool
+        True if likelihood decreased (only if check_decreased=True)
+    
+    Notes
+    -----
+    - Convergence criterion matches MATLAB implementation (Nowcasting/functions/dfm.m)
+    - Formula from Numerical Recipes in C (pg. 423)
+    - Default threshold (1e-4) matches MATLAB default
     """
     converged = False
     decrease = False
     
-    if check_decreased and (loglik - previous_loglik) < -1e-3:
+    if check_decreased and (loglik - previous_loglik) < LIKELIHOOD_DECREASE_THRESHOLD:
         _logger.warning(f"Likelihood decreased from {previous_loglik:.4f} to {loglik:.4f}")
         decrease = True
     
@@ -258,8 +275,8 @@ def init_conditions(
                     # For global block, allow missing data but require sufficient pairwise observations
                     # Calculate how many series have data at each time point
                     n_obs_per_time = np.sum(np.isfinite(block_residuals), axis=1)
-                    # Require at least 50% of series to have data (or minimum 2 series)
-                    min_series_required = max(2, int(len(idx_clock_freq) * 0.5))
+                    # Require at least MIN_DATA_COVERAGE_RATIO of series to have data (or minimum 2 series)
+                    min_series_required = max(2, int(len(idx_clock_freq) * MIN_DATA_COVERAGE_RATIO))
                     valid_times = n_obs_per_time >= min_series_required
                     if np.sum(valid_times) < max(10, len(idx_clock_freq) + 1):
                         # Fallback: use all available data with pairwise complete
@@ -289,24 +306,38 @@ def init_conditions(
                             else:
                                 block_residuals_clean[nan_mask, col_idx] = 0.0
                 # Compute covariance safely with appropriate method
-                # For Block_Global (i == 0), use pairwise complete for robustness
+                # For Block_Global (i == 0), use pairwise complete for robustness.
+                # This allows covariance computation even when no single time point
+                # has all series observed, which is common in mixed-frequency or
+                # sparse data scenarios. Pairwise complete uses all available
+                # pairwise observations, making it more robust than listwise deletion.
                 use_pairwise = (i == 0 and len(idx_clock_freq) > 1)
                 cov_res = _compute_covariance_safe(
                     block_residuals_clean,
                     rowvar=True,  # Each row is a time period, each column is a series
                     pairwise_complete=use_pairwise,
-                    min_eigenval=1e-8,
+                    min_eigenval=MIN_EIGENVALUE_THRESHOLD,
                     fallback_to_identity=True
                 )
                 # For Block_Global, ensure minimum variance in first principal component
                 d, v = _compute_principal_components(cov_res, int(r_i), block_idx=i)
                 # Ensure first eigenvalue is not too small for Block_Global
                 if i == 0 and len(d) > 0:
-                    d_min = np.max(d) * 0.01  # At least 1% of max eigenvalue
+                    # For Block_Global, ensure first eigenvalue is meaningful
+                    # Use absolute minimum to ensure factor can evolve
+                    d_min_absolute = MIN_EIGENVALUE_ABSOLUTE
+                    d_min_relative = np.max(d) * MIN_EIGENVALUE_RELATIVE  # At least MIN_EIGENVALUE_RELATIVE of max eigenvalue
+                    d_min = max(d_min_absolute, d_min_relative)
                     d = np.maximum(d, d_min)
+                    # Log if we're using the absolute minimum
+                    if d[0] == d_min_absolute and d_min_absolute > d_min_relative:
+                        _logger.warning(
+                            f"init_conditions: Block_Global first eigenvalue too small "
+                            f"(max={np.max(d):.6e}), using absolute minimum {d_min_absolute}"
+                        )
                 if np.sum(v) < 0:
                     v = -v
-                d_pos = np.maximum(d, 1e-8)
+                d_pos = np.maximum(d, MIN_EIGENVALUE_THRESHOLD)
                 sqrt_d = np.sqrt(d_pos)
                 v_scaled = v * float(sqrt_d) if np.isscalar(sqrt_d) or (isinstance(sqrt_d, np.ndarray) and sqrt_d.ndim == 0) else v @ np.diag(sqrt_d)
                 if v_scaled.ndim == 2 and v_scaled.shape[1] > 0:
@@ -315,6 +346,29 @@ def init_conditions(
                         if col_norm > 0:
                             d_val = float(d_pos) if np.isscalar(d_pos) or (isinstance(d_pos, np.ndarray) and d_pos.ndim == 0) else d_pos[col_idx]
                             v_scaled[:, col_idx] = v_scaled[:, col_idx] / col_norm * np.sqrt(d_val)
+                # For Block_Global (first block, i == 0), ensure loadings have meaningful scale
+                # Also check if this is the global block by checking if all series load on it
+                is_global_block = (i == 0) or (blocks is not None and np.all(blocks[:, i] == 1))
+                if is_global_block and len(idx_clock_freq) > 0:
+                    # Check if loadings are too small
+                    max_loading_abs = np.max(np.abs(v_scaled))
+                    if max_loading_abs < MIN_LOADING_ABS_THRESHOLD:
+                        # Scale up loadings to have at least TARGET_LOADING_ABS_MAX max absolute value
+                        scale_factor = TARGET_LOADING_ABS_MAX / max_loading_abs if max_loading_abs > 0 else 1.0
+                        v_scaled = v_scaled * scale_factor
+                        _logger.warning(
+                            f"init_conditions: Block {i+1} (Global) loadings too small "
+                            f"(max_abs={max_loading_abs:.6e}), scaling by {scale_factor:.2f} to {np.max(np.abs(v_scaled)):.6e}"
+                        )
+                # For all blocks, ensure loadings are not all zero
+                max_loading_abs_all = np.max(np.abs(v_scaled)) if v_scaled.size > 0 else 0.0
+                if max_loading_abs_all < MIN_VARIANCE_THRESHOLD and len(idx_clock_freq) > 0 and int(r_i) > 0:
+                    # If all loadings are essentially zero, use uniform loadings as fallback
+                    v_scaled = np.ones((len(idx_clock_freq), int(r_i))) * MIN_LOADING_ABS_THRESHOLD / np.sqrt(len(idx_clock_freq))
+                    _logger.warning(
+                        f"init_conditions: Block {i+1} loadings all zero (max_abs={max_loading_abs_all:.6e}), "
+                        f"using uniform fallback (shape={v_scaled.shape})"
+                    )
                 block_loadings[idx_clock_freq, :int(r_i)] = v_scaled
                 f = data_residuals[:, idx_clock_freq] @ v_scaled
                 F = None
@@ -412,40 +466,54 @@ def init_conditions(
                 try:
                     ar_coeffs = inv(Z_lag.T @ Z_lag) @ Z_lag.T @ z
                     block_transition[:int(r_i), :int(r_i * p)] = ar_coeffs.T
+                    # For Block_Global (i == 0), ensure AR coefficient is not too small
+                    if i == 0 and r_i > 0 and p > 0:
+                        ar_coeff_0 = block_transition[0, 0]
+                        if np.abs(ar_coeff_0) < MIN_AR_COEFF_ABSOLUTE:
+                            # Use default AR coefficient if estimated value is too small
+                            block_transition[0, 0] = DEFAULT_AR_COEFFICIENT if ar_coeff_0 >= 0 else -DEFAULT_AR_COEFFICIENT
+                            _logger.warning(
+                                f"init_conditions: Block_Global AR coefficient too small "
+                                f"({ar_coeff_0:.6e}), using default {block_transition[0, 0]:.2f}"
+                            )
                 except _NUMERICAL_EXCEPTIONS:
                     block_transition[:int(r_i), :int(r_i * p)] = 0.0
+                    # For Block_Global, use default AR coefficient instead of 0
+                    if i == 0 and r_i > 0 and p > 0:
+                        block_transition[0, 0] = DEFAULT_AR_COEFFICIENT
             if r_i * (ppC - 1) > 0:
                 block_transition[int(r_i):, :int(r_i * (ppC - 1))] = np.eye(int(r_i * (ppC - 1)))
             block_innovation_cov = np.zeros((int(ppC * r_i), int(ppC * r_i)))
             if len(z) > 0:
                 innovation_residuals = z - Z_lag @ ar_coeffs if ar_coeffs is not None else z
-                innovation_residuals = np.nan_to_num(innovation_residuals, nan=0.0, posinf=0.0, neginf=0.0)
+                # Clean residuals using consistent matrix cleaning utility
+                innovation_residuals = _clean_matrix(innovation_residuals, 'general', default_nan=0.0, default_inf=0.0)
                 if innovation_residuals.shape[1] > 1:
                     try:
                         Q_block = np.cov(innovation_residuals.T)
                         if np.any(~np.isfinite(Q_block)):
-                            Q_block = np.eye(int(r_i)) * 0.1
+                            Q_block = np.eye(int(r_i)) * DEFAULT_INNOVATION_VARIANCE
                     except _NUMERICAL_EXCEPTIONS:
-                        Q_block = np.eye(int(r_i)) * 0.1
+                        Q_block = np.eye(int(r_i)) * DEFAULT_INNOVATION_VARIANCE
                 else:
                     # Single series case: compute variance safely
                     variance = _compute_variance_safe(
                         innovation_residuals,
                         ddof=0,
-                        min_variance=1e-8,
-                        default_variance=0.1
+                        min_variance=MIN_INNOVATION_VARIANCE,
+                        default_variance=DEFAULT_INNOVATION_VARIANCE
                     )
                     Q_block = np.array([[variance]]) if innovation_residuals.ndim > 1 else np.eye(int(r_i)) * variance
                 block_innovation_cov[:int(r_i), :int(r_i)] = Q_block
             # Ensure Q diagonal has minimum value - critical for factor evolution
             block_innovation_cov[:int(r_i), :int(r_i)] = _ensure_innovation_variance_minimum(
-                block_innovation_cov[:int(r_i), :int(r_i)], min_variance=1e-8
+                block_innovation_cov[:int(r_i), :int(r_i)], min_variance=MIN_INNOVATION_VARIANCE
             )
             block_transition_clean = _clean_matrix(block_transition, 'loading')
             block_innovation_cov_clean = _clean_matrix(block_innovation_cov, 'covariance', default_nan=0.0)
             # Re-ensure minimum after cleaning (in case cleaning set values to 0)
             block_innovation_cov_clean[:int(r_i), :int(r_i)] = _ensure_innovation_variance_minimum(
-                block_innovation_cov_clean[:int(r_i), :int(r_i)], min_variance=1e-8
+                block_innovation_cov_clean[:int(r_i), :int(r_i)], min_variance=MIN_INNOVATION_VARIANCE
             )
             try:
                 kron_transition = np.kron(block_transition_clean, block_transition_clean)
@@ -457,7 +525,7 @@ def init_conditions(
             except _NUMERICAL_EXCEPTIONS:
                 _logger.warning(
                     f"init_conditions: Initial covariance computation failed for block {i+1} "
-                    f"(kron/inv failed); using diagonal fallback (0.1 * I)."
+                    f"(kron/inv failed); using diagonal fallback ({DEFAULT_IDIO_INIT_COVARIANCE} * I)."
                 )
                 init_cov_block = np.eye(int(r_i * ppC)) * DEFAULT_IDIO_INIT_COVARIANCE
             if A is None:
@@ -467,9 +535,9 @@ def init_conditions(
                 Q = block_diag(Q, block_innovation_cov)
                 V_0 = block_diag(V_0, init_cov_block)
         else:
-            block_transition = np.eye(int(r_i * ppC)) * 0.9
-            block_innovation_cov = np.eye(int(r_i * ppC)) * 0.1
-            init_cov_block = np.eye(int(r_i * ppC)) * 0.1
+            block_transition = np.eye(int(r_i * ppC)) * FALLBACK_TRANSITION_COEFF
+            block_innovation_cov = np.eye(int(r_i * ppC)) * DEFAULT_INNOVATION_VARIANCE
+            init_cov_block = np.eye(int(r_i * ppC)) * DEFAULT_IDIO_INIT_COVARIANCE
             if A is None:
                 A, Q, V_0 = block_transition, block_innovation_cov, init_cov_block
             else:
@@ -484,7 +552,8 @@ def init_conditions(
         clock_h = FREQUENCY_HIERARCHY.get(clock, 3)
         slower_indices = [j for j in range(N) if j < len(frequencies) and FREQUENCY_HIERARCHY.get(frequencies[j], 3) > clock_h]
         Rdiag = np.nanvar(residuals_with_nan, axis=0)
-        Rdiag = np.where((np.isnan(Rdiag) | np.isinf(Rdiag)), 1e-4, Rdiag)
+        # Replace NaN/Inf with default variance (1D array - use np.where for efficiency)
+        Rdiag = np.where((np.isnan(Rdiag) | np.isinf(Rdiag)), DEFAULT_OBSERVATION_VARIANCE, Rdiag)
         slower_idio_blocks = []
         slower_series_count: Dict[str, int] = {}
         slower_series_indices: Dict[str, list] = {}
@@ -515,7 +584,7 @@ def init_conditions(
         if slower_idio_blocks:
             slower_idio_full = np.hstack(slower_idio_blocks)
             C = np.hstack([C, slower_idio_full])
-        Rdiag = np.where((np.isnan(Rdiag) | np.isinf(Rdiag) | (Rdiag < 0)), 1e-4, Rdiag)
+        Rdiag = np.where((np.isnan(Rdiag) | np.isinf(Rdiag) | (Rdiag < 0)), DEFAULT_OBSERVATION_VARIANCE, Rdiag)
         R = np.diag(Rdiag)
     else:
         var_values = np.nanvar(residuals_with_nan, axis=0)
@@ -571,7 +640,7 @@ def init_conditions(
     # Monthly idio init covariance
     eye_diag = np.diag(np.eye(BM.shape[0]))
     BM_diag_sq = np.diag(BM) ** 2
-    denom_val = np.where(np.abs(eye_diag - BM_diag_sq) < 1e-10, 1.0, eye_diag - BM_diag_sq)
+    denom_val = np.where(np.abs(eye_diag - BM_diag_sq) < MIN_VARIANCE_THRESHOLD, 1.0, eye_diag - BM_diag_sq)
     denom_viM = np.diag(1.0 / denom_val)
     initViM = denom_viM @ SM
     # Slower idio init: create BQ and SQ with proper dimensions
@@ -590,7 +659,7 @@ def init_conditions(
     Q = block_diag(Q, SM, SQ)
     # Ensure Q diagonal has minimum value - critical for factor evolution
     if Q.size > 0:
-        Q = _ensure_innovation_variance_minimum(Q, min_variance=1e-8)
+        Q = _ensure_innovation_variance_minimum(Q, min_variance=MIN_INNOVATION_VARIANCE)
     Z_0 = np.zeros(A.shape[0])
     # Ensure all covariance matrices are square
     V_0 = _ensure_square_matrix(V_0, method='diag')
@@ -605,7 +674,7 @@ def init_conditions(
             if param_name in ['A', 'Q', 'V_0']:
                 outputs[param_name] = _clean_matrix(param_value, 'covariance', default_nan=0.0)
             elif param_name == 'R':
-                outputs[param_name] = _clean_matrix(param_value, 'diagonal', default_nan=1e-4)
+                outputs[param_name] = _clean_matrix(param_value, 'diagonal', default_nan=DEFAULT_OBSERVATION_VARIANCE)
             elif param_name == 'C':
                 outputs[param_name] = _clean_matrix(param_value, 'loading')
             elif param_name == 'Z_0':
@@ -729,7 +798,9 @@ def em_step(
     -----
     - All input parameters are validated and cleaned before use
     - Missing data is handled automatically by the Kalman filter
-    - Q diagonal elements are enforced to have minimum value (1e-8) for factor evolution
+    - Q diagonal elements are enforced to have minimum value (MIN_INNOVATION_VARIANCE) 
+      for factor evolution. This is critical: Q[i,i] = 0 means factor i cannot evolve.
+      Enforcement occurs after block updates and as final safeguard.
     - All covariance matrices are regularized to ensure positive semi-definiteness
     - AR coefficients are clipped to stability bounds if configured
     
@@ -760,14 +831,14 @@ def em_step(
     """
     # Validate and clean input parameters
     if not _check_finite(A, "A"):
-        _logger.warning("em_step: A contains NaN/Inf, applying regularization (0.9*I + 0.1*cleaned)")
-        A = np.eye(A.shape[0]) * 0.9 + _clean_matrix(A, 'loading') * 0.1
+        _logger.warning(f"em_step: A contains NaN/Inf, applying regularization ({FALLBACK_TRANSITION_COEFF}*I + {1-FALLBACK_TRANSITION_COEFF}*cleaned)")
+        A = np.eye(A.shape[0]) * FALLBACK_TRANSITION_COEFF + _clean_matrix(A, 'loading') * (1 - FALLBACK_TRANSITION_COEFF)
     if not _check_finite(Q, "Q"):
-        _logger.warning("em_step: Q contains NaN/Inf, applying regularization (min=1e-6)")
-        Q = _clean_matrix(Q, 'covariance', default_nan=1e-6)
+        _logger.warning(f"em_step: Q contains NaN/Inf, applying regularization (min={MIN_INNOVATION_VARIANCE})")
+        Q = _clean_matrix(Q, 'covariance', default_nan=MIN_INNOVATION_VARIANCE)
     if not _check_finite(R, "R"):
-        _logger.warning("em_step: R contains NaN/Inf, applying regularization (min=1e-4)")
-        R = _clean_matrix(R, 'diagonal', default_nan=1e-4, default_inf=1e4)
+        _logger.warning(f"em_step: R contains NaN/Inf, applying regularization (min={DEFAULT_OBSERVATION_VARIANCE})")
+        R = _clean_matrix(R, 'diagonal', default_nan=DEFAULT_OBSERVATION_VARIANCE, default_inf=1e4)
     if not _check_finite(C, "C"):
         _logger.warning("em_step: C contains NaN/Inf, cleaning matrix")
         C = _clean_matrix(C, 'loading')
@@ -775,8 +846,8 @@ def em_step(
         _logger.warning("em_step: Z_0 contains NaN/Inf, resetting to zeros")
         Z_0 = np.zeros_like(Z_0)
     if not _check_finite(V_0, "V_0"):
-        _logger.warning("em_step: V_0 contains NaN/Inf, using regularized identity (0.1*I)")
-        V_0 = np.eye(V_0.shape[0]) * 0.1
+        _logger.warning(f"em_step: V_0 contains NaN/Inf, using regularized identity ({DEFAULT_IDIO_INIT_COVARIANCE}*I)")
+        V_0 = np.eye(V_0.shape[0]) * DEFAULT_IDIO_INIT_COVARIANCE
 
     n, T = y.shape
     if nQ is None and frequencies is not None:
@@ -841,8 +912,8 @@ def em_step(
         block_innovation_cov = Q[t_start:t_end, t_start:t_end].copy()
         try:
             expected_lag_sub = expected_factor_lag_outer[:factor_lag_size, :factor_lag_size]
-            min_eigenval = _get_config_param(config, "min_eigenvalue", 1e-8)
-            warn_reg = _get_config_param(config, "warn_on_regularization", True)
+            min_eigenval = safe_get_attr(config, "min_eigenvalue", 1e-8)
+            warn_reg = safe_get_attr(config, "warn_on_regularization", True)
             expected_lag_sub, _ = _ensure_positive_definite(expected_lag_sub, min_eigenval, warn_reg)
             try:
                 eigenvals = np.linalg.eigvals(expected_lag_sub)
@@ -860,29 +931,28 @@ def em_step(
             block_innovation_cov = _clean_matrix(block_innovation_cov, 'covariance', default_nan=0.0)
             # Ensure diagonal elements have minimum value to prevent Q from becoming zero
             # This is critical for factor evolution - Q[i,i] = 0 means factor i doesn't evolve
-            # Ensure Q diagonal has minimum value - critical for factor evolution
             block_innovation_cov[:r_i, :r_i] = _ensure_innovation_variance_minimum(
-                block_innovation_cov[:r_i, :r_i], min_variance=1e-8
+                block_innovation_cov[:r_i, :r_i], min_variance=MIN_INNOVATION_VARIANCE
             )
             innovation_cov_reg, _ = _ensure_positive_definite(block_innovation_cov[:r_i, :r_i], min_eigenval, warn_reg)
             block_innovation_cov[:r_i, :r_i] = innovation_cov_reg
             # Re-ensure minimum after positive definite check (it may have changed diagonal)
             block_innovation_cov[:r_i, :r_i] = _ensure_innovation_variance_minimum(
-                block_innovation_cov[:r_i, :r_i], min_variance=1e-8
+                block_innovation_cov[:r_i, :r_i], min_variance=MIN_INNOVATION_VARIANCE
             )
-            max_eig = _get_config_param(config, "max_eigenvalue", 1e6)
+            max_eig = safe_get_attr(config, "max_eigenvalue", 1e6)
             block_innovation_cov[:r_i, :r_i] = _cap_max_eigenvalue(block_innovation_cov[:r_i, :r_i], max_eigenval=max_eig)
             # Re-ensure minimum after max eigenvalue capping (it may have changed diagonal)
             block_innovation_cov[:r_i, :r_i] = _ensure_innovation_variance_minimum(
-                block_innovation_cov[:r_i, :r_i], min_variance=1e-8
+                block_innovation_cov[:r_i, :r_i], min_variance=MIN_INNOVATION_VARIANCE
             )
         except _NUMERICAL_EXCEPTIONS:
             if np.allclose(block_transition[:r_i, :factor_lag_size], 0):
-                block_transition[:r_i, :factor_lag_size] = np.random.randn(r_i, factor_lag_size) * 0.1
+                block_transition[:r_i, :factor_lag_size] = np.random.randn(r_i, factor_lag_size) * FALLBACK_RANDOM_SCALE
             else:
-                block_transition[:r_i, :factor_lag_size] *= 0.95
+                block_transition[:r_i, :factor_lag_size] *= TRANSITION_DAMPING_FACTOR
         if np.any(~np.isfinite(block_transition)):
-            block_transition = _clean_matrix(block_transition, 'loading', default_nan=0.0, default_inf=0.99)
+            block_transition = _clean_matrix(block_transition, 'loading', default_nan=0.0, default_inf=DEFAULT_LOADING_INF_REPLACEMENT)
             block_transition, _ = _apply_ar_clipping(block_transition, config)
         A_new[t_start:t_end, t_start:t_end] = block_transition
         Q_new[t_start:t_end, t_start:t_end] = block_innovation_cov
@@ -970,6 +1040,8 @@ def em_step(
     C_new = C.copy()
     for i in range(n_bl):
         bl_i = bl[i, :]
+        # rs = total factors across blocks in this block group (sum of r[bl_i])
+        # Note: r_i (used elsewhere) = factors per individual block (from r[i])
         rs = int(np.sum(r[bl_i.astype(bool)]))
         idx_i = np.where((blocks == bl_i).all(axis=1))[0]
         freq_groups = group_series_by_frequency(idx_i, frequencies, clock)
@@ -1034,8 +1106,8 @@ def em_step(
                 idio_term = np.zeros((len(idx_clock_freq), rs_actual))
             nom += y_term - idio_term
         try:
-            scale_factor = _get_config_param(config, "regularization_scale", 1e-5)
-            warn_reg = _get_config_param(config, "warn_on_regularization", True)
+            scale_factor = safe_get_attr(config, "regularization_scale", 1e-5)
+            warn_reg = safe_get_attr(config, "warn_on_regularization", True)
             reg_param, _ = _compute_regularization_param(denom, scale_factor, warn_reg)
             denom_reg = denom + np.eye(denom.shape[0]) * reg_param
             vec_C = inv(denom_reg) @ nom.flatten()
@@ -1119,8 +1191,8 @@ def em_step(
                         denom += np.kron(ZZZ + V_block, Wt)
                     nom += y_clean[j, t] * Z_row.reshape(1, -1)
                 try:
-                    scale_factor = _get_config_param(config, "regularization_scale", 1e-5)
-                    warn_reg = _get_config_param(config, "warn_on_regularization", True)
+                    scale_factor = safe_get_attr(config, "regularization_scale", 1e-5)
+                    warn_reg = safe_get_attr(config, "warn_on_regularization", True)
                     reg_param, _ = _compute_regularization_param(denom, scale_factor, warn_reg)
                     denom_reg = denom + np.eye(denom.shape[0]) * reg_param
                     C_i = inv(denom_reg) @ nom.T
@@ -1151,27 +1223,25 @@ def em_step(
             R_diag[i] += resid_sq + var_factor
     n_obs_per_series = np.maximum(n_obs_per_series, 1)
     R_diag = R_diag / n_obs_per_series
-    mean_var = np.mean(R_diag[R_diag > 0]) if np.any(R_diag > 0) else 1e-4
-    min_var = np.maximum(mean_var * 1e-6, 1e-8)
+    mean_var = np.mean(R_diag[R_diag > 0]) if np.any(R_diag > 0) else DEFAULT_OBSERVATION_VARIANCE
+    min_var = np.maximum(mean_var * MIN_DIAGONAL_VARIANCE, MIN_OBSERVATION_VARIANCE)
     R_diag = np.maximum(R_diag, min_var)
     valid_mask = np.isfinite(R_diag) & (R_diag > 0)
     if np.any(valid_mask):
         median_var = np.median(R_diag[valid_mask])
         R_diag = np.where(valid_mask, R_diag, median_var)
     else:
-        R_diag.fill(1e-4)
+        R_diag.fill(DEFAULT_OBSERVATION_VARIANCE)
     R_new = np.diag(R_diag)
     Q_new = _clean_matrix(Q_new, 'covariance', default_nan=0.0)
-    min_eigenval = _get_config_param(config, "min_eigenvalue", 1e-8)
-    warn_reg = _get_config_param(config, "warn_on_regularization", True)
-    max_eigenval = _get_config_param(config, "max_eigenvalue", 1e6)
-    # Ensure Q diagonal has minimum value - critical for factor evolution
-    Q_new = _ensure_innovation_variance_minimum(Q_new, min_variance=MIN_INNOVATION_VARIANCE)
+    min_eigenval = safe_get_attr(config, "min_eigenvalue", 1e-8)
+    warn_reg = safe_get_attr(config, "warn_on_regularization", True)
+    max_eigenval = safe_get_attr(config, "max_eigenvalue", 1e6)
+    # Apply stability operations: PSD, eigenvalue capping, then enforce minimum variance
+    # Note: We enforce minimum after all operations since PSD and capping may affect diagonal
     Q_new, _ = _ensure_positive_definite(Q_new, min_eigenval, warn_reg)
-    # Re-ensure minimum after positive definite check (it may have changed diagonal)
-    Q_new = _ensure_innovation_variance_minimum(Q_new, min_variance=MIN_INNOVATION_VARIANCE)
     Q_new = _cap_max_eigenvalue(Q_new, max_eigenval=max_eigenval)
-    # Re-ensure minimum after max eigenvalue capping (it may have changed diagonal)
+    # Final enforcement: ensure Q diagonal has minimum value - critical for factor evolution
     Q_new = _ensure_innovation_variance_minimum(Q_new, min_variance=MIN_INNOVATION_VARIANCE)
     V_0_new = _clean_matrix(V_0_new, 'covariance', default_nan=0.0)
     V_0_new, _ = _ensure_positive_definite(V_0_new, min_eigenval, warn_reg)

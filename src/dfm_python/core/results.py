@@ -24,6 +24,14 @@ def calculate_rmse(actual: np.ndarray, predicted: np.ndarray,
         Overall RMSE averaged across all series and time periods
     rmse_per_series : np.ndarray
         RMSE for each series (N,) or scalar if 1D input
+        
+    Notes
+    -----
+    - Returns NaN for overall RMSE if no valid observations exist
+    - Returns NaN for individual series if that series has no valid observations
+    - Mask parameter allows selective calculation (e.g., exclude certain time periods)
+    - Used in diagnostics and model evaluation
+    - Automatically handles missing data by excluding NaN values
     """
     # Ensure arrays are the same shape
     if actual.shape != predicted.shape:
@@ -66,5 +74,3 @@ def calculate_rmse(actual: np.ndarray, predicted: np.ndarray,
         rmse_overall = np.nan
     
     return rmse_overall, rmse_per_series
-
-

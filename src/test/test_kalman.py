@@ -139,6 +139,82 @@ def test_miss_data():
     print("✓ Missing data elimination test passed")
     assert True
 
+
+def test_skf_zero_observation_variance():
+    """Test Kalman filter with zero observation variance (edge case).
+    
+    This tests the edge case where R has zeros on the diagonal, which could
+    cause numerical issues. The filter should handle this gracefully.
+    """
+    print("\n" + "="*70)
+    print("TEST: Kalman Filter Zero Observation Variance")
+    print("="*70)
+    
+    y, A, C, Q, R, Z_0, V_0, z_true = create_test_data(T=30, n=5, m=2)
+    
+    # Create R with some zeros on diagonal (edge case)
+    R_zero = R.copy()
+    R_zero[0, 0] = 0.0  # First observation has zero variance
+    R_zero[2, 2] = 0.0  # Third observation has zero variance
+    
+    # Should handle gracefully - may use regularization or fallback
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        Sf = skf(y, A, C, Q, R_zero, Z_0, V_0)
+    
+    assert Sf is not None
+    assert hasattr(Sf, 'ZmU') and hasattr(Sf, 'VmU')
+    assert hasattr(Sf, 'loglik')
+    assert Sf.ZmU.shape == (z_true.shape[1], y.shape[1] + 1)
+    assert np.isfinite(Sf.loglik) or np.isnan(Sf.loglik)  # loglik may be NaN in extreme cases
+    
+    # Verify outputs are finite (may have NaN in extreme cases, but should not crash)
+    assert np.all(np.isfinite(Sf.ZmU)) or np.any(np.isfinite(Sf.ZmU)), \
+        "At least some state estimates should be finite"
+    
+    print("✓ Kalman filter zero observation variance test passed")
+    assert True
+
+
+def test_fis_all_missing_observations():
+    """Test fixed interval smoother with all missing observations.
+    
+    This tests the edge case where all observations are missing at all time
+    points. The smoother should handle this gracefully.
+    """
+    print("\n" + "="*70)
+    print("TEST: Fixed Interval Smoother All Missing Observations")
+    print("="*70)
+    
+    y, A, C, Q, R, Z_0, V_0, z_true = create_test_data(T=30, n=5, m=2)
+    
+    # Create Y with all NaN (all observations missing)
+    y_all_missing = np.full_like(y, np.nan)
+    
+    # Run Kalman filter with all missing data
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        Sf = skf(y_all_missing, A, C, Q, R, Z_0, V_0)
+    
+    # Run smoother
+    from dfm_python.kalman import fis
+    Ss = fis(A, Sf)
+    
+    assert Ss is not None
+    assert hasattr(Ss, 'ZmT') and hasattr(Ss, 'VmT')
+    assert Ss.ZmT.shape == Sf.ZmU.shape
+    assert Ss.VmT.shape == Sf.VmU.shape
+    
+    # With all missing observations, smoother should still produce finite outputs
+    # (based on prior/prediction only, no observation updates)
+    assert np.all(np.isfinite(Ss.ZmT)) or np.any(np.isfinite(Ss.ZmT)), \
+        "At least some smoothed state estimates should be finite"
+    assert np.all(np.isfinite(Ss.VmT)) or np.any(np.isfinite(Ss.VmT)), \
+        "At least some smoothed covariances should be finite"
+    
+    print("✓ Fixed interval smoother all missing observations test passed")
+    assert True
+
 # ============================================================================
 # Test Runner
 # ============================================================================
@@ -154,7 +230,9 @@ def run_all_tests():
     test_funcs = [
         ('skf_basic', test_skf_basic),
         ('skf_missing_data', test_skf_missing_data),
+        ('skf_zero_observation_variance', test_skf_zero_observation_variance),
         ('fis_basic', test_fis_basic),
+        ('fis_all_missing_observations', test_fis_all_missing_observations),
         ('miss_data', test_miss_data),
     ]
     

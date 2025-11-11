@@ -21,7 +21,28 @@ else:
 
 
 def _display_dfm_tables(Res: DFMResult, config: DFMConfig, nQ: int) -> None:
-    """Display DFM estimation output tables."""
+    """Display DFM estimation output tables.
+    
+    Displays formatted tables for factor loadings, AR coefficients, and
+    idiosyncratic components. Uses pandas DataFrame formatting if available,
+    otherwise falls back to shape information.
+    
+    Parameters
+    ----------
+    Res : DFMResult
+        DFM estimation results containing C, A, Q, p, r
+    config : DFMConfig
+        Configuration object with series and block information
+    nQ : int
+        Number of slower-frequency series (for mixed-frequency models)
+        
+    Notes
+    -----
+    - Only displays if logging level is INFO or higher
+    - Tables include: same-frequency loadings, slower-frequency loadings,
+      factor AR coefficients, and idiosyncratic AR coefficients
+    - Automatically handles missing pandas dependency
+    """
     if not _logger.isEnabledFor(logging.INFO):
         return
     
@@ -185,7 +206,49 @@ def _display_dfm_tables(Res: DFMResult, config: DFMConfig, nQ: int) -> None:
 
 def diagnose_series(Res: DFMResult, config: DFMConfig, series_name: Optional[str] = None, 
                     series_idx: Optional[int] = None) -> Dict[str, Any]:
-    """Diagnose model fit issues for a specific series."""
+    """Diagnose model fit issues for a specific series.
+    
+    Computes diagnostic statistics including RMSE, loading magnitudes,
+    and standardization information for a single series.
+    
+    Parameters
+    ----------
+    Res : DFMResult
+        DFM estimation results containing C, x_sm, x, and other outputs
+    config : DFMConfig
+        Configuration object with series information
+    series_name : str, optional
+        Name of series to diagnose (case-insensitive matching)
+    series_idx : int, optional
+        Index of series to diagnose (0-based)
+        
+    Returns
+    -------
+    dict
+        Dictionary containing diagnostic information:
+        - 'series_name': Name of the series
+        - 'series_idx': Index of the series
+        - 'rmse_original': RMSE on original scale
+        - 'rmse_standardized': RMSE on standardized scale
+        - 'rmse_pct_of_mean': RMSE as percentage of mean
+        - 'rmse_in_std_devs': RMSE in standard deviations
+        - 'mean': Mean of original series
+        - 'std': Standard deviation of original series
+        - 'max_loading_abs': Maximum absolute loading value
+        - 'loading_norm': L2 norm of loading vector
+        
+    Raises
+    ------
+    ValueError
+        If neither series_name nor series_idx is provided, or if
+        series_name is not found or series_idx is out of range
+        
+    Notes
+    -----
+    - Either series_name or series_idx must be provided
+    - Series name matching is case-insensitive
+    - RMSE values may be None if insufficient data is available
+    """
     if series_name is not None:
         try:
             series_names = config.get_series_names() if config.series else []
@@ -242,8 +305,26 @@ def print_series_diagnosis(Res: DFMResult, config: DFMConfig,
                           series_idx: Optional[int] = None) -> None:
     """Print a formatted diagnosis report for a specific series.
     
-    Note: This function uses print() for user-facing output, as it's intended
-    to be called directly by users who want to see diagnostic information.
+    Prints a user-friendly diagnostic report including RMSE statistics,
+    standardization values, and loading information.
+    
+    Parameters
+    ----------
+    Res : DFMResult
+        DFM estimation results
+    config : DFMConfig
+        Configuration object with series information
+    series_name : str, optional
+        Name of series to diagnose (case-insensitive matching)
+    series_idx : int, optional
+        Index of series to diagnose (0-based)
+        
+    Notes
+    -----
+    - This function uses print() for user-facing output, as it's intended
+      to be called directly by users who want to see diagnostic information
+    - Calls diagnose_series() internally to compute statistics
+    - Prints formatted report with section headers and clear labels
     """
     diag = diagnose_series(Res, config, series_name=series_name, series_idx=series_idx)
     print(f"\n{'='*70}")
