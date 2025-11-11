@@ -603,13 +603,29 @@ def _run_em_algorithm(
     converged = False
     
     while num_iter < max_iter and not converged:
-        C_new, R_new, A_new, Q_new, Z_0_new, V_0_new, loglik = em_step(
-            y_est, A, C, Q, R, Z_0, V_0, r, p, R_mat, q, nQ, i_idio, blocks,
+        # Create EMStepParams dataclass for em_step()
+        from .core.em.iteration import EMStepParams
+        em_step_params = EMStepParams(
+            y=y_est,
+            A=A,
+            C=C,
+            Q=Q,
+            R=R,
+            Z_0=Z_0,
+            V_0=V_0,
+            r=r,
+            p=p,
+            R_mat=R_mat,
+            q=q,
+            nQ=nQ,
+            i_idio=i_idio,
+            blocks=blocks,
             tent_weights_dict=tent_weights_dict,
             clock=clock,
             frequencies=frequencies,
             config=config
         )
+        C_new, R_new, A_new, Q_new, Z_0_new, V_0_new, loglik = em_step(em_step_params)
         
         # Handle likelihood decreases with damped updates
         if num_iter > 0 and loglik < previous_loglik - 1e-3:

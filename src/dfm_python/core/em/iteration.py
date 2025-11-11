@@ -5,6 +5,7 @@ This module contains:
 """
 
 from typing import Optional, Tuple, Dict, Any, TypedDict
+from dataclasses import dataclass
 import logging
 import warnings
 import numpy as np
@@ -110,25 +111,46 @@ from .initialization import (
 )
 from .convergence import DAMPING, MAX_LOADING_REPLACE
 
+
+@dataclass
+class EMStepParams:
+    """Parameters for a single EM step execution.
+    
+    This dataclass groups all parameters required for performing one EM iteration,
+    reducing function parameter count and improving readability.
+    
+    All parameters are required (no optional fields) since the EM step
+    needs all of them to execute.
+    """
+    # Data
+    y: np.ndarray
+    
+    # Model parameters
+    A: np.ndarray
+    C: np.ndarray
+    Q: np.ndarray
+    R: np.ndarray
+    Z_0: np.ndarray
+    V_0: np.ndarray
+    r: np.ndarray
+    p: int
+    
+    # Structure parameters
+    R_mat: Optional[np.ndarray]
+    q: Optional[np.ndarray]
+    nQ: Optional[int]
+    i_idio: np.ndarray
+    blocks: np.ndarray
+    tent_weights_dict: Optional[Dict[str, np.ndarray]]
+    clock: str
+    frequencies: Optional[np.ndarray]
+    
+    # Config
+    config: Optional[DFMConfig]
+
+
 def em_step(
-    y: np.ndarray,
-    A: np.ndarray,
-    C: np.ndarray,
-    Q: np.ndarray,
-    R: np.ndarray,
-    Z_0: np.ndarray,
-    V_0: np.ndarray,
-    r: np.ndarray,
-    p: int,
-    R_mat: Optional[np.ndarray],
-    q: Optional[np.ndarray],
-    nQ: Optional[int],
-    i_idio: np.ndarray,
-    blocks: np.ndarray,
-    tent_weights_dict: Optional[Dict[str, np.ndarray]] = None,
-    clock: str = 'm',
-    frequencies: Optional[np.ndarray] = None,
-    config: Optional[DFMConfig] = None
+    params: EMStepParams
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]:
     """Perform one EM iteration (E-step + M-step) and return updated parameters.
     
@@ -153,46 +175,27 @@ def em_step(
     
     Parameters
     ----------
-    y : np.ndarray
-        Observation matrix (n x T), where n is number of series and T is time periods.
-        Missing values should be NaN. These are handled automatically by the Kalman filter.
-    A : np.ndarray
-        Current transition matrix estimate (m x m), where m is state dimension.
-    C : np.ndarray
-        Current loading matrix estimate (n x m).
-    Q : np.ndarray
-        Current innovation covariance estimate (m x m).
-    R : np.ndarray
-        Current observation covariance estimate (n x n), typically diagonal.
-    Z_0 : np.ndarray
-        Current initial state estimate (m,).
-    V_0 : np.ndarray
-        Current initial covariance estimate (m x m).
-    r : np.ndarray
-        Number of factors per block, shape (n_blocks,).
-    p : int
-        AR lag order for factor dynamics. Typically p=1.
-    R_mat : np.ndarray, optional
-        Constraint matrix for tent kernel aggregation in mixed-frequency models.
-    q : np.ndarray, optional
-        Constraint vector for tent kernel aggregation.
-    nQ : int, optional
-        Number of slower-frequency series. If None, inferred from frequencies.
-    i_idio : np.ndarray
-        Indicator array (n,) where 1 indicates clock frequency, 0 indicates slower.
-    blocks : np.ndarray
-        Block structure matrix (n x n_blocks).
-    tent_weights_dict : dict, optional
-        Dictionary mapping frequency strings to tent weight arrays.
-    clock : str, default 'm'
-        Clock frequency for latent factors ('m', 'q', 'sa', 'a').
-    frequencies : np.ndarray, optional
-        Array of frequency strings (n,) for each series.
-    config : DFMConfig, optional
-        Configuration object for numerical stability parameters:
-        - min_eigenvalue: Minimum eigenvalue threshold for regularization
-        - max_eigenvalue: Maximum eigenvalue threshold for capping
-        - warn_on_regularization: Whether to warn when regularization is applied
+    params : EMStepParams
+        Dataclass containing all parameters for the EM step:
+        - y: Observation matrix (n x T), where n is number of series and T is time periods.
+          Missing values should be NaN. These are handled automatically by the Kalman filter.
+        - A: Current transition matrix estimate (m x m), where m is state dimension.
+        - C: Current loading matrix estimate (n x m).
+        - Q: Current innovation covariance estimate (m x m).
+        - R: Current observation covariance estimate (n x n), typically diagonal.
+        - Z_0: Current initial state estimate (m,).
+        - V_0: Current initial covariance estimate (m x m).
+        - r: Number of factors per block, shape (n_blocks,).
+        - p: AR lag order for factor dynamics. Typically p=1.
+        - R_mat: Constraint matrix for tent kernel aggregation in mixed-frequency models.
+        - q: Constraint vector for tent kernel aggregation.
+        - nQ: Number of slower-frequency series. If None, inferred from frequencies.
+        - i_idio: Indicator array (n,) where 1 indicates clock frequency, 0 indicates slower.
+        - blocks: Block structure matrix (n x n_blocks).
+        - tent_weights_dict: Dictionary mapping frequency strings to tent weight arrays.
+        - clock: Clock frequency for latent factors ('m', 'q', 'sa', 'a').
+        - frequencies: Array of frequency strings (n,) for each series.
+        - config: Configuration object for numerical stability parameters.
         
     Returns
     -------
@@ -232,7 +235,7 @@ def em_step(
     Examples
     --------
     >>> import numpy as np
-    >>> from dfm_python.core.em import em_step
+    >>> from dfm_python.core.em.iteration import em_step, EMStepParams
     >>> # Observation matrix with missing data
     >>> y = np.random.randn(10, 100)
     >>> y[0, 10:20] = np.nan  # Some missing values
@@ -245,15 +248,37 @@ def em_step(
     >>> V_0 = np.eye(3) * 0.1
     >>> r = np.array([1, 2])
     >>> blocks = np.column_stack([np.ones(10), np.ones(10)])
-    >>> # Perform one EM iteration
-    >>> C_new, R_new, A_new, Q_new, Z_0_new, V_0_new, loglik = em_step(
-    ...     y, A, C, Q, R, Z_0, V_0, r, p=1,
+    >>> # Create parameters dataclass
+    >>> params = EMStepParams(
+    ...     y=y, A=A, C=C, Q=Q, R=R, Z_0=Z_0, V_0=V_0, r=r, p=1,
     ...     R_mat=None, q=None, nQ=0, i_idio=np.ones(10),
-    ...     blocks=blocks, clock='m'
+    ...     blocks=blocks, tent_weights_dict=None, clock='m', frequencies=None, config=None
     ... )
+    >>> # Perform one EM iteration
+    >>> C_new, R_new, A_new, Q_new, Z_0_new, V_0_new, loglik = em_step(params)
     >>> assert C_new.shape == C.shape
     >>> assert np.isfinite(loglik)
     """
+    # Extract parameters from dataclass
+    y = params.y
+    A = params.A
+    C = params.C
+    Q = params.Q
+    R = params.R
+    Z_0 = params.Z_0
+    V_0 = params.V_0
+    r = params.r
+    p = params.p
+    R_mat = params.R_mat
+    q = params.q
+    nQ = params.nQ
+    i_idio = params.i_idio
+    blocks = params.blocks
+    tent_weights_dict = params.tent_weights_dict
+    clock = params.clock
+    frequencies = params.frequencies
+    config = params.config
+    
     # Validate and clean input parameters using generic helper
     A, Q, R, C, Z_0, V_0 = validate_params(
         A, Q, R, C, Z_0, V_0,
