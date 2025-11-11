@@ -519,6 +519,106 @@ class DFMConfig:
             self._cached_blocks = np.array(blocks_list, dtype=int)
         return self._cached_blocks
     
+    def validate_and_report(self) -> Dict[str, Any]:
+        """Validate configuration and return structured report with issues and suggestions.
+        
+        This method performs validation checks without raising exceptions, returning
+        a structured report that can be used for debugging and user guidance.
+        
+        Returns
+        -------
+        Dict[str, Any]
+            Report dictionary with keys:
+            - 'valid': bool - Whether configuration is valid
+            - 'errors': List[str] - List of error messages
+            - 'warnings': List[str] - List of warning messages
+            - 'suggestions': List[str] - List of actionable suggestions
+            
+        Examples
+        --------
+        >>> config = DFMConfig(...)
+        >>> report = config.validate_and_report()
+        >>> if not report['valid']:
+        ...     print("Errors:", report['errors'])
+        ...     print("Suggestions:", report['suggestions'])
+        """
+        from .utils import FREQUENCY_HIERARCHY
+        
+        report = {
+            'valid': True,
+            'errors': [],
+            'warnings': [],
+            'suggestions': []
+        }
+        
+        # Check for empty series
+        if not self.series:
+            report['valid'] = False
+            report['errors'].append("DFM configuration must contain at least one series.")
+            report['suggestions'].append("Add series definitions to your configuration.")
+            return report
+        
+        # Check for empty blocks
+        if not self.blocks:
+            report['valid'] = False
+            report['errors'].append("DFM configuration must contain at least one block.")
+            report['suggestions'].append("Add block definitions to your configuration.")
+            return report
+        
+        # Check frequency constraints
+        global_clock_hierarchy = FREQUENCY_HIERARCHY.get(self.clock, 3)
+        for i, s in enumerate(self.series):
+            series_freq_hierarchy = FREQUENCY_HIERARCHY.get(s.frequency, 3)
+            
+            for block_idx, loads_on_block in enumerate(s.blocks):
+                if loads_on_block == 1:
+                    if block_idx < len(self.block_names):
+                        block_name = self.block_names[block_idx]
+                        block_cfg = self.blocks[block_name]
+                        block_clock_hierarchy = FREQUENCY_HIERARCHY.get(block_cfg.clock, 3)
+                        
+                        if series_freq_hierarchy < block_clock_hierarchy:
+                            valid_freqs = [freq for freq, hier in FREQUENCY_HIERARCHY.items() 
+                                          if hier >= block_clock_hierarchy]
+                            valid_freqs_str = ', '.join(sorted(valid_freqs))
+                            report['valid'] = False
+                            report['errors'].append(
+                                f"Series '{s.series_id}' has frequency '{s.frequency}' which is faster than "
+                                f"block '{block_name}' clock '{block_cfg.clock}'."
+                            )
+                            report['suggestions'].append(
+                                f"For series '{s.series_id}': change frequency to one of [{valid_freqs_str}], "
+                                f"or set block '{block_name}' clock to '{s.frequency}' or faster."
+                            )
+        
+        # Check block clock constraints
+        for block_name, block_cfg in self.blocks.items():
+            block_clock_hierarchy = FREQUENCY_HIERARCHY.get(block_cfg.clock, 3)
+            if block_clock_hierarchy < global_clock_hierarchy:
+                report['valid'] = False
+                report['errors'].append(
+                    f"Block '{block_name}' has clock '{block_cfg.clock}' which is faster than "
+                    f"global clock '{self.clock}'."
+                )
+                report['suggestions'].append(
+                    f"Change block '{block_name}' clock to '{self.clock}' or slower, "
+                    f"or set global clock to '{block_cfg.clock}' or faster."
+                )
+        
+        # Check factors_per_block
+        if any(f < 1 for f in self.factors_per_block):
+            invalid_blocks = [i for i, f in enumerate(self.factors_per_block) if f < 1]
+            report['valid'] = False
+            report['errors'].append(
+                f"factors_per_block must contain positive integers (>= 1). "
+                f"Invalid values found at block indices {invalid_blocks}."
+            )
+            report['suggestions'].append(
+                f"Set factors_per_block[{invalid_blocks[0]}] to at least 1 for block '{self.block_names[invalid_blocks[0]]}'."
+            )
+        
+        return report
+    
     # Note: Legacy PascalCase properties were removed to keep the API clean and generic.
     # Use the snake_case helper methods above.
     

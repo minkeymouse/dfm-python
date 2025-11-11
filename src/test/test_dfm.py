@@ -956,6 +956,31 @@ def test_with_direct_config():
         pytest.skip(f"Integration test skipped: {e}")
 
 
+def test_config_validation_report():
+    """Test validate_and_report() method for configuration debugging."""
+    # Test valid configuration
+    series = [SeriesConfig(series_id='test1', frequency='m', transformation='lin', blocks=[1])]
+    blocks = {'Block_Global': BlockConfig(factors=1, ar_lag=1, clock='m')}
+    config = DFMConfig(series=series, blocks=blocks)
+    
+    report = config.validate_and_report()
+    assert report['valid'] is True
+    assert len(report['errors']) == 0
+    assert isinstance(report['suggestions'], list)
+    assert 'valid' in report
+    assert 'errors' in report
+    assert 'warnings' in report
+    assert 'suggestions' in report
+    
+    # Test that validate_and_report works on valid configs
+    # (invalid configs raise ValueError in __post_init__, so we can't test them directly)
+    # But we can verify the method structure and that it returns the right format
+    assert isinstance(report['valid'], bool)
+    assert isinstance(report['errors'], list)
+    assert isinstance(report['warnings'], list)
+    assert isinstance(report['suggestions'], list)
+
+
 if __name__ == '__main__':
     # Quick verification
     print("Running DFM quick test...")
