@@ -41,6 +41,7 @@ from .utils import (
     reshape_to_row_vector,
     pad_matrix_to_shape,
     safe_numerical_operation,
+    resolve_param,
 )
 
 __all__ = [
@@ -82,5 +83,6 @@ __all__ = [
     'reshape_to_row_vector',
     'pad_matrix_to_shape',
     'safe_numerical_operation',
+    'resolve_param',
 ]
 

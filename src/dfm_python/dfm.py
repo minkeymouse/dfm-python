@@ -46,7 +46,7 @@ from .core.em import (
     em_converged,
     NaNHandlingOptions,
 )
-from .core.helpers import safe_get_method, safe_get_attr
+from .core.helpers import safe_get_method, safe_get_attr, resolve_param
 
 from .data_loader import rem_nans_spline
 from .utils.aggregation import (
@@ -311,11 +311,6 @@ class DFM:
         return self._config
 
 
-def _resolve_param(override: Any, default: Any) -> Any:
-    """Resolve parameter: use override if provided, else use default."""
-    return override if override is not None else default
-
-
 def _prepare_data_and_params(
     X: np.ndarray,
     config: DFMConfig,
@@ -359,26 +354,26 @@ def _prepare_data_and_params(
     
     # Resolve all parameters
     params = {
-        'p': _resolve_param(ar_lag, config.ar_lag),
+        'p': resolve_param(ar_lag, config.ar_lag),
         'r': (np.array(config.factors_per_block) 
               if config.factors_per_block is not None 
               else np.ones(blocks.shape[1])),
-        'nan_method': _resolve_param(nan_method, config.nan_method),
-        'nan_k': _resolve_param(nan_k, config.nan_k),
-        'threshold': _resolve_param(threshold, config.threshold),
-        'max_iter': _resolve_param(max_iter, config.max_iter),
-        'clock': _resolve_param(clock, config.clock),
-        'clip_ar_coefficients': _resolve_param(clip_ar_coefficients, config.clip_ar_coefficients),
-        'ar_clip_min': _resolve_param(ar_clip_min, config.ar_clip_min),
-        'ar_clip_max': _resolve_param(ar_clip_max, config.ar_clip_max),
-        'clip_data_values': _resolve_param(clip_data_values, config.clip_data_values),
-        'data_clip_threshold': _resolve_param(data_clip_threshold, config.data_clip_threshold),
-        'use_regularization': _resolve_param(use_regularization, config.use_regularization),
-        'regularization_scale': _resolve_param(regularization_scale, config.regularization_scale),
-        'min_eigenvalue': _resolve_param(min_eigenvalue, config.min_eigenvalue),
-        'max_eigenvalue': _resolve_param(max_eigenvalue, config.max_eigenvalue),
-        'use_damped_updates': _resolve_param(use_damped_updates, config.use_damped_updates),
-        'damping_factor': _resolve_param(damping_factor, config.damping_factor),
+        'nan_method': resolve_param(nan_method, config.nan_method),
+        'nan_k': resolve_param(nan_k, config.nan_k),
+        'threshold': resolve_param(threshold, config.threshold),
+        'max_iter': resolve_param(max_iter, config.max_iter),
+        'clock': resolve_param(clock, config.clock),
+        'clip_ar_coefficients': resolve_param(clip_ar_coefficients, config.clip_ar_coefficients),
+        'ar_clip_min': resolve_param(ar_clip_min, config.ar_clip_min),
+        'ar_clip_max': resolve_param(ar_clip_max, config.ar_clip_max),
+        'clip_data_values': resolve_param(clip_data_values, config.clip_data_values),
+        'data_clip_threshold': resolve_param(data_clip_threshold, config.data_clip_threshold),
+        'use_regularization': resolve_param(use_regularization, config.use_regularization),
+        'regularization_scale': resolve_param(regularization_scale, config.regularization_scale),
+        'min_eigenvalue': resolve_param(min_eigenvalue, config.min_eigenvalue),
+        'max_eigenvalue': resolve_param(max_eigenvalue, config.max_eigenvalue),
+        'use_damped_updates': resolve_param(use_damped_updates, config.use_damped_updates),
+        'damping_factor': resolve_param(damping_factor, config.damping_factor),
         'T': T,
         'N': N,
     }
