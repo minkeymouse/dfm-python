@@ -2,8 +2,12 @@
 
 from typing import Tuple
 import numpy as np
+import logging
 from scipy.linalg import inv, pinv
 from ._common import NUMERICAL_EXCEPTIONS
+from ..numeric import _clean_matrix
+
+_logger = logging.getLogger(__name__)
 
 
 def estimate_ar_coefficients_ols(
@@ -192,4 +196,71 @@ def safe_mean_std(matrix: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
             means[j] = 0.0
             stds[j] = 1.0
     return means, stds
+
+
+def standardize_data(
+    X: np.ndarray,
+    clip_data_values: bool,
+    data_clip_threshold: float
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Standardize data and handle missing values.
+    
+    Parameters
+    ----------
+    X : np.ndarray
+        Input data matrix (T x N)
+    clip_data_values : bool
+        Whether to clip extreme standardized values
+    data_clip_threshold : float
+        Threshold for clipping (in standard deviations)
+    
+    Returns
+    -------
+    x_standardized : np.ndarray
+        Standardized data (T x N)
+    Mx : np.ndarray
+        Series means (N,)
+    Wx : np.ndarray
+        Series standard deviations (N,)
+    """
+    Mx, Wx = safe_mean_std(X)
+    
+    # Handle zero/near-zero standard deviations
+    min_std = 1e-6
+    Wx = np.maximum(Wx, min_std)
+    
+    # Handle NaN standard deviations
+    nan_std_mask = np.isnan(Wx) | np.isnan(Mx)
+    if np.any(nan_std_mask):
+        _logger.warning(
+            f"Series with NaN mean/std detected: {np.sum(nan_std_mask)}. "
+            f"Setting Wx=1.0, Mx=0.0 for these series."
+        )
+        Wx[nan_std_mask] = 1.0
+        Mx[nan_std_mask] = 0.0
+    
+    # Standardize
+    x_standardized = (X - Mx) / Wx
+    
+    # Clip extreme values if enabled
+    if clip_data_values:
+        n_clipped_before = np.sum(np.abs(x_standardized) > data_clip_threshold)
+        x_standardized = np.clip(x_standardized, -data_clip_threshold, data_clip_threshold)
+        if n_clipped_before > 0:
+            pct_clipped = 100.0 * n_clipped_before / x_standardized.size
+            _logger.warning(
+                f"Data value clipping applied: {n_clipped_before} values ({pct_clipped:.2f}%) "
+                f"clipped beyond ±{data_clip_threshold} standard deviations."
+            )
+    
+    # Replace any remaining NaN/Inf using consolidated utility
+    default_inf_val = data_clip_threshold if clip_data_values else 100
+    x_standardized = _clean_matrix(
+        x_standardized,
+        'general',
+        default_nan=0.0,
+        default_inf=default_inf_val
+    )
+    
+    return x_standardized, Mx, Wx
 
