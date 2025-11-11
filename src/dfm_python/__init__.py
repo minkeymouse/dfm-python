@@ -63,7 +63,7 @@ from .config import (
     MergedConfigSource,
     make_config_source,
 )
-from .data.transformer import transform_data
+from .data import transform_data
 from .dfm import DFMResult
 from .core.diagnostics import calculate_rmse, diagnose_series, print_series_diagnosis
 from .dfm import DFM as _DFMCore  # Core DFM class from dfm.py
