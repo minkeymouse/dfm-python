@@ -158,7 +158,7 @@ def main() -> None:
         raise ValueError("Data not loaded")
     print(f"✓ Data loaded:")
     print(f"  - Shape: {X.shape} (time periods × series)")
-    print(f"  - Time range: {Time[0]} ~ {Time[-1]}")
+    print(f"  - Time range: {Time.iloc[0] if hasattr(Time, 'iloc') else Time[0]} ~ {Time.iloc[-1] if hasattr(Time, 'iloc') else Time[-1]}")
     print(f"  - Missing data ratio: {pd.isna(X).sum().sum() / X.size * 100:.2f}%")
 
     # 4) Train
@@ -353,7 +353,7 @@ if result.time_index is not None:
     else:
         X_forecast, Z_forecast = pred_out, None
     # Build forecast date index for saving
-    last_date = pd.to_datetime(Time[-1])
+    last_date = pd.to_datetime(Time.iloc[-1] if hasattr(Time, 'iloc') else Time[-1])
     try:
         forecast_dates = pd.date_range(
             start=last_date + pd.tseries.frequencies.to_offset('ME'),
