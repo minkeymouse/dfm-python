@@ -70,55 +70,11 @@ from .kalman import run_kf, skf, fis, miss_data
 from .news import update_nowcast, news_dfm, para_const
 
 # Import high-level API (extends core DFM with convenience methods)
-from .api import DFM, _dfm_instance, from_yaml, from_spec, from_spec_df, from_dict
-
-# Module-level API: expose singleton instance methods and properties
-# This allows: import dfm_python as dfm; dfm.load_config(...); dfm.result
-def load_config(
-    source=None,
-    *,
-    yaml=None,
-    mapping=None,
-    spec=None,
-    hydra=None,
-    base=None,
-    override=None,
-    config=None,
-):
-    """Load configuration (module-level convenience function).
-    
-    See DFM.load_config() for parameter documentation.
-    """
-    return _dfm_instance.load_config(
-        source=source,
-        yaml=yaml,
-        mapping=mapping,
-        spec=spec,
-        hydra=hydra,
-        base=base,
-        override=override,
-        config=config,
-    )
-
-def load_data(data_path=None, data=None, **kwargs):
-    """Load data (module-level convenience function)."""
-    return _dfm_instance.load_data(data_path=data_path, data=data, **kwargs)
-
-def train(threshold=None, max_iter=None, **kwargs):
-    """Train the model (module-level convenience function)."""
-    return _dfm_instance.train(threshold=threshold, max_iter=max_iter, **kwargs)
-
-def predict(horizon=12, **kwargs):
-    """Forecast using the trained model (module-level convenience function)."""
-    return _dfm_instance.predict(horizon=horizon, **kwargs)
-
-def plot(**kwargs):
-    """Plot common visualizations (module-level convenience function)."""
-    return _dfm_instance.plot(**kwargs)
-
-def reset():
-    """Reset state (module-level convenience function)."""
-    return _dfm_instance.reset()
+# Import module-level convenience functions directly from api.py to avoid duplication
+from .api import (
+    DFM, _dfm_instance, from_yaml, from_spec, from_spec_df, from_dict,
+    load_config, load_data, train, predict, plot, reset
+)
 
 # Expose properties as module-level attributes
 # Use property-like access via functions or direct attribute access
