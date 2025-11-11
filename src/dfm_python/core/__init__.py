@@ -1,12 +1,10 @@
 """Core utilities for DFM estimation.
 
 This package contains core functionality organized by domain:
-- em.py: EM algorithm core (init_conditions, em_step, em_converged)
-- numeric.py: Numerical utilities (matrix operations, regularization, clipping)
-- diagnostics.py: Diagnostic functions and output formatting
-- results.py: Result metrics (RMSE calculation)
-- grouping.py: Frequency grouping utilities
-- helpers.py: Common helper functions for code patterns
+- em: EM algorithm core package (init_conditions, em_step, em_converged)
+- numeric: Numerical utilities package (matrix operations, regularization, clipping)
+- diagnostics: Diagnostic functions and output formatting
+- helpers: Common helper functions for code patterns
 """
 
 from .em import init_conditions, em_step, em_converged
