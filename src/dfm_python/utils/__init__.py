@@ -1,6 +1,6 @@
 """Utility functions for data preprocessing and summary statistics."""
 
-from ..data_loader import rem_nans_spline, summarize
+from ..data.utils import rem_nans_spline, summarize
 from .aggregation import (
     generate_tent_weights,
     generate_R_mat,

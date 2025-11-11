@@ -10,6 +10,8 @@ from .estimation import (
     estimate_ar_coefficients_ols,
     compute_innovation_covariance,
     compute_sufficient_stats,
+    safe_mean_std,
+    standardize_data,
 )
 from .validation import validate_params, stabilize_cov
 from .matrix import (
@@ -41,6 +43,7 @@ from .utils import (
     reshape_to_row_vector,
     pad_matrix_to_shape,
     safe_numerical_operation,
+    resolve_param,
 )
 
 __all__ = [
@@ -51,6 +54,8 @@ __all__ = [
     'estimate_ar_coefficients_ols',
     'compute_innovation_covariance',
     'compute_sufficient_stats',
+    'safe_mean_std',
+    'standardize_data',
     # Validation
     'validate_params',
     'stabilize_cov',
@@ -82,5 +87,6 @@ __all__ = [
     'reshape_to_row_vector',
     'pad_matrix_to_shape',
     'safe_numerical_operation',
+    'resolve_param',
 ]
 

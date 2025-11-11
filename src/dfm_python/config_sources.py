@@ -242,7 +242,7 @@ class SpecCSVSource:
     def load(self) -> DFMConfig:
         """Load series definitions from spec CSV."""
         import pandas as pd
-        from .data_loader import _load_config_from_dataframe
+        from .data.config_loader import _load_config_from_dataframe
         
         specfile = Path(self.spec_path)
         if not specfile.exists():
@@ -501,4 +501,58 @@ def make_config_source(
         f"Unsupported source type: {type(source)}. "
         f"Expected str, Path, dict, ConfigSource, or DFMConfig."
     )
+
+
+# ============================================================================
+# Hydra ConfigStore Registration (optional - only if Hydra is available)
+# ============================================================================
+
+try:
+    from hydra.core.config_store import ConfigStore
+    HYDRA_AVAILABLE = True
+except ImportError:
+    HYDRA_AVAILABLE = False
+    ConfigStore = None
+
+if HYDRA_AVAILABLE and ConfigStore is not None:
+    try:
+        cs = ConfigStore.instance()
+        if cs is not None:
+            from dataclasses import dataclass as schema_dataclass
+            from typing import List as ListType
+            
+            @schema_dataclass
+            class SeriesConfigSchema:
+                """Schema for SeriesConfig validation in Hydra."""
+                series_id: str
+                series_name: str
+                frequency: str
+                units: str
+                transformation: str
+                category: str
+                blocks: ListType[int]
+            
+            @schema_dataclass
+            class DFMConfigSchema:
+                """Schema for unified DFMConfig validation in Hydra."""
+                series: ListType[SeriesConfigSchema]
+                block_names: ListType[str]
+                factors_per_block: Optional[ListType[int]] = None
+                ar_lag: int = 1
+                threshold: float = 1e-5
+                max_iter: int = 5000
+                nan_method: int = 2
+                nan_k: int = 3
+                clock: str = 'm'
+            
+            # Register schemas
+            cs.store(group="dfm", name="base_dfm_config", node=DFMConfigSchema)
+            cs.store(group="model", name="base_model_config", node=DFMConfigSchema)
+            cs.store(name="dfm_config_schema", node=DFMConfigSchema)
+            cs.store(name="model_config_schema", node=DFMConfigSchema)
+            
+    except Exception as e:
+        import warnings
+        warnings.warn(f"Could not register Hydra structured config schemas: {e}. "
+                     f"Configs will still work via from_dict() but without schema validation.")
 

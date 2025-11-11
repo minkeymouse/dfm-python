@@ -34,7 +34,8 @@ Example (High-level API - Recommended):
     
 Example (Low-level API - For advanced usage):
     >>> from dfm_python import DFM, DFMConfig, SeriesConfig
-    >>> from dfm_python.data_loader import load_data
+    >>> from dfm_python.data import load_data  # Preferred import
+    >>> # or for backward compatibility: from dfm_python.data_loader import load_data
     >>> # Option 1: Load from YAML
     >>> config = load_config('config.yaml')
     >>> # Option 2: Create directly
@@ -62,7 +63,7 @@ from .config import (
     MergedConfigSource,
     make_config_source,
 )
-from .data_loader import transform_data
+from .data.transformer import transform_data
 from .dfm import DFMResult
 from .core.diagnostics import calculate_rmse, diagnose_series, print_series_diagnosis
 from .dfm import DFM as _DFMCore  # Core DFM class from dfm.py
