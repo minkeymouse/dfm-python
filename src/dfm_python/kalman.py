@@ -14,9 +14,11 @@ def _get_numeric_utils():
     from dfm_python.core.numeric import (
         _ensure_real_and_symmetric,
         _ensure_covariance_stable,
-        _ensure_real
+        _ensure_real,
+        _clean_matrix,
+        _check_finite
     )
-    return _ensure_real_and_symmetric, _ensure_covariance_stable, _ensure_real
+    return _ensure_real_and_symmetric, _ensure_covariance_stable, _ensure_real, _clean_matrix, _check_finite
 
 
 @dataclass
@@ -193,14 +195,15 @@ def skf(Y: np.ndarray, A: np.ndarray, C: np.ndarray, Q: np.ndarray,
         # Use transition equation to create prior estimate for factor
         # i.e. Z = Z_t|t-1
         # Check for NaN/Inf in inputs
-        if np.any(np.isnan(Zu)) or np.any(np.isinf(Zu)):
+        _, _ensure_covariance_stable, _, _, _check_finite = _get_numeric_utils()
+        if not _check_finite(Zu, f"Zu at t={t}"):
             _logger.warning(f"skf: Zu contains NaN/Inf at t={t}, resetting to zeros")
             Zu = np.zeros_like(Zu)
         
         Z = A @ Zu
         
         # Check for NaN/Inf in Z
-        if np.any(np.isnan(Z)) or np.any(np.isinf(Z)):
+        if not _check_finite(Z, f"Z at t={t}"):
             _logger.warning(f"skf: Z contains NaN/Inf at t={t}, using previous Zu")
             Z = Zu.copy()
         
@@ -209,12 +212,11 @@ def skf(Y: np.ndarray, A: np.ndarray, C: np.ndarray, Q: np.ndarray,
         V = A @ Vu @ A.T + Q
         
         # Check for NaN/Inf before stabilization
-        if np.any(np.isnan(V)) or np.any(np.isinf(V)):
+        if not _check_finite(V, f"V at t={t}"):
             # Fallback: use previous covariance with regularization
             V = Vu + np.eye(V.shape[0]) * 1e-6
         
         # Ensure V is real, symmetric, and positive semi-definite
-        _, _ensure_covariance_stable, _ = _get_numeric_utils()
         V = _ensure_covariance_stable(V, min_eigenval=1e-8, ensure_real=True)
         
         # Calculate posterior distribution
@@ -234,11 +236,11 @@ def skf(Y: np.ndarray, A: np.ndarray, C: np.ndarray, Q: np.ndarray,
             F = C_t @ VC + R_t
             
             # Ensure F is real, symmetric, and positive semi-definite
-            _, _ensure_covariance_stable, _ = _get_numeric_utils()
+            _, _ensure_covariance_stable, _, _, _check_finite = _get_numeric_utils()
             F = _ensure_covariance_stable(F, min_eigenval=1e-8, ensure_real=True)
             
             # Check for NaN/Inf before inversion
-            if np.any(np.isnan(F)) or np.any(np.isinf(F)):
+            if not _check_finite(F, f"F at t={t}"):
                 # Fallback: use identity with large variance
                 F = np.eye(F.shape[0]) * 1e6
                 _logger.warning(f"skf: F matrix contains NaN/Inf at t={t}, using fallback")
@@ -258,7 +260,7 @@ def skf(Y: np.ndarray, A: np.ndarray, C: np.ndarray, Q: np.ndarray,
             innov = Y_t - C_t @ Z
             
             # Check for NaN/Inf in innovation
-            if np.any(np.isnan(innov)) or np.any(np.isinf(innov)):
+            if not _check_finite(innov, f"innovation at t={t}"):
                 _logger.warning(f"skf: Innovation contains NaN/Inf at t={t}, skipping update")
                 Zu = Z
                 Vu = V
@@ -267,23 +269,23 @@ def skf(Y: np.ndarray, A: np.ndarray, C: np.ndarray, Q: np.ndarray,
                 Zu = Z + VCF @ innov
                 
                 # Clean NaN/Inf only (remove excessive clipping during iterations)
-                if np.any(~np.isfinite(Zu)):
-                    Zu = np.nan_to_num(Zu, nan=0.0, posinf=0.0, neginf=0.0)
+                _, _ensure_covariance_stable, _, _clean_matrix, _check_finite = _get_numeric_utils()
+                if not _check_finite(Zu, f"Zu at t={t}"):
+                    Zu = _clean_matrix(Zu, 'general', default_nan=0.0, default_inf=0.0)
                 
                 # Update covariance matrix (posterior) for time t
                 Vu = V - VCF @ VC.T
                 
                 # Clean NaN/Inf before stabilization
-                if np.any(~np.isfinite(Vu)):
-                    Vu = np.nan_to_num(Vu, nan=1e-8, posinf=1e6, neginf=1e-8)
+                if not _check_finite(Vu, f"Vu at t={t}"):
+                    Vu = _clean_matrix(Vu, 'general', default_nan=1e-8, default_inf=1e6)
                 
                 # Check for NaN/Inf after cleaning
-                if np.any(np.isnan(Vu)) or np.any(np.isinf(Vu)):
+                if not _check_finite(Vu, f"Vu at t={t}"):
                     _logger.warning(f"skf: Vu contains NaN/Inf at t={t}, using V as fallback")
                     Vu = V.copy()
                 
                 # Ensure Vu is real, symmetric, and positive semi-definite
-                _, _ensure_covariance_stable, _ = _get_numeric_utils()
                 Vu = _ensure_covariance_stable(Vu, min_eigenval=1e-8, ensure_real=True)
                 
                 # Update log-likelihood (with safeguards)
@@ -304,7 +306,7 @@ def skf(Y: np.ndarray, A: np.ndarray, C: np.ndarray, Q: np.ndarray,
         # Store output
         # Store covariance and observation values for t (priors)
         # Ensure Z and V are real before storing
-        _ensure_real_and_symmetric, _, _ensure_real = _get_numeric_utils()
+        _ensure_real_and_symmetric, _, _ensure_real, _, _ = _get_numeric_utils()
         Z = _ensure_real(Z)
         V = _ensure_real_and_symmetric(V)
         Zm[:, t] = Z
@@ -358,7 +360,7 @@ def fis(A: np.ndarray, S: KalmanFilterState) -> KalmanFilterState:
     # Initialize VmT_1 lag 1 covariance matrix for final period
     VmT_1 = np.zeros((m, m, nobs))
     VmT_1_temp = (np.eye(m) - S.k_t) @ A @ S.VmU[:, :, nobs - 1]
-    _ensure_real_and_symmetric, _, _ = _get_numeric_utils()
+    _ensure_real_and_symmetric, _, _, _, _ = _get_numeric_utils()
     VmT_1[:, :, nobs - 1] = _ensure_real_and_symmetric(VmT_1_temp)
     
     # Used for recursion process
@@ -381,17 +383,17 @@ def fis(A: np.ndarray, S: KalmanFilterState) -> KalmanFilterState:
         ZmT[:, t] = S.ZmU[:, t] + J_1 @ (ZmT[:, t + 1] - A @ S.ZmU[:, t])
         
         # Clean NaN/Inf only (remove excessive clipping)
-        if np.any(~np.isfinite(ZmT[:, t])):
-            ZmT[:, t] = np.nan_to_num(ZmT[:, t], nan=0.0, posinf=0.0, neginf=0.0)
+        _ensure_real_and_symmetric, _, _, _clean_matrix, _check_finite = _get_numeric_utils()
+        if not _check_finite(ZmT[:, t], f"ZmT[:, t] at t={t}"):
+            ZmT[:, t] = _clean_matrix(ZmT[:, t], 'general', default_nan=0.0, default_inf=0.0)
         
         # Update smoothed factor covariance matrix
         VmT_temp = VmU + J_1 @ (V_T - Vm1) @ J_1.T
-        _ensure_real_and_symmetric, _, _ = _get_numeric_utils()
         VmT[:, :, t] = _ensure_real_and_symmetric(VmT_temp)
         
         # Clean NaN/Inf and ensure PSD (keep only critical regularization)
-        if np.any(~np.isfinite(VmT[:, :, t])):
-            VmT[:, :, t] = np.nan_to_num(VmT[:, :, t], nan=1e-8, posinf=1e6, neginf=1e-8)
+        if not _check_finite(VmT[:, :, t], f"VmT[:, :, t] at t={t}"):
+            VmT[:, :, t] = _clean_matrix(VmT[:, :, t], 'general', default_nan=1e-8, default_inf=1e6)
         
         if t > 0:
             # Update weight
@@ -399,7 +401,7 @@ def fis(A: np.ndarray, S: KalmanFilterState) -> KalmanFilterState:
             
             # Update lag 1 factor covariance matrix 
             VmT_1_temp = VmU @ J_2.T + J_1 @ (V_T1 - A @ VmU) @ J_2.T
-            _ensure_real_and_symmetric, _, _ = _get_numeric_utils()
+            _ensure_real_and_symmetric, _, _, _, _ = _get_numeric_utils()
             VmT_1[:, :, t - 1] = _ensure_real_and_symmetric(VmT_1_temp)
     
     # Add smoothed estimates as attributes
@@ -455,7 +457,7 @@ def run_kf(Y: np.ndarray, A: np.ndarray, C: np.ndarray, Q: np.ndarray,
     loglik = S.loglik
     
     # Ensure loglik is real and finite
-    _, _, _ensure_real = _get_numeric_utils()
+    _, _, _ensure_real, _, _ = _get_numeric_utils()
     loglik = _ensure_real(np.array([loglik]))[0] if np.iscomplexobj(loglik) else loglik
     if not np.isfinite(loglik):
         loglik = -np.inf

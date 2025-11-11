@@ -535,12 +535,13 @@ def _standardize_data(
                 f"clipped beyond ±{data_clip_threshold} standard deviations."
             )
     
-    # Replace any remaining NaN/Inf
-    x_standardized = np.nan_to_num(
+    # Replace any remaining NaN/Inf using consolidated utility
+    default_inf_val = data_clip_threshold if clip_data_values else 100
+    x_standardized = _clean_matrix(
         x_standardized,
-        nan=0.0,
-        posinf=data_clip_threshold if clip_data_values else 100,
-        neginf=-data_clip_threshold if clip_data_values else -100
+        'general',
+        default_nan=0.0,
+        default_inf=default_inf_val
     )
     
     return x_standardized, Mx, Wx

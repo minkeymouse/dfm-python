@@ -1,22 +1,42 @@
 # Changelog
 
-## [0.2.4] - 2025-01-XX
+## [0.2.4] - 2025-11-11
 
 ### Major Refactoring and Code Quality Improvements
 
 This release includes extensive refactoring focused on code maintainability, robustness, and documentation.
 
 #### Code Refactoring
+- **Fixed import inconsistency**: Added missing `_compute_variance_safe` import in `core/__init__.py` (was in `__all__` but not imported)
+- **Removed redundant code**: Simplified redundant if/else in `_estimate_ar_coefficient()` that set `Q_diag = None` in both branches
+- **Consolidated lazy import pattern**: Created `_get_helpers()` helper function for consistent lazy import pattern in `numeric.py`
+- **Removed unused import**: Removed unused `Callable` import from `core/helpers.py` (only `callable()` built-in is used, not the type hint)
+- **Consolidated config access**: Removed redundant `_get_config_param()` function from `em.py` and replaced all 8 instances with `safe_get_attr()` from `core/helpers.py`, eliminating duplication and centralizing config access patterns
+- **Consolidated matrix cleaning**: Replaced all direct `np.nan_to_num()` calls with `_clean_matrix()` utility for consistency:
+  - Replaced 4 calls in `kalman.py` (state vectors and covariance matrices)
+  - Replaced 1 call in `dfm.py` (data standardization)
+  - Replaced scalar case in `_estimate_ar_coefficient()` in `numeric.py`
+  - All matrix cleaning now goes through centralized `_clean_matrix()` utility
 - **Consolidated covariance/variance computation**: Created `_compute_covariance_safe()` and `_compute_variance_safe()` functions to eliminate code duplication (17 patterns → 3 functions)
-- **Named constants**: Replaced 30+ magic numbers with named constants for better maintainability:
-  - `DEFAULT_AR_COEFFICIENT`, `DEFAULT_INNOVATION_VARIANCE`
-  - `MIN_INNOVATION_VARIANCE`, `MIN_OBSERVATION_VARIANCE`
-  - `DEFAULT_OBSERVATION_VARIANCE`, etc.
+- **Eliminated redundant variance computation**: Refactored `_compute_covariance_safe()` to use `_compute_variance_safe()` for 1D and single-variable cases, removing duplicate validation logic
+- **Unified PSD regularization**: Refactored `_ensure_covariance_stable()` to use `_ensure_positive_definite()` internally, eliminating duplicate PSD regularization code and ensuring consistent behavior
+- **Named constants**: Replaced 40+ magic numbers with named constants for better maintainability:
+  - **Initialization constants** (in `em.py`): `MIN_DATA_COVERAGE_RATIO`, `MIN_EIGENVALUE_ABSOLUTE`, `MIN_EIGENVALUE_RELATIVE`, `MIN_LOADING_ABS_THRESHOLD`, `TARGET_LOADING_ABS_MAX`, `MIN_AR_COEFF_ABSOLUTE`, `FALLBACK_TRANSITION_COEFF`, `FALLBACK_RANDOM_SCALE`
+  - **Numerical stability constants** (in `em.py`): `DEFAULT_AR_COEFFICIENT`, `DEFAULT_INNOVATION_VARIANCE`, `MIN_INNOVATION_VARIANCE`, `MIN_OBSERVATION_VARIANCE`, `DEFAULT_OBSERVATION_VARIANCE`
+  - **Numeric utility constants** (in `numeric.py`): `DEFAULT_VARIANCE_FALLBACK`, `MIN_VARIANCE_COVARIANCE`, `MIN_EIGENVAL_CLEAN`, `MIN_DIAGONAL_VARIANCE`
 - **Improved naming**: Consistent variable naming throughout codebase (e.g., `res_block` → `block_residuals`, `resNaN` → `residuals_with_nan`)
-- **Code deduplication**: Reduced code by ~80 lines through consolidation of repeated patterns
+- **Code deduplication**: Reduced code by ~100 lines through consolidation of repeated patterns
 
 #### Documentation
 - **Enhanced docstrings**: Comprehensive docstrings with examples for all major functions (`init_conditions`, `em_step`, `em_converged`)
+- **Convergence documentation**: Added Notes section to `em_converged()` documenting MATLAB alignment and Numerical Recipes formula reference
+- **Improved function documentation**: Added complete Parameters/Returns/Notes sections to 18 utility functions:
+  - Numeric utilities: `_clean_matrix()`, `_compute_principal_components()`, `_ensure_real_and_symmetric()`, `_ensure_covariance_stable()`, `_ensure_positive_definite()`, `_apply_ar_clipping()`, `_estimate_ar_coefficient()`, `_safe_divide()`, `_compute_regularization_param()`, `_clip_ar_coefficients()`, `_ensure_square_matrix()`, `_ensure_symmetric()`, `_ensure_real()`, `_check_finite()`
+  - Helper functions: `group_series_by_frequency()`, `safe_get_method()`, `safe_get_attr()`, `calculate_rmse()`
+  - Diagnostics: `_display_dfm_tables()`, `diagnose_series()`, `print_series_diagnosis()`
+- **Code comments**: Added explanatory comment for Block_Global pairwise_complete rationale in `init_conditions()`
+- **Tutorial improvements**: Enhanced skip messages with file paths and actionable guidance
+- **Clarified parameter documentation**: Enhanced docstrings for `_estimate_ar_coefficient()` to document unused `T` parameter (reserved for future use)
 - **Updated README**: Added "Code Quality" section highlighting refactoring improvements
 - **Improved tutorials**: Enhanced `basic_tutorial.py` and `hydra_tutorial.py` with better explanations and examples
 
@@ -26,7 +46,13 @@ This release includes extensive refactoring focused on code maintainability, rob
 - **Enhanced error messages**: More informative logging messages with context information
 
 #### Testing
-- All 38+ tests passing
+- **Expanded test coverage**: Added 32 new comprehensive tests (67 total, up from 35):
+  - **Edge case tests**: `test_q_diagonal_never_zero()`, `test_init_conditions_block_global_sparse_data()`, `test_em_converged()`, `test_kalman_stability_edge_cases()`
+  - **Block_Global edge cases**: `test_init_conditions_block_global_all_nan_residuals()`, `test_init_conditions_block_global_single_series()`, `test_init_conditions_pairwise_complete_block_global()`
+  - **Kalman filter edge cases**: `test_skf_zero_observation_variance()`, `test_fis_all_missing_observations()`
+  - **Covariance edge cases**: `test_compute_covariance_safe_pairwise_extreme_sparsity()`, `test_compute_covariance_safe_pairwise_single_observation()`
+  - **Tutorial validation**: `test_tutorial_smoke_test()` (no data files required)
+- All 67 core tests passing (1 skipped, 3 expected warnings)
 - No linter errors
 - Verified compatibility with existing functionality
 
@@ -34,7 +60,7 @@ This release includes extensive refactoring focused on code maintainability, rob
 - Internal refactoring: No breaking changes to public API
 - Improved numerical stability through consolidated utility functions
 
-## [0.2.3] - 2025-01-XX
+## [0.2.3] - 2025-11-11
 
 ### Changed
 
@@ -42,7 +68,7 @@ This release includes extensive refactoring focused on code maintainability, rob
   - Improves compatibility with other packages (e.g., `ydata-profiling`) that require `matplotlib<=3.10`
   - Reduces dependency conflicts in Kaggle and other environments
 
-## [0.2.2] - 2025-01-XX
+## [0.2.2] - 2025-11-10
 
 ### Changed
 
@@ -72,7 +98,7 @@ This release includes extensive refactoring focused on code maintainability, rob
 - **README**: Significantly simplified and streamlined (reduced from 653 to ~250 lines) while maintaining all essential information.
 - Improved clarity and focus on most common use cases.
 
-## [0.2.0] - 2025-01-XX
+## [0.2.0] - 2025-11-10
 
 ### Major Refactoring
 
@@ -183,29 +209,6 @@ This release represents a comprehensive refactoring focused on code quality, mai
 - Updated all docstrings to use new API
 - Improved code comments and documentation
 
-## [0.1.7] - 2025-01-XX
-
-### Changed
-- **BREAKING**: Removed CSV config loading - use YAML files or create `DFMConfig` objects directly
-- Made package more generic by removing application-specific dependencies
-- Improved code documentation and comments throughout codebase
-- Refactored variable naming for clarity and consistency
-- Updated README to be more concise and focused
-
-### Added
-- Direct `DFMConfig` object creation support in `load_config()`
-- Application-specific adapter guidance for custom formats
-- Database-backed data loading adapter interface documentation
-- Enhanced function docstrings with detailed parameter descriptions
-
-### Removed
-- CSV configuration file support (deprecated, use YAML or direct object creation)
-- `load_config_from_csv()` function (deprecated, kept for backward compatibility with warning)
-- Spec file dependencies
-
-### Fixed
-- Improved error messages for frequency constraint violations
-- Enhanced type hints and documentation
 
 ## [0.1.6] - Previous release
 

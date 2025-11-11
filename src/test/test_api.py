@@ -145,6 +145,29 @@ def test_get_result_without_training():
 # Tutorial Tests (from test_tutorials.py)
 # ============================================================================
 
+def test_tutorial_smoke_test():
+    """Smoke test for tutorial structure (no data files required).
+    
+    This test validates that tutorial modules can be imported and basic
+    structure is correct, without requiring data files.
+    """
+    # Test that tutorial modules can be imported
+    import dfm_python as dfm
+    from dfm_python.config import Params
+    
+    # Verify basic API structure
+    assert hasattr(dfm, 'from_spec')
+    assert hasattr(dfm, 'load_data')
+    assert hasattr(dfm, 'train')
+    assert hasattr(dfm, 'predict')
+    assert hasattr(dfm, 'get_result')
+    
+    # Verify Params can be instantiated
+    params = Params(max_iter=10, threshold=1e-4)
+    assert params.max_iter == 10
+    assert params.threshold == 1e-4
+
+
 def test_basic_tutorial_workflow():
     """Test basic tutorial workflow."""
     import dfm_python as dfm
@@ -155,7 +178,12 @@ def test_basic_tutorial_workflow():
     data_file = base_dir / 'data' / 'sample_data.csv'
     
     if not spec_file.exists() or not data_file.exists():
-        pytest.skip("Tutorial data files not found")
+        pytest.skip(
+            f"Tutorial data files not found. Expected:\n"
+            f"  - {spec_file}\n"
+            f"  - {data_file}\n"
+            f"To run this test, ensure data files exist in the data/ directory."
+        )
     
     try:
         # Load config from spec
@@ -180,7 +208,10 @@ def test_basic_tutorial_workflow():
         assert X_forecast.shape[0] == 6
         
     except Exception as e:
-        pytest.skip(f"Tutorial test skipped: {e}")
+        pytest.skip(
+            f"Tutorial test skipped due to error: {e}\n"
+            f"This may indicate missing dependencies or configuration issues."
+        )
 
 
 def test_hydra_tutorial_workflow():
@@ -190,7 +221,10 @@ def test_hydra_tutorial_workflow():
         from omegaconf import DictConfig
         HYDRA_AVAILABLE = True
     except ImportError:
-        pytest.skip("Hydra not available")
+        pytest.skip(
+            "Hydra not available. Install with: pip install hydra-core omegaconf\n"
+            "This test requires Hydra for configuration management."
+        )
     
     import dfm_python as dfm
     
@@ -198,7 +232,10 @@ def test_hydra_tutorial_workflow():
     data_file = base_dir / 'data' / 'sample_data.csv'
     
     if not data_file.exists():
-        pytest.skip("Tutorial data file not found")
+        pytest.skip(
+            f"Tutorial data file not found: {data_file}\n"
+            f"To run this test, ensure the data file exists in the data/ directory."
+        )
     
     try:
         # Create mock Hydra config
@@ -226,7 +263,10 @@ def test_hydra_tutorial_workflow():
         assert result is not None
         
     except Exception as e:
-        pytest.skip(f"Hydra tutorial test skipped: {e}")
+        pytest.skip(
+            f"Hydra tutorial test skipped due to error: {e}\n"
+            f"This may indicate missing dependencies, configuration issues, or data problems."
+        )
 
 
 def test_api_reset():
