@@ -16,6 +16,27 @@ A Python implementation of **Dynamic Factor Models (DFM)** for nowcasting and fo
 - **Numerical stability**: Comprehensive error handling and robust matrix operations
 - **Well-documented**: Extensive docstrings and tutorials
 
+## Project Goals (prioritized) & Iteration Policy
+
+Top 10 functional goals (priority order):
+1. Class-oriented DFM supporting DictConfig (Hydra) and Spec + class configs.
+2. Plausible, stable results: no complex numbers; sensible EM convergence; enforce Q diag ≥ 1e-8.
+3. Generic Block DFM working with any valid CSV schema (given correct spec).
+4. Full pipeline: initialization, Kalman filter/smoother, EM, nowcasting, forecasting.
+5. Complete APIs: visualization, results access, nowcasting, forecasting (MATLAB parity where helpful).
+6. Mixed frequency: generalized clock with tent weights for slower series over manageable gaps.
+7. Missing data handling: robust preprocessing plus KF handling; aligned with Nowcast behavior.
+8. Frequency guardrails: any series faster than the clock raises a clear error.
+9. Generic naming/logic/patterns; no overengineering; ready for varied environments.
+10. Structure: ≤ 20 Python files under `src/` (src/dfm_python + src/test) without sacrificing functionality or tests.
+
+Iteration policy:
+- Every change must pass:
+  - `pytest src/test -q`
+  - `python tutorial/basic_tutorial.py --spec data/sample_spec.csv --data data/sample_data.csv --max-iter 1`
+- Tests and tutorial are protected assets: do not delete or move them.
+- File count rule: total Python files under `src/` (src/dfm_python + src/test) must be ≤ 20.
+
 ## Installation
 
 ```bash
@@ -199,18 +220,13 @@ Contains all estimation outputs:
 ## Architecture
 
 **Core Modules**:
-- `config.py`: Configuration management (DFMConfig, SeriesConfig, BlockConfig, Params)
-- `dfm.py`: Core estimation (DFM class with fit() method)
-- `api.py`: High-level convenience API
+- `config.py` and `config_sources.py`: Configuration dataclasses and adapters (YAML/Dict/CSV/Hydra)
+- `dfm.py`: Core estimation (DFM class with fit() method; EM/KF helpers)
 - `kalman.py`: Kalman filter and smoother
 - `news.py`: News decomposition
+- `api.py`: High-level convenience API and module-level functions
 
-**Core Submodules**:
-- `core/em.py`: EM algorithm core (init_conditions, em_step, em_converged)
-- `core/numeric.py`: Numerical utilities (matrix operations, regularization, stability)
-- `core/diagnostics.py`: Diagnostic functions
-- `core/results.py`: Result metrics
-- `core/grouping.py`: Frequency grouping utilities
+Note: Some functionality historically referenced under `dfm_python.core.*` has been consolidated into the modules above. No separate `core/` package is required.
 
 **Key Improvements** (v0.2.3+):
 - Consolidated covariance/variance computation functions for robustness
@@ -225,12 +241,13 @@ Contains all estimation outputs:
 pytest src/test/ -v
 ```
 
-Tests are organized into 5 files:
-- `test_dfm.py` - Core DFM estimation (12 tests)
-- `test_kalman.py` - Kalman filter/smoother (4 tests)
-- `test_news.py` - News decomposition
-- `test_config.py` - Configuration and API (11 tests)
-- `test_api.py` - Edge cases and tutorials (11 tests)
+Tests are organized into modules under `src/test/`:
+- `test_dfm.py` - Core DFM estimation
+- `test_kalman.py` - Kalman filter/smoother
+- `test_numeric.py` - Numerical utilities and stability
+- `test_factor.py` - Factor properties and thresholds
+- `test_api.py` - Module-level API and tutorials
+- `__init__.py` - Consolidated helpers and additional tests
 
 **Test Coverage**: 38+ tests covering core functionality, edge cases, and numerical stability.
 

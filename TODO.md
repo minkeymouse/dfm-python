@@ -1,4 +1,32 @@
-# TODO: File Consolidation
+# Roadmap (Functionality-First)
+
+Goals (must be met):
+- Class-oriented DFM supporting DictConfig (Hydra) and Spec + class configs.
+- Plausible, stable results (no complex; sensible convergence; Q diag ≥ 1e-8).
+- Generic Block DFM that runs with any valid CSV.
+- Full pipeline: init, Kalman filter, EM, nowcasting, forecasting.
+- Complete APIs for visualization, results, nowcasting, forecasting (MATLAB parity where useful).
+- Mixed-frequency via generalized clock; slower series use tent weights.
+- Robust missing-data handling aligned with Nowcast behavior.
+- Frequency rules enforced (series faster than clock → error).
+- Generic naming/logic; no overengineering.
+- Organized structure under 20 Python files without sacrificing tests/functionality.
+
+Iteration working agreement:
+- Every iteration must run: `pytest src/test -q` and `python tutorial/basic_tutorial.py --max-iter 1`.
+- Proceed/commit only if both pass; otherwise fix or back out.
+- Never delete/move `src/test` or `tutorial/basic_tutorial.py`; never move working code to `trash/`.
+- Keep file count under `src/` (src/dfm_python + src/test) ≤ 20; consolidate only when safe and beneficial.
+
+Near-term:
+- Fix import/layout mismatches (e.g., dfm_python.core/data vs current modules) with minimal re-exports or routing.
+- Stabilize EM/KF numerics (real symmetric PSD, damping, min diag(Q)).
+- Verify clock/tent-weight handling and frequency guardrails.
+- Ensure missing-data logic matches Nowcast expectations.
+
+---
+
+# Legacy: File Consolidation (for reference)
 
 ## Current Status
 - **File count: 15** (target: ≤20) ✓ **BELOW LIMIT** (25% below maximum, 5 files below limit)
