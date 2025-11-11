@@ -35,7 +35,7 @@ from .diagnostics import (
     print_series_diagnosis,
 )
 from .helpers import safe_get_method, safe_get_attr
-from ..utils.aggregation import group_series_by_frequency
+from ..utils import group_series_by_frequency
 
 __all__ = [
     'init_conditions',
