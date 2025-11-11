@@ -8,7 +8,7 @@ This package contains:
 
 from .convergence import em_converged
 from .initialization import init_conditions, NaNHandlingOptions
-from .iteration import em_step
+from .iteration import em_step, EMStepParams
 
 # Re-export constants for backward compatibility
 from .initialization import (
@@ -42,6 +42,7 @@ __all__ = [
     'em_converged',
     'init_conditions',
     'em_step',
+    'EMStepParams',
     'NaNHandlingOptions',
     # Constants
     'DEFAULT_AR_COEFFICIENT',
