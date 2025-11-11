@@ -23,7 +23,7 @@ import numpy as np
 import pandas as pd
 
 from .config import DFMConfig, Params
-from .data_loader import load_data as _load_data
+from .data.loader import load_data as _load_data
 from .config import (
     make_config_source,
     ConfigSource,
