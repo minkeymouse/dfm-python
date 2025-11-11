@@ -35,14 +35,7 @@ except ImportError:
     HYDRA_AVAILABLE = False
     ConfigStore = None
 
-# Valid frequency codes
-_VALID_FREQUENCIES = {'d', 'w', 'm', 'q', 'sa', 'a'}
-
-# Valid transformation codes
-_VALID_TRANSFORMATIONS = {
-    'lin', 'chg', 'ch1', 'pch', 'pc1', 'pca', 
-    'cch', 'cca', 'log'
-}
+from .config_validation import validate_frequency, validate_transformation
 
 # Default global block name (can be overridden in config)
 DEFAULT_GLOBAL_BLOCK_NAME = 'Block_Global'
@@ -59,20 +52,6 @@ _TRANSFORM_UNITS_MAP = {
     'cca': 'Continuously Compounded Annual Rate of Change',
     'log': 'Natural Log'
 }
-
-
-def validate_frequency(frequency: str) -> str:
-    """Validate frequency code."""
-    if frequency not in _VALID_FREQUENCIES:
-        raise ValueError(f"Invalid frequency: {frequency}. Must be one of {_VALID_FREQUENCIES}")
-    return frequency
-
-
-def validate_transformation(transformation: str) -> str:
-    """Validate transformation code."""
-    if transformation not in _VALID_TRANSFORMATIONS:
-        warnings.warn(f"Unknown transformation code: {transformation}. Will use untransformed data.")
-    return transformation
 
 
 @dataclass
