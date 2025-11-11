@@ -1,22 +1,25 @@
-# DFM-Python Codebase Assessment - Final
+# DFM-Python Codebase Assessment - Final (Post-Iteration 9)
 
 **Date**: 2025-01-11  
-**Status**: Post-refactoring assessment (after iterations 1-3)  
-**Purpose**: Identify remaining refactoring opportunities prioritized by impact
+**Status**: Post-Iteration 9 (data package structure continued)  
+**Purpose**: Comprehensive assessment identifying remaining refactoring opportunities
 
 ---
 
 ## Executive Summary
 
-After 3 iterations of refactoring, the codebase is **significantly cleaner**:
-- ✅ Removed 2252 lines of duplicate dead code
-- ✅ Extracted validation functions from config.py
-- ✅ Clean package structure (em/, numeric/, helpers/)
+After 9 iterations of refactoring, the codebase is **significantly cleaner**:
+- ✅ Removed 2252 lines of duplicate dead code (iterations 1-2)
+- ✅ Extracted validation from `config.py` (iteration 3)
+- ✅ Extracted 3 helpers from `dfm.py` (iterations 4-6)
+- ✅ Extracted 4 functions from `data_loader.py` to `data/` package (iterations 7-9)
+- ✅ `dfm.py` reduced from 873 to 784 lines (< 800 lines ✅)
+- ✅ `data_loader.py` reduced from 783 to 439 lines (44% reduction ✅)
 
 **Remaining opportunities** focus on:
-1. **MEDIUM**: Helper function consolidation in `dfm.py`
-2. **MEDIUM**: File organization in `data_loader.py`
-3. **LOW**: Monitor large files as they evolve
+1. **MEDIUM**: Continue splitting `data_loader.py` (439 lines, still has config loading and data loading)
+2. **MEDIUM**: `config.py` structure (878 lines, could separate models from factory methods)
+3. **LOW**: Monitor `news.py` (783 lines) and other large files
 
 **Overall Assessment**: Code quality is **good**. Remaining work is organizational improvements, not critical issues.
 
@@ -24,58 +27,85 @@ After 3 iterations of refactoring, the codebase is **significantly cleaner**:
 
 ## 1. File Structure Analysis
 
-### 1.1 Current File Sizes (Post-Refactoring)
+### 1.1 Current File Sizes (Post-Iteration 9)
 
-| File | Lines | Status | Priority | Action |
-|------|-------|--------|----------|--------|
-| `dfm.py` | 873 | ⚠️ LARGE | **MEDIUM** | Helper extraction in progress (iteration 4) ✅ |
-| `config.py` | 878 | ⚠️ LARGE | **LOW** | Monitor (validation extracted ✅) |
+| File | Lines | Status | Priority | Recommendation |
+|------|-------|--------|----------|---------------|
+| `config.py` | 878 | ⚠️ LARGE | **MEDIUM** | Consider separating models from factory methods |
+| `dfm.py` | 784 | ✅ OK | - | Helper extraction complete ✅ |
 | `news.py` | 783 | ⚠️ LARGE | **LOW** | Acceptable, monitor if grows |
-| `data_loader.py` | 783 | ⚠️ LARGE | **MEDIUM** | Split loading/transformation/config |
+| `data_loader.py` | 439 | ✅ OK | **MEDIUM** | Continue splitting: config loading, data loading |
 | `core/em/iteration.py` | 622 | ✅ OK | - | Part of modular structure |
 | `core/em/initialization.py` | 615 | ✅ OK | - | Part of modular structure |
 | `config_sources.py` | 504 | ✅ OK | - | Reasonable size |
 | `kalman.py` | 466 | ✅ OK | - | Reasonable size |
 | `core/diagnostics.py` | 429 | ✅ OK | - | Reasonable size |
 | `api.py` | 420 | ✅ OK | - | Reasonable size |
-| `config_validation.py` | 77 | ✅ OK | - | New (iteration 3) |
 
 **Guideline**: Files should ideally be < 500 lines. Files > 750 lines are candidates for splitting.
 
 **Progress**:
 - ✅ Removed 2 files > 1000 lines (duplicate dead code)
-- ✅ Extracted validation from config.py (21 lines)
-- ⚠️ 4 files still > 750 lines (organization opportunity)
+- ✅ Extracted validation from `config.py` (21 lines)
+- ✅ Extracted 3 helpers from `dfm.py` (89 lines)
+- ✅ Extracted 4 functions from `data_loader.py` (344 lines)
+- ⚠️ 3 files still > 750 lines (organization opportunity)
 
-### 1.2 Directory Structure
+### 1.2 Directory Structure Assessment
 
 **Current Structure** (Good):
 ```
 dfm_python/
-├── __init__.py              # 185 lines ✅
-├── api.py                   # 420 lines ✅
-├── config.py                # 878 lines ⚠️ (validation extracted ✅)
-├── config_validation.py     # 77 lines ✅ (new)
-├── config_sources.py        # 504 lines ✅
-├── data_loader.py           # 783 lines ⚠️ (mixes concerns)
-├── dfm.py                   # 878 lines ⚠️ (has helper functions)
-├── kalman.py                # 466 lines ✅
-├── news.py                  # 783 lines ⚠️ (acceptable)
+├── __init__.py              # Module-level API (185 lines - ✅ OK)
+├── api.py                   # High-level API (420 lines - ✅ OK)
+├── config.py                # Config classes (878 lines - ⚠️ LARGE)
+├── config_sources.py        # Config adapters (504 lines - ✅ OK)
+├── config_validation.py     # Validation functions (77 lines - ✅ OK)
+├── data_loader.py           # Data loading (439 lines - ✅ OK, but can split further)
+├── dfm.py                   # Core DFM (784 lines - ✅ OK, helpers extracted)
+├── kalman.py                # Kalman filter (466 lines - ✅ OK)
+├── news.py                  # News decomposition (783 lines - ⚠️ LARGE)
 ├── core/
-│   ├── em/                  # ✅ Well-organized package
-│   ├── numeric/             # ✅ Well-organized package
-│   ├── helpers/              # ✅ Well-organized package
-│   └── diagnostics.py        # ✅ OK
+│   ├── em/                  # ✅ WELL-ORGANIZED
+│   │   ├── __init__.py
+│   │   ├── convergence.py
+│   │   ├── initialization.py (615 lines)
+│   │   └── iteration.py (622 lines)
+│   ├── numeric/             # ✅ WELL-ORGANIZED
+│   │   ├── __init__.py
+│   │   ├── matrix.py (335 lines)
+│   │   ├── covariance.py (272 lines)
+│   │   ├── regularization.py (282 lines)
+│   │   ├── clipping.py (116 lines)
+│   │   └── utils.py
+│   ├── diagnostics.py       # ✅ OK (429 lines)
+│   └── helpers/             # ✅ WELL-ORGANIZED
+│       ├── array.py
+│       ├── block.py
+│       ├── config.py
+│       ├── estimation.py (266 lines)
+│       ├── frequency.py
+│       ├── matrix.py
+│       ├── utils.py (221 lines)
+│       └── validation.py
+├── data/                    # ✅ NEW PACKAGE (iterations 7-9)
+│   ├── __init__.py (10 lines)
+│   ├── utils.py (222 lines)
+│   │   ├── rem_nans_spline ✅
+│   │   └── summarize ✅
+│   └── transformer.py (148 lines)
+│       ├── _transform_series ✅
+│       └── transform_data ✅
 └── utils/
-    └── aggregation.py        # ✅ OK
+    └── aggregation.py        # ✅ OK (334 lines)
 ```
 
-**Assessment**:
-- ✅ Core structure is excellent (em/, numeric/, helpers/)
-- ✅ Validation extracted (iteration 3)
-- ⚠️ Top-level files are large and mix concerns
-- ⚠️ `dfm.py` has helper functions that could be consolidated
-- ⚠️ `data_loader.py` mixes loading, transformation, config, utilities
+**Assessment**: 
+- ✅ `core/helpers/` is well-organized (good domain separation)
+- ✅ `core/em/` and `core/numeric/` structure is well-designed
+- ✅ `data/` package structure established (3 modules with 4 functions extracted)
+- ⚠️ `data_loader.py` still mixes config loading and data loading (439 lines)
+- ⚠️ `config.py` is large but focused (could separate models from factory methods)
 
 ---
 
@@ -83,31 +113,33 @@ dfm_python/
 
 ### 2.1 Naming Consistency
 
-**Status**: ✅ **EXCELLENT** - Consistent throughout
+**Status**: ✅ **GOOD** - Generally consistent
 
-- **Functions**: snake_case ✅
-- **Classes**: PascalCase ✅
-- **Private functions**: `_` prefix ✅
-- **Constants**: UPPER_CASE ✅
-- **Modules**: snake_case ✅
+**Conventions**:
+- **Functions**: snake_case (e.g., `load_data`, `transform_data`)
+- **Classes**: PascalCase (e.g., `DFMConfig`, `SeriesConfig`)
+- **Private functions**: `_` prefix (e.g., `_dfm_core`, `_transform_series`)
+- **Constants**: UPPER_CASE (e.g., `DEFAULT_GLOBAL_BLOCK_NAME`)
 
-**No issues found**.
+**Issues Found**:
+- Some private functions (`_dfm_core`, `_prepare_data_and_params`) are used across modules - acceptable for now
+- Mix of `_` prefix and no prefix for internal helpers (minor inconsistency)
+
+**Recommendation**: 
+- Keep private functions truly private (only used within same file)
+- Move shared internal functions to `core/helpers/` if needed
 
 ### 2.2 Code Duplication
 
-**Status**: ✅ **GOOD** - Minimal duplication
-
-**Findings**:
-- ✅ No duplicate code detected
-- ✅ Helper functions are well-organized in `core/helpers/`
-- ⚠️ Some helper functions in `dfm.py` could be moved to `core/helpers/` for reuse
+**Status**: ✅ **GOOD** - Minimal duplication detected
 
 **Potential Consolidation**:
-1. `_resolve_param()` in `dfm.py` (3 lines) - Simple utility, could move to `core/helpers/utils.py`
-2. `_safe_mean_std()` in `dfm.py` (28 lines) - Data standardization, could move to `core/helpers/estimation.py`
-3. `_standardize_data()` in `dfm.py` (58 lines) - Data standardization, same as above
+1. Helper functions in `dfm.py` - ✅ **COMPLETE** (all 3 helpers extracted)
+2. Data utilities in `data_loader.py` - ✅ **IN PROGRESS** (4 of 7 functions extracted)
+3. Matrix operations: `core/numeric/matrix.py` vs `core/helpers/matrix.py` - Different purposes ✅
+4. Covariance: `core/numeric/covariance.py` vs `core/helpers/estimation.py` - Different contexts ✅
 
-**Assessment**: These are **candidates for consolidation**, not critical duplication.
+**Assessment**: Current separation is reasonable. No critical duplication.
 
 ### 2.3 Logic Clarity
 
@@ -120,263 +152,373 @@ dfm_python/
 
 **Weaknesses**:
 - `_dfm_core()` in `dfm.py` has 15+ parameters (could use dataclass for parameter group)
-- `data_loader.py` mixes multiple concerns (loading, transformation, config, utilities)
+- `data_loader.py` still mixes config loading and data loading
 - Large files are harder to navigate
+
+**Recommendation**:
+- Consider using dataclasses/structs for parameter groups in functions with many parameters
+- Continue splitting `data_loader.py` to improve clarity
 
 ---
 
 ## 3. Organization Issues
 
-### 3.1 Helper Functions in `dfm.py`
+### 3.1 Data Loader Organization
 
-**Current Situation**:
-- `_resolve_param()` - Simple parameter resolution (3 lines, used 15 times in `_prepare_data_and_params()`)
-- `_safe_mean_std()` - Data standardization (28 lines, used by `_standardize_data()`)
-- `_standardize_data()` - Data standardization wrapper (58 lines, used by `_dfm_core()`)
-- `_prepare_data_and_params()` - Parameter preparation (83 lines, DFM-specific, keep in `dfm.py`)
-- `_prepare_aggregation_structure()` - Aggregation setup (53 lines, DFM-specific, keep in `dfm.py`)
+**Current Structure** (439 lines):
+```
+data_loader.py:
+├── Config Loading (lines 39-176, ~138 lines)
+│   ├── load_config_from_yaml()
+│   ├── _load_config_from_dataframe()
+│   ├── load_config_from_spec()
+│   └── load_config()
+└── Data Loading (lines 179-439, ~261 lines)
+    ├── read_data()
+    ├── sort_data()
+    └── load_data()
+```
 
-**Assessment**: 
-- `_resolve_param()`: **General utility** - should move to `core/helpers/utils.py`
-- `_safe_mean_std()`: **Data standardization** - should move to `core/helpers/estimation.py` or new `core/helpers/data.py`
-- `_standardize_data()`: **Data standardization** - same as above
-- `_prepare_data_and_params()`: **DFM-specific** - keep in `dfm.py`
-- `_prepare_aggregation_structure()`: **DFM-specific** - keep in `dfm.py`
+**Issues**:
+- **Mixed Concerns**: Config loading and data loading still in one file
+- **Large File**: 439 lines makes it harder to navigate
+- **Comparison with MATLAB**: MATLAB has separate files (`load_data.m`, `load_spec.m`)
+- **Progress**: 4 functions extracted to `data/` package ✅ (44% reduction)
 
-**Recommendation**: Move 3 functions (~89 lines) to `core/helpers/` for:
-- Better organization
-- Potential reuse
-- Reducing `dfm.py` size (from 878 to ~789 lines)
+**Recommendation**: Continue splitting into `data/` package:
+```
+data/
+├── __init__.py          # Public API
+├── utils.py             # Utilities (rem_nans_spline ✅, summarize ✅)
+├── transformer.py       # Data transformation (transform_data ✅, _transform_series ✅)
+├── config_loader.py     # Config loading (load_config_from_yaml, load_config_from_spec, etc.) ⏳
+└── loader.py            # Data loading (read_data, sort_data, load_data) ⏳
+```
 
-### 3.2 Data Loader Organization
+**Priority**: **MEDIUM** - Improves organization and maintainability
+
+**Next Steps** (incremental):
+1. **Iteration 10**: Extract config loading functions to `data/config_loader.py` (~138 lines)
+2. **Iteration 11**: Extract data loading functions to `data/loader.py` (~261 lines)
+
+### 3.2 Config Module Organization
+
+**Current Structure** (878 lines):
+```
+config.py:
+├── Dataclasses (lines 58-494, ~437 lines)
+│   ├── BlockConfig
+│   ├── SeriesConfig
+│   ├── Params
+│   └── DFMConfig (with __post_init__ validation and helper methods)
+└── Factory Methods (lines 528-878, ~351 lines)
+    ├── from_dict()
+    ├── from_hydra()
+    ├── _from_legacy_dict()
+    ├── _from_hydra_dict()
+    └── _extract_estimation_params()
+```
+
+**Issues**:
+- **Large File**: 878 lines makes it hard to navigate
+- **Mixed Concerns**: Models (dataclasses) and factory methods in same file
+- **Comparison with MATLAB**: MATLAB has separate files for config loading
+
+**Recommendation**: Consider separating models from factory methods:
+- Keep dataclasses in `config.py` (or `config/models.py`)
+- Move factory methods to `config_sources.py` or new `config/factory.py`
+
+**Priority**: **MEDIUM** - Improves organization, but current structure is acceptable
+
+### 3.3 News Module Organization
 
 **Current Structure** (783 lines):
-- **Config loading** (~150 lines): `load_config_from_yaml()`, `load_config_from_spec()`, `load_config()`, `_load_config_from_dataframe()`
-- **Data loading** (~200 lines): `read_data()`, `load_data()`
-- **Transformation** (~150 lines): `transform_data()`, `_transform_series()`
-- **Utilities** (~280 lines): `rem_nans_spline()`, `summarize()`
-
-**Assessment**: 
-- ⚠️ Mixes multiple concerns (config, loading, transformation, utilities)
-- Could split into: `data/loader.py`, `data/transformer.py`, `data/utils.py`, `data/config_loader.py`
-- Config loading could move to `config/` package
-
-**Recommendation**:
-- **Priority**: MEDIUM
-- **Impact**: Improves organization
-- **Effort**: Medium (need to update imports across codebase)
-
-### 3.3 Helper Organization
-
-**Current Structure**: ✅ **EXCELLENT**
 ```
-core/helpers/
-├── array.py          # Array utilities ✅
-├── block.py          # Block operations ✅
-├── config.py         # Config utilities ✅
-├── estimation.py     # Estimation helpers ✅
-├── frequency.py      # Frequency handling ✅
-├── matrix.py         # Matrix operations ✅
-├── utils.py          # General utilities ✅
-└── validation.py     # Validation functions ✅
+news.py:
+├── Helper Functions (lines 35-139)
+│   ├── _check_config_consistency()
+│   └── para_const()
+├── Main Functions (lines 140-483)
+│   └── news_dfm()
+└── High-level API (lines 484-783)
+    └── update_nowcast()
 ```
 
-**Assessment**: Well-organized by domain. No issues.
+**Issues**:
+- **Large File**: 783 lines, but well-organized
+- **Comparison with MATLAB**: MATLAB has `update_nowcast.m` as separate file
+
+**Recommendation**: 
+- **LOW Priority** - Current structure is acceptable
+- Monitor if file grows beyond 800 lines
+- Consider splitting only if it becomes hard to maintain
 
 ---
 
 ## 4. Comparison with MATLAB Structure
 
-### MATLAB Structure
+### 4.1 MATLAB File Organization
+
+**MATLAB Structure** (`Nowcasting/functions/`):
 ```
-Nowcasting/functions/
-├── dfm.m              # 1109 lines (monolithic)
-├── update_nowcast.m   # 651 lines
-├── load_data.m        # 168 lines
-├── remNaNs_spline.m   # 134 lines
-├── load_spec.m        # 94 lines
-└── summarize.m        # 90 lines
+functions/
+├── dfm.m              # Core DFM estimation
+├── load_data.m        # Data loading
+├── load_spec.m        # Spec loading
+├── remNaNs_spline.m  # NaN handling
+├── summarize.m        # Data summarization
+└── update_nowcast.m   # News decomposition
 ```
 
-### Python Structure (Current)
+**Python Structure** (Current):
 ```
 dfm_python/
-├── dfm.py             # 878 lines (core + helpers)
-├── data_loader.py     # 783 lines (loading + transformation + config)
-├── news.py            # 783 lines (news decomposition)
-├── config.py          # 878 lines (models, validation extracted ✅)
-└── core/              # Well-organized packages ✅
+├── dfm.py             # Core DFM estimation ✅
+├── data_loader.py     # Data loading, config loading ⚠️
+├── data/utils.py      # NaN handling ✅, summarization ✅
+├── data/transformer.py # Data transformation ✅
+├── news.py            # News decomposition ✅
+└── config.py          # Config models and factory methods ⚠️
 ```
 
-### Insights
-- **MATLAB**: Monolithic `dfm.m` (1109 lines) - single function approach
-- **Python**: More modular, but some files still large
-- **Python Advantage**: Better separation of concerns, but could be improved further
-- **Recommendation**: Continue incremental splitting while maintaining clear interfaces
+### 4.2 Key Differences
+
+**MATLAB Approach**:
+- **Separation**: Each major function in separate file
+- **Clarity**: Easy to find specific functionality
+- **Modularity**: Clear boundaries between concerns
+
+**Python Approach**:
+- **Consolidation**: Related functions grouped together
+- **Efficiency**: Fewer files, easier imports
+- **Trade-off**: Some files are large (439-878 lines)
+
+**Recommendation**:
+- **Balance**: Python's consolidation is good, but some files are too large
+- **Action**: Continue splitting `data_loader.py` to match MATLAB's separation pattern
+- **Keep**: Current structure for `dfm.py` and `news.py` (well-organized)
 
 ---
 
-## 5. Specific Refactoring Opportunities (Prioritized)
+## 5. Prioritized Refactoring Recommendations
 
-### 5.1 MEDIUM PRIORITY: Extract Helpers from `dfm.py` (873 lines)
+### HIGH Priority
 
-**Status**: ✅ **IN PROGRESS** - `resolve_param()` extracted (iteration 4)
+**None** - No critical issues remaining after iterations 1-9.
 
-**Functions to Move**:
-1. ✅ `resolve_param()` → `core/helpers/utils.py` (3 lines) - **COMPLETED** (iteration 4)
-   - **Why**: General utility pattern, used 15 times
-   - **Impact**: Low risk, improves organization
+### MEDIUM Priority
 
-2. `_safe_mean_std()` → `core/helpers/estimation.py` or new `core/helpers/data.py` (28 lines)
-   - **Why**: Data standardization, could be reused
-   - **Impact**: Medium risk, improves organization
+#### 1. Continue splitting `data_loader.py` into `data/` package
+**File**: `src/dfm_python/data_loader.py` (439 lines)  
+**Impact**: High (improves organization, maintainability)  
+**Effort**: Medium (requires careful import updates)  
+**Risk**: Low (functions are self-contained)
 
-3. `_standardize_data()` → `core/helpers/estimation.py` or new `core/helpers/data.py` (58 lines)
-   - **Why**: Data standardization, uses `_safe_mean_std()`
-   - **Impact**: Medium risk, improves organization
+**Remaining Functions to Extract**:
 
-**Functions to Keep**:
-- `_prepare_data_and_params()` - DFM-specific, keep in `dfm.py`
-- `_prepare_aggregation_structure()` - DFM-specific, keep in `dfm.py`
-- `_dfm_core()` - Core DFM logic, keep in `dfm.py`
-- `_run_em_algorithm()` - DFM-specific, keep in `dfm.py`
+**A. Config loading functions → `data/config_loader.py`** (Iteration 10)
+- **Functions**: `load_config_from_yaml()`, `_load_config_from_dataframe()`, `load_config_from_spec()`, `load_config()`
+- **Lines**: ~138 lines (39-176)
+- **Dependencies**: `DFMConfig`, `SeriesConfig`, `BlockConfig`, `YamlSource`, `SpecCSVSource`
+- **Usage**: 
+  - `load_config()` used by `__init__.py`, `dfm.py`, examples
+  - `_load_config_from_dataframe()` used by `config_sources.py`, `api.py` (internal)
+- **Risk**: Low (self-contained config loading)
+- **Benefits**: Clear separation, matches MATLAB structure (`load_spec.m`)
 
-**Impact**:
-- **Medium**: Reduces `dfm.py` by ~89 lines (from 878 to ~789)
-- **Effort**: Low (move functions, update imports)
-- **Risk**: Low (functions are self-contained)
+**B. Data loading functions → `data/loader.py`** (Iteration 11)
+- **Functions**: `read_data()`, `sort_data()`, `load_data()`
+- **Lines**: ~261 lines (179-439)
+- **Dependencies**: `DFMConfig`, `transform_data()` (from `data.transformer`), `sort_data()`
+- **Usage**: 
+  - `load_data()` used by `api.py`, `__init__.py`, examples
+  - `read_data()` and `sort_data()` used by `load_data()`
+- **Risk**: Low (self-contained data loading)
+- **Benefits**: Clear separation, matches MATLAB structure (`load_data.m`)
 
-**Recommendation**: **Do this next** - highest impact, lowest risk.
+#### 2. Consider separating `config.py` models from factory methods
+**File**: `src/dfm_python/config.py` (878 lines)  
+**Impact**: Medium (improves organization)  
+**Effort**: Medium (requires import updates)  
+**Risk**: Low (clear separation)
 
-### 5.2 MEDIUM PRIORITY: Split `data_loader.py` (783 lines)
+**Structure**:
+- Keep dataclasses in `config.py` (or `config/models.py`)
+- Move factory methods to `config_sources.py` or new `config/factory.py`
 
-**Current Structure**:
-- Config loading: `load_config_from_yaml()`, `load_config_from_spec()`, `load_config()`, `_load_config_from_dataframe()` (~150 lines)
-- Data loading: `read_data()`, `load_data()` (~200 lines)
-- Transformation: `transform_data()`, `_transform_series()` (~150 lines)
-- Utilities: `rem_nans_spline()`, `summarize()` (~280 lines)
+**Benefits**:
+- Clearer separation between models and factory methods
+- Easier to navigate
+- Reduces file size (878 → ~400-500 lines per file)
 
-**Proposed Split**:
-```
-data/
-├── __init__.py           # Re-export public API
-├── loader.py             # read_data(), load_data()
-├── transformer.py        # transform_data(), _transform_series()
-├── utils.py              # rem_nans_spline(), summarize()
-└── config_loader.py      # Config loading (or move to config/)
-```
+### LOW Priority
 
-**Alternative**: Move config loading to `config/` package
+#### 3. Monitor `news.py` for future splitting
+**File**: `src/dfm_python/news.py` (783 lines)  
+**Impact**: Low (current structure is acceptable)  
+**Effort**: Low (only if file grows)  
+**Risk**: None (monitoring only)
 
-**Impact**:
-- **Medium**: Improves organization, separates concerns
-- **Effort**: Medium (need to update imports across codebase)
-- **Risk**: Medium (used by many modules)
+**Action**: 
+- Monitor if `news.py` grows beyond 800 lines
+- Consider splitting only if it becomes hard to maintain
 
-**Recommendation**: Consider after extracting helpers from `dfm.py`.
+#### 4. Consider parameter grouping for `_dfm_core()`
+**File**: `src/dfm_python/dfm.py`  
+**Impact**: Low (improves readability)  
+**Effort**: Low (refactoring only)  
+**Risk**: Low (internal function)
 
-### 5.3 LOW PRIORITY: Monitor Large Files
-
-**Files to Monitor**:
-- `config.py` (878 lines) - Validation extracted ✅, monitor if it grows
-- `news.py` (783 lines) - Acceptable size, only split if it grows beyond 900 lines
-
-**Recommendation**: No action needed now, monitor as code evolves.
+**Action**:
+- Consider using dataclass for parameter group
+- Improves readability for functions with 15+ parameters
 
 ---
 
-## 6. Prioritized Refactoring Plan
+## 6. Summary of Completed Work
 
-### Phase 1: MEDIUM PRIORITY (Next Iteration)
+### Iterations 1-2: Duplicate Code Removal
+- ✅ Removed `core/em.py` (1200 lines) - duplicate of `core/em/` package
+- ✅ Removed `core/numeric.py` (1052 lines) - duplicate of `core/numeric/` package
+- **Total Removed**: 2252 lines of dead code
 
-**Extract Helpers from `dfm.py`**
-- **Effort**: Low
-- **Risk**: Low
-- **Impact**: Medium (reduces file size, improves organization)
-- **Steps**:
-  1. Move `_resolve_param()` to `core/helpers/utils.py`
-  2. Move `_safe_mean_std()` and `_standardize_data()` to `core/helpers/estimation.py` or new `core/helpers/data.py`
-  3. Update imports in `dfm.py`
-  4. Verify functionality
+### Iteration 3: Config Validation Extraction
+- ✅ Extracted validation functions from `config.py` to `config_validation.py`
+- **Reduced**: `config.py` from 899 to 878 lines
 
-### Phase 2: MEDIUM PRIORITY (Future Iteration)
+### Iterations 4-6: Helper Function Extraction
+- ✅ Extracted `resolve_param()` from `dfm.py` to `core/helpers/utils.py`
+- ✅ Extracted `safe_mean_std()` from `dfm.py` to `core/helpers/estimation.py`
+- ✅ Extracted `standardize_data()` from `dfm.py` to `core/helpers/estimation.py`
+- **Reduced**: `dfm.py` from 873 to 784 lines (10% reduction)
 
-**Split `data_loader.py`**
-- **Effort**: Medium
-- **Risk**: Medium
-- **Impact**: Medium (organization)
-- **Steps**:
-  1. Create `data/` package structure
-  2. Split into loader, transformer, utils, config_loader
-  3. Update imports across codebase
-  4. Consider moving config loading to `config/` package
+### Iterations 7-9: Data Package Structure (In Progress)
+- ✅ Extracted `rem_nans_spline()` from `data_loader.py` to `data/utils.py` (iteration 7)
+- ✅ Extracted `summarize()` from `data_loader.py` to `data/utils.py` (iteration 8)
+- ✅ Extracted `transform_data()` and `_transform_series()` to `data/transformer.py` (iteration 9)
+- ✅ Created `data/` package structure with 3 modules
+- **Reduced**: `data_loader.py` from 783 to 439 lines (44% reduction)
 
-### Phase 3: LOW PRIORITY (Optional)
+---
 
-**Monitor and Maintain**
+## 7. Key Metrics
+
+### File Size Distribution (After Iteration 9)
+- **Largest file**: 878 lines (`config.py`)
+- **Files > 800 lines**: 2 files (down from original 6)
+- **Files > 1000 lines**: 0 files ✅
+- **dfm.py**: 784 lines ✅ (below 800-line threshold)
+- **data_loader.py**: 439 lines ✅ (down from 783, 44% reduction, now < 500 lines)
+- **Average file size**: ~350 lines
+- **Package organization**: ✅ Improved
+
+### Code Organization
+- **Helper functions**: ✅ Well organized (all 3 helpers extracted from `dfm.py`)
+- **Core modules**: ✅ Well organized (`core/em/`, `core/numeric/`, `core/helpers/`)
+- **Data package**: ✅ Established (`data/` package with 3 modules, 4 functions extracted)
+- **Reusability**: ✅ Improved (helpers available for reuse)
+- **Domain organization**: ✅ Clear (helpers grouped by purpose)
+
+---
+
+## 8. Specific Files/Functions to Refactor (Prioritized)
+
+### MEDIUM Priority
+
+#### 1. `data_loader.py` (439 lines) - Continue Splitting
+
+**Functions to Extract** (in order):
+
+**A. Config loading functions → `data/config_loader.py`** (Iteration 10)
+- **Functions**: 
+  - `load_config_from_yaml()` (~30 lines)
+  - `_load_config_from_dataframe()` (~50 lines, internal)
+  - `load_config_from_spec()` (~20 lines)
+  - `load_config()` (~40 lines)
+- **Total**: ~138 lines (39-176)
+- **Dependencies**: `DFMConfig`, `SeriesConfig`, `BlockConfig`, `YamlSource`, `SpecCSVSource`
+- **Usage**: 
+  - `load_config()`: Used by `__init__.py`, `dfm.py`, examples
+  - `_load_config_from_dataframe()`: Used by `config_sources.py`, `api.py` (internal)
+- **Risk**: Low (self-contained config loading)
+- **Next**: Iteration 10
+
+**B. Data loading functions → `data/loader.py`** (Iteration 11)
+- **Functions**: 
+  - `read_data()` (~95 lines)
+  - `sort_data()` (~40 lines)
+  - `load_data()` (~125 lines)
+- **Total**: ~261 lines (179-439)
+- **Dependencies**: `DFMConfig`, `transform_data()` (from `data.transformer`), `sort_data()`
+- **Usage**: 
+  - `load_data()`: Used by `api.py`, `__init__.py`, examples
+  - `read_data()` and `sort_data()`: Used by `load_data()`
+- **Risk**: Low (self-contained data loading)
+- **Future**: Iteration 11
+
+#### 2. `config.py` (878 lines) - Separate Models from Factory Methods
+
+**Structure to Extract**:
+- **Factory Methods** (lines 528-878, ~351 lines):
+  - `from_dict()`, `from_hydra()`, `_from_legacy_dict()`, `_from_hydra_dict()`, `_extract_estimation_params()`
+- **Target**: Move to `config_sources.py` or new `config/factory.py`
+- **Keep**: Dataclasses and helper methods in `config.py`
+- **Risk**: Low (clear separation)
+
+### LOW Priority
+
+#### 3. `news.py` (783 lines) - Monitor
+- **Status**: Well-organized, acceptable structure
+- **Action**: Monitor if file grows beyond 800 lines
+- **Priority**: LOW (only if it becomes hard to maintain)
+
+#### 4. `_dfm_core()` parameter grouping
+- **Function**: `_dfm_core()` in `dfm.py` (15+ parameters)
+- **Action**: Consider using dataclass for parameter group
+- **Priority**: LOW (improves readability, not critical)
+
+---
+
+## 9. Next Steps
+
+### Immediate (Next Iteration - Iteration 10)
+- Extract config loading functions to `data/config_loader.py`
+- Continue incremental splitting of `data_loader.py`
+
+### Short-term
+- Continue incremental refactoring of large files
 - Monitor file sizes as code evolves
-- Continue incremental improvements
 - Document patterns for future reference
 
----
-
-## 7. Recommendations Summary
-
-### Must Do (MEDIUM Priority - Next)
-1. ⚠️ **Extract helpers from `dfm.py`** - Move `_resolve_param()`, `_safe_mean_std()`, `_standardize_data()` to `core/helpers/`
-
-### Should Do (MEDIUM Priority - Future)
-2. ⚠️ **Split `data_loader.py`** - Separate loading, transformation, config, utils
-
-### Nice to Have (LOW Priority)
-3. 💡 Monitor `config.py` and `news.py` - Only split if they grow further
-4. 💡 Consider parameter grouping for `_dfm_core()` (15+ parameters)
-
-### Don't Do
-- ❌ Don't split `dfm.py` further (after extracting helpers, ~789 lines is reasonable)
-- ❌ Don't reorganize `core/helpers/` (already excellent)
-- ❌ Don't split `news.py` yet (783 lines is acceptable)
+### Long-term
+- Complete `data/` package structure
+- Maintain clean structure
+- Prevent accumulation of functions in large modules
+- Keep separation of concerns clear
 
 ---
 
-## 8. Metrics
+## 10. Assessment Conclusion
 
-### Current State (Post-Refactoring)
-- **Largest file**: 878 lines (`dfm.py`, `config.py`)
-- **Files > 800 lines**: 4 files
-- **Files > 1000 lines**: 0 files ✅
-- **Average file size**: ~350 lines
-- **Duplicate code**: 0 files ✅
-- **Helper organization**: ✅ Excellent
+**Overall Status**: ✅ **GOOD** - Code quality is solid, remaining work is organizational
 
-### Target State (After Next Iteration)
-- **Largest file**: < 800 lines
-- **Files > 800 lines**: 2-3 files
-- **Average file size**: ~340 lines
-- **Helper consolidation**: ✅ Complete
+**Strengths**:
+- ✅ No duplicate code
+- ✅ Well-organized core modules
+- ✅ Helper functions properly extracted
+- ✅ Clear separation of concerns in core modules
+- ✅ `dfm.py` reduced below 800 lines
+- ✅ `data/` package structure established (3 modules, 4 functions extracted)
+- ✅ `data_loader.py` reduced by 44% (783 → 439 lines, now < 500 lines)
 
----
+**Remaining Opportunities**:
+- ⚠️ `data_loader.py` could be further split for better organization (2 groups remaining)
+- ⚠️ `config.py` could separate models from factory methods
+- ⚠️ Monitor large files for future splitting needs
 
-## 9. Conclusion
+**Recommendation**: 
+- **Focus on continuing `data_loader.py` splitting** (MEDIUM priority, high impact)
+- **Consider `config.py` separation** (MEDIUM priority, medium impact)
+- **Monitor other files** (LOW priority, monitoring only)
 
-The codebase is **significantly improved** after 3 iterations:
-- ✅ Duplicate dead code removed (2252 lines)
-- ✅ Validation extracted from config
-- ✅ Clean package structure
-
-**Remaining work** is **organizational improvements**, not critical issues:
-- Extract helpers from `dfm.py` (medium priority, low risk)
-- Consider splitting `data_loader.py` (medium priority, medium risk)
-- Monitor other files as they evolve
-
-**Recommended Approach**:
-1. Start with extracting helpers from `dfm.py` (highest impact, lowest risk)
-2. Consider `data_loader.py` split if needed
-3. Continue incremental improvements
-
-**Estimated Effort**:
-- Phase 1: 1 iteration (extract helpers)
-- Phase 2: 1-2 iterations (split data_loader, optional)
-- Total: 1-3 iterations for remaining improvements
-
-The codebase is in **good shape**. Remaining work focuses on **organization and consolidation** rather than critical issues.
+The codebase is in good shape. Remaining refactoring is incremental improvement, not critical fixes.

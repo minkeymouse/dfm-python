@@ -390,7 +390,7 @@ def from_spec(spec_path: Union[str, Path], params: Optional[Params] = None) -> D
 
 def from_spec_df(spec_df: pd.DataFrame, params: Optional[Params] = None) -> DFM:
     """Load configuration from spec DataFrame (convenience constructor)."""
-    from .data_loader import _load_config_from_dataframe
+    from .data.config_loader import _load_config_from_dataframe
     
     if params is None:
         params = Params()
