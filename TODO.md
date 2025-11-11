@@ -524,3 +524,32 @@ The codebase meets all success criteria and demonstrates excellent organization.
 - ✅ Git status: Clean (no uncommitted changes)
 
 **Status:** Package is clean and ready. All 10 functional criteria met. File count at limit (20/20). No consolidation needed.
+
+---
+
+## Consolidation: Import Consistency Fix
+
+**Date:** Current iteration  
+**Type:** Code improvement (import consistency)
+
+**Changes Made:**
+- Fixed absolute import to relative import in `src/dfm_python/kalman.py:14`
+  - Changed: `from dfm_python.core.numeric import` → `from .core.numeric import`
+  - Rationale: Consistent with codebase pattern (all other modules use relative imports)
+
+**Verification Results:**
+- ✅ File count: 20/20 (no increase)
+- ✅ Markdown files: Only allowed files present (AGENT.md, MEMO.md, README.md, TODO.md)
+- ✅ No temporary artifacts or unwanted files
+- ✅ Test suite: 69 passed, 2 skipped (all pass)
+- ✅ Tutorial: Completes successfully
+- ✅ Plausibility: Q diag ≥ 1e-8, no complex, AR stable, shapes consistent, no NaN/Inf
+- ✅ Import verification: All imports work correctly
+
+**Impact:**
+- Improved import consistency across codebase
+- All internal imports now use relative syntax
+- No functional changes (cosmetic improvement only)
+- All tests and tutorial pass
+
+**Status:** Package is clean and ready. All 10 functional criteria met. File count at limit (20/20). Import consistency improved.
