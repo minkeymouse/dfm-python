@@ -46,7 +46,7 @@ from .core.em import (
     em_converged,
     NaNHandlingOptions,
 )
-from .core.helpers import safe_get_method, safe_get_attr, resolve_param
+from .core.helpers import safe_get_method, safe_get_attr, resolve_param, safe_mean_std
 
 from .data_loader import rem_nans_spline
 from .utils.aggregation import (
@@ -451,37 +451,6 @@ def _prepare_aggregation_structure(
     return tent_weights_dict, R_mat, q, frequencies, i_idio, nQ
 
 
-def _safe_mean_std(matrix: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-    """Compute mean and standard deviation for each column, handling missing values.
-    
-    Parameters
-    ----------
-    matrix : np.ndarray
-        Input matrix (T x N)
-        
-    Returns
-    -------
-    means : np.ndarray
-        Column means (N,)
-    stds : np.ndarray
-        Column standard deviations (N,)
-    """
-    n_series = matrix.shape[1]
-    means = np.zeros(n_series)
-    stds = np.ones(n_series)
-    for j in range(n_series):
-        col = matrix[:, j]
-        mask = np.isfinite(col)
-        if np.any(mask):
-            means[j] = float(np.nanmean(col[mask]))
-            std_val = float(np.nanstd(col[mask]))
-            stds[j] = std_val if std_val > 0 else 1.0
-        else:
-            means[j] = 0.0
-            stds[j] = 1.0
-    return means, stds
-
-
 def _standardize_data(
     X: np.ndarray,
     clip_data_values: bool,
@@ -498,7 +467,7 @@ def _standardize_data(
     Wx : np.ndarray
         Series standard deviations (N,)
     """
-    Mx, Wx = _safe_mean_std(X)
+    Mx, Wx = safe_mean_std(X)
     
     # Handle zero/near-zero standard deviations
     min_std = 1e-6
