@@ -1,0 +1,15 @@
+dfm-python Refactoring Workflow Summary
+Started: Tue Nov 11 04:58:45 PM KST 2025
+Max iterations: 1
+Test interval: 10
+Tutorial interval: 20
+PR update interval: 10 (status only)
+Agent branch: agent/refactoring
+PR policy: Feedback-based (no push without feedback)
+Checkpoint interval: 1
+Step checkpoint: 1
+Stall detection: 1 (timeout: 1800s)
+Auto-resume: 1
+Max retries: 5
+==========================================
+

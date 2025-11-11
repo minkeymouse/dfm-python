@@ -63,7 +63,7 @@ Examples:
                        help="Path to data CSV")
     parser.add_argument("--output", type=str, default="outputs",
                        help="Output directory")
-    parser.add_argument("--sample-start", type=str, default="2021-01-01",
+    parser.add_argument("--sample-start", type=str, default="1990-01-01",
                        help="Sample start date (YYYY-MM-DD)")
     parser.add_argument("--sample-end", type=str, default="2022-12-31",
                        help="Sample end date (YYYY-MM-DD)")
