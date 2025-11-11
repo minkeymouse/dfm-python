@@ -322,6 +322,37 @@ Near-term:
 - Better validation and warnings for data quality issues
 - All existing functionality preserved
 
+## Error Message Enhancement (2025-01-XX)
+
+**Status:** Completed successfully
+
+**Objective:** Enhance error messages and warnings with actionable suggestions to improve user experience and reduce debugging time.
+
+**Changes Made:**
+1. **`src/dfm_python/config.py`**: Enhanced frequency constraint error messages
+   - Added specific valid frequency suggestions when series frequency is faster than block clock
+   - Error messages now list valid frequencies and suggest fixes
+   - Enhanced block clock constraint error messages with specific suggestions
+
+2. **`src/dfm_python/data.py`**: Enhanced data loading warnings
+   - Improved warnings for T < N with specific actionable suggestions
+   - Warnings now include "Suggested fix: increase sample size or reduce number of series"
+   - More descriptive warning messages
+
+**Results:**
+- ✅ Test suite: 66 passed, 2 skipped (all tests pass)
+- ✅ Tutorial: Completes successfully
+- ✅ Plausibility: All checks pass (no complex, Q ≥ 1e-8, AR stable, shapes consistent)
+- ✅ File count: 20/20 (no increase)
+- ✅ No new files created (only edits to existing files)
+- ✅ Error messages verified to include actionable suggestions
+
+**Impact:**
+- Improved user experience with more actionable error messages
+- Reduced debugging time for configuration and data quality issues
+- All existing functionality preserved
+- Error messages now provide specific suggestions (e.g., valid frequencies, fix options)
+
 ---
 
 # Legacy: File Consolidation (for reference)

@@ -419,7 +419,9 @@ class DFMConfig:
             if block_clock_hierarchy < global_clock_hierarchy:
                 raise ValueError(
                     f"Block '{block_name}' has clock '{block_cfg.clock}' which is faster than "
-                    f"global clock '{self.clock}'. Block clocks must be >= global clock."
+                    f"global clock '{self.clock}'. Block clocks must be >= global clock. "
+                    f"Suggested fix: change block '{block_name}' clock to '{self.clock}' or slower, "
+                    f"or set global clock to '{block_cfg.clock}' or faster."
                 )
         
         # Auto-generate series_id if not provided and convert blocks to indices
@@ -469,11 +471,17 @@ class DFMConfig:
                     
                     # Series frequency must be <= block clock (slower or equal)
                     if series_freq_hierarchy < block_clock_hierarchy:
+                        # Suggest valid frequencies for the series
+                        valid_freqs = [freq for freq, hier in FREQUENCY_HIERARCHY.items() 
+                                      if hier >= block_clock_hierarchy]
+                        valid_freqs_str = ', '.join(sorted(valid_freqs))
                         raise ValueError(
                             f"Series '{s.series_id}' has frequency '{s.frequency}' which is faster than "
                             f"block '{block_name}' clock '{block_cfg.clock}'. "
                             f"Series in a block must have frequency <= block clock. "
-                            f"Either change the series frequency or move it to a faster block."
+                            f"Suggested fix: change series frequency to one of [{valid_freqs_str}] "
+                            f"(slower or equal to block clock '{block_cfg.clock}'), "
+                            f"or set block clock to '{s.frequency}' or faster."
                         )
         
         # Validate factors_per_block
