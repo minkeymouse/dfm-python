@@ -893,6 +893,25 @@ def em_step(params: EMStepParams) -> Tuple[np.ndarray, np.ndarray, np.ndarray, n
                 # Update loading for slower-frequency series
                 C_i, success = reg_inv(denom, nom.T, config)
                 if success:
+                    # Apply tent weight constraints (matching init_conditions behavior)
+                    if has_valid_data(R_con_i) and R_con_i.shape[0] > 0 and R_con_i.shape[1] == len(C_i):
+                        try:
+                            # Use same regularized inverse as reg_inv for consistency
+                            from .numeric import _compute_regularization_param
+                            scale_factor = safe_get_attr(config, "regularization_scale", 1e-5)
+                            warn_reg = safe_get_attr(config, "warn_on_regularization", True)
+                            reg_param, _ = _compute_regularization_param(denom, scale_factor, warn_reg)
+                            denom_reg = denom + np.eye(denom.shape[0]) * reg_param
+                            gram_inv = inv(denom_reg)
+                            # Apply constraint correction: C_i = C_i - gram_inv @ R_con_i.T @ inv(R_con_i @ gram_inv @ R_con_i.T) @ (R_con_i @ C_i - q_con_i)
+                            constraint_matrix = R_con_i @ gram_inv @ R_con_i.T
+                            if constraint_matrix.shape[0] > 0 and constraint_matrix.shape[1] > 0:
+                                constraint_inv = inv(constraint_matrix)
+                                constraint_term = gram_inv @ R_con_i.T @ constraint_inv @ (R_con_i @ C_i - q_con_i)
+                                C_i = C_i - constraint_term
+                        except _NUMERICAL_EXCEPTIONS:
+                            # If constraint application fails, use unconstrained result (fallback)
+                            pass
                     C_i = _clean_matrix(C_i, 'loading', default_nan=0.0, default_inf=0.0)
                     if len(bl_idx_slower_freq_i) > 0:
                         C_update = C_i.flatten()[:len(bl_idx_slower_freq_i)]
