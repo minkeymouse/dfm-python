@@ -11,7 +11,7 @@ _logger = logging.getLogger(__name__)
 
 def _get_numeric_utils():
     """Lazy import to avoid circular dependency."""
-    from dfm_python.core.numeric import (
+    from .core.numeric import (
         _ensure_real_and_symmetric,
         _ensure_covariance_stable,
         _ensure_real,
