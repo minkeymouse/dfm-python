@@ -114,11 +114,27 @@
 - ✅ Standalone utility modules merged into parent packages
 - ✅ File count reduced from 33 → 15 (well below 20 limit)
 
-**No Further Consolidation Opportunities Identified:**
+**Consolidation Analysis - Detailed Assessment:**
+
+**Potential Opportunity: `config.py` + `config_sources.py`**
+- `config.py`: 904 lines (dataclasses, factory methods, validation)
+- `config_sources.py`: 558 lines (source adapters: YamlSource, DictSource, SpecCSVSource, etc.)
+- Combined: Would be 1462 lines
+- **Decision: DO NOT MERGE**
+  - Rationale: Would create a very large file (1462 lines) without improving clarity
+  - They have distinct responsibilities:
+    - `config.py`: Data models (DFMConfig, SeriesConfig, BlockConfig, Params) and factory methods
+    - `config_sources.py`: Source adapters that load/create DFMConfig from various sources
+  - Current separation is logical and maintainable
+  - `config.py` already re-exports from `config_sources.py` for convenience
+  - Merging would violate principle: "If change doesn't improve clarity/structure, revert immediately"
+
+**All Other Files:**
 - All remaining files are either:
   - Core modules with distinct responsibilities (dfm, config, kalman, news, api)
   - Already consolidated packages (helpers, em, numeric, data, utils, test, core)
   - Package `__init__.py` files that serve as entry points
+- All are appropriately sized and serve clear purposes
 
 ### Code Organization Quality
 
