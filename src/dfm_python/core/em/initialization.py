@@ -69,7 +69,7 @@ from ..helpers import (
     ensure_minimum_size,
 )
 from ...utils.aggregation import group_series_by_frequency
-from ...data_loader import rem_nans_spline
+from ...data.utils import rem_nans_spline
 from ...utils.aggregation import (
     FREQUENCY_HIERARCHY,
     generate_R_mat,
