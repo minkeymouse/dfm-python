@@ -147,6 +147,31 @@ def pad_matrix_to_shape(
     return matrix
 
 
+def resolve_param(override: Any, default: Any) -> Any:
+    """Resolve parameter: use override if provided, else use default.
+    
+    Parameters
+    ----------
+    override : Any
+        Override value (used if not None)
+    default : Any
+        Default value (used if override is None)
+        
+    Returns
+    -------
+    Any
+        Override value if not None, else default value
+        
+    Examples
+    --------
+    >>> resolve_param(10, 5)
+    10
+    >>> resolve_param(None, 5)
+    5
+    """
+    return override if override is not None else default
+
+
 def safe_numerical_operation(
     operation: Any,
     *args,
