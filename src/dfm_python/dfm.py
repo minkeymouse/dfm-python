@@ -626,6 +626,7 @@ def _run_em_algorithm(
             config=config
         )
         C_new, R_new, A_new, Q_new, Z_0_new, V_0_new, loglik = em_step(em_step_params)
+        # Note: em_step returns (C, R, A, Q, Z_0, V_0, loglik) in this order
         
         # Handle likelihood decreases with damped updates
         if num_iter > 0 and loglik < previous_loglik - 1e-3:

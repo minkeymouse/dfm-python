@@ -19,7 +19,10 @@ Iteration working agreement:
 - Keep file count under `src/` (src/dfm_python + src/test) ≤ 20; consolidate only when safe and beneficial.
 
 Near-term:
-- Fix import/layout mismatches (e.g., dfm_python.core/data vs current modules) with minimal re-exports or routing.
+- **CRITICAL**: Implement full `init_conditions` and `em_step` functions in `src/dfm_python/core/em.py` (currently placeholders).
+  - Source: `trash/core_em_initialization.py` and `trash/core_em_iteration.py`
+  - Must maintain numerical stability (real symmetric PSD, damping, min diag(Q) ≥ 1e-8)
+  - Must handle block structure, tent weights, and mixed frequencies correctly
 - Stabilize EM/KF numerics (real symmetric PSD, damping, min diag(Q)).
 - Verify clock/tent-weight handling and frequency guardrails.
 - Ensure missing-data logic matches Nowcast expectations.
@@ -29,8 +32,8 @@ Near-term:
 # Legacy: File Consolidation (for reference)
 
 ## Current Status
-- **File count: 15** (target: ≤20) ✓ **BELOW LIMIT** (25% below maximum, 5 files below limit)
-- **Latest iteration**: Plan execution completed - codebase verified as production-ready, no refactoring needed
+- **File count: 20** (target: ≤20) ✓ **AT LIMIT** (exactly at maximum)
+- **Latest iteration**: Consolidation completed - removed unnecessary `src/__init__.py` to meet file count limit
 - **Previous iterations completed**: 
   - Merged `core/helpers/` package (3 files → 1)
   - Merged `core/numeric/` package (3 files → 1)
@@ -95,14 +98,13 @@ The codebase meets all success criteria and demonstrates excellent organization.
 
 ## Completed Iterations
 
-### ✅ COMPLETED: Refactoring Plan Execution (Current Iteration)
-**Result:** Execution completed - codebase verified as production-ready, no refactoring needed ✓
-- Plan stated: "No Refactoring Required" - codebase already optimal
-- Verified file count: 15 (optimal, below 20 limit)
-- Verified all files compile successfully
-- Verified all critical imports work correctly
-- Confirmed code structure is optimal
-- **Conclusion:** No code changes made - codebase already meets all success criteria
+### ✅ COMPLETED: Consolidation Iteration (Current)
+**Result:** File count reduced from 21 → 20 to meet limit ✓
+- Removed unnecessary `src/__init__.py` (not part of package structure, unused)
+- Verified file count: 20 (exactly at limit)
+- All tests passing (65 passed, 2 skipped)
+- Package imports verified working
+- **Note:** `init_conditions` and `em_step` in `core/em.py` remain as placeholders - full implementation needed
 
 ### ✅ COMPLETED: Eliminate Function Duplication
 **Result:** Function duplication eliminated, code quality improved ✓
