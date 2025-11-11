@@ -1,15 +1,15 @@
-"""Utility functions for data preprocessing, summary statistics, and mixed-frequency aggregation.
+"""Aggregation utilities for mixed-frequency data in Dynamic Factor Models.
 
-This module provides:
-- Aggregation utilities for mixed-frequency data in Dynamic Factor Models
-  (clock-based framework with tent kernels)
-- Lazy imports for data preprocessing functions (rem_nans_spline, summarize)
-  to avoid circular dependencies
+This module implements the clock-based aggregation framework for handling mixed-frequency
+time series in Dynamic Factor Models. The key innovation is the use of deterministic
+tent kernels to map lower-frequency observed variables to higher-frequency latent states
+within the observation equation.
 
-The aggregation utilities implement the clock-based aggregation framework for handling
-mixed-frequency time series in Dynamic Factor Models. The key innovation is the use
-of deterministic tent kernels to map lower-frequency observed variables to higher-frequency
-latent states within the observation equation.
+The module provides:
+- Frequency hierarchy definitions
+- Tent weight generation and lookup
+- Constraint matrix (R_mat) generation from tent weights
+- Aggregation structure computation based on global clock
 
 The tent kernel approach connects lower-frequency series to higher-frequency 
 latent factors through weighted aggregation constraints. This allows all factors to 
@@ -332,40 +332,3 @@ def group_series_by_frequency(
     # Convert lists to numpy arrays
     return {freq: np.array(indices, dtype=int) for freq, indices in freq_groups.items()}
 
-
-# ============================================================================
-# Lazy imports to avoid circular dependency with data module
-# ============================================================================
-
-def _get_rem_nans_spline():
-    """Lazy import of rem_nans_spline to avoid circular dependency."""
-    from ..data import rem_nans_spline
-    return rem_nans_spline
-
-def _get_summarize():
-    """Lazy import of summarize to avoid circular dependency."""
-    from ..data import summarize
-    return summarize
-
-# Re-export via __getattr__ for lazy loading
-def __getattr__(name: str):
-    if name == 'rem_nans_spline':
-        return _get_rem_nans_spline()
-    elif name == 'summarize':
-        return _get_summarize()
-    raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
-
-__all__ = [
-    # Aggregation functions and constants
-    'generate_tent_weights',
-    'generate_R_mat',
-    'get_tent_weights_for_pair',
-    'get_aggregation_structure',
-    'group_series_by_frequency',
-    'FREQUENCY_HIERARCHY',
-    'TENT_WEIGHTS_LOOKUP',
-    'MAX_TENT_SIZE',
-    # Data utility functions (lazy loaded)
-    'rem_nans_spline',
-    'summarize',
-]
