@@ -414,7 +414,7 @@ def from_dict(mapping: Dict[str, Any]) -> DFM:
 
 # Expose singleton instance for direct access
 # Users can access: dfm.config, dfm.data, dfm.result, etc.
-__all__ = ['DFM', 'load_config', 'load_data', 'train', 'reset', 
+__all__ = ['DFM', 'load_config', 'load_data', 'train', 'predict', 'plot', 'reset', 
            'from_yaml', 'from_spec', 'from_spec_df', 'from_dict']
 
 
