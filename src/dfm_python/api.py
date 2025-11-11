@@ -23,7 +23,7 @@ import numpy as np
 import pandas as pd
 
 from .config import DFMConfig, Params
-from .data.loader import load_data as _load_data
+from .data import load_data as _load_data
 from .config import (
     make_config_source,
     ConfigSource,
@@ -390,7 +390,7 @@ def from_spec(spec_path: Union[str, Path], params: Optional[Params] = None) -> D
 
 def from_spec_df(spec_df: pd.DataFrame, params: Optional[Params] = None) -> DFM:
     """Load configuration from spec DataFrame (convenience constructor)."""
-    from .data.loader import _load_config_from_dataframe
+    from .data import _load_config_from_dataframe
     
     if params is None:
         params = Params()

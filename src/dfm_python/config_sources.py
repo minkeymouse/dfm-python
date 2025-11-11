@@ -242,7 +242,7 @@ class SpecCSVSource:
     def load(self) -> DFMConfig:
         """Load series definitions from spec CSV."""
         import pandas as pd
-        from .data.loader import _load_config_from_dataframe
+        from .data import _load_config_from_dataframe
         
         specfile = Path(self.spec_path)
         if not specfile.exists():

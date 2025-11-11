@@ -48,7 +48,7 @@ from .core.em import (
 )
 from .core.helpers import safe_get_method, safe_get_attr, resolve_param, safe_mean_std, standardize_data
 
-from .data.utils import rem_nans_spline
+from .data import rem_nans_spline
 from .utils.aggregation import (
     get_aggregation_structure,
     FREQUENCY_HIERARCHY,
