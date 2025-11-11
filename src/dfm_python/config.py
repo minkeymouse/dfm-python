@@ -1,19 +1,23 @@
-"""Configuration models and source adapters for DFM nowcasting.
+"""Configuration models and factory methods for DFM nowcasting.
 
-This module provides a unified configuration system for Dynamic Factor Models:
+This module provides the core configuration system for Dynamic Factor Models:
 - Configuration dataclasses (DFMConfig, SeriesConfig, BlockConfig, Params)
-- Configuration source adapters (YAML, Dict, Spec CSV, Hydra)
-- Factory functions for flexible config loading
+- Factory methods for creating DFMConfig from dictionaries and Hydra configs
 
-The configuration system supports:
-- YAML files (with Hydra/OmegaConf support)
-- Direct DFMConfig object creation
-- Spec CSV files (series definitions)
-- Dictionary configurations
-- Merging multiple configuration sources
+The configuration dataclasses define:
+- Model structure (series, blocks, factors)
+- Estimation parameters (EM algorithm settings)
+- Numerical stability controls (regularization, clipping, damping)
 
-All adapters return a DFMConfig object, ensuring a consistent interface
-regardless of the source format.
+Factory methods support:
+- Dictionary configurations (legacy format, new format, Hydra format)
+- Hydra DictConfig objects (via from_hydra())
+
+For loading configurations from files (YAML, Spec CSV) or other sources,
+see the config_sources module which provides source adapters.
+
+Note: Source adapter classes (YamlSource, DictSource, etc.) are re-exported
+from config_sources for backward compatibility.
 """
 
 import numpy as np
