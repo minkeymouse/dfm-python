@@ -21,7 +21,7 @@ import pandas as pd
 
 from .kalman import run_kf
 from .config import DFMConfig
-from .core.diagnostics import calculate_rmse
+from .core import calculate_rmse
 from .utils import group_series_by_frequency
 from .core.numeric import (
     _ensure_symmetric,
@@ -35,7 +35,7 @@ from .core.numeric import (
     _safe_divide,
     _check_finite,
 )
-from .core.diagnostics import (
+from .core import (
     _display_dfm_tables,
     diagnose_series,
     print_series_diagnosis,
@@ -902,5 +902,5 @@ def _dfm_core(
     return Res
 
 
-# Diagnostic functions are imported directly from core.diagnostics - no proxy functions needed
+# Diagnostic functions are imported directly from core - no proxy functions needed
 

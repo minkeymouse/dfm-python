@@ -65,7 +65,7 @@ from .config import (
 )
 from .data import transform_data
 from .dfm import DFMResult
-from .core.diagnostics import calculate_rmse, diagnose_series, print_series_diagnosis
+from .core import calculate_rmse, diagnose_series, print_series_diagnosis
 from .dfm import DFM as _DFMCore  # Core DFM class from dfm.py
 from .kalman import run_kf, skf, fis, miss_data
 from .news import update_nowcast, news_dfm, para_const
