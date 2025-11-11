@@ -19,7 +19,6 @@ regardless of the source format.
 import numpy as np
 from typing import List, Optional, Dict, Any, Union
 from pathlib import Path
-import warnings
 import logging
 from dataclasses import dataclass, field, is_dataclass, asdict
 
@@ -27,13 +26,6 @@ try:
     from typing import Protocol
 except ImportError:
     from typing_extensions import Protocol
-
-try:
-    from hydra.core.config_store import ConfigStore
-    HYDRA_AVAILABLE = True
-except ImportError:
-    HYDRA_AVAILABLE = False
-    ConfigStore = None
 
 from .config_validation import validate_frequency, validate_transformation
 
@@ -805,48 +797,6 @@ class DFMConfig:
         if not isinstance(cfg, dict):
             raise TypeError("from_hydra expects a DictConfig or dict.")
         return cls.from_dict(cfg)
-
-
-# Register with Hydra ConfigStore (optional - only if Hydra is available)
-if HYDRA_AVAILABLE and ConfigStore is not None:
-    try:
-        cs = ConfigStore.instance()
-        if cs is not None:
-            from dataclasses import dataclass as schema_dataclass
-            
-            @schema_dataclass
-            class SeriesConfigSchema:
-                """Schema for SeriesConfig validation in Hydra."""
-                series_id: str
-                series_name: str
-                frequency: str
-                units: str
-                transformation: str
-                category: str
-                blocks: List[int]
-            
-            @schema_dataclass
-            class DFMConfigSchema:
-                """Schema for unified DFMConfig validation in Hydra."""
-                series: List[SeriesConfigSchema]
-                block_names: List[str]
-                factors_per_block: Optional[List[int]] = None
-                ar_lag: int = 1
-                threshold: float = 1e-5
-                max_iter: int = 5000
-                nan_method: int = 2
-                nan_k: int = 3
-                clock: str = 'm'
-            
-            # Register schemas
-            cs.store(group="dfm", name="base_dfm_config", node=DFMConfigSchema)
-            cs.store(group="model", name="base_model_config", node=DFMConfigSchema)
-            cs.store(name="dfm_config_schema", node=DFMConfigSchema)
-            cs.store(name="model_config_schema", node=DFMConfigSchema)
-            
-    except Exception as e:
-        warnings.warn(f"Could not register Hydra structured config schemas: {e}. "
-                     f"Configs will still work via from_dict() but without schema validation.")
 
 
 # ============================================================================
