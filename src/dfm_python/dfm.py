@@ -255,6 +255,48 @@ class DFMParams:
         return cls(**filtered)
 
 
+@dataclass
+class EMAlgorithmParams:
+    """Parameters for EM algorithm execution.
+    
+    This dataclass groups all parameters required for running the EM algorithm,
+    reducing function parameter count and improving readability.
+    
+    All parameters are required (no optional fields) since the EM algorithm
+    needs all of them to execute.
+    """
+    # Data
+    y: np.ndarray
+    y_est: np.ndarray
+    
+    # Model parameters
+    A: np.ndarray
+    C: np.ndarray
+    Q: np.ndarray
+    R: np.ndarray
+    Z_0: np.ndarray
+    V_0: np.ndarray
+    r: np.ndarray
+    p: int
+    
+    # Structure parameters
+    R_mat: Optional[np.ndarray]
+    q: Optional[np.ndarray]
+    nQ: int
+    i_idio: np.ndarray
+    blocks: np.ndarray
+    tent_weights_dict: Dict[str, np.ndarray]
+    clock: str
+    frequencies: Optional[np.ndarray]
+    
+    # Config and algorithm parameters
+    config: DFMConfig
+    threshold: float
+    max_iter: int
+    use_damped_updates: bool
+    damping_factor: float
+
+
 # Core functions are imported directly from core modules - no proxy functions needed
 
 
@@ -511,31 +553,14 @@ def _prepare_aggregation_structure(
 
 
 def _run_em_algorithm(
-    y: np.ndarray,
-    y_est: np.ndarray,
-    A: np.ndarray,
-    C: np.ndarray,
-    Q: np.ndarray,
-    R: np.ndarray,
-    Z_0: np.ndarray,
-    V_0: np.ndarray,
-    r: np.ndarray,
-    p: int,
-    R_mat: Optional[np.ndarray],
-    q: Optional[np.ndarray],
-    nQ: int,
-    i_idio: np.ndarray,
-    blocks: np.ndarray,
-    tent_weights_dict: Dict[str, np.ndarray],
-    clock: str,
-    frequencies: Optional[np.ndarray],
-    config: DFMConfig,
-    threshold: float,
-    max_iter: int,
-    use_damped_updates: bool,
-    damping_factor: float,
+    params: EMAlgorithmParams
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, float, int, bool]:
     """Run EM algorithm until convergence.
+    
+    Parameters
+    ----------
+    params : EMAlgorithmParams
+        All parameters required for EM algorithm execution
     
     Returns
     -------
@@ -548,6 +573,31 @@ def _run_em_algorithm(
     converged : bool
         Whether convergence was achieved
     """
+    # Extract parameters from dataclass
+    y = params.y
+    y_est = params.y_est
+    A = params.A
+    C = params.C
+    Q = params.Q
+    R = params.R
+    Z_0 = params.Z_0
+    V_0 = params.V_0
+    r = params.r
+    p = params.p
+    R_mat = params.R_mat
+    q = params.q
+    nQ = params.nQ
+    i_idio = params.i_idio
+    blocks = params.blocks
+    tent_weights_dict = params.tent_weights_dict
+    clock = params.clock
+    frequencies = params.frequencies
+    config = params.config
+    threshold = params.threshold
+    max_iter = params.max_iter
+    use_damped_updates = params.use_damped_updates
+    damping_factor = params.damping_factor
+    
     previous_loglik = -np.inf
     num_iter = 0
     converged = False
@@ -770,11 +820,32 @@ def _dfm_core(
     y_est = x_est.T  # n x T (missing data removed)
     
     # Step 6: Run EM algorithm
-    A, C, Q, R, Z_0, V_0, loglik, num_iter, converged = _run_em_algorithm(
-        y, y_est, A, C, Q, R, Z_0, V_0, r, p, R_mat, q, nQ, i_idio, blocks,
-        tent_weights_dict, clock, frequencies, config,
-        threshold, max_iter, use_damped_updates, damping_factor
+    em_params = EMAlgorithmParams(
+        y=y,
+        y_est=y_est,
+        A=A,
+        C=C,
+        Q=Q,
+        R=R,
+        Z_0=Z_0,
+        V_0=V_0,
+        r=r,
+        p=p,
+        R_mat=R_mat,
+        q=q,
+        nQ=nQ,
+        i_idio=i_idio,
+        blocks=blocks,
+        tent_weights_dict=tent_weights_dict,
+        clock=clock,
+        frequencies=frequencies,
+        config=config,
+        threshold=threshold,
+        max_iter=max_iter,
+        use_damped_updates=use_damped_updates,
+        damping_factor=damping_factor,
     )
+    A, C, Q, R, Z_0, V_0, loglik, num_iter, converged = _run_em_algorithm(em_params)
     
     # Step 7: Final Kalman smoothing
     zsmooth, _, _, _ = run_kf(y, A, C, Q, R, Z_0, V_0)
