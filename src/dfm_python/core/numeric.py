@@ -473,7 +473,7 @@ def _apply_ar_clipping(A: np.ndarray, config: Optional[Any] = None) -> Tuple[np.
     if config is None:
         return _clip_ar_coefficients(A, -0.99, 0.99, True)
     
-    from ..core.helpers import safe_get_attr
+    from .helpers import safe_get_attr
     
     clip_enabled = safe_get_attr(config, 'clip_ar_coefficients', True)
     if not clip_enabled:
@@ -518,3 +518,112 @@ def _safe_divide(numerator: np.ndarray, denominator: float, default: float = 0.0
     result = numerator / denominator
     result = np.where(np.isfinite(result), result, default)
     return result
+
+
+def _safe_determinant(M: np.ndarray, use_logdet: bool = True) -> float:
+    """Compute determinant safely to avoid overflow warnings.
+    
+    Uses log-determinant computation for large matrices or matrices with high
+    condition numbers to avoid numerical overflow. For positive semi-definite
+    matrices, uses Cholesky decomposition which is more stable.
+    
+    Parameters
+    ----------
+    M : np.ndarray
+        Square matrix for which to compute determinant
+    use_logdet : bool
+        Whether to use log-determinant computation (default: True)
+        
+    Returns
+    -------
+    det : float
+        Determinant of M, or 0.0 if computation fails
+        
+    Notes
+    -----
+    For log-determinant: det(M) = exp(sum(log(diag(L)))) where L is Cholesky factor
+    This avoids overflow for large determinants.
+    """
+    if M.size == 0 or M.shape[0] == 0:
+        return 0.0
+    
+    if M.shape[0] != M.shape[1]:
+        _logger.debug("_safe_determinant: non-square matrix, returning 0.0")
+        return 0.0
+    
+    # Check for NaN/Inf
+    if np.any(~np.isfinite(M)):
+        _logger.debug("_safe_determinant: matrix contains NaN/Inf, returning 0.0")
+        return 0.0
+    
+    # For small matrices (1x1 or 2x2), direct computation is safe
+    if M.shape[0] <= 2:
+        try:
+            with warnings.catch_warnings():
+                warnings.filterwarnings('error', category=RuntimeWarning)
+                det = np.linalg.det(M)
+                if np.isfinite(det):
+                    return float(det)
+        except (RuntimeWarning, OverflowError):
+            pass
+        # Fall through to log-determinant
+    
+    # Check condition number to decide on method
+    try:
+        eigenvals = np.linalg.eigvals(M)
+        eigenvals = eigenvals[np.isfinite(eigenvals)]
+        if len(eigenvals) > 0:
+            max_eig = np.max(np.abs(eigenvals))
+            min_eig = np.max(np.abs(eigenvals[eigenvals != 0])) if np.any(eigenvals != 0) else max_eig
+            cond_num = max_eig / max(min_eig, 1e-12)
+        else:
+            cond_num = np.inf
+    except (np.linalg.LinAlgError, ValueError):
+        cond_num = np.inf
+    
+    # Use log-determinant for large condition numbers or if requested
+    if use_logdet or cond_num > 1e10:
+        try:
+            # Try Cholesky decomposition first (more stable for PSD matrices)
+            try:
+                L = np.linalg.cholesky(M)
+                log_det = 2.0 * np.sum(np.log(np.diag(L)))
+                # Check if log_det is too large to avoid overflow in exp
+                if log_det > 700:  # exp(700) is near float64 max
+                    _logger.debug("_safe_determinant: log_det too large, returning 0.0")
+                    return 0.0
+                with warnings.catch_warnings():
+                    warnings.filterwarnings('ignore', category=RuntimeWarning)
+                    det = np.exp(log_det)
+                if np.isfinite(det) and det > 0:
+                    return float(det)
+            except np.linalg.LinAlgError:
+                # Not PSD, use LU decomposition
+                P, L, U = np.linalg.lu(M)
+                log_det = np.sum(np.log(np.abs(np.diag(U))))
+                # Check if log_det is too large to avoid overflow in exp
+                if log_det > 700:
+                    _logger.debug("_safe_determinant: log_det too large, returning 0.0")
+                    return 0.0
+                # Account for permutation sign
+                sign = np.linalg.det(P) if P.shape[0] <= 10 else 1.0
+                with warnings.catch_warnings():
+                    warnings.filterwarnings('ignore', category=RuntimeWarning)
+                    det = sign * np.exp(log_det)
+                if np.isfinite(det):
+                    return float(det)
+        except (np.linalg.LinAlgError, ValueError, OverflowError, RuntimeWarning):
+            pass
+    
+    # Fallback: direct computation with exception handling
+    try:
+        with warnings.catch_warnings():
+            warnings.filterwarnings('ignore', category=RuntimeWarning)
+            det = np.linalg.det(M)
+            if np.isfinite(det):
+                return float(det)
+    except (np.linalg.LinAlgError, ValueError, OverflowError):
+        pass
+    
+    _logger.debug("_safe_determinant: all methods failed, returning 0.0")
+    return 0.0

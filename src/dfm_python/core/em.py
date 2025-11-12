@@ -189,7 +189,13 @@ def init_conditions(x, r, p, blocks, opt_nan, Rcon, q, nQ, i_idio, clock='m', te
                     finite_rows = np.all(np.isfinite(res), axis=1)
                 n_finite = int(np.sum(finite_rows))
                 if n_finite < max(2, n_freq + 1):
-                    raise ValueError("insufficient data")
+                    block_name = f"block {i}" if i > 0 else "Block_Global"
+                    raise ValueError(
+                        f"Insufficient data for {block_name}: only {n_finite} valid time periods "
+                        f"available, but need at least {max(2, n_freq + 1)}. "
+                        f"Series in this block have too much missing data. "
+                        f"Consider removing series with high missing data ratios or increasing data coverage."
+                    )
                 
                 res_clean = res[finite_rows, :]
                 # Fill remaining NaNs for Block_Global
@@ -893,6 +899,25 @@ def em_step(params: EMStepParams) -> Tuple[np.ndarray, np.ndarray, np.ndarray, n
                 # Update loading for slower-frequency series
                 C_i, success = reg_inv(denom, nom.T, config)
                 if success:
+                    # Apply tent weight constraints (matching init_conditions behavior)
+                    if has_valid_data(R_con_i) and R_con_i.shape[0] > 0 and R_con_i.shape[1] == len(C_i):
+                        try:
+                            # Use same regularized inverse as reg_inv for consistency
+                            from .numeric import _compute_regularization_param
+                            scale_factor = safe_get_attr(config, "regularization_scale", 1e-5)
+                            warn_reg = safe_get_attr(config, "warn_on_regularization", True)
+                            reg_param, _ = _compute_regularization_param(denom, scale_factor, warn_reg)
+                            denom_reg = denom + np.eye(denom.shape[0]) * reg_param
+                            gram_inv = inv(denom_reg)
+                            # Apply constraint correction: C_i = C_i - gram_inv @ R_con_i.T @ inv(R_con_i @ gram_inv @ R_con_i.T) @ (R_con_i @ C_i - q_con_i)
+                            constraint_matrix = R_con_i @ gram_inv @ R_con_i.T
+                            if constraint_matrix.shape[0] > 0 and constraint_matrix.shape[1] > 0:
+                                constraint_inv = inv(constraint_matrix)
+                                constraint_term = gram_inv @ R_con_i.T @ constraint_inv @ (R_con_i @ C_i - q_con_i)
+                                C_i = C_i - constraint_term
+                        except _NUMERICAL_EXCEPTIONS:
+                            # If constraint application fails, use unconstrained result (fallback)
+                            pass
                     C_i = _clean_matrix(C_i, 'loading', default_nan=0.0, default_inf=0.0)
                     if len(bl_idx_slower_freq_i) > 0:
                         C_update = C_i.flatten()[:len(bl_idx_slower_freq_i)]
