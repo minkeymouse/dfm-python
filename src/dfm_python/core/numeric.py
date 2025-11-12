@@ -598,20 +598,23 @@ def _safe_determinant(M: np.ndarray, use_logdet: bool = True) -> float:
                 if np.isfinite(det) and det > 0:
                     return float(det)
             except np.linalg.LinAlgError:
-                # Not PSD, use LU decomposition
-                P, L, U = np.linalg.lu(M)
-                log_det = np.sum(np.log(np.abs(np.diag(U))))
-                # Check if log_det is too large to avoid overflow in exp
+                # Not PSD: fall back to slogdet for general matrices
+                try:
+                    sign, log_det = np.linalg.slogdet(M)
+                    # If determinant is non-positive or invalid, return 0.0
+                    if not np.isfinite(log_det) or sign <= 0:
+                        return 0.0
+                    # Avoid overflow in exp
                 if log_det > 700:
                     _logger.debug("_safe_determinant: log_det too large, returning 0.0")
                     return 0.0
-                # Account for permutation sign
-                sign = np.linalg.det(P) if P.shape[0] <= 10 else 1.0
                 with warnings.catch_warnings():
                     warnings.filterwarnings('ignore', category=RuntimeWarning)
-                    det = sign * np.exp(log_det)
+                        det = np.exp(log_det)
                 if np.isfinite(det):
                     return float(det)
+                except Exception:
+                    pass
         except (np.linalg.LinAlgError, ValueError, OverflowError, RuntimeWarning):
             pass
     

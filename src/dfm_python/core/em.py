@@ -86,9 +86,10 @@ class EMStepParams:
     tent_weights_dict: Optional[Dict[str, np.ndarray]]
     clock: str
     frequencies: Optional[np.ndarray]
+    idio_chain_lengths: np.ndarray
     config: Any
 
-def init_conditions(x, r, p, blocks, opt_nan, Rcon, q, nQ, i_idio, clock='m', tent_weights_dict=None, frequencies=None):
+def init_conditions(x, r, p, blocks, opt_nan, Rcon, q, nQ, i_idio, clock='m', tent_weights_dict=None, frequencies=None, idio_chain_lengths=None, config=None):
     """Compute initial parameter estimates for DFM via PCA and OLS.
     
     This function computes initial values for the DFM parameters:
@@ -225,8 +226,13 @@ def init_conditions(x, r, p, blocks, opt_nan, Rcon, q, nQ, i_idio, clock='m', te
                     d_min = max(d_min_absolute, d_min_relative)
                     d = np.maximum(d, d_min)
                 
-                # Set loadings (flip sign if needed)
-                if np.sum(v) < 0:
+                # Sign-alignment for principal components: ensure consistent sign to reduce iteration jitter
+                # Use first non-zero element to determine sign
+                first_nonzero_idx = np.where(np.abs(v[:, 0]) > 1e-10)[0]
+                if len(first_nonzero_idx) > 0:
+                    if v[first_nonzero_idx[0], 0] < 0:
+                        v = -v
+                elif np.sum(v) < 0:
                     v = -v
                 C_block[idx_freq, :r_i] = v
                 
@@ -362,7 +368,20 @@ def init_conditions(x, r, p, blocks, opt_nan, Rcon, q, nQ, i_idio, clock='m', te
                                         # Store loadings (only up to available columns in C_block)
                                         n_loadings = min(pC_freq * r_i, C_block.shape[1])
                                         if n_loadings > 0:
-                                            C_block[j, :n_loadings] = loadings[:n_loadings]
+                                            # Clip initial loadings to prevent extreme values
+                                            # This helps prevent Q explosion during C normalization
+                                            max_loading_norm = safe_get_attr(config, "max_loading_norm", 10.0) if config is not None else 10.0
+                                            # Clip loadings: if norm is too large, scale down
+                                            loadings_to_store = loadings[:n_loadings]
+                                            if loadings_to_store.ndim == 1:
+                                                # Vector case: clip by norm
+                                                loading_norm = np.linalg.norm(loadings_to_store)
+                                                if loading_norm > max_loading_norm:
+                                                    loadings_to_store = loadings_to_store * (max_loading_norm / loading_norm)
+                                            else:
+                                                # Multi-dimensional: clip each element
+                                                loadings_to_store = np.clip(loadings_to_store, -max_loading_norm, max_loading_norm)
+                                            C_block[j, :n_loadings] = loadings_to_store
                                     except Exception:
                                         # If constrained LS fails, use unconstrained (fallback)
                                         try:
@@ -371,7 +390,19 @@ def init_conditions(x, r, p, blocks, opt_nan, Rcon, q, nQ, i_idio, clock='m', te
                                             loadings = gram_inv @ factor_projection_clean.T @ series_data_clean
                                             n_loadings = min(pC_freq * r_i, C_block.shape[1])
                                             if n_loadings > 0:
-                                                C_block[j, :n_loadings] = loadings[:n_loadings]
+                                                # Clip initial loadings to prevent extreme values
+                                                max_loading_norm = safe_get_attr(config, "max_loading_norm", 10.0) if config is not None else 10.0
+                                                # Clip loadings: if norm is too large, scale down
+                                                loadings_to_store = loadings[:n_loadings]
+                                                if loadings_to_store.ndim == 1:
+                                                    # Vector case: clip by norm
+                                                    loading_norm = np.linalg.norm(loadings_to_store)
+                                                    if loading_norm > max_loading_norm:
+                                                        loadings_to_store = loadings_to_store * (max_loading_norm / loading_norm)
+                                                else:
+                                                    # Multi-dimensional: clip each element
+                                                    loadings_to_store = np.clip(loadings_to_store, -max_loading_norm, max_loading_norm)
+                                                C_block[j, :n_loadings] = loadings_to_store
                                         except Exception:
                                             pass  # Leave as zeros
                         except Exception:
@@ -441,6 +472,127 @@ def init_conditions(x, r, p, blocks, opt_nan, Rcon, q, nQ, i_idio, clock='m', te
     
     # Ensure V_0 is numerically stable
     V_0 = _ensure_covariance_stable(V_0, min_eigenval=MIN_INNOVATION_VARIANCE, ensure_real=True)
+    
+    # Augment state with idiosyncratic components if enabled
+    if idio_chain_lengths is not None and config is not None and config.augment_idio:
+        from scipy.linalg import solve_discrete_lyapunov
+        from ..utils import FREQUENCY_HIERARCHY
+        
+        m_factor = A.shape[0] if A is not None else 0
+        total_idio_dim = int(np.sum(idio_chain_lengths))
+        
+        if total_idio_dim > 0:
+            # Get config parameters
+            idio_rho0 = getattr(config, 'idio_rho0', 0.1)
+            idio_min_var = getattr(config, 'idio_min_var', 1e-8)
+            clock_hierarchy = FREQUENCY_HIERARCHY.get(clock, 3)
+            
+            # Build idio A, Q, V0 blocks
+            A_idio_list = []
+            Q_idio_list = []
+            V0_idio_list = []
+            C_idio_cols = np.zeros((N, total_idio_dim))
+            
+            idio_state_idx = 0
+            for i in range(N):
+                chain_len = int(idio_chain_lengths[i])
+                if chain_len == 0:
+                    continue
+                
+                freq = frequencies[i] if frequencies is not None and i < len(frequencies) else clock
+                freq_hierarchy = FREQUENCY_HIERARCHY.get(freq, 3)
+                
+                if chain_len == 1:
+                    # Clock-frequency series: AR(1) idio state
+                    A_idio_block = np.array([[idio_rho0]])
+                    # Estimate variance from residuals
+                    if i < residuals_with_nan.shape[1]:
+                        idio_var = np.nanvar(residuals_with_nan[:, i])
+                        if not np.isfinite(idio_var) or idio_var < idio_min_var:
+                            idio_var = idio_min_var
+                    else:
+                        idio_var = idio_min_var
+                    Q_idio_block = np.array([[idio_var]])
+                    # Stationary variance for AR(1): V = Q / (1 - rho^2)
+                    if abs(idio_rho0) < 0.99:
+                        V0_idio_block = np.array([[idio_var / (1 - idio_rho0**2)]])
+                    else:
+                        V0_idio_block = np.array([[idio_var]])
+                    # C maps idio state to observation (identity column)
+                    C_idio_cols[i, idio_state_idx] = 1.0
+                else:
+                    # Slower-frequency series: L-length chain with tent weights
+                    # A: top-left AR(1) with subdiagonal 1s (shift)
+                    A_idio_block = np.zeros((chain_len, chain_len))
+                    A_idio_block[0, 0] = idio_rho0
+                    if chain_len > 1:
+                        A_idio_block[1:, :-1] = np.eye(chain_len - 1)
+                    
+                    # Q: variance on head state only
+                    if i < residuals_with_nan.shape[1]:
+                        idio_var = np.nanvar(residuals_with_nan[:, i])
+                        if not np.isfinite(idio_var) or idio_var < idio_min_var:
+                            idio_var = idio_min_var
+                    else:
+                        idio_var = idio_min_var
+                    Q_idio_block = np.zeros((chain_len, chain_len))
+                    Q_idio_block[0, 0] = idio_var
+                    
+                    # V0: via discrete Lyapunov equation
+                    try:
+                        V0_idio_block = solve_discrete_lyapunov(A_idio_block, Q_idio_block)
+                    except:
+                        # Fallback: diagonal with scaled variance
+                        V0_idio_block = np.eye(chain_len) * idio_var
+                    
+                    # C: maps chain to observation with tent weights
+                    tent_weights = tent_weights_dict.get(freq) if tent_weights_dict else None
+                    if tent_weights is not None and len(tent_weights) == chain_len:
+                        # Normalize tent weights
+                        tent_sum = np.sum(tent_weights)
+                        if tent_sum > 0:
+                            C_idio_cols[i, idio_state_idx:idio_state_idx+chain_len] = tent_weights / tent_sum
+                        else:
+                            C_idio_cols[i, idio_state_idx] = 1.0
+                    else:
+                        # Fallback: map to first state only
+                        C_idio_cols[i, idio_state_idx] = 1.0
+                
+                A_idio_list.append(A_idio_block)
+                Q_idio_list.append(Q_idio_block)
+                V0_idio_list.append(V0_idio_block)
+                idio_state_idx += chain_len
+            
+            # Combine idio blocks
+            if A_idio_list:
+                from scipy.linalg import block_diag
+                A_idio = block_diag(*A_idio_list)
+                Q_idio = block_diag(*Q_idio_list)
+                V0_idio = block_diag(*V0_idio_list)
+                
+                # Augment A, Q, V0
+                if A is not None:
+                    A_aug = block_diag(A, A_idio)
+                else:
+                    A_aug = A_idio
+                if Q is not None:
+                    Q_aug = block_diag(Q, Q_idio)
+                else:
+                    Q_aug = Q_idio
+                if V_0 is not None:
+                    V_0_aug = block_diag(V_0, V0_idio)
+                else:
+                    V_0_aug = V0_idio
+                
+                # Augment C
+                C_aug = np.hstack([C, C_idio_cols]) if C is not None else C_idio_cols
+                
+                # Augment Z_0
+                Z_0_aug = np.zeros(A_aug.shape[0])
+                if Z_0 is not None and len(Z_0) > 0:
+                    Z_0_aug[:len(Z_0)] = Z_0
+                
+                A, C, Q, V_0, Z_0 = A_aug, C_aug, Q_aug, V_0_aug, Z_0_aug
     
     # Final validation
     if not _check_finite(A, "A") or not _check_finite(C, "C") or not _check_finite(Q, "Q") or not _check_finite(R, "R"):
@@ -542,6 +694,7 @@ def em_step(params: EMStepParams) -> Tuple[np.ndarray, np.ndarray, np.ndarray, n
     tent_weights_dict = params.tent_weights_dict
     clock = params.clock
     frequencies = params.frequencies
+    idio_chain_lengths = params.idio_chain_lengths
     config = params.config
     
     # Validate and clean input parameters
@@ -586,11 +739,18 @@ def em_step(params: EMStepParams) -> Tuple[np.ndarray, np.ndarray, np.ndarray, n
             use_damped_updates=True,
             damping_factor=0.8,
             warn_on_damped_update=True,
+            augment_idio=False,
+            augment_idio_slow=True,
+            idio_rho0=0.1,
+            idio_min_var=1e-8,
         )
 
     # Ensure matrices are large enough for idiosyncratic components before Kalman filter
     idio_start_idx = int(np.sum(r) * ppC)
-    n_idio = int(np.sum(i_idio))
+    if idio_chain_lengths is not None and config is not None and config.augment_idio:
+        n_idio = int(np.sum(idio_chain_lengths))
+    else:
+        n_idio = int(np.sum(i_idio))  # Fallback to old approach
     required_size = idio_start_idx + n_idio
     if A.shape[0] < required_size:
         # Expand matrices to accommodate idiosyncratic components
@@ -642,6 +802,15 @@ def em_step(params: EMStepParams) -> Tuple[np.ndarray, np.ndarray, np.ndarray, n
             try:
                 eigenvals = np.linalg.eigvals(EZZ_lag_sub)
                 cond_num = (np.max(eigenvals) / max(np.min(eigenvals), 1e-12)) if np.max(eigenvals) > 0 else 1.0
+                # Adaptive ridge regularization: if cond > 1e8, add λI with λ ∝ trace/size
+                if cond_num > 1e8:
+                    trace_val = np.trace(EZZ_lag_sub)
+                    size_val = EZZ_lag_sub.shape[0]
+                    lambda_ridge = (trace_val / size_val) * 1e-5  # Scale factor
+                    EZZ_lag_sub = EZZ_lag_sub + lambda_ridge * np.eye(size_val)
+                    # Recompute condition number after regularization
+                eigenvals = np.linalg.eigvals(EZZ_lag_sub)
+                cond_num = (np.max(eigenvals) / max(np.min(eigenvals), 1e-12)) if np.max(eigenvals) > 0 else 1.0
                 EZZ_lag_inv = pinv(EZZ_lag_sub, rcond=1e-8) if cond_num > 1e12 else inv(EZZ_lag_sub)
             except _NUMERICAL_EXCEPTIONS:
                 EZZ_lag_inv = pinv(EZZ_lag_sub)
@@ -677,7 +846,109 @@ def em_step(params: EMStepParams) -> Tuple[np.ndarray, np.ndarray, np.ndarray, n
         update_block_in_matrix(V_0_new, V_0_block, t_start, t_end)
 
     # Update idiosyncratic components (A, Q, V_0)
-    # Note: idio_start_idx and n_idio already computed above
+    # Use idio_chain_lengths if available, otherwise fall back to old i_idio approach
+    if idio_chain_lengths is not None and config is not None and config.augment_idio:
+        # New approach: per-series idio chains
+        idio_min_var = getattr(config, 'idio_min_var', 1e-8)
+        idio_state_idx = idio_start_idx
+        
+        for i in range(n):
+            chain_len = int(idio_chain_lengths[i]) if i < len(idio_chain_lengths) else 0
+            if chain_len == 0:
+                continue
+            
+            i_subset_series = slice(idio_state_idx, idio_state_idx + chain_len)
+            i_subset_slice_series = slice(i_subset_series.start, i_subset_series.stop)
+            
+            # Extract sufficient statistics for this series' idio chain
+            Z_idio_series = Zsmooth[i_subset_slice_series, 1:] if idio_state_idx < Zsmooth.shape[1] else np.zeros((chain_len, T))
+            Z_idio_lag_series = Zsmooth[i_subset_slice_series, :-1] if idio_state_idx < Zsmooth.shape[1] else np.zeros((chain_len, T))
+            
+            # Skip if idio series is empty or has invalid shape
+            if Z_idio_series.shape[0] == 0 or Z_idio_series.shape[1] == 0:
+                idio_state_idx += chain_len
+                continue
+            
+            if chain_len == 1:
+                # Clock-frequency series: diagonal AR(1) update
+                vsmooth_idio_series = vsmooth[i_subset_slice_series, :, :][:, i_subset_slice_series, 1:]
+                vsmooth_idio_sum_series = np.sum(vsmooth_idio_series, axis=2)
+                vsmooth_idio_diag_series = vsmooth_idio_sum_series[0, 0] if vsmooth_idio_sum_series.size > 0 else 0.0
+                
+                vsmooth_lag_series = vsmooth[i_subset_slice_series, :, :][:, i_subset_slice_series, :-1]
+                vsmooth_lag_sum_series = np.sum(vsmooth_lag_series, axis=2)
+                vsmooth_lag_diag_series = vsmooth_lag_sum_series[0, 0] if vsmooth_lag_sum_series.size > 0 else 0.0
+                
+                expected_idio_current_sq_series = np.sum(Z_idio_series[0, :]**2) + vsmooth_idio_diag_series
+                expected_idio_lag_sq_series = np.sum(Z_idio_lag_series[0, :]**2) + vsmooth_lag_diag_series
+                expected_idio_cross_series = np.sum(Z_idio_series[0, :] * Z_idio_lag_series[0, :])
+                
+                vvsmooth_series = vvsmooth[i_subset_slice_series, :, :][:, i_subset_slice_series, :]
+                vvsmooth_sum_series = np.sum(vvsmooth_series, axis=2)
+                vvsmooth_diag_series = vvsmooth_sum_series[0, 0] if vvsmooth_sum_series.size > 0 else 0.0
+                expected_idio_cross_series = expected_idio_cross_series + vvsmooth_diag_series
+                
+                # Estimate AR coefficient
+                ar_coeff, _ = _estimate_ar_coefficient(
+                    expected_idio_cross_series, expected_idio_lag_sq_series, 
+                    vsmooth_sum=vsmooth_lag_diag_series
+                )
+                ar_coeff = float(np.clip(ar_coeff, -0.99, 0.99))  # Ensure stationarity, extract scalar
+                
+                # Update A and Q
+                A_new[i_subset_series.start, i_subset_series.start] = ar_coeff
+                innovation_var = (expected_idio_current_sq_series - ar_coeff * expected_idio_cross_series) / T
+                innovation_var = float(max(innovation_var, idio_min_var))  # Extract scalar
+                Q_new[i_subset_series.start, i_subset_series.start] = innovation_var
+                
+                # Update V_0
+                vsmooth_0_series = vsmooth[i_subset_slice_series, :, :][:, i_subset_slice_series, 0]
+                V_0_new[i_subset_series.start, i_subset_series.start] = vsmooth_0_series[0, 0] if vsmooth_0_series.size > 0 else innovation_var
+            else:
+                # Slower-frequency series: block-chain update
+                # A structure: top-left AR(1) with subdiagonal 1s
+                # Extract sufficient stats for head state only (AR part)
+                vsmooth_idio_series = vsmooth[i_subset_slice_series, :, :][:, i_subset_slice_series, 1:]
+                vsmooth_lag_series = vsmooth[i_subset_slice_series, :, :][:, i_subset_slice_series, :-1]
+                vvsmooth_series = vvsmooth[i_subset_slice_series, :, :][:, i_subset_slice_series, :]
+                
+                # Head state (index 0) AR update
+                expected_head_current_sq = np.sum(Z_idio_series[0, :]**2) + (vsmooth_idio_series[0, 0, :].sum() if vsmooth_idio_series.size > 0 else 0.0)
+                expected_head_lag_sq = np.sum(Z_idio_lag_series[0, :]**2) + (vsmooth_lag_series[0, 0, :].sum() if vsmooth_lag_series.size > 0 else 0.0)
+                expected_head_cross = np.sum(Z_idio_series[0, :] * Z_idio_lag_series[0, :]) + (vvsmooth_series[0, 0, :].sum() if vvsmooth_series.size > 0 else 0.0)
+                
+                # Estimate AR coefficient for head state
+                ar_coeff, _ = _estimate_ar_coefficient(
+                    expected_head_cross, expected_head_lag_sq,
+                    vsmooth_sum=vsmooth_lag_series[0, 0, :].sum() if vsmooth_lag_series.size > 0 else 0.0
+                )
+                ar_coeff = float(np.clip(ar_coeff, -0.99, 0.99))  # Extract scalar
+                
+                # Update A: AR(1) on head, subdiagonal 1s for shift
+                A_new[i_subset_series.start, i_subset_series.start] = ar_coeff
+                if chain_len > 1:
+                    A_new[i_subset_series.start+1:i_subset_series.stop, i_subset_series.start:i_subset_series.stop-1] = np.eye(chain_len - 1)
+                
+                # Update Q: variance on head state only
+                innovation_var = (expected_head_current_sq - ar_coeff * expected_head_cross) / T
+                innovation_var = float(max(innovation_var, idio_min_var))  # Extract scalar
+                Q_new[i_subset_series.start, i_subset_series.start] = innovation_var
+                
+                # Update V_0: use smoothed covariance at t=0
+                vsmooth_0_series = vsmooth[i_subset_slice_series, :, :][:, i_subset_slice_series, 0]
+                if vsmooth_0_series.size > 0 and vsmooth_0_series.shape[0] == chain_len:
+                    V_0_new[i_subset_series.start:i_subset_series.stop, i_subset_series.start:i_subset_series.stop] = vsmooth_0_series
+                else:
+                    # Fallback: diagonal with head variance
+                    V_0_new[i_subset_series.start, i_subset_series.start] = innovation_var
+                    if chain_len > 1:
+                        V_0_new[i_subset_series.start+1:i_subset_series.stop, i_subset_series.start+1:i_subset_series.stop] = np.eye(chain_len - 1) * innovation_var * 0.1
+            
+            idio_state_idx += chain_len
+        
+        # Keep C fixed for idio components (not updated in M-step)
+    else:
+        # Fallback to old approach for backward compatibility
     i_subset = slice(idio_start_idx, idio_start_idx + n_idio)
     i_subset_slice = slice(i_subset.start, i_subset.stop)
     Z_idio = Zsmooth[i_subset_slice, 1:] if idio_start_idx < Zsmooth.shape[1] else np.zeros((n_idio, T))
@@ -931,10 +1202,111 @@ def em_step(params: EMStepParams) -> Tuple[np.ndarray, np.ndarray, np.ndarray, n
         min_variance=MIN_OBSERVATION_VARIANCE,
         min_diagonal_variance_ratio=MIN_DIAGONAL_VARIANCE
     )
+    # Hard floor: enforce min diagonal on R (≥ 1e-8)
+    idio_min_var = getattr(config, 'idio_min_var', 1e-8) if config is not None else 1e-8
+    R_diag = np.maximum(R_diag, idio_min_var)
+    
+    # R cap to prevent explosion: maximum allowed observation error variance
+    # For standardized data, R should typically be < 10
+    R_cap = safe_get_attr(config, "max_observation_variance", 10.0) if config is not None else 10.0
+    R_diag = np.minimum(R_diag, R_cap)
+    
     R_new = np.diag(R_diag)
     
     # Final stability operations
     Q_new = stabilize_cov(Q_new, config, min_variance=MIN_INNOVATION_VARIANCE)
+    # Hard floor: enforce min diagonal on Q
+    # For factors: use larger minimum (0.01) to prevent scale issues
+    # For idio components: use idio_min_var (1e-8)
+    Q_diag = np.diag(Q_new).copy()  # Make a copy to avoid read-only array issues
+    Q_min_factor = 0.01  # Minimum variance for factors
+    num_factors = idio_start_idx  # Factor states end at idio_start_idx
+    if num_factors > 0:
+        # Apply larger minimum for factors
+        Q_diag[:num_factors] = np.maximum(Q_diag[:num_factors], Q_min_factor)
+        # Apply smaller minimum for idio components
+        if num_factors < len(Q_diag):
+            Q_diag[num_factors:] = np.maximum(Q_diag[num_factors:], idio_min_var)
+    else:
+        # Fallback: apply idio_min_var to all if no factors
+        Q_diag = np.maximum(Q_diag, idio_min_var)
+    Q_new = np.diag(Q_diag) + (Q_new - np.diag(np.diag(Q_new)))  # Preserve off-diagonal
+    
+    # Normalize C matrix: ||C[:,j]|| = 1 for each clock-frequency factor j only
+    # This helps stabilize the scale and prevents C from becoming too large
+    # Note: Only normalize clock-frequency factors (not slower-frequency tent weight parts)
+    # to avoid violating tent weight constraints
+    # When we normalize C[:,j] by dividing by norm, we need to adjust Q to preserve variance:
+    # Var(x) = C*Q*C' = (C/norm)*(Q*norm^2)*(C/norm)'
+    # Skip normalization if there are slower-frequency series (tent weight constraints)
+    # to avoid violating tent weight constraints
+    has_slower_freq = (frequencies is not None and 
+                      any(freq != clock for freq in frequencies if freq is not None))
+    num_clock_factors = int(np.sum(r))  # Only clock-frequency factors (ppC=1 part)
+    
+    # Q cap to prevent explosion: maximum allowed innovation variance for factors
+    Q_cap_factor = safe_get_attr(config, "max_innovation_variance", 1.0) if config is not None else 1.0
+    
+    # Normalize C for clock-frequency factors to prevent scale issues
+    # Only normalize if C norm is in reasonable range (not too small, not too large)
+    # This prevents Q from becoming too small (when C norm is small) or too large (when C norm is large)
+    if num_clock_factors > 0:
+        # Check if there are slower-frequency series (tent weight constraints)
+        has_slower_freq = (frequencies is not None and 
+                          any(freq != clock for freq in frequencies if freq is not None))
+        
+        # Only normalize if no slower-frequency series (to avoid violating tent weight constraints)
+        if not has_slower_freq:
+            for j in range(num_clock_factors):
+                norm = np.linalg.norm(C_new[:, j])
+                if norm > 1e-8:
+                    # Only normalize if norm is in reasonable range
+                    # Too small norm (< 0.1) would make Q too small
+                    # Too large norm (> 10) would make Q too large
+                    C_norm_min = 0.1  # Minimum norm to normalize
+                    C_norm_cap = safe_get_attr(config, "max_loading_norm", 10.0) if config is not None else 10.0
+                    
+                    if C_norm_min <= norm <= C_norm_cap:
+                        # Normalize C column
+                        C_new[:, j] = C_new[:, j] / norm
+                        
+                        # Adjust Q to preserve variance: Q[j,j] *= norm^2
+                        Q_adjustment = norm ** 2
+                        Q_new[j, j] = Q_new[j, j] * Q_adjustment
+                        
+                        # Off-diagonal: Q[j,k] and Q[k,j] *= norm (for k != j)
+                        for k in range(Q_new.shape[0]):
+                            if k != j:
+                                Q_new[j, k] = Q_new[j, k] * norm
+                                Q_new[k, j] = Q_new[k, j] * norm
+                    # If norm is too small or too large, skip normalization to preserve stability
+        
+        # Re-apply Q floor and cap after C normalization to prevent extreme values
+        # C normalization can make Q very large (if C norm was large) or very small (if C norm was small)
+        Q_diag_after_norm = np.diag(Q_new).copy()
+        if num_factors > 0:
+            # Apply both floor and cap to factors after normalization
+            Q_diag_after_norm[:num_factors] = np.clip(
+                Q_diag_after_norm[:num_factors],
+                Q_min_factor,  # Floor: 0.01
+                Q_cap_factor   # Cap: 1.0 (configurable)
+            )
+            # Preserve idio components (only floor, no cap needed)
+            if num_factors < len(Q_diag_after_norm):
+                Q_diag_after_norm[num_factors:] = np.maximum(Q_diag_after_norm[num_factors:], idio_min_var)
+        else:
+            Q_diag_after_norm = np.maximum(Q_diag_after_norm, idio_min_var)
+        # Update Q with re-applied floor and cap
+        Q_new = np.diag(Q_diag_after_norm) + (Q_new - np.diag(np.diag(Q_new)))  # Preserve off-diagonal
+    
+    # Spectral radius cap on A (< 0.99) with minimal shrinkage
+    eigenvals_A = np.linalg.eigvals(A_new)
+    max_eig_A = np.max(np.abs(eigenvals_A))
+    if max_eig_A >= 0.99:
+        scale_factor = 0.99 / max_eig_A
+        A_new = A_new * scale_factor
+        # Minimal shrinkage: only scale if really needed
+    
     V_0_new = _clean_matrix(V_0_new, 'covariance', default_nan=0.0)
     min_eigenval = safe_get_attr(config, "min_eigenvalue", 1e-8)
     warn_reg = safe_get_attr(config, "warn_on_regularization", True)

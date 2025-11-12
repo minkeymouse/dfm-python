@@ -235,6 +235,14 @@ class Params:
         Damping factor: 0.8 = 80% new, 20% old (default: 0.8)
     warn_on_damped_update : bool
         Warn when damped updates are used (default: True)
+    augment_idio : bool
+        Enable state augmentation with idiosyncratic components (default: True)
+    augment_idio_slow : bool
+        Enable tent-length chains for slower-frequency series (default: True)
+    idio_rho0 : float
+        Initial AR coefficient for idiosyncratic components (default: 0.1)
+    idio_min_var : float
+        Minimum variance for idiosyncratic innovation covariance (default: 1e-8)
     
     Examples
     --------
@@ -272,6 +280,12 @@ class Params:
     use_damped_updates: bool = True
     damping_factor: float = 0.8
     warn_on_damped_update: bool = True
+    
+    # Idiosyncratic component augmentation
+    augment_idio: bool = True  # Enable state augmentation with idiosyncratic components (default: True)
+    augment_idio_slow: bool = True  # Enable tent-length chains for slower-frequency series (default: True)
+    idio_rho0: float = 0.1  # Initial AR coefficient for idiosyncratic components (default: 0.1)
+    idio_min_var: float = 1e-8  # Minimum variance for idiosyncratic innovation covariance (default: 1e-8)
     
     def __post_init__(self):
         """Validate parameters."""
@@ -345,6 +359,12 @@ class DFMConfig:
     use_damped_updates: bool = True  # Enable damped updates when likelihood decreases
     damping_factor: float = 0.8  # Damping factor (0.8 = 80% new, 20% old)
     warn_on_damped_update: bool = True  # Warn when damped updates are used
+    
+    # Idiosyncratic Component Augmentation
+    augment_idio: bool = True  # Enable state augmentation with idiosyncratic components (default: True)
+    augment_idio_slow: bool = True  # Enable tent-length chains for slower-frequency series (default: True)
+    idio_rho0: float = 0.1  # Initial AR coefficient for idiosyncratic components (default: 0.1)
+    idio_min_var: float = 1e-8  # Minimum variance for idiosyncratic innovation covariance (default: 1e-8)
     
     # ========================================================================
     # Internal cache (not user-configurable)
@@ -651,7 +671,12 @@ class DFMConfig:
             'warn_on_regularization': data.get('warn_on_regularization', True),
             'use_damped_updates': data.get('use_damped_updates', True),
             'damping_factor': data.get('damping_factor', 0.8),
-            'warn_on_damped_update': data.get('warn_on_damped_update', True)
+            'warn_on_damped_update': data.get('warn_on_damped_update', True),
+            # Idiosyncratic component augmentation
+            'augment_idio': data.get('augment_idio', True),
+            'augment_idio_slow': data.get('augment_idio_slow', True),
+            'idio_rho0': data.get('idio_rho0', 0.1),
+            'idio_min_var': data.get('idio_min_var', 1e-8)
         }
     
     @classmethod

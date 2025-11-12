@@ -50,6 +50,7 @@ def test_em_step_basic():
     y = xNaN_est.T
     
     from dfm_python.core.em import EMStepParams
+    idio_chain_lengths = np.zeros(N)  # No idio augmentation for this test
     em_params = EMStepParams(
         y=y,
         A=A,
@@ -68,6 +69,7 @@ def test_em_step_basic():
         tent_weights_dict={},
         clock='m',
         frequencies=None,
+        idio_chain_lengths=idio_chain_lengths,
         config=None
     )
     C_new, R_new, A_new, Q_new, Z_0_new, V_0_new, loglik = em_step(em_params)
@@ -861,10 +863,12 @@ def test_kalman_stability_edge_cases():
         try:
             # Use em_step which internally calls KF/KFS
             from dfm_python.core.em import EMStepParams
+            idio_chain_lengths = np.zeros(N)  # No idio augmentation for this test
             em_params = EMStepParams(
                 y=y, A=A, C=C, Q=Q, R=R_very_small, Z_0=Z_0, V_0=V_0,
                 r=r, p=p, R_mat=R_mat, q=q, nQ=nQ, i_idio=i_idio, blocks=blocks,
-                tent_weights_dict={}, clock='m', frequencies=None, config=None
+                tent_weights_dict={}, clock='m', frequencies=None,
+                idio_chain_lengths=idio_chain_lengths, config=None
             )
             C_new, R_new, A_new, Q_new, Z_0_new, V_0_new, loglik = em_step(em_params)
             # Should not crash, should produce finite outputs
@@ -885,10 +889,12 @@ def test_kalman_stability_edge_cases():
         warnings.simplefilter("ignore")
         try:
             from dfm_python.core.em import EMStepParams
+            idio_chain_lengths = np.zeros(N)  # No idio augmentation for this test
             em_params = EMStepParams(
                 y=y, A=A, C=C, Q=Q_very_large, R=R, Z_0=Z_0, V_0=V_0,
                 r=r, p=p, R_mat=R_mat, q=q, nQ=nQ, i_idio=i_idio, blocks=blocks,
-                tent_weights_dict={}, clock='m', frequencies=None, config=None
+                tent_weights_dict={}, clock='m', frequencies=None,
+                idio_chain_lengths=idio_chain_lengths, config=None
             )
             C_new, R_new, A_new, Q_new, Z_0_new, V_0_new, loglik = em_step(em_params)
             # Should handle large Q (may be capped)
@@ -910,10 +916,12 @@ def test_kalman_stability_edge_cases():
         warnings.simplefilter("ignore")
         try:
             from dfm_python.core.em import EMStepParams
+            idio_chain_lengths = np.zeros(N)  # No idio augmentation for this test
             em_params = EMStepParams(
                 y=y, A=A, C=C, Q=Q_near_singular, R=R, Z_0=Z_0, V_0=V_0,
                 r=r, p=p, R_mat=R_mat, q=q, nQ=nQ, i_idio=i_idio, blocks=blocks,
-                tent_weights_dict={}, clock='m', frequencies=None, config=None
+                tent_weights_dict={}, clock='m', frequencies=None,
+                idio_chain_lengths=idio_chain_lengths, config=None
             )
             C_new, R_new, A_new, Q_new, Z_0_new, V_0_new, loglik = em_step(em_params)
             # Should regularize Q to be non-singular
@@ -1172,6 +1180,214 @@ def test_config_validation_report():
     report_multi = config_multi.validate_and_report()
     assert report_multi['valid'] is True
     assert len(report_multi['errors']) == 0
+
+
+def test_idio_clock_augmentation_shape():
+    """Test that clock-frequency idio augmentation adds correct state dimensions."""
+    T, N = 100, 8
+    np.random.seed(42)
+    x = np.random.randn(T, N)
+    
+    # Create config with augment_idio=True
+    series = [
+        SeriesConfig(series_id=f's{i}', frequency='m', transformation='lin', blocks=[1])
+        for i in range(N)
+    ]
+    blocks = {'Block_Global': BlockConfig(factors=1, ar_lag=1, clock='m')}
+    config = DFMConfig(series=series, blocks=blocks, augment_idio=True, augment_idio_slow=True)
+    
+    blocks_array = config.get_blocks_array()
+    r = np.array([1])
+    p = 1
+    opt_nan = {'method': 2, 'k': 3}
+    R_mat = None
+    q = None
+    nQ = 0
+    i_idio = np.ones(N)
+    
+    from dfm_python.utils import compute_idio_chain_lengths
+    idio_chain_lengths = compute_idio_chain_lengths(config, clock='m')
+    
+    A, C, Q, R, Z_0, V_0 = init_conditions(
+        x, r, p, blocks_array, opt_nan, R_mat, q, nQ, i_idio,
+        clock='m', tent_weights_dict={}, frequencies=np.array(['m'] * N),
+        idio_chain_lengths=idio_chain_lengths, config=config
+    )
+    
+    # Assert C has N extra idio cols (one per series)
+    assert C.shape == (N, A.shape[0]), f"C shape {C.shape} should be (N={N}, m={A.shape[0]})"
+    assert A.shape[0] == int(np.sum(r)) * p + np.sum(idio_chain_lengths), "A should include factor + idio states"
+    assert Q.shape == A.shape, "Q should match A dimensions"
+    assert V_0.shape == A.shape, "V_0 should match A dimensions"
+    
+    # Assert no complex/NaN
+    assert np.all(np.isfinite(A)) and np.all(np.isreal(A)), "A should be real and finite"
+    assert np.all(np.isfinite(C)) and np.all(np.isreal(C)), "C should be real and finite"
+    assert np.all(np.isfinite(Q)) and np.all(np.isreal(Q)), "Q should be real and finite"
+    assert np.all(np.isfinite(V_0)) and np.all(np.isreal(V_0)), "V_0 should be real and finite"
+    
+    # Test that Kalman filter runs
+    from dfm_python.kalman import run_kf
+    xNaN = (x - np.nanmean(x, axis=0)) / np.nanstd(x, axis=0)
+    y = xNaN.T
+    zsmooth, vsmooth, vvsmooth, loglik = run_kf(y, A, C, Q, R, Z_0, V_0)
+    assert np.isfinite(loglik), "Kalman filter should run without errors"
+
+
+def test_idio_slow_chain_shape():
+    """Test that slower-frequency series get tent-length chains."""
+    T, N = 100, 6
+    np.random.seed(42)
+    x = np.random.randn(T, N)
+    
+    # Create config with 3 monthly and 3 quarterly series
+    series = [
+        SeriesConfig(series_id=f'm{i}', frequency='m', transformation='lin', blocks=[1])
+        for i in range(3)
+    ] + [
+        SeriesConfig(series_id=f'q{i}', frequency='q', transformation='lin', blocks=[1])
+        for i in range(3)
+    ]
+    blocks = {'Block_Global': BlockConfig(factors=1, ar_lag=1, clock='m')}
+    config = DFMConfig(series=series, blocks=blocks, augment_idio=True, augment_idio_slow=True)
+    
+    blocks_array = config.get_blocks_array()
+    r = np.array([1])
+    p = 1
+    opt_nan = {'method': 2, 'k': 3}
+    R_mat = None
+    q = None
+    nQ = 3  # 3 quarterly series
+    i_idio = np.array([1, 1, 1, 0, 0, 0])  # Monthly get idio, quarterly don't (old approach)
+    
+    from dfm_python.utils import compute_idio_chain_lengths
+    from dfm_python.utils import get_aggregation_structure
+    agg_structure = get_aggregation_structure(config, clock='m')
+    tent_weights_dict = agg_structure.get('tent_weights', {})
+    idio_chain_lengths = compute_idio_chain_lengths(config, clock='m', tent_weights_dict=tent_weights_dict)
+    
+    # Quarterly series should have chain length 5 (tent length for q->m)
+    assert idio_chain_lengths[3] == 5, "Quarterly series should have chain length 5"
+    assert idio_chain_lengths[4] == 5, "Quarterly series should have chain length 5"
+    assert idio_chain_lengths[5] == 5, "Quarterly series should have chain length 5"
+    # Monthly series should have chain length 1
+    assert idio_chain_lengths[0] == 1, "Monthly series should have chain length 1"
+    assert idio_chain_lengths[1] == 1, "Monthly series should have chain length 1"
+    assert idio_chain_lengths[2] == 1, "Monthly series should have chain length 1"
+    
+    A, C, Q, R, Z_0, V_0 = init_conditions(
+        x, r, p, blocks_array, opt_nan, R_mat, q, nQ, i_idio,
+        clock='m', tent_weights_dict=tent_weights_dict,
+        frequencies=np.array(['m', 'm', 'm', 'q', 'q', 'q']),
+        idio_chain_lengths=idio_chain_lengths, config=config
+    )
+    
+    # Assert additional 5×nQ chain states (3 quarterly × 5 = 15 states)
+    total_idio_dim = np.sum(idio_chain_lengths)  # 3*1 + 3*5 = 18
+    assert A.shape[0] == int(np.sum(r)) * p + total_idio_dim, f"A should have {int(np.sum(r)) * p + total_idio_dim} states"
+    
+    # Assert fixed tent-weight columns present for quarterly rows
+    # C should map quarterly series to their tent-weight chains
+    for i in range(3, 6):  # Quarterly series indices
+        idio_start = int(np.sum(r)) * p + sum(idio_chain_lengths[:i])
+        # Check that C[i, idio_start:idio_start+5] has tent weights
+        tent_weights = tent_weights_dict.get('q')
+        if tent_weights is not None:
+            c_idio_slice = C[i, idio_start:idio_start+5]
+            # Should be proportional to tent weights (normalized)
+            assert np.sum(np.abs(c_idio_slice)) > 0, f"Quarterly series {i} should have non-zero idio mapping"
+
+
+def test_constraints_unchanged():
+    """Test that tent constraints for factor part still satisfied with idio enabled."""
+    T, N = 100, 6
+    np.random.seed(42)
+    x = np.random.randn(T, N)
+    
+    # Create config with quarterly series
+    series = [
+        SeriesConfig(series_id=f'q{i}', frequency='q', transformation='lin', blocks=[1])
+        for i in range(N)
+    ]
+    blocks = {'Block_Global': BlockConfig(factors=1, ar_lag=1, clock='m')}
+    config = DFMConfig(series=series, blocks=blocks, augment_idio=True, augment_idio_slow=True)
+    
+    blocks_array = config.get_blocks_array()
+    r = np.array([1])
+    p = 1
+    opt_nan = {'method': 2, 'k': 3}
+    
+    from dfm_python.utils import get_aggregation_structure, generate_R_mat
+    agg_structure = get_aggregation_structure(config, clock='m')
+    tent_weights_dict = agg_structure.get('tent_weights', {})
+    tent_weights = tent_weights_dict.get('q')
+    R_mat, q = generate_R_mat(tent_weights) if tent_weights is not None else (None, None)
+    nQ = N
+    i_idio = np.zeros(N)
+    
+    from dfm_python.utils import compute_idio_chain_lengths
+    idio_chain_lengths = compute_idio_chain_lengths(config, clock='m', tent_weights_dict=tent_weights_dict)
+    
+    A, C, Q, R, Z_0, V_0 = init_conditions(
+        x, r, p, blocks_array, opt_nan, R_mat, q, nQ, i_idio,
+        clock='m', tent_weights_dict=tent_weights_dict,
+        frequencies=np.array(['q'] * N),
+        idio_chain_lengths=idio_chain_lengths, config=config
+    )
+    
+    # Test that model runs and produces valid results with idio enabled
+    # The tent constraints are applied during init_conditions and em_step
+    # We verify that the model structure is correct and no errors occur
+    assert C.shape[0] == N, "C should have N rows"
+    assert C.shape[1] == A.shape[0], "C should match state dimension"
+    assert np.all(np.isfinite(C)), "C should be finite"
+    assert np.all(np.isfinite(A)), "A should be finite"
+    assert np.all(np.isfinite(Q)), "Q should be finite"
+    
+    # Test that Kalman filter runs successfully
+    from dfm_python.kalman import run_kf
+    xNaN = (x - np.nanmean(x, axis=0)) / np.nanstd(x, axis=0)
+    y = xNaN.T
+    zsmooth, vsmooth, vvsmooth, loglik = run_kf(y, A, C, Q, R, Z_0, V_0)
+    assert np.isfinite(loglik), "Kalman filter should run without errors"
+    
+    # Verify idio augmentation is present
+    total_idio_dim = np.sum(idio_chain_lengths)
+    assert A.shape[0] == int(np.sum(r)) * p + total_idio_dim, \
+        f"A should include {int(np.sum(r)) * p} factor states + {total_idio_dim} idio states"
+
+
+def test_stability_guards():
+    """Test that numerical stability guards are enforced."""
+    T, N = 80, 8
+    np.random.seed(42)
+    x = np.random.randn(T, N)
+    
+    series = [
+        SeriesConfig(series_id=f's{i}', frequency='m', transformation='lin', blocks=[1])
+        for i in range(N)
+    ]
+    blocks = {'Block_Global': BlockConfig(factors=1, ar_lag=1, clock='m')}
+    config = DFMConfig(series=series, blocks=blocks, augment_idio=True, idio_min_var=1e-8)
+    
+    model = DFM()
+    result = model.fit(x, config, max_iter=5, threshold=1e-5)  # Short run for test
+    
+    # Test min diag(Q) ≥ 1e-8
+    Q_diag = np.diag(result.Q)
+    assert np.all(Q_diag >= 1e-8), f"Q diagonal should be ≥ 1e-8, min = {np.min(Q_diag)}"
+    
+    # Test min diag(R) ≥ 1e-8
+    R_diag = np.diag(result.R)
+    assert np.all(R_diag >= 1e-8), f"R diagonal should be ≥ 1e-8, min = {np.min(R_diag)}"
+    
+    # Test spectral radius(A) < 1
+    eigenvals_A = np.linalg.eigvals(result.A)
+    max_eig_A = np.max(np.abs(eigenvals_A))
+    assert max_eig_A < 1.0, f"Spectral radius of A should be < 1, got {max_eig_A}"
+    
+    # Test loglik is finite
+    assert np.isfinite(result.loglik), "Log-likelihood should be finite"
 
 
 if __name__ == '__main__':

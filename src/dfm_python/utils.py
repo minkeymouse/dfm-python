@@ -332,3 +332,72 @@ def group_series_by_frequency(
     
     # Convert lists to numpy arrays
     return {freq: np.array(indices, dtype=int) for freq, indices in freq_groups.items()}
+
+
+def compute_idio_chain_lengths(
+    config: DFMConfig,
+    clock: str,
+    tent_weights_dict: Optional[Dict[str, np.ndarray]] = None
+) -> np.ndarray:
+    """Compute idiosyncratic chain length for each series.
+    
+    For clock-frequency series: returns 1 (single AR(1) state).
+    For slower-frequency series: returns tent length (L) if augment_idio_slow is True, else 0.
+    If augment_idio is False: all series return 0.
+    
+    Parameters
+    ----------
+    config : DFMConfig
+        Model configuration containing series frequencies and idio augmentation flags
+    clock : str
+        Clock frequency ('d', 'w', 'm', 'q', 'sa', 'a')
+    tent_weights_dict : Dict[str, np.ndarray], optional
+        Dictionary mapping frequency strings to tent weight arrays.
+        If None, will be computed from config using get_aggregation_structure.
+        
+    Returns
+    -------
+    idio_chain_lengths : np.ndarray
+        Array of chain lengths, one per series.
+        - 0: no idio augmentation
+        - 1: clock-frequency series (AR(1) idio)
+        - L: slower-frequency series (tent-length chain, where L = len(tent_weights))
+        
+    Examples
+    --------
+    >>> from dfm_python import load_config
+    >>> config = load_config('config.yaml')
+    >>> lengths = compute_idio_chain_lengths(config, clock='m')
+    >>> # Returns array with 1 for monthly series, 5 for quarterly, etc.
+    """
+    if not config.augment_idio:
+        # Feature disabled: all zeros
+        return np.zeros(len(config.series), dtype=int)
+    
+    # Get frequencies for each series
+    frequencies = [s.frequency for s in config.series]
+    clock_hierarchy = FREQUENCY_HIERARCHY.get(clock, 3)
+    
+    # Get tent weights if not provided
+    if tent_weights_dict is None:
+        agg_structure = get_aggregation_structure(config, clock=clock)
+        tent_weights_dict = agg_structure.get('tent_weights', {})
+    
+    lengths = np.zeros(len(config.series), dtype=int)
+    
+    for i, freq in enumerate(frequencies):
+        freq_hierarchy = FREQUENCY_HIERARCHY.get(freq, 3)
+        
+        if freq_hierarchy == clock_hierarchy:
+            # Clock-frequency series: AR(1) idio state
+            lengths[i] = 1
+        elif freq_hierarchy > clock_hierarchy:
+            # Slower-frequency series: tent-length chain (if enabled)
+            if config.augment_idio_slow:
+                tent_weights = tent_weights_dict.get(freq)
+                if tent_weights is not None:
+                    lengths[i] = len(tent_weights)
+                # If no tent weights available, length stays 0 (no idio for this series)
+            # If augment_idio_slow is False, length stays 0
+    
+    return lengths
