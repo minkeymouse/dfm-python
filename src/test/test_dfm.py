@@ -521,6 +521,67 @@ def test_frequency_constraint_error_quality():
         assert 'suggested fix' in error_msg.lower() or 'change series frequency' in error_msg.lower()
 
 
+def verify_tent_weight_constraints(C, series_indices, slower_freq, clock, r_i, 
+                                   tolerance=1e-6):
+    """Helper function to verify tent weight constraints are satisfied.
+    
+    Parameters
+    ----------
+    C : np.ndarray
+        Loading matrix (n x m)
+    series_indices : list
+        Indices of series with slower frequency
+    slower_freq : str
+        Slower frequency (e.g., 'q', 'sa', 'a')
+    clock : str
+        Clock frequency (e.g., 'm')
+    r_i : int
+        Number of factors in the block
+    tolerance : float
+        Numerical tolerance for constraint satisfaction
+        
+    Returns
+    -------
+    max_violation : float
+        Maximum constraint violation across all series
+    violations : dict
+        Dictionary mapping series index to violation details
+    """
+    from dfm_python.utils import get_tent_weights_for_pair, generate_R_mat
+    
+    # Get tent weights for frequency pair
+    tent_weights = get_tent_weights_for_pair(slower_freq, clock)
+    if tent_weights is None:
+        return None, None
+    
+    # Generate constraint matrices
+    R_mat, q_vec = generate_R_mat(tent_weights)
+    pC_freq = len(tent_weights)
+    
+    # For block with r_i factors, R_con_i = kron(R_mat, eye(r_i))
+    R_con_i = np.kron(R_mat, np.eye(r_i))
+    q_con_i = np.kron(q_vec, np.zeros(r_i))
+    
+    max_violation = 0.0
+    violations = {}
+    
+    for i in series_indices:
+        # Extract loadings for this series (first pC_freq * r_i columns for tent weights)
+        C_i = C[i, :pC_freq * r_i]
+        
+        # Compute constraint violation: R_con_i @ C_i - q_con_i
+        constraint_violation = R_con_i @ C_i - q_con_i
+        violation_norm = np.max(np.abs(constraint_violation))
+        
+        violations[i] = {
+            'violation': constraint_violation,
+            'norm': violation_norm
+        }
+        max_violation = max(max_violation, violation_norm)
+    
+    return max_violation, violations
+
+
 def test_mixed_frequencies():
     """Test with mixed frequencies (monthly and quarterly)."""
     T, N = 60, 8
@@ -548,39 +609,15 @@ def test_mixed_frequencies():
         assert Res.x_sm.shape == (T, N)
         assert np.any(np.isfinite(Res.Z))
         
-        # Verify tent weight constraints for quarterly series
-        from dfm_python.utils import get_tent_weights_for_pair, generate_R_mat
-        
-        clock = 'm'
-        slower_freq = 'q'
-        r_i = 1  # Number of factors in Block_Global
-        
-        # Get tent weights for quarterly -> monthly
-        tent_weights = get_tent_weights_for_pair(slower_freq, clock)
-        assert tent_weights is not None, f"Tent weights should be available for {slower_freq} -> {clock}"
-        
-        # Generate constraint matrices
-        R_mat, q_vec = generate_R_mat(tent_weights)
-        pC_freq = len(tent_weights)  # Number of periods in tent (5 for quarterly->monthly)
-        
-        # For block with r_i factors, R_con_i = kron(R_mat, eye(r_i))
-        R_con_i = np.kron(R_mat, np.eye(r_i))
-        q_con_i = np.kron(q_vec, np.zeros(r_i))
-        
-        # Verify constraints for each quarterly series (indices 5-7)
+        # Verify tent weight constraints for quarterly series using helper
         quarterly_series_indices = [i for i in range(N) if series_list[i].frequency == 'q']
         assert len(quarterly_series_indices) == 3, "Should have 3 quarterly series"
         
-        max_violation = 0.0
-        for i in quarterly_series_indices:
-            # Extract loadings for this series (first pC_freq * r_i columns for tent weights)
-            C_i = Res.C[i, :pC_freq * r_i]
-            
-            # Compute constraint violation: R_con_i @ C_i - q_con_i
-            constraint_violation = R_con_i @ C_i - q_con_i
-            
-            # Track maximum violation
-            max_violation = max(max_violation, np.max(np.abs(constraint_violation)))
+        max_violation, violations = verify_tent_weight_constraints(
+            Res.C, quarterly_series_indices, 'q', 'm', r_i=1, tolerance=1e-6
+        )
+        
+        assert max_violation is not None, "Tent weight constraints should be verifiable"
         
         # Verify constraints are satisfied (within numerical tolerance)
         tolerance = 1e-6
@@ -589,6 +626,79 @@ def test_mixed_frequencies():
             f"Max violation: {max_violation:.2e} (tolerance: {tolerance:.2e}). "
             f"This indicates tent weight constraints are not being correctly enforced."
         )
+
+
+def test_tent_weight_constraints_satisfied():
+    """Test tent weight constraints are satisfied for multiple slower frequencies."""
+    T, N = 100, 12
+    np.random.seed(42)
+    X = np.random.randn(T, N)
+    
+    blocks = {'Block_Global': BlockConfig(factors=1, ar_lag=1, clock='m')}
+    series_list = []
+    # Mix of monthly (0-3), quarterly (4-7), semi-annual (8-9), annual (10-11)
+    for i in range(N):
+        if i < 4:
+            freq = 'm'
+        elif i < 8:
+            freq = 'q'
+        elif i < 10:
+            freq = 'sa'
+        else:
+            freq = 'a'
+        series_list.append(SeriesConfig(
+            series_id=f"TEST_{i:02d}",
+            series_name=f"Test Series {i}",
+            frequency=freq,
+            transformation='lin',
+            blocks=['Block_Global']
+        ))
+    config = DFMConfig(series=series_list, blocks=blocks, clock='m')
+    
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model = DFM()
+        Res = model.fit(X, config, threshold=1e-2, max_iter=10)
+        
+        assert Res.x_sm.shape == (T, N)
+        assert np.any(np.isfinite(Res.Z))
+        
+        # Verify constraints for each slower frequency
+        tolerance = 1e-6
+        r_i = 1  # Number of factors in Block_Global
+        
+        # Quarterly series
+        quarterly_indices = [i for i in range(N) if series_list[i].frequency == 'q']
+        if len(quarterly_indices) > 0:
+            max_violation_q, _ = verify_tent_weight_constraints(
+                Res.C, quarterly_indices, 'q', 'm', r_i, tolerance
+            )
+            assert max_violation_q is not None
+            assert max_violation_q < tolerance, (
+                f"Quarterly tent weight constraints violated: {max_violation_q:.2e}"
+            )
+        
+        # Semi-annual series
+        semi_annual_indices = [i for i in range(N) if series_list[i].frequency == 'sa']
+        if len(semi_annual_indices) > 0:
+            max_violation_sa, _ = verify_tent_weight_constraints(
+                Res.C, semi_annual_indices, 'sa', 'm', r_i, tolerance
+            )
+            assert max_violation_sa is not None
+            assert max_violation_sa < tolerance, (
+                f"Semi-annual tent weight constraints violated: {max_violation_sa:.2e}"
+            )
+        
+        # Annual series
+        annual_indices = [i for i in range(N) if series_list[i].frequency == 'a']
+        if len(annual_indices) > 0:
+            max_violation_a, _ = verify_tent_weight_constraints(
+                Res.C, annual_indices, 'a', 'm', r_i, tolerance
+            )
+            assert max_violation_a is not None
+            assert max_violation_a < tolerance, (
+                f"Annual tent weight constraints violated: {max_violation_a:.2e}"
+            )
 
 
 # ============================================================================
