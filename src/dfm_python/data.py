@@ -401,13 +401,43 @@ def load_data(datafile: Union[str, Path], config: DFMConfig,
     
     if len(warnings_list) > 0:
         for series_id, T_obs, N_total in warnings_list[:5]:
-            logger.warning(f"Series '{series_id}': T={T_obs} < N={N_total} (may cause numerical issues)")
+            logger.warning(
+                f"Series '{series_id}': T={T_obs} < N={N_total} (may cause numerical issues). "
+                f"Suggested fix: increase sample size or reduce number of series."
+            )
         if len(warnings_list) > 5:
             logger.warning(f"... and {len(warnings_list) - 5} more series with T < N")
         
         import warnings
         warnings.warn(
-            f"Insufficient data: {len(warnings_list)} block(s) have T < N. "
+            f"Insufficient data: {len(warnings_list)} series have T < N (time periods < number of series). "
+            f"This may cause numerical issues. Suggested fix: increase sample size or reduce number of series. "
+            f"See log for details.",
+            UserWarning,
+            stacklevel=2
+        )
+    
+    # Validate extreme missing data (>90% missing per series)
+    missing_ratios = np.sum(np.isnan(X), axis=0) / X.shape[0]
+    extreme_missing_series = []
+    for i, ratio in enumerate(missing_ratios):
+        if ratio > 0.9:
+            series_id = series_ids[i] if i < len(series_ids) else f"series_{i}"
+            extreme_missing_series.append((series_id, ratio))
+    
+    if len(extreme_missing_series) > 0:
+        for series_id, ratio in extreme_missing_series[:5]:
+            logger.warning(
+                f"Series '{series_id}' has {ratio:.1%} missing data (>90%). "
+                f"This may cause estimation issues. Consider removing this series or increasing data coverage."
+            )
+        if len(extreme_missing_series) > 5:
+            logger.warning(f"... and {len(extreme_missing_series) - 5} more series with >90% missing data")
+        
+        import warnings
+        warnings.warn(
+            f"Extreme missing data detected: {len(extreme_missing_series)} series have >90% missing values. "
+            f"Estimation may be unreliable. Consider removing these series or increasing data coverage. "
             f"See log for details.",
             UserWarning,
             stacklevel=2

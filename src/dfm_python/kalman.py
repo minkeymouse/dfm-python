@@ -11,7 +11,7 @@ _logger = logging.getLogger(__name__)
 
 def _get_numeric_utils():
     """Lazy import to avoid circular dependency."""
-    from dfm_python.core.numeric import (
+    from .core.numeric import (
         _ensure_real_and_symmetric,
         _ensure_covariance_stable,
         _ensure_real,
@@ -290,7 +290,8 @@ def skf(Y: np.ndarray, A: np.ndarray, C: np.ndarray, Q: np.ndarray,
                 
                 # Update log-likelihood (with safeguards)
                 try:
-                    det_iF = np.linalg.det(iF)
+                    from .core.numeric import _safe_determinant
+                    det_iF = _safe_determinant(iF, use_logdet=True)
                     if det_iF > 0 and np.isfinite(det_iF):
                         log_det = np.log(det_iF)
                         innov_term = innov.T @ iF @ innov
