@@ -290,7 +290,8 @@ def skf(Y: np.ndarray, A: np.ndarray, C: np.ndarray, Q: np.ndarray,
                 
                 # Update log-likelihood (with safeguards)
                 try:
-                    det_iF = np.linalg.det(iF)
+                    from .core.numeric import _safe_determinant
+                    det_iF = _safe_determinant(iF, use_logdet=True)
                     if det_iF > 0 and np.isfinite(det_iF):
                         log_det = np.log(det_iF)
                         innov_term = innov.T @ iF @ innov
