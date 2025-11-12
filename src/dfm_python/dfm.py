@@ -288,6 +288,7 @@ class EMAlgorithmParams:
     tent_weights_dict: Dict[str, np.ndarray]
     clock: str
     frequencies: Optional[np.ndarray]
+    idio_chain_lengths: np.ndarray
     
     # Config and algorithm parameters
     config: DFMConfig
@@ -500,7 +501,7 @@ def _prepare_data_and_params(
 def _prepare_aggregation_structure(
     config: DFMConfig,
     clock: str
-) -> Tuple[Dict[str, np.ndarray], Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray], np.ndarray, int]:
+) -> Tuple[Dict[str, np.ndarray], Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray], np.ndarray, int, np.ndarray]:
     """Prepare aggregation structure for mixed-frequency handling.
     
     Returns
@@ -517,7 +518,11 @@ def _prepare_aggregation_structure(
         Indicator array (1 for clock frequency, 0 for slower frequencies)
     nQ : int
         Number of slower-frequency series
+    idio_chain_lengths : np.ndarray
+        Array of idiosyncratic chain lengths per series (0, 1, or tent length)
     """
+    from .utils import compute_idio_chain_lengths
+    
     agg_info = get_aggregation_structure(config, clock=clock)
     tent_weights_dict = agg_info.get('tent_weights', {})
     frequencies = np.array(config.get_frequencies()) if config.series else None
@@ -549,7 +554,10 @@ def _prepare_aggregation_structure(
         i_idio = np.ones(config.get_blocks_array().shape[0])
         nQ = 0
     
-    return tent_weights_dict, R_mat, q, frequencies, i_idio, nQ
+    # Compute idio chain lengths
+    idio_chain_lengths = compute_idio_chain_lengths(config, clock, tent_weights_dict)
+    
+    return tent_weights_dict, R_mat, q, frequencies, i_idio, nQ, idio_chain_lengths
 
 
 def _run_em_algorithm(
@@ -592,6 +600,7 @@ def _run_em_algorithm(
     tent_weights_dict = params.tent_weights_dict
     clock = params.clock
     frequencies = params.frequencies
+    idio_chain_lengths = params.idio_chain_lengths
     config = params.config
     threshold = params.threshold
     max_iter = params.max_iter
@@ -623,6 +632,7 @@ def _run_em_algorithm(
             tent_weights_dict=tent_weights_dict,
             clock=clock,
             frequencies=frequencies,
+            idio_chain_lengths=idio_chain_lengths,
             config=config
         )
         C_new, R_new, A_new, Q_new, Z_0_new, V_0_new, loglik = em_step(em_step_params)
@@ -809,7 +819,7 @@ def _dfm_core(
     T, N = params_dict['T'], params_dict['N']
     
     # Step 2: Prepare aggregation structure
-    tent_weights_dict, R_mat, q, frequencies, i_idio, nQ = _prepare_aggregation_structure(
+    tent_weights_dict, R_mat, q, frequencies, i_idio, nQ, idio_chain_lengths = _prepare_aggregation_structure(
         config, clock
     )
     
@@ -820,7 +830,8 @@ def _dfm_core(
     opt_nan = {'method': nan_method, 'k': nan_k}
     A, C, Q, R, Z_0, V_0 = init_conditions(
         x_standardized, r, p, blocks, opt_nan, R_mat, q, nQ, i_idio,
-        clock=clock, tent_weights_dict=tent_weights_dict, frequencies=frequencies
+        clock=clock, tent_weights_dict=tent_weights_dict, frequencies=frequencies,
+        idio_chain_lengths=idio_chain_lengths, config=config
     )
     
     # Verify initial conditions
@@ -855,6 +866,7 @@ def _dfm_core(
         tent_weights_dict=tent_weights_dict,
         clock=clock,
         frequencies=frequencies,
+        idio_chain_lengths=idio_chain_lengths,
         config=config,
         threshold=threshold,
         max_iter=max_iter,
