@@ -605,14 +605,14 @@ def _safe_determinant(M: np.ndarray, use_logdet: bool = True) -> float:
                     if not np.isfinite(log_det) or sign <= 0:
                         return 0.0
                     # Avoid overflow in exp
-                if log_det > 700:
-                    _logger.debug("_safe_determinant: log_det too large, returning 0.0")
-                    return 0.0
-                with warnings.catch_warnings():
-                    warnings.filterwarnings('ignore', category=RuntimeWarning)
+                    if log_det > 700:
+                        _logger.debug("_safe_determinant: log_det too large, returning 0.0")
+                        return 0.0
+                    with warnings.catch_warnings():
+                        warnings.filterwarnings('ignore', category=RuntimeWarning)
                         det = np.exp(log_det)
-                if np.isfinite(det):
-                    return float(det)
+                    if np.isfinite(det):
+                        return float(det)
                 except Exception:
                     pass
         except (np.linalg.LinAlgError, ValueError, OverflowError, RuntimeWarning):
