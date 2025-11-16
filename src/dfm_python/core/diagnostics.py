@@ -4,12 +4,10 @@ from typing import Optional, Dict, Any, Tuple, TYPE_CHECKING
 import numpy as np
 import logging
 
-try:
-    import pandas as pd
-    PANDAS_AVAILABLE = True
-except ImportError:
-    PANDAS_AVAILABLE = False
-    pd = None
+import pandas as pd
+from scipy.linalg import orthogonal_procrustes
+
+PANDAS_AVAILABLE = True
 
 from ..config import DFMConfig
 
@@ -94,6 +92,217 @@ def calculate_rmse(actual: np.ndarray, predicted: np.ndarray,
         rmse_overall = np.nan
     
     return rmse_overall, rmse_per_series
+
+
+def evaluate_factor_estimation(
+    true_factors: np.ndarray,
+    estimated_factors: np.ndarray,
+    use_procrustes: bool = True
+) -> Dict[str, Any]:
+    """Evaluate how well factors are estimated (synthetic-data diagnostic).
+    
+    This function compares known ``true_factors`` with ``estimated_factors``
+    (typically ``result.Z[:, :num_factors]``) and returns:
+    
+    - Per-factor correlations (before any rotation)
+    - Optionally Procrustes-rotated factors and an overall correlation
+    
+    Parameters
+    ----------
+    true_factors : np.ndarray
+        Array of shape (T, k) with generated factors used to build the data.
+    estimated_factors : np.ndarray
+        Array of shape (T, k_est) with estimated factors. Only the first
+        ``k = min(k, k_est)`` columns are compared.
+    use_procrustes : bool, default True
+        If True and SciPy is available, apply orthogonal Procrustes rotation
+        to align estimated factors with true factors before computing the
+        overall correlation.
+    
+    Returns
+    -------
+    Dict[str, Any]
+        {
+          'num_factors': int,
+          'correlation_per_factor': np.ndarray (k,),
+          'overall_correlation': float or None,
+          'rotation_matrix': np.ndarray (k, k) or None,
+          'aligned_factors': np.ndarray (T, k) or None,
+        }
+    
+    Notes
+    -----
+    - This is primarily intended for synthetic-data experiments where the
+      true latent factors are known.
+    - Correlations are computed factor-by-factor, ignoring any time points
+      with NaN values.
+    - Procrustes rotation is useful because factors are only identified up
+      to sign, scale (if not constrained), and rotation in general.
+    """
+    if true_factors.ndim != 2 or estimated_factors.ndim != 2:
+        raise ValueError(
+            f"true_factors and estimated_factors must be 2D, "
+            f"got shapes {true_factors.shape} and {estimated_factors.shape}"
+        )
+    
+    T_true, k_true = true_factors.shape
+    T_est, k_est = estimated_factors.shape
+    if T_true != T_est:
+        raise ValueError(
+            f"Time dimension must match, got {T_true} and {T_est}"
+        )
+    
+    k = min(k_true, k_est)
+    if k == 0:
+        raise ValueError("At least one factor is required for comparison.")
+    
+    F_true = np.asarray(true_factors[:, :k], dtype=float)
+    F_est = np.asarray(estimated_factors[:, :k], dtype=float)
+    
+    # Per-factor correlations (no rotation)
+    corr_per_factor = np.full(k, np.nan, dtype=float)
+    for j in range(k):
+        mask_j = np.isfinite(F_true[:, j]) & np.isfinite(F_est[:, j])
+        if np.sum(mask_j) > 1:
+            corr = np.corrcoef(F_true[mask_j, j], F_est[mask_j, j])[0, 1]
+            corr_per_factor[j] = float(corr)
+    
+    rotation_matrix = None
+    aligned_factors = None
+    overall_corr = None
+    
+    if use_procrustes:
+        # Center factors before Procrustes to focus on shape, not level.
+        F_true_centered = F_true - np.nanmean(F_true, axis=0, keepdims=True)
+        F_est_centered = F_est - np.nanmean(F_est, axis=0, keepdims=True)
+        
+        # Replace any remaining NaNs with 0 before Procrustes (rare in synthetic tests)
+        F_true_clean = np.where(np.isfinite(F_true_centered), F_true_centered, 0.0)
+        F_est_clean = np.where(np.isfinite(F_est_centered), F_est_centered, 0.0)
+        
+        try:
+            # Find R such that F_est_clean @ R ≈ F_true_clean
+            R, _ = orthogonal_procrustes(F_est_clean, F_true_clean)  # type: ignore[arg-type]
+            rotation_matrix = R
+            aligned_factors = F_est @ R
+            
+            mask_all = np.isfinite(F_true) & np.isfinite(aligned_factors)
+            if np.any(mask_all):
+                overall_corr = float(
+                    np.corrcoef(
+                        F_true[mask_all].ravel(),
+                        aligned_factors[mask_all].ravel()
+                    )[0, 1]
+                )
+        except Exception as e:
+            _logger.debug(f"Procrustes rotation failed in evaluate_factor_estimation: {e}")
+    
+    return {
+        "num_factors": k,
+        "correlation_per_factor": corr_per_factor,
+        "overall_correlation": overall_corr,
+        "rotation_matrix": rotation_matrix,
+        "aligned_factors": aligned_factors,
+    }
+
+
+def evaluate_loading_estimation(
+    true_loadings: np.ndarray,
+    estimated_loadings: np.ndarray,
+    rotation_matrix: Optional[np.ndarray] = None
+) -> Dict[str, Any]:
+    """Evaluate loading matrix estimation accuracy (synthetic-data diagnostic).
+    
+    Parameters
+    ----------
+    true_loadings : np.ndarray
+        Array of shape (N, k_true) with the loadings used to generate data.
+    estimated_loadings : np.ndarray
+        Array of shape (N, k_est) with estimated loadings from the model
+        (typically ``result.C[:, :num_factors]``).
+    rotation_matrix : np.ndarray, optional
+        Orthogonal rotation matrix of shape (k_est, k_rot) returned by
+        :func:`evaluate_factor_estimation`. If provided, the estimated
+        loadings are rotated as ``estimated_loadings @ rotation_matrix``
+        before comparison.
+    
+    Returns
+    -------
+    Dict[str, Any]
+        {
+          'num_factors': int,
+          'correlation_per_factor': np.ndarray (k,),
+          'rmse_per_series': np.ndarray (N,),
+          'overall_rmse': float,
+          'aligned_loadings': np.ndarray (N, k),
+        }
+    
+    Notes
+    -----
+    - RMSE is computed per series (row-wise) across factors.
+    - This function assumes synthetic data where ``true_loadings`` are known.
+    """
+    if true_loadings.ndim != 2 or estimated_loadings.ndim != 2:
+        raise ValueError(
+            f"true_loadings and estimated_loadings must be 2D, "
+            f"got shapes {true_loadings.shape} and {estimated_loadings.shape}"
+        )
+    
+    N_true, k_true = true_loadings.shape
+    N_est, k_est = estimated_loadings.shape
+    if N_true != N_est:
+        raise ValueError(
+            f"Number of series (rows) must match, got {N_true} and {N_est}"
+        )
+    
+    # Apply rotation if provided (align loadings with rotated factors)
+    L_est = np.asarray(estimated_loadings, dtype=float)
+    if rotation_matrix is not None:
+        if rotation_matrix.ndim != 2 or rotation_matrix.shape[0] != k_est:
+            raise ValueError(
+                f"rotation_matrix shape {rotation_matrix.shape} incompatible "
+                f"with estimated_loadings shape {estimated_loadings.shape}"
+            )
+        L_est = L_est @ rotation_matrix
+    
+    k = min(k_true, L_est.shape[1])
+    if k == 0:
+        raise ValueError("At least one factor/loading column is required.")
+    
+    L_true = np.asarray(true_loadings[:, :k], dtype=float)
+    L_est_k = np.asarray(L_est[:, :k], dtype=float)
+    
+    # Per-factor loading correlations
+    corr_per_factor = np.full(k, np.nan, dtype=float)
+    for j in range(k):
+        mask_j = np.isfinite(L_true[:, j]) & np.isfinite(L_est_k[:, j])
+        if np.sum(mask_j) > 1:
+            corr = np.corrcoef(L_true[mask_j, j], L_est_k[mask_j, j])[0, 1]
+            corr_per_factor[j] = float(corr)
+    
+    # RMSE per series (row-wise across factors)
+    diff = L_true - L_est_k
+    mask = np.isfinite(L_true) & np.isfinite(L_est_k)
+    rmse_per_series = np.full(N_true, np.nan, dtype=float)
+    for i in range(N_true):
+        mask_i = mask[i, :]
+        if np.any(mask_i):
+            rmse_per_series[i] = float(
+                np.sqrt(np.mean(diff[i, mask_i] ** 2))
+            )
+    
+    if np.any(mask):
+        overall_rmse = float(np.sqrt(np.mean(diff[mask] ** 2)))
+    else:
+        overall_rmse = float("nan")
+    
+    return {
+        "num_factors": k,
+        "correlation_per_factor": corr_per_factor,
+        "rmse_per_series": rmse_per_series,
+        "overall_rmse": overall_rmse,
+        "aligned_loadings": L_est_k,
+    }
 
 
 def _display_dfm_tables(Res: DFMResult, config: DFMConfig, nQ: int) -> None:

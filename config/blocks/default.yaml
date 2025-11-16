@@ -6,43 +6,58 @@
 #
 # Each block has:
 #   - factors: number of latent factors in this block
-#   - ar_lag: autoregressive lag order for the block-level factor
+#              **IMPORTANT**: This should be determined based on:
+#              * Number of series in the block (more series may need more factors)
+#              * Complexity of the sector (simple sectors: 1, complex: 2-3)
+#              * Model fit diagnostics (check factor loadings and explained variance)
+#              * Typical range: 1-3 factors per block
+#              * Start with 1 and increase if model fit is poor
+#   - ar_lag: autoregressive lag order for the block-level factor (typically 1)
 #   - clock: optional, if block frequency differs from global clock
 #   - notes: optional comments
+#
+# **How to determine factors per block:**
+#   1. Start with factors: 1 for each block (simplest model)
+#   2. Check model diagnostics: factor loadings, explained variance per series
+#   3. If many series in a block have low loadings (<0.3), consider increasing factors
+#   4. Use cross-validation or information criteria (AIC/BIC) to compare models
+#   5. Consider economic theory: does the sector have multiple distinct drivers?
+#
+# **Current settings are examples - adjust based on your data and modeling goals!**
 # ============================================================================
 
 Block_Global:
-  factors: 1
+  factors: 3  # Adjust based on data complexity and model diagnostics
   ar_lag: 1
   clock: m
   notes: "Global (aggregate) factor driving all blocks"
 
 Block_Consumption:
-  factors: 1
+  factors: 1  # Adjust based on data complexity and model diagnostics
   ar_lag: 1
   clock: m
   notes: "Consumption-related indicators (retail sales, CSI, etc.)"
 
 Block_Investment:
-  factors: 1
+  factors: 1  # Adjust based on data complexity and model diagnostics
   ar_lag: 1
   clock: m
   notes: "Investment-related indicators (GFCF, BSI Investment, etc.)"
 
 Block_Export:
-  factors: 1
+  factors: 1  # Adjust based on data complexity and model diagnostics
   ar_lag: 1
   clock: m
   notes: "Export and external demand (goods & services, terms of trade, etc.)"
 
 Block_Labor:
-  factors: 1
+  factors: 1 # Adjust based on data complexity and model diagnostics
   ar_lag: 1
   clock: m
   notes: "Employment, unemployment, participation, labor expectations"
 
 Block_Nominal:
-  factors: 1
+  factors: 1  # Adjust based on data complexity and model diagnostics
   ar_lag: 1
   clock: m
   notes: "Nominal price-level or value indicators (PPI, CPI, trade prices, credit, etc.)"

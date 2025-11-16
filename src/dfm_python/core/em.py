@@ -949,55 +949,55 @@ def em_step(params: EMStepParams) -> Tuple[np.ndarray, np.ndarray, np.ndarray, n
         # Keep C fixed for idio components (not updated in M-step)
     else:
         # Fallback to old approach for backward compatibility
-    i_subset = slice(idio_start_idx, idio_start_idx + n_idio)
-    i_subset_slice = slice(i_subset.start, i_subset.stop)
-    Z_idio = Zsmooth[i_subset_slice, 1:] if idio_start_idx < Zsmooth.shape[1] else np.zeros((n_idio, T))
-    n_idio_actual = Z_idio.shape[0] if Z_idio.shape[0] > 0 else n_idio
-    expected_idio_current_sq = np.sum(Z_idio**2, axis=1)
-    vsmooth_idio_block = vsmooth[i_subset_slice, :, :][:, i_subset_slice, 1:]
-    vsmooth_idio_sum = np.sum(vsmooth_idio_block, axis=2)
-    if vsmooth_idio_sum.ndim == 2 and vsmooth_idio_sum.shape[0] >= n_idio_actual and vsmooth_idio_sum.shape[1] >= n_idio_actual:
-        vsmooth_idio_diag = np.diag(vsmooth_idio_sum[:n_idio_actual, :n_idio_actual])
-    else:
-        vsmooth_idio_diag = np.zeros(n_idio_actual)
-    expected_idio_current_sq = expected_idio_current_sq + vsmooth_idio_diag
-    Z_idio_lag = Zsmooth[i_subset_slice, :-1]
-    expected_idio_lag_sq = np.sum(Z_idio_lag**2, axis=1)
-    vsmooth_lag_block = vsmooth[i_subset_slice, :, :][:, i_subset_slice, :-1]
-    vsmooth_lag_sum = np.sum(vsmooth_lag_block, axis=2)
-    if vsmooth_lag_sum.ndim == 2 and vsmooth_lag_sum.shape[0] >= n_idio_actual and vsmooth_lag_sum.shape[1] >= n_idio_actual:
-        vsmooth_lag_diag = np.diag(vsmooth_lag_sum[:n_idio_actual, :n_idio_actual])
-    else:
-        vsmooth_lag_diag = np.zeros(n_idio_actual)
-    expected_idio_lag_sq = expected_idio_lag_sq + vsmooth_lag_diag
-    min_cols = min(Z_idio.shape[1], Z_idio_lag.shape[1])
-    expected_idio_cross = np.sum(Z_idio[:, :min_cols] * Z_idio_lag[:, :min_cols], axis=1)
-    vvsmooth_block = vvsmooth[i_subset_slice, :, :][:, i_subset_slice, :]
-    vvsmooth_sum = np.sum(vvsmooth_block, axis=2)
-    if vvsmooth_sum.ndim == 2 and vvsmooth_sum.shape[0] >= n_idio_actual and vvsmooth_sum.shape[1] >= n_idio_actual:
-        vvsmooth_diag = np.diag(vvsmooth_sum[:n_idio_actual, :n_idio_actual])
-    else:
-        vvsmooth_diag = np.zeros(n_idio_actual)
-    expected_idio_cross = expected_idio_cross + vvsmooth_diag
-    ar_coeffs_diag, _ = _estimate_ar_coefficient(expected_idio_cross, expected_idio_lag_sq, vsmooth_sum=vsmooth_lag_diag)
-    A_block_idio = np.diag(ar_coeffs_diag)
-    innovation_cov_diag = (np.maximum(expected_idio_current_sq, 0.0) - ar_coeffs_diag * expected_idio_cross) / T
-    innovation_cov_diag = np.maximum(innovation_cov_diag, MIN_INNOVATION_VARIANCE)
-    Q_block_idio = np.diag(innovation_cov_diag)
-    i_subset_size = i_subset.stop - i_subset.start
-    if n_idio_actual == i_subset_size:
-        A_new[i_subset, i_subset] = A_block_idio
-        Q_new[i_subset, i_subset] = Q_block_idio
-    elif n_idio_actual < i_subset_size:
-        A_new[i_subset.start:i_subset.start + n_idio_actual, i_subset.start:i_subset.start + n_idio_actual] = A_block_idio
-        Q_new[i_subset.start:i_subset.start + n_idio_actual, i_subset.start:i_subset.start + n_idio_actual] = Q_block_idio
-    else:
-        A_new[i_subset, i_subset] = A_block_idio[:i_subset_size, :i_subset_size]
-        Q_new[i_subset, i_subset] = Q_block_idio[:i_subset_size, :i_subset_size]
-    vsmooth_sub = vsmooth[i_subset_slice, :, :][:, i_subset_slice, 0]
-    vsmooth_diag = np.diag(vsmooth_sub[:n_idio_actual, :n_idio_actual]) if vsmooth_sub.ndim == 2 else np.zeros(n_idio_actual)
-    for idx in range(min(n_idio_actual, i_subset_size)):
-        V_0_new[i_subset.start + idx, i_subset.start + idx] = vsmooth_diag[idx] if idx < len(vsmooth_diag) else 0.0
+        i_subset = slice(idio_start_idx, idio_start_idx + n_idio)
+        i_subset_slice = slice(i_subset.start, i_subset.stop)
+        Z_idio = Zsmooth[i_subset_slice, 1:] if idio_start_idx < Zsmooth.shape[1] else np.zeros((n_idio, T))
+        n_idio_actual = Z_idio.shape[0] if Z_idio.shape[0] > 0 else n_idio
+        expected_idio_current_sq = np.sum(Z_idio**2, axis=1)
+        vsmooth_idio_block = vsmooth[i_subset_slice, :, :][:, i_subset_slice, 1:]
+        vsmooth_idio_sum = np.sum(vsmooth_idio_block, axis=2)
+        if vsmooth_idio_sum.ndim == 2 and vsmooth_idio_sum.shape[0] >= n_idio_actual and vsmooth_idio_sum.shape[1] >= n_idio_actual:
+            vsmooth_idio_diag = np.diag(vsmooth_idio_sum[:n_idio_actual, :n_idio_actual])
+        else:
+            vsmooth_idio_diag = np.zeros(n_idio_actual)
+        expected_idio_current_sq = expected_idio_current_sq + vsmooth_idio_diag
+        Z_idio_lag = Zsmooth[i_subset_slice, :-1]
+        expected_idio_lag_sq = np.sum(Z_idio_lag**2, axis=1)
+        vsmooth_lag_block = vsmooth[i_subset_slice, :, :][:, i_subset_slice, :-1]
+        vsmooth_lag_sum = np.sum(vsmooth_lag_block, axis=2)
+        if vsmooth_lag_sum.ndim == 2 and vsmooth_lag_sum.shape[0] >= n_idio_actual and vsmooth_lag_sum.shape[1] >= n_idio_actual:
+            vsmooth_lag_diag = np.diag(vsmooth_lag_sum[:n_idio_actual, :n_idio_actual])
+        else:
+            vsmooth_lag_diag = np.zeros(n_idio_actual)
+        expected_idio_lag_sq = expected_idio_lag_sq + vsmooth_lag_diag
+        min_cols = min(Z_idio.shape[1], Z_idio_lag.shape[1])
+        expected_idio_cross = np.sum(Z_idio[:, :min_cols] * Z_idio_lag[:, :min_cols], axis=1)
+        vvsmooth_block = vvsmooth[i_subset_slice, :, :][:, i_subset_slice, :]
+        vvsmooth_sum = np.sum(vvsmooth_block, axis=2)
+        if vvsmooth_sum.ndim == 2 and vvsmooth_sum.shape[0] >= n_idio_actual and vvsmooth_sum.shape[1] >= n_idio_actual:
+            vvsmooth_diag = np.diag(vvsmooth_sum[:n_idio_actual, :n_idio_actual])
+        else:
+            vvsmooth_diag = np.zeros(n_idio_actual)
+        expected_idio_cross = expected_idio_cross + vvsmooth_diag
+        ar_coeffs_diag, _ = _estimate_ar_coefficient(expected_idio_cross, expected_idio_lag_sq, vsmooth_sum=vsmooth_lag_diag)
+        A_block_idio = np.diag(ar_coeffs_diag)
+        innovation_cov_diag = (np.maximum(expected_idio_current_sq, 0.0) - ar_coeffs_diag * expected_idio_cross) / T
+        innovation_cov_diag = np.maximum(innovation_cov_diag, MIN_INNOVATION_VARIANCE)
+        Q_block_idio = np.diag(innovation_cov_diag)
+        i_subset_size = i_subset.stop - i_subset.start
+        if n_idio_actual == i_subset_size:
+            A_new[i_subset, i_subset] = A_block_idio
+            Q_new[i_subset, i_subset] = Q_block_idio
+        elif n_idio_actual < i_subset_size:
+            A_new[i_subset.start:i_subset.start + n_idio_actual, i_subset.start:i_subset.start + n_idio_actual] = A_block_idio
+            Q_new[i_subset.start:i_subset.start + n_idio_actual, i_subset.start:i_subset.start + n_idio_actual] = Q_block_idio
+        else:
+            A_new[i_subset, i_subset] = A_block_idio[:i_subset_size, :i_subset_size]
+            Q_new[i_subset, i_subset] = Q_block_idio[:i_subset_size, :i_subset_size]
+        vsmooth_sub = vsmooth[i_subset_slice, :, :][:, i_subset_slice, 0]
+        vsmooth_diag = np.diag(vsmooth_sub[:n_idio_actual, :n_idio_actual]) if vsmooth_sub.ndim == 2 else np.zeros(n_idio_actual)
+        for idx in range(min(n_idio_actual, i_subset_size)):
+            V_0_new[i_subset.start + idx, i_subset.start + idx] = vsmooth_diag[idx] if idx < len(vsmooth_diag) else 0.0
 
     Z_0 = Zsmooth[0, :].copy()
     nanY = np.isnan(y)

@@ -37,7 +37,11 @@ import pandas as pd
 import numpy as np
 
 import dfm_python as dfm
-from dfm_python.config import Params
+from dfm_python.config import Params, DFMConfig, SeriesConfig, BlockConfig
+from dfm_python.core.diagnostics import (
+    evaluate_factor_estimation,
+    evaluate_loading_estimation,
+)
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -175,6 +179,141 @@ def main() -> None:
         loglik_val = result.loglik
         if loglik_val is not None and np.isfinite(loglik_val):
             print(f"  - Final log-likelihood: {loglik_val:.2f}")
+
+    # ------------------------------------------------------------------
+    # Synthetic data test for factor/loading estimation accuracy (always run)
+    # ------------------------------------------------------------------
+    print(f"\n" + "="*70)
+    print("Synthetic Data Test: Factor/Loading Estimation Accuracy")
+    print("="*70)
+
+    # Synthetic data generation using actual config structure
+    # Use the same number of series and block structure as the real data
+    np.random.seed(42)
+    T_syn = 100
+    N_syn = len(config.series)  # Use actual number of series from config
+    
+    # Calculate number of factors from actual block structure
+    num_factors_syn = sum(
+        config.blocks[block_name].factors 
+        for block_name in config.block_names
+    )
+    # Ensure at least 1 factor
+    if num_factors_syn == 0:
+        num_factors_syn = 1
+    
+    print(f"\nSynthetic data will match actual config structure:")
+    print(f"  - Num series: {N_syn} (from config)")
+    print(f"  - Num factors: {num_factors_syn} (from config blocks)")
+
+    # Generate latent factors as AR(1) processes
+    factors = np.zeros((T_syn + 1, num_factors_syn))
+    # Use different AR coefficients for each factor
+    ar_coeffs = np.linspace(0.8, 0.6, num_factors_syn) if num_factors_syn > 1 else np.array([0.8])
+    innovation_std = 0.5
+    for t in range(T_syn):
+        factors[t + 1, :] = (
+            ar_coeffs * factors[t, :] + np.random.randn(num_factors_syn) * innovation_std
+        )
+
+    # Generate loadings and observed data
+    loadings = np.random.randn(N_syn, num_factors_syn) * 0.5 + 1.0
+    common_part_all = factors[1 : T_syn + 1, :] @ loadings.T  # (T, N)
+
+    idio_std = 0.3
+    idio_rho = 0.5
+    idio_innov = np.random.randn(T_syn, N_syn) * idio_std
+    idio = np.zeros((T_syn, N_syn))
+    idio[0, :] = idio_innov[0, :]
+    for t in range(1, T_syn):
+        idio[t, :] = idio_rho * idio[t - 1, :] + idio_innov[t, :]
+
+    X_syn = common_part_all + idio
+
+    # Small amount of missing data
+    missing_mask = np.random.rand(T_syn, N_syn) < 0.05
+    X_syn[missing_mask] = np.nan
+
+    print("\nSynthetic data summary:")
+    print(f"  - Shape: {X_syn.shape} (time × series)")
+    print(f"  - Num factors (true): {num_factors_syn}")
+    print(f"  - Missing ratio: {np.isnan(X_syn).sum() / X_syn.size * 100:.2f}%")
+
+    # Build DFMConfig for synthetic data using actual config structure
+    # Reuse actual series structure (frequency, transformation, blocks) but with synthetic IDs
+    series_syn = [
+        SeriesConfig(
+            series_id=f"syn_{s.series_id}",
+            frequency=s.frequency,  # Use actual frequency
+            transformation=s.transformation,  # Use actual transformation
+            blocks=s.blocks,  # Use actual block membership
+        )
+        for s in config.series
+    ]
+    # Reuse actual block structure
+    blocks_syn = {
+        block_name: BlockConfig(
+            factors=block_config.factors,  # Use actual number of factors per block
+            ar_lag=block_config.ar_lag,  # Use actual AR lag
+            clock=block_config.clock,  # Use actual clock frequency
+        )
+        for block_name, block_config in config.blocks.items()
+    }
+    config_syn = DFMConfig(series=series_syn, blocks=blocks_syn)
+
+    # Fit model to synthetic data
+    print("\n--- Fitting model on synthetic data ---")
+    model_syn = dfm.DFM()
+    result_syn = model_syn.fit(
+        X_syn,
+        config_syn,
+        max_iter=max(50, args.max_iter),
+        threshold=min(1e-4, args.threshold),
+    )
+    print("✓ Synthetic model trained")
+    print(f"  - Iterations: {result_syn.num_iter}")
+    print(f"  - Converged: {result_syn.converged}")
+
+    # Evaluate factors
+    true_factors = factors[1 : T_syn + 1, :]
+    est_factors = result_syn.Z[:, :num_factors_syn]
+    factor_eval = evaluate_factor_estimation(
+        true_factors,
+        est_factors,
+        use_procrustes=True,
+    )
+
+    print("\nFactor estimation accuracy:")
+    print(f"  - Num factors compared: {factor_eval['num_factors']}")
+    print(
+        f"  - Correlation per factor: "
+        f"{np.round(factor_eval['correlation_per_factor'], 4)}"
+    )
+    if factor_eval["overall_correlation"] is not None:
+        print(
+            f"  - Overall correlation (after Procrustes): "
+            f"{factor_eval['overall_correlation']:.4f}"
+        )
+
+    # Evaluate loadings (aligned using rotation from factor comparison)
+    true_loadings = loadings
+    est_loadings = result_syn.C[:, :num_factors_syn]
+    loading_eval = evaluate_loading_estimation(
+        true_loadings,
+        est_loadings,
+        rotation_matrix=factor_eval["rotation_matrix"],
+    )
+
+    print("\nLoading estimation accuracy:")
+    print(
+        f"  - Correlation per factor: "
+        f"{np.round(loading_eval['correlation_per_factor'], 4)}"
+    )
+    print(f"  - Overall RMSE (across series × factors): {loading_eval['overall_rmse']:.4f}")
+    print(
+        f"  - RMSE per series (first 5): "
+        f"{np.round(loading_eval['rmse_per_series'][:5], 4)}"
+    )
     
     # Format loglik for display
     loglik_str = f"{result.loglik:.2f}" if (hasattr(result, 'loglik') and result.loglik is not None and np.isfinite(result.loglik)) else 'N/A'
