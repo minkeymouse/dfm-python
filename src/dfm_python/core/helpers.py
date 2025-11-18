@@ -996,3 +996,79 @@ def validate_params(
         V_0 = np.eye(V_0.shape[0]) * default_idio_init_covariance
     
     return A, Q, R, C, Z_0, V_0
+
+
+# ============================================================================
+# Legacy config compatibility helpers
+# ============================================================================
+
+def _get_frequencies_from_config(config: Any) -> list:
+    """Get frequencies from config, supporting both new and legacy formats.
+    
+    This function provides a unified interface for accessing frequencies
+    from DFMConfig objects, handling both:
+    - New format: config.get_frequencies() method
+    - Legacy format: config.Frequency attribute
+    
+    Parameters
+    ----------
+    config : Any
+        Configuration object (DFMConfig or legacy format)
+        
+    Returns
+    -------
+    list
+        List of frequency codes for each series
+        
+    Notes
+    -----
+    - Maintains backward compatibility with legacy configuration formats
+    - Returns empty list if neither format is available
+    """
+    if hasattr(config, 'get_frequencies'):
+        return config.get_frequencies()
+    elif hasattr(config, 'Frequency'):
+        # Legacy format support: Frequency attribute (for backward compatibility)
+        freq_attr = config.Frequency
+        if hasattr(freq_attr, '__iter__') and not isinstance(freq_attr, str):
+            return list(freq_attr)
+        else:
+            return [freq_attr] if freq_attr is not None else []
+    else:
+        return []
+
+
+def _get_units_from_config(config: Any, series_index: int) -> Optional[str]:
+    """Get units for a series from config, supporting both new and legacy formats.
+    
+    This function provides a unified interface for accessing units from config,
+    handling both:
+    - New format: config.series[series_index].units
+    - Legacy format: config.UnitsTransformed[series_index]
+    
+    Parameters
+    ----------
+    config : Any
+        Configuration object (DFMConfig or legacy format)
+    series_index : int
+        Index of the series (0-based)
+        
+    Returns
+    -------
+    Optional[str]
+        Units string or None if not available
+        
+    Notes
+    -----
+    - Maintains backward compatibility with legacy configuration formats
+    - Returns None if units are not available for the series
+    """
+    # New format: SeriesConfig.units
+    if hasattr(config, 'series') and series_index < len(config.series):
+        return config.series[series_index].units
+    
+    # Legacy format: UnitsTransformed attribute
+    if hasattr(config, 'UnitsTransformed') and series_index < len(config.UnitsTransformed):
+        return config.UnitsTransformed[series_index]
+    
+    return None

@@ -29,11 +29,11 @@ from .config import (
     ConfigSource,
     MergedConfigSource,
 )
-from .dfm import DFM as _DFMCore, DFMResult
+from .dfm import DFMCore, DFMResult
 from .core.helpers import safe_get_method, safe_get_attr
 
 
-class DFM(_DFMCore):
+class DFM(DFMCore):
     """High-level API for Dynamic Factor Model estimation.
     
     This class provides a simple, object-oriented interface for DFM operations.
@@ -368,29 +368,48 @@ def from_yaml(yaml_path: Union[str, Path]) -> DFM:
     return _dfm_instance.load_config(yaml=yaml_path)
 
 
-def from_spec(spec_path: Union[str, Path], params: Optional[Params] = None) -> DFM:
-    """Load configuration from spec CSV file (convenience constructor)."""
-    from .config import SpecCSVSource
+def from_spec(
+    csv_path: Union[str, Path],
+    output_dir: Optional[Union[str, Path]] = None,
+    series_filename: Optional[str] = None,
+    blocks_filename: Optional[str] = None
+) -> Tuple[Path, Path]:
+    """Convert spec CSV file to YAML configuration files.
     
-    if params is None:
-        params = Params()
+    This function reads a spec CSV file and generates two YAML files:
+    - config/series/{basename}.yaml - series definitions
+    - config/blocks/{basename}.yaml - block definitions
     
-    # Load config from spec CSV using ConfigSource pattern
-    spec_source = SpecCSVSource(spec_path)
-    config = spec_source.load()
-    
-    # Override estimation parameters from params
-    for key, value in params.__dict__.items():
-        if hasattr(config, key):
-            setattr(config, key, value)
-    
-    _dfm_instance._config = config
-    return _dfm_instance
+    Parameters
+    ----------
+    csv_path : str or Path
+        Path to the spec CSV file
+    output_dir : str or Path, optional
+        Output directory for YAML files. Defaults to config/ directory relative to CSV.
+    series_filename : str, optional
+        Custom filename for series YAML (without .yaml extension).
+        Defaults to CSV basename.
+    blocks_filename : str, optional
+        Custom filename for blocks YAML (without .yaml extension).
+        Defaults to CSV basename.
+        
+    Returns
+    -------
+    Tuple[Path, Path]
+        Paths to generated series YAML and blocks YAML files
+        
+    Examples
+    --------
+    >>> series_path, blocks_path = from_spec('data/sample_spec.csv')
+    >>> # Creates config/series/sample_spec.yaml and config/blocks/sample_spec.yaml
+    """
+    from .config_sources import from_spec as _from_spec
+    return _from_spec(csv_path, output_dir, series_filename, blocks_filename)
 
 
 def from_spec_df(spec_df: pd.DataFrame, params: Optional[Params] = None) -> DFM:
     """Load configuration from spec DataFrame (convenience constructor)."""
-    from .data import _load_config_from_dataframe
+    from .config_sources import _load_config_from_dataframe
     
     if params is None:
         params = Params()

@@ -10,11 +10,62 @@ This module provides adapters for loading DFMConfig from various sources:
 All adapters implement the ConfigSource protocol and return DFMConfig objects.
 """
 
-from typing import Protocol, Optional, Dict, Any, Union
+import warnings
+from typing import Protocol, Optional, Dict, Any, Union, Tuple
 from pathlib import Path
 from dataclasses import is_dataclass, asdict
 
 from .config import DFMConfig, SeriesConfig, BlockConfig, DEFAULT_GLOBAL_BLOCK_NAME
+import pandas as pd
+
+
+def _load_config_from_defaults(cfg, root_config_dir, config_type: str) -> Optional[dict]:
+    """Load config from defaults or direct path (helper for series/blocks loading).
+    
+    Parameters
+    ----------
+    cfg : OmegaConf.DictConfig
+        Main config object
+    root_config_dir : Path
+        Root config directory (contains series/ and blocks/ subdirectories)
+    config_type : str
+        Type of config to load: 'series' or 'blocks'
+        
+    Returns
+    -------
+    Optional[dict]
+        Loaded config dict or None if not found
+    """
+    from omegaconf import OmegaConf
+    
+    config_dict = None
+    config_loaded = False
+    
+    # Try loading from defaults
+    if 'defaults' in cfg:
+        defaults_list = cfg.defaults
+        for default_item in defaults_list:
+            default_dict = OmegaConf.to_container(default_item, resolve=False) if hasattr(default_item, 'keys') else default_item
+            
+            # Handle dict format: {'series': 'default'} or {'blocks': 'default'}
+            if isinstance(default_dict, dict) and config_type in default_dict:
+                config_name = default_dict[config_type]
+                config_path = root_config_dir / config_type / f'{config_name}.yaml'
+                if config_path.exists():
+                    config_cfg = OmegaConf.load(config_path)
+                    config_dict = OmegaConf.to_container(config_cfg, resolve=True)
+                    config_loaded = True
+                    break
+    
+    # If not loaded from defaults, try direct path
+    if not config_loaded:
+        config_path = root_config_dir / config_type / 'default.yaml'
+        if config_path.exists():
+            config_cfg = OmegaConf.load(config_path)
+            config_dict = OmegaConf.to_container(config_cfg, resolve=True)
+            config_loaded = True
+    
+    return config_dict if config_loaded else None
 
 
 class ConfigSource(Protocol):
@@ -55,6 +106,14 @@ class YamlSource:
             raise FileNotFoundError(f"Configuration file not found: {configfile}")
         
         config_dir = configfile.parent
+        # If config file is in a subdirectory (e.g., experiment/), find the root config directory
+        # Look for series/ or blocks/ directories to identify config root
+        root_config_dir = config_dir
+        while root_config_dir.parent != root_config_dir:  # Not at filesystem root
+            if (root_config_dir / 'series').exists() or (root_config_dir / 'blocks').exists():
+                break
+            root_config_dir = root_config_dir.parent
+        
         cfg = OmegaConf.load(configfile)
         cfg_dict = OmegaConf.to_container(cfg, resolve=True)
         
@@ -64,44 +123,28 @@ class YamlSource:
         
         # Load series from config/series/default.yaml
         series_list = []
-        series_loaded = False
-        series_dict = None
-        
-        if 'defaults' in cfg:
-            defaults_list = cfg.defaults
-            for default_item in defaults_list:
-                default_dict = OmegaConf.to_container(default_item, resolve=False) if hasattr(default_item, 'keys') else default_item
-                
-                # Handle dict format: {'series': 'default'}
-                if isinstance(default_dict, dict) and 'series' in default_dict:
-                    series_config_name = default_dict['series']
-                    series_config_path = config_dir / 'series' / f'{series_config_name}.yaml'
-                    if series_config_path.exists():
-                        series_cfg = OmegaConf.load(series_config_path)
-                        series_dict = OmegaConf.to_container(series_cfg, resolve=True)
-                        series_loaded = True
-                        break
-        
-        # If not loaded from defaults, try direct path
-        if not series_loaded:
-            series_config_path = config_dir / 'series' / 'default.yaml'
-            if series_config_path.exists():
-                series_cfg = OmegaConf.load(series_config_path)
-                series_dict = OmegaConf.to_container(series_cfg, resolve=True)
-                series_loaded = True
+        series_dict = _load_config_from_defaults(cfg, root_config_dir, 'series')
+        series_loaded = series_dict is not None
         
         # Convert series dict to SeriesConfig objects
         if series_loaded and series_dict is not None:
             for series_id, series_data in series_dict.items():
                 if isinstance(series_data, dict):
+                    # Parse release_date if available
+                    release_date = series_data.get('release', series_data.get('release_date', None))
+                    if release_date is not None:
+                        try:
+                            release_date = int(release_date)
+                        except (ValueError, TypeError):
+                            release_date = None
+                    
                     series_list.append(SeriesConfig(
                         series_id=series_id,
                         series_name=series_data.get('series_name', series_id),
                         frequency=series_data.get('frequency', 'm'),
                         transformation=series_data.get('transformation', 'lin'),
-                        category=series_data.get('category', ''),
-                        units=series_data.get('units', ''),
-                        blocks=series_data.get('blocks', [])
+                        blocks=series_data.get('blocks', []),
+                        release_date=release_date
                     ))
         
         # If no series loaded from separate files, try to get from main config
@@ -118,31 +161,8 @@ class YamlSource:
         
         # Load blocks from config/blocks/default.yaml
         blocks_dict = {}
-        blocks_loaded = False
-        blocks_dict_raw = None
-        
-        if 'defaults' in cfg:
-            defaults_list = cfg.defaults
-            for default_item in defaults_list:
-                default_dict = OmegaConf.to_container(default_item, resolve=False) if hasattr(default_item, 'keys') else default_item
-                
-                # Handle dict format: {'blocks': 'default'}
-                if isinstance(default_dict, dict) and 'blocks' in default_dict:
-                    blocks_config_name = default_dict['blocks']
-                    blocks_config_path = config_dir / 'blocks' / f'{blocks_config_name}.yaml'
-                    if blocks_config_path.exists():
-                        blocks_cfg = OmegaConf.load(blocks_config_path)
-                        blocks_dict_raw = OmegaConf.to_container(blocks_cfg, resolve=True)
-                        blocks_loaded = True
-                        break
-        
-        # If not loaded from defaults, try direct path
-        if not blocks_loaded:
-            blocks_config_path = config_dir / 'blocks' / 'default.yaml'
-            if blocks_config_path.exists():
-                blocks_cfg = OmegaConf.load(blocks_config_path)
-                blocks_dict_raw = OmegaConf.to_container(blocks_cfg, resolve=True)
-                blocks_loaded = True
+        blocks_dict_raw = _load_config_from_defaults(cfg, root_config_dir, 'blocks')
+        blocks_loaded = blocks_dict_raw is not None
         
         # Convert blocks dict to BlockConfig objects
         if blocks_loaded and blocks_dict_raw is not None:
@@ -241,9 +261,6 @@ class SpecCSVSource:
     
     def load(self) -> DFMConfig:
         """Load series definitions from spec CSV."""
-        import pandas as pd
-        from .data import _load_config_from_dataframe
-        
         specfile = Path(self.spec_path)
         if not specfile.exists():
             raise FileNotFoundError(f"Spec file not found: {specfile}")
@@ -369,6 +386,190 @@ class MergedConfigSource:
             blocks=merged_blocks,
             **merged_settings
         )
+
+
+def from_spec(
+    csv_path: Union[str, Path],
+    output_dir: Optional[Union[str, Path]] = None,
+    series_filename: Optional[str] = None,
+    blocks_filename: Optional[str] = None
+) -> Tuple[Path, Path]:
+    """Convert spec CSV file to YAML configuration files.
+    
+    This function reads a spec CSV file and generates two YAML files:
+    - config/series/{basename}.yaml - series definitions
+    - config/blocks/{basename}.yaml - block definitions
+    
+    Parameters
+    ----------
+    csv_path : str or Path
+        Path to the spec CSV file
+    output_dir : str or Path, optional
+        Output directory for YAML files. Defaults to config/ directory relative to CSV.
+    series_filename : str, optional
+        Custom filename for series YAML (without .yaml extension).
+        Defaults to CSV basename.
+    blocks_filename : str, optional
+        Custom filename for blocks YAML (without .yaml extension).
+        Defaults to CSV basename.
+        
+    Returns
+    -------
+    Tuple[Path, Path]
+        Paths to generated series YAML and blocks YAML files
+        
+    Examples
+    --------
+    >>> series_path, blocks_path = from_spec('data/sample_spec.csv')
+    >>> # Creates config/series/sample_spec.yaml and config/blocks/sample_spec.yaml
+    """
+    
+    csv_path = Path(csv_path)
+    if not csv_path.exists():
+        raise FileNotFoundError(f"CSV file not found: {csv_path}")
+    
+    # Determine output directory
+    if output_dir is None:
+        # Default: config/ directory relative to CSV file's parent
+        output_dir = csv_path.parent.parent / 'config'
+    else:
+        output_dir = Path(output_dir)
+    
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Determine filenames
+    csv_basename = csv_path.stem
+    series_filename = series_filename or csv_basename
+    blocks_filename = blocks_filename or csv_basename
+    
+    # Read CSV and convert to DFMConfig
+    try:
+        df = pd.read_csv(csv_path)
+    except Exception as e:
+        raise ValueError(f"Failed to read CSV file {csv_path}: {e}")
+    
+    config = _load_config_from_dataframe(df)
+    
+    # Prepare series YAML content
+    series_dir = output_dir / 'series'
+    series_dir.mkdir(parents=True, exist_ok=True)
+    series_path = series_dir / f'{series_filename}.yaml'
+    
+    series_dict = {}
+    # Get block names in order (from config.block_names)
+    block_names = config.block_names
+    
+    for series in config.series:
+        # Convert blocks from indices to block names if needed
+        if isinstance(series.blocks, list) and len(series.blocks) > 0:
+            if isinstance(series.blocks[0], int):
+                # Blocks are indices - convert to block names
+                blocks_names = [block_names[i] for i, val in enumerate(series.blocks) if val != 0]
+            else:
+                # Blocks are already names
+                blocks_names = list(series.blocks)
+        else:
+            blocks_names = ['Block_Global']  # Default
+        
+        series_entry = {
+            'series_name': series.series_name,
+            'frequency': series.frequency,
+            'transformation': series.transformation,
+            'blocks': blocks_names
+        }
+        if series.release_date is not None:
+            series_entry['release'] = series.release_date
+        series_dict[series.series_id] = series_entry
+    
+    # Prepare blocks YAML content
+    blocks_dir = output_dir / 'blocks'
+    blocks_dir.mkdir(parents=True, exist_ok=True)
+    blocks_path = blocks_dir / f'{blocks_filename}.yaml'
+    
+    blocks_dict = {}
+    for block_name, block_config in config.blocks.items():
+        block_entry = {
+            'factors': block_config.factors,
+            'ar_lag': block_config.ar_lag,
+            'clock': block_config.clock
+        }
+        if block_config.notes:
+            block_entry['notes'] = block_config.notes
+        blocks_dict[block_name] = block_entry
+    
+    # Write YAML files
+    try:
+        try:
+            import yaml
+            yaml_lib = yaml
+            yaml_kwargs = {'default_flow_style': False, 'sort_keys': False, 'allow_unicode': True}
+        except ImportError:
+            try:
+                from omegaconf import OmegaConf
+                yaml_lib = OmegaConf
+                yaml_kwargs = {}
+            except ImportError:
+                raise ImportError(
+                    "Either PyYAML or omegaconf is required for YAML generation. "
+                    "Install with: pip install pyyaml or pip install omegaconf"
+                )
+        
+        # Write series YAML
+        if hasattr(yaml_lib, 'dump'):
+            # PyYAML - add blank lines between series for better readability
+            import io
+            stream = io.StringIO()
+            yaml_lib.dump(series_dict, stream, **yaml_kwargs)
+            yaml_content = stream.getvalue()
+            
+            # Add blank line before each series key (except the first one)
+            lines = yaml_content.split('\n')
+            formatted_lines = []
+            for i, line in enumerate(lines):
+                # If line starts a new series (starts with a key and colon, not indented)
+                if line and not line.startswith(' ') and ':' in line and not line.strip().startswith('#'):
+                    # Add blank line before this line (except for the first series)
+                    if i > 0 and formatted_lines and formatted_lines[-1].strip():
+                        formatted_lines.append('')
+                formatted_lines.append(line)
+            
+            with open(series_path, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(formatted_lines))
+        else:
+            # OmegaConf
+            series_cfg = OmegaConf.create(series_dict)
+            OmegaConf.save(series_cfg, series_path)
+        
+        # Write blocks YAML
+        if hasattr(yaml_lib, 'dump'):
+            # PyYAML - add blank lines between blocks for better readability
+            import io
+            stream = io.StringIO()
+            yaml_lib.dump(blocks_dict, stream, **yaml_kwargs)
+            yaml_content = stream.getvalue()
+            
+            # Add blank line before each block key (except the first one)
+            lines = yaml_content.split('\n')
+            formatted_lines = []
+            for i, line in enumerate(lines):
+                # If line starts a new block (starts with a key and colon, not indented)
+                if line and not line.startswith(' ') and ':' in line and not line.strip().startswith('#'):
+                    # Add blank line before this line (except for the first block)
+                    if i > 0 and formatted_lines and formatted_lines[-1].strip():
+                        formatted_lines.append('')
+                formatted_lines.append(line)
+            
+            with open(blocks_path, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(formatted_lines))
+        else:
+            # OmegaConf
+            blocks_cfg = OmegaConf.create(blocks_dict)
+            OmegaConf.save(blocks_cfg, blocks_path)
+            
+    except Exception as e:
+        raise RuntimeError(f"Failed to write YAML files: {e}")
+    
+    return series_path, blocks_path
 
 
 def make_config_source(
@@ -504,6 +705,101 @@ def make_config_source(
 
 
 # ============================================================================
+# Internal helper: Load config from DataFrame
+# ============================================================================
+
+def _load_config_from_dataframe(df: pd.DataFrame) -> DFMConfig:
+    """Load configuration from DataFrame (internal helper).
+    
+    This function converts a DataFrame with series specifications into a DFMConfig.
+    It's used internally by SpecCSVSource and other config loaders.
+    
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame with columns: series_id, series_name, frequency, transformation, blocks
+        Optional columns: Release (release date)
+        Block_* columns: Binary indicators for block membership
+        
+    Returns
+    -------
+    DFMConfig
+        Model configuration object
+    """
+    series_list = []
+    block_names_set = set()
+    
+    for _, row in df.iterrows():
+        # Parse blocks from Block_* columns or 'blocks' column
+        blocks = []
+        
+        # First, try to find Block_* columns (CSV format)
+        block_cols = [col for col in df.columns 
+                     if (col.startswith('Block_') or col.startswith('Block-')) 
+                     and col not in ['blocks']]
+        
+        if block_cols:
+            # CSV format: Block_Global, Block_Consumption, etc. columns with 1/0 values
+            for block_col in block_cols:
+                block_value = row.get(block_col, 0)
+                # Handle various types: int, float, numpy int/float, bool, string "1"/"0"
+                # Check numpy types first (numpy.int64, numpy.float64, etc.)
+                if hasattr(block_value, 'item'):
+                    # numpy scalar - convert to Python native type
+                    block_value = block_value.item()
+                
+                if isinstance(block_value, (int, float)) and block_value != 0:
+                    blocks.append(block_col)
+                elif isinstance(block_value, bool) and block_value:
+                    blocks.append(block_col)
+                elif isinstance(block_value, str) and block_value.strip() in ['1', 'True', 'true']:
+                    blocks.append(block_col)
+        else:
+            # Fallback: try 'blocks' column (comma-separated string or list)
+            blocks_str = row.get('blocks', 'Block_Global')
+            if isinstance(blocks_str, str):
+                blocks = [b.strip() for b in blocks_str.split(',')]
+            elif isinstance(blocks_str, list):
+                blocks = blocks_str
+            else:
+                blocks = ['Block_Global']
+        
+        # Ensure at least Block_Global
+        if not blocks:
+            blocks = ['Block_Global']
+        
+        # Track block names
+        for block in blocks:
+            block_names_set.add(block)
+        
+        # Parse release_date if available
+        release_date = row.get('Release', None)
+        if release_date is not None:
+            try:
+                release_date = int(release_date)
+            except (ValueError, TypeError):
+                release_date = None
+        
+        series_list.append(SeriesConfig(
+            series_id=row.get('series_id', f"series_{len(series_list)}"),
+            series_name=row.get('series_name', row.get('series_id', f"Series {len(series_list)}")),
+            frequency=row.get('frequency', 'm'),
+            transformation=row.get('transformation', 'lin'),
+            blocks=blocks,
+            release_date=release_date
+        ))
+    
+    # Create default blocks if none specified
+    block_names = sorted(block_names_set) if block_names_set else ['Block_Global']
+    blocks = {}
+    for block_name in block_names:
+        blocks[block_name] = BlockConfig(factors=1, ar_lag=1, clock='m')
+    
+    # block_names is derived automatically in DFMConfig.__post_init__ from blocks dict
+    return DFMConfig(series=series_list, blocks=blocks)
+
+
+# ============================================================================
 # Hydra ConfigStore Registration (optional - only if Hydra is available)
 # ============================================================================
 
@@ -527,10 +823,9 @@ if HYDRA_AVAILABLE and ConfigStore is not None:
                 series_id: str
                 series_name: str
                 frequency: str
-                units: str
                 transformation: str
-                category: str
                 blocks: ListType[int]
+                units: Optional[str] = None  # Optional, for display only
             
             @schema_dataclass
             class DFMConfigSchema:

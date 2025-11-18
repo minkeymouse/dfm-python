@@ -12,6 +12,11 @@ This approach is ideal when:
 - You want to use Hydra's powerful configuration management
 - You need CLI overrides and configuration composition
 - You're working with complex configuration hierarchies
+- You want to use Hydra multirun for multiple experiments
+
+Note: For multirun experiments, use:
+  python tutorial/hydra_tutorial.py --multirun experiment=exp1,exp2,exp3
+  This will run the tutorial with different experiment configurations sequentially.
 
 Run:
   python tutorial/hydra_tutorial.py \\
@@ -113,7 +118,7 @@ def main(cfg: DictConfig) -> None:
     
     print(f"✓ Data loaded:")
     print(f"  - Shape: {X.shape} (time periods × series)")
-    print(f"  - Time range: {Time[0]} ~ {Time[-1]}")
+    print(f"  - Time range: {Time.iloc[0] if hasattr(Time, 'iloc') else Time[0]} ~ {Time.iloc[-1] if hasattr(Time, 'iloc') else Time[len(Time)-1]}")
     print(f"  - Missing data ratio: {pd.isna(X).sum().sum() / X.size * 100:.2f}%")
     
     # 3) Train
@@ -151,7 +156,7 @@ def main(cfg: DictConfig) -> None:
         X_forecast, Z_forecast = pred_out, None
     
     # Build forecast date index
-    last_date = pd.to_datetime(Time[-1])
+    last_date = pd.to_datetime(Time.iloc[-1] if hasattr(Time, 'iloc') else Time[len(Time)-1])
     try:
         forecast_dates = pd.date_range(
             start=last_date + pd.tseries.frequencies.to_offset('ME'),

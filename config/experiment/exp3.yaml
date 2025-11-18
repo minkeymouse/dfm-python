@@ -1,0 +1,14 @@
+# Experiment 3: Sample Spec2 Configuration
+# Uses sample_spec2 series and blocks
+# For demonstration purposes
+
+defaults:
+  - /default
+  - series: sample_spec2
+  - blocks: sample_spec2
+  - _self_
+
+# Override any estimation parameters if needed
+# threshold: 1e-5
+# max_iter: 5000
+

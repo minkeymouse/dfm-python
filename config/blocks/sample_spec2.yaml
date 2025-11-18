@@ -14,7 +14,7 @@ Block-Nominal:
   clock: m
 
 Block_Consumption:
-  factors: 1
+  factors: 2
   ar_lag: 1
   clock: m
 

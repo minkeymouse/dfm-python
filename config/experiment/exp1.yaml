@@ -1,0 +1,14 @@
+# Experiment 1: Default Configuration
+# Uses default series and default blocks
+# This is the baseline configuration
+
+defaults:
+  - /default
+  - series: default
+  - blocks: default
+  - _self_
+
+# Override any estimation parameters if needed
+# threshold: 1e-5
+# max_iter: 5000
+
