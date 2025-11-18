@@ -301,11 +301,14 @@ class EMAlgorithmParams:
 # Core functions are imported directly from core modules - no proxy functions needed
 
 
-class DFM:
+class DFMCore:
     """Core Dynamic Factor Model class.
     
     This class provides the main DFM estimation functionality. The core algorithm
     is implemented in the `fit()` method, which performs EM estimation.
+    
+    Note: This is the core implementation class. For high-level API with
+    convenience methods, use the `DFM` class from `api.py` which extends this class.
     """
     
     def __init__(self):

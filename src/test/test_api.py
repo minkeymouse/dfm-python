@@ -11,7 +11,8 @@ import pytest
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root / 'src'))
 
-from dfm_python.dfm import DFM, DFMResult
+from dfm_python.api import DFM
+from dfm_python.dfm import DFMResult
 from dfm_python.config import (
     DFMConfig, SeriesConfig, BlockConfig,
     YamlSource, DictSource, SpecCSVSource, MergedConfigSource,

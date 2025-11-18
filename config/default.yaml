@@ -9,8 +9,9 @@
 # - Block structure: Edit config/blocks/default.yaml
 
 defaults:
-  - series: default  # Load series definitions from config/series/default.yaml
-  - blocks: default # Load block structure from config/blocks/default.yaml
+  - experiment: null      # Optional: Select experiment config (exp1, exp2, etc.) or null for base config
+  - series: default      # Load series definitions from config/series/default.yaml
+  - blocks: default      # Load block structure from config/blocks/default.yaml
   - _self_
 
 # ============================================================================

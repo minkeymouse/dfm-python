@@ -5,6 +5,7 @@ for Dynamic Factor Model estimation.
 """
 
 import logging
+import warnings
 from pathlib import Path
 from typing import List, Optional, Tuple, Union
 
@@ -408,7 +409,6 @@ def load_data(datafile: Union[str, Path], config: DFMConfig,
         if len(warnings_list) > 5:
             logger.warning(f"... and {len(warnings_list) - 5} more series with T < N")
         
-        import warnings
         warnings.warn(
             f"Insufficient data: {len(warnings_list)} series have T < N (time periods < number of series). "
             f"This may cause numerical issues. Suggested fix: increase sample size or reduce number of series. "
@@ -434,7 +434,6 @@ def load_data(datafile: Union[str, Path], config: DFMConfig,
         if len(extreme_missing_series) > 5:
             logger.warning(f"... and {len(extreme_missing_series) - 5} more series with >90% missing data")
         
-        import warnings
         warnings.warn(
             f"Extreme missing data detected: {len(extreme_missing_series)} series have >90% missing values. "
             f"Estimation may be unreliable. Consider removing these series or increasing data coverage. "
@@ -444,55 +443,6 @@ def load_data(datafile: Union[str, Path], config: DFMConfig,
         )
     
     return X, Time, Z
-
-
-def _load_config_from_dataframe(df: pd.DataFrame) -> DFMConfig:
-    """Load configuration from DataFrame (internal helper).
-    
-    This function converts a DataFrame with series specifications into a DFMConfig.
-    It's used internally by SpecCSVSource and other config loaders.
-    
-    Parameters
-    ----------
-    df : pd.DataFrame
-        DataFrame with columns: series_id, series_name, frequency, transformation, blocks
-        
-    Returns
-    -------
-    DFMConfig
-        Model configuration object
-    """
-    series_list = []
-    block_names_set = set()
-    
-    for _, row in df.iterrows():
-        # Parse blocks (can be comma-separated string or list)
-        blocks_str = row.get('blocks', 'Block_Global')
-        if isinstance(blocks_str, str):
-            blocks = [b.strip() for b in blocks_str.split(',')]
-        else:
-            blocks = blocks_str if isinstance(blocks_str, list) else ['Block_Global']
-        
-        # Track block names
-        for block in blocks:
-            block_names_set.add(block)
-        
-        series_list.append(SeriesConfig(
-            series_id=row.get('series_id', f"series_{len(series_list)}"),
-            series_name=row.get('series_name', row.get('series_id', f"Series {len(series_list)}")),
-            frequency=row.get('frequency', 'm'),
-            transformation=row.get('transformation', 'lin'),
-            blocks=blocks
-        ))
-    
-    # Create default blocks if none specified
-    block_names = sorted(block_names_set) if block_names_set else ['Block_Global']
-    blocks = {}
-    for block_name in block_names:
-        blocks[block_name] = BlockConfig(factors=1, ar_lag=1, clock='m')
-    
-    # block_names is derived automatically in DFMConfig.__post_init__ from blocks dict
-    return DFMConfig(series=series_list, blocks=blocks)
 
 
 def rem_nans_spline(X: np.ndarray, method: int = 2, k: int = 3) -> Tuple[np.ndarray, np.ndarray]:

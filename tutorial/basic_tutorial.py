@@ -16,6 +16,10 @@ This approach is ideal when:
 - You don't need Hydra's advanced features
 - You prefer a simple, straightforward workflow
 
+Note: If you want to convert CSV to YAML format for Hydra, use:
+  dfm.from_spec('data/sample_spec.csv')
+  This creates config/series/sample_spec.yaml and config/blocks/sample_spec.yaml
+
 Run:
   python tutorial/basic_tutorial.py \\
     --spec data/sample_spec.csv \\
@@ -62,7 +66,7 @@ Examples:
         """
     )
     parser.add_argument("--spec", type=str, required=True,
-                       help="Path to spec CSV (series definitions). Required columns: series_id, series_name, frequency, transformation, category, units, plus Block_* columns.")
+                       help="Path to spec CSV (series definitions). Required columns: series_id, series_name, frequency, transformation, plus Block_* columns. Optional: release (release date).")
     parser.add_argument("--data", type=str, default="data/sample_data.csv",
                        help="Path to data CSV")
     parser.add_argument("--output", type=str, default="outputs",
@@ -143,7 +147,9 @@ def main() -> None:
     # The spec CSV defines all series and their block memberships
     # The Params object provides main settings (threshold, max_iter, etc.)
     print(f"\n--- Loading configuration from spec CSV ---")
-    dfm.from_spec(args.spec, params=params)
+    # Read CSV and load config using from_spec_df
+    spec_df = pd.read_csv(args.spec)
+    dfm.from_spec_df(spec_df, params=params)
     config = dfm.get_config()
     if config is None:
         raise ValueError("Configuration not loaded")

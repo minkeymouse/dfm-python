@@ -19,7 +19,7 @@ Block_Consumption:
   clock: m
 
 Block_Global:
-  factors: 3
+  factors: 1
   ar_lag: 1
   clock: m
 

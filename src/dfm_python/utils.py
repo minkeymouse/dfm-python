@@ -224,13 +224,10 @@ def get_aggregation_structure(
     >>> print(agg_info['tent_weights'])
     {'q': array([1, 2, 3, 2, 1]), 'sa': array([1, 2, 3, 4, 3, 2, 1])}
     """
-    # Get frequencies using new API with fallback for legacy configs
-    if hasattr(config, 'get_frequencies'):
-        frequencies = set(config.get_frequencies())
-    elif hasattr(config, 'Frequency'):
-        frequencies = set(config.Frequency)
-    else:
-        frequencies = set()
+    # Get frequencies using unified helper function (supports both new and legacy formats)
+    from .core.helpers import _get_frequencies_from_config
+    frequencies_list = _get_frequencies_from_config(config)
+    frequencies = set(frequencies_list)
     structures = {}
     tent_weights = {}
     n_periods_map = {}

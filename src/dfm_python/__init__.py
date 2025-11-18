@@ -50,22 +50,17 @@ Example (Low-level API - For advanced usage):
 For detailed documentation, see the README.md file and the tutorial notebooks/scripts.
 """
 
-__version__ = "0.2.8"
+__version__ = "0.2.9"
 
-from .config import DFMConfig, SeriesConfig, BlockConfig, Params, DEFAULT_GLOBAL_BLOCK_NAME
 from .config import (
-    ConfigSource,
-    YamlSource,
-    DictSource,
-    SpecCSVSource,
-    HydraSource,
-    MergedConfigSource,
-    make_config_source,
+    DFMConfig, SeriesConfig, BlockConfig, Params, DEFAULT_GLOBAL_BLOCK_NAME,
+    ConfigSource, YamlSource, DictSource, SpecCSVSource, HydraSource,
+    MergedConfigSource, make_config_source,
 )
 from .data import transform_data
 from .dfm import DFMResult
 from .core import calculate_rmse, diagnose_series, print_series_diagnosis
-from .dfm import DFM as _DFMCore  # Core DFM class from dfm.py
+from .dfm import DFMCore  # Core DFM class from dfm.py
 from .kalman import run_kf, skf, fis, miss_data
 from .news import update_nowcast, news_dfm, para_const
 
@@ -100,27 +95,9 @@ def get_original_data():
     """Get original (untransformed) data matrix."""
     return _dfm_instance.original_data
 
-# For direct attribute access, we'll use __getattr__ but handle config module conflict
-
-def __getattr__(name):
-    """Allow access to DFM instance properties at module level."""
-    # Handle special cases that conflict with submodules
-    if name == 'config' and _dfm_instance.config is not None:
-        return _dfm_instance.config
-    elif name == 'data':
-        return _dfm_instance.data
-    elif name == 'time':
-        return _dfm_instance.time
-    elif name == 'result':
-        return _dfm_instance.result
-    elif name == 'original_data':
-        return _dfm_instance.original_data
-    # For other attributes, try normal import
-    raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
-
 __all__ = [
     # Core classes
-    'DFMConfig', 'SeriesConfig', 'BlockConfig', 'Params', 'DFM',
+    'DFMConfig', 'SeriesConfig', 'BlockConfig', 'Params', 'DFM', 'DFMCore',
     # Constants
     'DEFAULT_GLOBAL_BLOCK_NAME',
     # Config sources

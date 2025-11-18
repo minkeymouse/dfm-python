@@ -21,6 +21,7 @@ from config_sources for backward compatibility.
 """
 
 import numpy as np
+import warnings
 from typing import List, Optional, Dict, Any, Union
 from dataclasses import dataclass, field
 
@@ -102,10 +103,14 @@ class SeriesConfig:
         Unique identifier (auto-generated if None)
     series_name : str, optional
         Human-readable name (defaults to series_id if None)
-    units : str
-        Units of measurement
-    category : str
-        Category/group name
+    units : str, optional
+        Units of measurement (optional metadata for display purposes only).
+        Used in news decomposition output for readability. Not used in model estimation.
+    release_date : int, optional
+        Release date information for pseudo real-time nowcasting.
+        - Positive value (1-31): Day of month when data is released
+        - Negative value: Days before end of previous month when data is released
+        Example: 25 = released on 25th of each month, -5 = released 5 days before end of previous month
     """
     # Required fields (no defaults)
     frequency: str
@@ -114,9 +119,8 @@ class SeriesConfig:
     # Optional fields (with defaults - must come after required fields)
     series_id: Optional[str] = None  # Auto-generated if None: "series_0", "series_1", etc.
     series_name: Optional[str] = None  # Optional metadata for display
-    units: str = ""  # Optional metadata
-    category: str = ""  # Optional metadata
-    aggregate: Optional[str] = None  # Aggregation method (deprecated: higher frequencies than clock are not supported)
+    units: Optional[str] = None  # Optional metadata for display only (used in news.py output)
+    release_date: Optional[int] = None  # Release date for pseudo real-time nowcasting
     
     def __post_init__(self):
         """Validate fields after initialization."""
@@ -716,9 +720,7 @@ class DFMConfig:
                 blocks=series_blocks,
                 series_id=get_list_value('SeriesID', i, None),
                 series_name=get_list_value('SeriesName', i, None),
-                units=str(get_list_value('Units', i, '')),
-                category=str(get_list_value('Category', i, '')),
-                aggregate=get_list_value('Aggregate', i, None)
+                units=get_list_value('Units', i, None)  # Optional, for display only
             ))
         
         # Convert block_names to blocks dict
@@ -805,9 +807,7 @@ class DFMConfig:
                     frequency=series_cfg.get('frequency', 'm'),
                     transformation=series_cfg.get('transformation', 'lin'),
                     blocks=series_blocks,
-                    units=series_cfg.get('units', ''),
-                    category=series_cfg.get('category', ''),
-                    aggregate=series_cfg.get('aggregate', None)  # Deprecated
+                    units=series_cfg.get('units', None)  # Optional, for display only
                 ))
         
         # Convert blocks_dict to BlockConfig dict
@@ -1031,7 +1031,6 @@ def validate_transformation(transformation: str) -> str:
     >>> validate_transformation('unknown')  # Issues warning but returns value
     'unknown'
     """
-    import warnings
     if transformation not in _VALID_TRANSFORMATIONS:
         warnings.warn(f"Unknown transformation code: {transformation}. Will use untransformed data.")
     return transformation

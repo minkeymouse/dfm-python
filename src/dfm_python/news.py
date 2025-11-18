@@ -18,6 +18,7 @@ import numpy as np
 from scipy.linalg import pinv, inv
 from typing import Tuple, Optional, Dict, Union, List, Any, Callable
 import pandas as pd
+import warnings
 import logging
 
 from .kalman import skf, fis, miss_data
@@ -61,7 +62,6 @@ def _check_config_consistency(saved_config: Any, current_config: DFMConfig) -> N
         else:
             current_ids = []
         if saved_ids != current_ids:
-                import warnings
                 warnings.warn(
                     "Config used in estimation differs from current config. "
                     "Results may be inconsistent. Consider re-estimating.",
@@ -552,12 +552,9 @@ def update_nowcast(X_old: np.ndarray, X_new: np.ndarray, Time: pd.DatetimeIndex,
     # Validate period format
     try:
         i_series = series_ids.index(series)
-        if hasattr(config, 'get_frequencies'):
-            frequencies = config.get_frequencies()
-        elif hasattr(config, 'Frequency'):
-            frequencies = config.Frequency
-        else:
-            frequencies = []
+        # Get frequencies using unified helper function (supports both new and legacy formats)
+        from .core.helpers import _get_frequencies_from_config
+        frequencies = _get_frequencies_from_config(config)
         freq = frequencies[i_series] if i_series < len(frequencies) else 'm'
         if freq == 'm':
             # Format: YYYYmMM (e.g., "2016m12")
@@ -650,12 +647,9 @@ def update_nowcast(X_old: np.ndarray, X_new: np.ndarray, Time: pd.DatetimeIndex,
     else:
         series_names = []
     
-    if hasattr(config, 'get_frequencies'):
-        frequencies = config.get_frequencies()
-    elif hasattr(config, 'Frequency'):
-        frequencies = config.Frequency
-    else:
-        frequencies = []
+    # Get frequencies using unified helper function (supports both new and legacy formats)
+    from .core.helpers import _get_frequencies_from_config
+    frequencies = _get_frequencies_from_config(config)
     series_name = series_names[i_series] if i_series < len(series_names) else series
     freq = frequencies[i_series] if i_series < len(frequencies) else 'm'
     
@@ -705,14 +699,13 @@ def update_nowcast(X_old: np.ndarray, X_new: np.ndarray, Time: pd.DatetimeIndex,
     else:
         period_str = pd.Timestamp(Time[t_nowcast]).strftime('%Y-%m')
     
-    # Get units
-    if hasattr(config, 'series') and i_series < len(config.series):
-        units = config.series[i_series].units
-    elif hasattr(config, 'UnitsTransformed') and i_series < len(config.UnitsTransformed):
-        units = config.UnitsTransformed[i_series]
-    else:
-        units = ""
-    print(f'Nowcast for {series_name} ({units}), {period_str}')
+    # Get units using unified helper function (supports both new and legacy formats)
+    from .core.helpers import _get_units_from_config
+    units = _get_units_from_config(config, i_series)
+    
+    # Format units for display
+    units_str = f" ({units})" if units else ""
+    print(f'Nowcast for {series_name}{units_str}, {period_str}')
     
     if len(forecast) == 0 or np.all(np.isnan(forecast)):
         print('\n  No forecast was made.\n')
@@ -774,7 +767,6 @@ def update_nowcast(X_old: np.ndarray, X_new: np.ndarray, Time: pd.DatetimeIndex,
                     Res=Res
                 )
             except Exception as e:
-                import warnings
                 warnings.warn(
                     f"save_callback failed: {e}. Continuing without saving.",
                     UserWarning

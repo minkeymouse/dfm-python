@@ -406,38 +406,13 @@ KOSIAI..E:
   - Block_Consumption
   release: 30
 
-KOIPMIMAG:
-  series_name: Production, Mining and Manufacturing, SA, Index, 2020 = 100
-  frequency: m
-  transformation: pch
-  blocks:
-  - Block_Global
-  release: 30
-
-KOMPCAPGG:
-  series_name: Production, Capital Goods, SA, Index, 2020 = 100
-  frequency: m
-  transformation: pch
-  blocks:
-  - Block_Global
-  - Block_Investment
-  release: 30
-
-KOMPCONGG:
-  series_name: Manufacturing Production - Consumer Goods, SA, Index, 2020 = 100
-  frequency: m
-  transformation: pch
-  blocks:
-  - Block_Global
-  - Block_Consumption
-  release: 30
-
 KOCYLEADR:
   series_name: Leading Index, Index, 2020 = 100
   frequency: m
   transformation: pch
   blocks:
   - Block_Global
+  - Block_Consumption
   release: 30
 
 KOROCOINF:
@@ -587,31 +562,6 @@ KOBSIBMAR:
   transformation: lin
   blocks:
   - Block_Global
-  release: -5
-
-KOBSIBNMR:
-  series_name: FKI, Business Conditions, Non-Manufacturing, Actual
-  frequency: m
-  transformation: lin
-  blocks:
-  - Block_Global
-  release: -5
-
-KOBFDSAAF:
-  series_name: FKI, Domestic Demand, All Industries, Actual
-  frequency: m
-  transformation: lin
-  blocks:
-  - Block_Global
-  release: -5
-
-KOBFXSAAF:
-  series_name: FKI, Export, All Industries, Actual
-  frequency: m
-  transformation: lin
-  blocks:
-  - Block_Global
-  - Block-Export
   release: -5
 
 KOBFINAAF:
