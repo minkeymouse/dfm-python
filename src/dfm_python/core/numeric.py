@@ -613,9 +613,9 @@ def _safe_determinant(M: np.ndarray, use_logdet: bool = True) -> float:
                         det = np.exp(log_det)
                     if np.isfinite(det):
                         return float(det)
-                except Exception:
+                except (np.linalg.LinAlgError, ValueError, OverflowError):
                     pass
-        except (np.linalg.LinAlgError, ValueError, OverflowError, RuntimeWarning):
+        except (np.linalg.LinAlgError, ValueError, OverflowError):
             pass
     
     # Fallback: direct computation with exception handling

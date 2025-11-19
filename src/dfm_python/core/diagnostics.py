@@ -4,10 +4,10 @@ from typing import Optional, Dict, Any, Tuple, TYPE_CHECKING
 import numpy as np
 import logging
 
-import pandas as pd
+import polars as pl
 from scipy.linalg import orthogonal_procrustes
 
-PANDAS_AVAILABLE = True
+POLARS_AVAILABLE = True
 
 from ..config import DFMConfig
 
@@ -309,7 +309,7 @@ def _display_dfm_tables(Res: DFMResult, config: DFMConfig, nQ: int) -> None:
     """Display DFM estimation output tables.
     
     Displays formatted tables for factor loadings, AR coefficients, and
-    idiosyncratic components. Uses pandas DataFrame formatting if available,
+    idiosyncratic components. Uses polars DataFrame formatting if available,
     otherwise falls back to shape information.
     
     Parameters
@@ -326,13 +326,14 @@ def _display_dfm_tables(Res: DFMResult, config: DFMConfig, nQ: int) -> None:
     - Only displays if logging level is INFO or higher
     - Tables include: same-frequency loadings, slower-frequency loadings,
       factor AR coefficients, and idiosyncratic AR coefficients
-    - Automatically handles missing pandas dependency
+    - Automatically handles missing polars dependency
     """
     if not _logger.isEnabledFor(logging.INFO):
         return
     
-    series_ids = config.get_series_ids()
-    series_names = config.get_series_names()
+    from .helpers import get_series_ids, get_series_names
+    series_ids = get_series_ids(config)
+    series_names = get_series_names(config)
     block_names = config.block_names
     n_same_freq = len(series_ids) - nQ
     nLags = max(Res.p, 5)
@@ -343,12 +344,14 @@ def _display_dfm_tables(Res: DFMResult, config: DFMConfig, nQ: int) -> None:
         # Factor Loadings for Same-Frequency Series
         _logger.info('Factor Loadings for Same-Frequency Series')
         C_same_freq = Res.C[:n_same_freq, ::5][:, :nFactors]
-        if PANDAS_AVAILABLE:
+        if POLARS_AVAILABLE:
             try:
-                df = pd.DataFrame(C_same_freq, 
-                                index=[name.replace(' ', '_') for name in series_names[:n_same_freq]],
-                                columns=block_names[:nFactors] if len(block_names) >= nFactors else [f'Block{i+1}' for i in range(nFactors)])
-                _logger.info(f'\n{df.to_string()}')
+                # Polars doesn't have index, so create DataFrame with series names as a column
+                df_dict = {block_names[i] if i < len(block_names) else f'Block{i+1}': C_same_freq[:, i] 
+                          for i in range(min(nFactors, C_same_freq.shape[1]))}
+                df_dict['series'] = [name.replace(' ', '_') for name in series_names[:n_same_freq]]
+                df = pl.DataFrame(df_dict)
+                _logger.info(f'\n{df}')
             except Exception as e:
                 _logger.debug(f'Failed to format same-frequency loadings table: {e}')
                 _logger.info(f'Same-frequency loadings shape: {C_same_freq.shape}')
@@ -359,14 +362,14 @@ def _display_dfm_tables(Res: DFMResult, config: DFMConfig, nQ: int) -> None:
         # Slower-Frequency Loadings Sample (First Factor)
         _logger.info('Slower-Frequency Loadings Sample (First Factor)')
         C_slower_freq = Res.C[-nQ:, :5]
-        if PANDAS_AVAILABLE:
+        if POLARS_AVAILABLE:
             try:
                 n_lags = min(5, C_slower_freq.shape[1])
                 lag_cols = [f'factor1_lag{i}' for i in range(n_lags)]
-                df = pd.DataFrame(C_slower_freq,
-                                index=[name.replace(' ', '_') for name in series_names[-nQ:]],
-                                columns=lag_cols)
-                _logger.info(f'\n{df.to_string()}')
+                df_dict = {lag_cols[i]: C_slower_freq[:, i] for i in range(n_lags)}
+                df_dict['series'] = [name.replace(' ', '_') for name in series_names[-nQ:]]
+                df = pl.DataFrame(df_dict)
+                _logger.info(f'\n{df}')
             except Exception as e:
                 _logger.debug(f'Failed to format slower-frequency loadings table: {e}')
                 _logger.info(f'Slower-frequency loadings shape: {C_slower_freq.shape}')
@@ -380,13 +383,15 @@ def _display_dfm_tables(Res: DFMResult, config: DFMConfig, nQ: int) -> None:
         Q_terms = np.diag(Res.Q)
         A_terms_factors = A_terms[::5][:nFactors]
         Q_terms_factors = Q_terms[::5][:nFactors]
-        if PANDAS_AVAILABLE:
+        if POLARS_AVAILABLE:
             try:
-                df = pd.DataFrame({
-                    'AR_Coefficient': A_terms_factors,
-                    'Variance_Residual': Q_terms_factors
-                }, index=[name.replace(' ', '_') for name in block_names[:nFactors]])
-                _logger.info(f'\n{df.to_string()}')
+                df_dict = {
+                    'block': [name.replace(' ', '_') for name in block_names[:nFactors]],
+                    'AR_Coefficient': A_terms_factors.tolist(),
+                    'Variance_Residual': Q_terms_factors.tolist()
+                }
+                df = pl.DataFrame(df_dict)
+                _logger.info(f'\n{df}')
             except Exception as e:
                 _logger.debug(f'Failed to format AR coefficients table: {e}')
                 _logger.info(f'Factor AR coefficients: {A_terms_factors}')
@@ -403,7 +408,7 @@ def _display_dfm_tables(Res: DFMResult, config: DFMConfig, nQ: int) -> None:
         combined_idx = combined_idx[combined_idx < len(A_terms)]
         A_idio = A_terms[combined_idx]
         Q_idio = Q_terms[combined_idx]
-        if PANDAS_AVAILABLE:
+        if POLARS_AVAILABLE:
             try:
                 series_names_list = []
                 for idx in combined_idx:
@@ -415,11 +420,13 @@ def _display_dfm_tables(Res: DFMResult, config: DFMConfig, nQ: int) -> None:
                         slower_idx = (idx - (rp1 + n_same_freq)) // 5
                         if slower_idx < nQ:
                             series_names_list.append(series_names[n_same_freq + slower_idx].replace(' ', '_'))
-                df = pd.DataFrame({
-                    'AR_Coefficient': A_idio[:len(series_names_list)],
-                    'Variance_Residual': Q_idio[:len(series_names_list)]
-                }, index=series_names_list)
-                _logger.info(f'\n{df.to_string()}')
+                df_dict = {
+                    'series': series_names_list[:len(A_idio)],
+                    'AR_Coefficient': A_idio[:len(series_names_list)].tolist(),
+                    'Variance_Residual': Q_idio[:len(series_names_list)].tolist()
+                }
+                df = pl.DataFrame(df_dict)
+                _logger.info(f'\n{df}')
             except Exception as e:
                 _logger.debug(f'Failed to format idiosyncratic AR coefficients table: {e}')
                 _logger.info(f'Idiosyncratic AR coefficients (first 10): {A_idio[:min(10, len(A_idio))]}')
@@ -536,7 +543,8 @@ def diagnose_series(Res: DFMResult, config: DFMConfig, series_name: Optional[str
     """
     if series_name is not None:
         try:
-            series_names = config.get_series_names() if config.series else []
+            from .helpers import get_series_names
+            series_names = get_series_names(config) if config.series else []
             if series_name in series_names:
                 series_idx = series_names.index(series_name)
             else:
@@ -551,7 +559,8 @@ def diagnose_series(Res: DFMResult, config: DFMConfig, series_name: Optional[str
     if series_idx < 0 or series_idx >= Res.C.shape[0]:
         raise ValueError(f"Series index {series_idx} out of range [0, {Res.C.shape[0]})")
     try:
-        series_names = config.get_series_names() if config.series else []
+        from .helpers import get_series_names
+        series_names = get_series_names(config) if config.series else []
         name = series_names[series_idx] if series_idx < len(series_names) else f"Series_{series_idx}"
     except (AttributeError, IndexError, KeyError):
         name = f"Series_{series_idx}"

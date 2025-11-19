@@ -129,19 +129,25 @@ class SQLiteAdapter:
             
         Notes
         -----
-        This is a placeholder implementation. Actual implementation
-        should query the database based on config and view_date.
+        This is an experimental feature. Database integration requires:
+        1. Database schema with time series data tables
+        2. View date tracking for pseudo real-time nowcasting
+        3. Proper indexing for efficient queries
+        
+        For production use, implement:
+        - Query data based on config.series (series_ids)
+        - Apply view_date filtering based on release_date
+        - Return (X, Time, Z) tuple compatible with DFM estimation
+        
+        Currently, use file-based data loading or BasicDataViewManager
+        for in-memory data views.
         """
         conn = self.connect()
         
-        # TODO: Implement actual data loading logic
-        # - Query data based on config.series (series_ids)
-        # - Apply view_date filtering if provided
-        # - Return (X, Time, Z) tuple
-        
         raise NotImplementedError(
-            "SQLiteAdapter.load_data() is not yet implemented. "
-            "This is a placeholder for future development."
+            "SQLiteAdapter.load_data() is experimental and not yet implemented. "
+            "Use file-based data loading (load_data() from dfm_python.data) "
+            "or BasicDataViewManager for in-memory data views."
         )
     
     def __enter__(self):

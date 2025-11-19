@@ -213,3 +213,5 @@ __marimo__/
 
 Nowcasting/
 agent/
+
+*.db

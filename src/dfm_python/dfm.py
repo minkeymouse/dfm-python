@@ -17,12 +17,12 @@ from dataclasses import dataclass
 from typing import Tuple, Optional, Any, Dict, Union, List
 import warnings
 import logging
-import pandas as pd
+import polars as pl
 
 from .kalman import run_kf
 from .config import DFMConfig
 from .core import calculate_rmse
-from .utils import group_series_by_frequency
+from .core.utils import group_series_by_frequency
 from .core.numeric import (
     _ensure_symmetric,
     _compute_principal_components,
@@ -49,7 +49,7 @@ from .core.em import (
 from .core.helpers import safe_get_method, safe_get_attr, resolve_param, safe_mean_std, standardize_data
 
 from .data import rem_nans_spline
-from .utils import (
+from .core.utils import (
     get_aggregation_structure,
     FREQUENCY_HIERARCHY,
 )
@@ -150,7 +150,7 @@ class DFMResult:
     # Optional metadata for object-oriented access
     series_ids: Optional[List[str]] = None
     block_names: Optional[List[str]] = None
-    time_index: Optional[object] = None  # Typically a pandas.DatetimeIndex
+    time_index: Optional[object] = None  # Typically a TimeIndex
 
     # ----------------------------
     # Convenience methods (OOP)
@@ -170,33 +170,72 @@ class DFMResult:
         except Exception:
             return self.num_state()
 
-    def to_pandas_factors(self, time_index: Optional[object] = None, factor_names: Optional[List[str]] = None):
-        """Return factors as pandas DataFrame.
+    def to_polars_factors(self, time_index: Optional[object] = None, factor_names: Optional[List[str]] = None):
+        """Return factors as polars DataFrame.
         
         Parameters
         ----------
-        time_index : pandas.DatetimeIndex or compatible, optional
-            Index to use for rows. If None, uses stored time_index if available.
+        time_index : TimeIndex, list, or compatible, optional
+            Time index to use for rows. If None, uses stored time_index if available.
         factor_names : List[str], optional
             Column names. Defaults to F1..Fm.
         """
         try:
-            import pandas as pd
-            idx = time_index if time_index is not None else self.time_index
+            import polars as pl
             cols = factor_names if factor_names is not None else [f"F{i+1}" for i in range(self.num_state())]
-            return pd.DataFrame(self.Z, index=idx, columns=cols)
+            
+            # Create DataFrame with factors as columns
+            df_dict = {col: self.Z[:, i] for i, col in enumerate(cols)}
+            
+            # Add time column if time_index provided
+            if time_index is not None:
+                from .core.time import TimeIndex
+                if isinstance(time_index, TimeIndex):
+                    time_list = time_index.to_list()
+                else:
+                    time_list = list(time_index) if hasattr(time_index, '__iter__') else [time_index[i] for i in range(len(time_index))]
+                df_dict['time'] = time_list
+            elif self.time_index is not None:
+                from .core.time import TimeIndex
+                if isinstance(self.time_index, TimeIndex):
+                    time_list = self.time_index.to_list()
+                else:
+                    time_list = list(self.time_index) if hasattr(self.time_index, '__iter__') else [self.time_index[i] for i in range(len(self.time_index))]
+                df_dict['time'] = time_list
+            
+            return pl.DataFrame(df_dict)
         except (ImportError, ValueError, TypeError):
             return self.Z
 
-    def to_pandas_smoothed(self, time_index: Optional[object] = None, series_ids: Optional[List[str]] = None):
-        """Return smoothed data (original scale) as pandas DataFrame."""
+    def to_polars_smoothed(self, time_index: Optional[object] = None, series_ids: Optional[List[str]] = None):
+        """Return smoothed data (original scale) as polars DataFrame."""
         try:
-            import pandas as pd
-            idx = time_index if time_index is not None else self.time_index
+            import polars as pl
             cols = series_ids if series_ids is not None else (self.series_ids if self.series_ids is not None else [f"S{i+1}" for i in range(self.num_series())])
-            return pd.DataFrame(self.X_sm, index=idx, columns=cols)
+            
+            # Create DataFrame with series as columns
+            df_dict = {col: self.X_sm[:, i] for i, col in enumerate(cols)}
+            
+            # Add time column if time_index provided
+            if time_index is not None:
+                from .core.time import TimeIndex
+                if isinstance(time_index, TimeIndex):
+                    time_list = time_index.to_list()
+                else:
+                    time_list = list(time_index) if hasattr(time_index, '__iter__') else [time_index[i] for i in range(len(time_index))]
+                df_dict['time'] = time_list
+            elif self.time_index is not None:
+                from .core.time import TimeIndex
+                if isinstance(self.time_index, TimeIndex):
+                    time_list = self.time_index.to_list()
+                else:
+                    time_list = list(self.time_index) if hasattr(self.time_index, '__iter__') else [self.time_index[i] for i in range(len(self.time_index))]
+                df_dict['time'] = time_list
+            
+            return pl.DataFrame(df_dict)
         except (ImportError, ValueError, TypeError):
             return self.X_sm
+    
 
     def save(self, path: str) -> None:
         """Save result to a pickle file."""
@@ -486,14 +525,16 @@ def _prepare_data_and_params(
     # Display blocks structure if debug logging enabled
     if _logger.isEnabledFor(logging.DEBUG):
         try:
-            series_names = config.get_series_names()
+            from .core.helpers import get_series_names
+            series_names = get_series_names(config)
             block_names = (config.block_names if len(config.block_names) == blocks.shape[1] 
                           else [f'Block_{i+1}' for i in range(blocks.shape[1])])
-            df = pd.DataFrame(blocks,
-                             index=[name.replace(' ', '_') for name in series_names],
-                             columns=block_names)
+            # Create polars DataFrame (no index concept, use row names as column)
+            df_dict = {block_names[i]: blocks[:, i].tolist() for i in range(blocks.shape[1])}
+            df_dict['series'] = [name.replace(' ', '_') for name in series_names]
+            df = pl.DataFrame(df_dict)
             _logger.debug('Block Loading Structure')
-            _logger.debug(f'\n{df.to_string()}')
+            _logger.debug(f'\n{df}')
             _logger.debug(f'Blocks shape: {blocks.shape}')
         except Exception as e:
             _logger.debug(f'Error displaying block structure: {e}')
@@ -524,11 +565,12 @@ def _prepare_aggregation_structure(
     idio_chain_lengths : np.ndarray
         Array of idiosyncratic chain lengths per series (0, 1, or tent length)
     """
-    from .utils import compute_idio_chain_lengths
+    from .core.utils import compute_idio_chain_lengths
     
     agg_info = get_aggregation_structure(config, clock=clock)
     tent_weights_dict = agg_info.get('tent_weights', {})
-    frequencies = np.array(config.get_frequencies()) if config.series else None
+    from .core.helpers import get_frequencies_from_config
+    frequencies = np.array(get_frequencies_from_config(config)) if config.series else None
     
     # Find R_mat and q for tent kernel constraints
     R_mat = None
@@ -767,11 +809,11 @@ def _dfm_core(
     --------
     >>> from dfm_python import DFM
     >>> from dfm_python.data import load_config, load_data  # Preferred import
-    >>> import pandas as pd
+    >>> from datetime import datetime
     >>> # Load configuration from YAML or create DFMConfig directly
     >>> config = load_config('config.yaml')
     >>> # Load data from file
-    >>> X, Time, Z = load_data('data.csv', config, sample_start=pd.Timestamp('2000-01-01'))
+    >>> X, Time, Z = load_data('data.csv', config, sample_start=datetime(2000, 1, 1))
     >>> # Estimate DFM
     >>> model = DFM()
     >>> Res = model.fit(X, config, threshold=1e-4)

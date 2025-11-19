@@ -24,43 +24,57 @@ MAX_LOADING_REPLACE = 0.99  # Replacement for Inf in loadings
 MIN_LOG_LIKELIHOOD_DELTA = -1e-3  # Threshold for detecting likelihood decrease
 
 # Lazy import to avoid circular dependency
+# Module-level cache for lazy imports (avoid repeated imports)
+_numeric_utils_cache = None
+_helpers_cache = None
+_data_utils_cache = None
+
 def _get_numeric_utils():
-    """Lazy import of numeric utilities."""
-    from .numeric import (
-        _ensure_innovation_variance_minimum, _ensure_covariance_stable,
-        _compute_principal_components, _compute_covariance_safe, _check_finite,
-        _clip_ar_coefficients, _clean_matrix, _ensure_positive_definite,
-        _apply_ar_clipping, _estimate_ar_coefficient
-    )
-    return (_ensure_innovation_variance_minimum, _ensure_covariance_stable, 
-            _compute_principal_components, _compute_covariance_safe, _check_finite, 
+    """Lazy import of numeric utilities (cached)."""
+    global _numeric_utils_cache
+    if _numeric_utils_cache is None:
+        from .numeric import (
+            _ensure_innovation_variance_minimum, _ensure_covariance_stable,
+            _compute_principal_components, _compute_covariance_safe, _check_finite,
             _clip_ar_coefficients, _clean_matrix, _ensure_positive_definite,
-            _apply_ar_clipping, _estimate_ar_coefficient)
+            _apply_ar_clipping, _estimate_ar_coefficient
+        )
+        _numeric_utils_cache = (_ensure_innovation_variance_minimum, _ensure_covariance_stable, 
+                _compute_principal_components, _compute_covariance_safe, _check_finite, 
+                _clip_ar_coefficients, _clean_matrix, _ensure_positive_definite,
+                _apply_ar_clipping, _estimate_ar_coefficient)
+    return _numeric_utils_cache
 
 def _get_helpers():
-    """Lazy import of helper functions."""
-    from .helpers import (
-        get_block_indices, append_or_initialize,
-        has_valid_data, get_matrix_shape, estimate_ar_coefficients_ols,
-        compute_innovation_covariance, update_block_diag, clean_variance_array,
-        infer_nQ, get_tent_weights, compute_sufficient_stats, safe_time_index,
-        extract_3d_matrix_slice, reg_inv, update_loadings, compute_obs_cov,
-        compute_block_slice_indices, extract_block_matrix, update_block_in_matrix,
-        stabilize_cov, validate_params, safe_get_attr
-    )
-    from ..utils import group_series_by_frequency, generate_R_mat
-    return (get_block_indices, group_series_by_frequency, append_or_initialize,
+    """Lazy import of helper functions (cached)."""
+    global _helpers_cache
+    if _helpers_cache is None:
+        from .helpers import (
+            get_block_indices, append_or_initialize,
             has_valid_data, get_matrix_shape, estimate_ar_coefficients_ols,
             compute_innovation_covariance, update_block_diag, clean_variance_array,
             infer_nQ, get_tent_weights, compute_sufficient_stats, safe_time_index,
             extract_3d_matrix_slice, reg_inv, update_loadings, compute_obs_cov,
             compute_block_slice_indices, extract_block_matrix, update_block_in_matrix,
-            stabilize_cov, validate_params, safe_get_attr, generate_R_mat)
+            stabilize_cov, validate_params, safe_get_attr
+        )
+        from .utils import group_series_by_frequency, generate_R_mat
+        _helpers_cache = (get_block_indices, group_series_by_frequency, append_or_initialize,
+                has_valid_data, get_matrix_shape, estimate_ar_coefficients_ols,
+                compute_innovation_covariance, update_block_diag, clean_variance_array,
+                infer_nQ, get_tent_weights, compute_sufficient_stats, safe_time_index,
+                extract_3d_matrix_slice, reg_inv, update_loadings, compute_obs_cov,
+                compute_block_slice_indices, extract_block_matrix, update_block_in_matrix,
+                stabilize_cov, validate_params, safe_get_attr, generate_R_mat)
+    return _helpers_cache
 
 def _get_data_utils():
-    """Lazy import of data utilities."""
-    from ..data import rem_nans_spline
-    return rem_nans_spline
+    """Lazy import of data utilities (cached)."""
+    global _data_utils_cache
+    if _data_utils_cache is None:
+        from ..data import rem_nans_spline
+        _data_utils_cache = rem_nans_spline
+    return _data_utils_cache
 
 class NaNHandlingOptions(TypedDict):
     method: int
@@ -100,21 +114,19 @@ def init_conditions(x, r, p, blocks, opt_nan, Rcon, q, nQ, i_idio, clock='m', te
     - Z_0: Initial state (via unconditional mean)
     - V_0: Initial covariance (via stationary covariance)
     """
-    # Get utilities
+    # Lazy import helper functions
+    (get_block_indices, group_series_by_frequency, append_or_initialize,
+     has_valid_data, get_matrix_shape, estimate_ar_coefficients_ols,
+     compute_innovation_covariance, update_block_diag, clean_variance_array,
+     infer_nQ, get_tent_weights, compute_sufficient_stats, safe_time_index,
+     extract_3d_matrix_slice, reg_inv, update_loadings, compute_obs_cov,
+     compute_block_slice_indices, extract_block_matrix, update_block_in_matrix,
+     stabilize_cov, validate_params, safe_get_attr, generate_R_mat) = _get_helpers()
+    
+    # Get numeric utilities
     (_ensure_innovation_variance_minimum, _ensure_covariance_stable,
      _compute_principal_components, _compute_covariance_safe, _check_finite,
      _clip_ar_coefficients, _, _, _, _) = _get_numeric_utils()
-    helpers_result = _get_helpers()
-    get_block_indices = helpers_result[0]
-    group_series_by_frequency = helpers_result[1]
-    append_or_initialize = helpers_result[2]
-    has_valid_data = helpers_result[3]
-    get_matrix_shape = helpers_result[4]
-    estimate_ar_coefficients_ols = helpers_result[5]
-    compute_innovation_covariance = helpers_result[6]
-    update_block_diag = helpers_result[7]
-    clean_variance_array = helpers_result[8]
-    infer_nQ = helpers_result[9]
     rem_nans_spline = _get_data_utils()
     
     # Determine pC (tent length)
@@ -298,7 +310,8 @@ def init_conditions(x, r, p, blocks, opt_nan, Rcon, q, nQ, i_idio, clock='m', te
                     init_cov_block = np.reshape(inv(identity_kron) @ innovation_cov_flat, (state_dim_block, state_dim_block))
                     if np.any(~np.isfinite(init_cov_block)):
                         raise ValueError("invalid init_cov_block")
-                except Exception:
+                except (np.linalg.LinAlgError, ValueError, OverflowError):
+                    # Fallback to default if matrix inversion fails
                     init_cov_block = np.eye(state_dim_block) * DEFAULT_IDIO_COV
                 
                 # Clip AR coefficients to ensure stability (max eigenvalue < 1.0)
@@ -317,7 +330,7 @@ def init_conditions(x, r, p, blocks, opt_nan, Rcon, q, nQ, i_idio, clock='m', te
                             tent_weights = get_tent_weights(freq, clock, tent_weights_dict, _logger)
                             if tent_weights is None:
                                 continue
-                            from ..utils import generate_R_mat
+                            from .utils import generate_R_mat
                             R_mat_freq, q_freq = generate_R_mat(tent_weights)
                             pC_freq = len(tent_weights)
                             
@@ -382,7 +395,7 @@ def init_conditions(x, r, p, blocks, opt_nan, Rcon, q, nQ, i_idio, clock='m', te
                                                 # Multi-dimensional: clip each element
                                                 loadings_to_store = np.clip(loadings_to_store, -max_loading_norm, max_loading_norm)
                                             C_block[j, :n_loadings] = loadings_to_store
-                                    except Exception:
+                                    except (np.linalg.LinAlgError, ValueError, OverflowError):
                                         # If constrained LS fails, use unconstrained (fallback)
                                         try:
                                             gram = factor_projection_clean.T @ factor_projection_clean
@@ -403,9 +416,9 @@ def init_conditions(x, r, p, blocks, opt_nan, Rcon, q, nQ, i_idio, clock='m', te
                                                     # Multi-dimensional: clip each element
                                                     loadings_to_store = np.clip(loadings_to_store, -max_loading_norm, max_loading_norm)
                                                 C_block[j, :n_loadings] = loadings_to_store
-                                        except Exception:
+                                        except (np.linalg.LinAlgError, ValueError, OverflowError):
                                             pass  # Leave as zeros
-                        except Exception:
+                        except (ValueError, TypeError, KeyError):
                             # If tent weight handling fails, skip this frequency
                             pass
                 
@@ -476,15 +489,17 @@ def init_conditions(x, r, p, blocks, opt_nan, Rcon, q, nQ, i_idio, clock='m', te
     # Augment state with idiosyncratic components if enabled
     if idio_chain_lengths is not None and config is not None and config.augment_idio:
         from scipy.linalg import solve_discrete_lyapunov
-        from ..utils import FREQUENCY_HIERARCHY
+        from .utils import FREQUENCY_HIERARCHY
         
         m_factor = A.shape[0] if A is not None else 0
         total_idio_dim = int(np.sum(idio_chain_lengths))
         
         if total_idio_dim > 0:
-            # Get config parameters
-            idio_rho0 = getattr(config, 'idio_rho0', 0.1)
-            idio_min_var = getattr(config, 'idio_min_var', 1e-8)
+            # Get config parameters using safe_get_attr for consistent access
+            helpers = _get_helpers()
+            safe_get_attr = helpers[-2]  # Second to last item (before generate_R_mat)
+            idio_rho0 = safe_get_attr(config, 'idio_rho0', 0.1)
+            idio_min_var = safe_get_attr(config, 'idio_min_var', 1e-8)
             clock_hierarchy = FREQUENCY_HIERARCHY.get(clock, 3)
             
             # Build idio A, Q, V0 blocks
@@ -541,8 +556,8 @@ def init_conditions(x, r, p, blocks, opt_nan, Rcon, q, nQ, i_idio, clock='m', te
                     # V0: via discrete Lyapunov equation
                     try:
                         V0_idio_block = solve_discrete_lyapunov(A_idio_block, Q_idio_block)
-                    except:
-                        # Fallback: diagonal with scaled variance
+                    except (np.linalg.LinAlgError, ValueError, OverflowError):
+                        # Fallback: diagonal with scaled variance if Lyapunov solver fails
                         V0_idio_block = np.eye(chain_len) * idio_var
                     
                     # C: maps chain to observation with tent weights
@@ -849,7 +864,10 @@ def em_step(params: EMStepParams) -> Tuple[np.ndarray, np.ndarray, np.ndarray, n
     # Use idio_chain_lengths if available, otherwise fall back to old i_idio approach
     if idio_chain_lengths is not None and config is not None and config.augment_idio:
         # New approach: per-series idio chains
-        idio_min_var = getattr(config, 'idio_min_var', 1e-8)
+        # Use safe_get_attr for consistent config access
+        helpers = _get_helpers()
+        safe_get_attr = helpers[-2]  # Second to last item (before generate_R_mat)
+        idio_min_var = safe_get_attr(config, 'idio_min_var', 1e-8)
         idio_state_idx = idio_start_idx
         
         for i in range(n):
@@ -1203,12 +1221,14 @@ def em_step(params: EMStepParams) -> Tuple[np.ndarray, np.ndarray, np.ndarray, n
         min_diagonal_variance_ratio=MIN_DIAGONAL_VARIANCE
     )
     # Hard floor: enforce min diagonal on R (≥ 1e-8)
-    idio_min_var = getattr(config, 'idio_min_var', 1e-8) if config is not None else 1e-8
+    helpers = _get_helpers()
+    safe_get_attr = helpers[-2]  # Second to last item (before generate_R_mat)
+    idio_min_var = safe_get_attr(config, 'idio_min_var', 1e-8)
     R_diag = np.maximum(R_diag, idio_min_var)
     
     # R cap to prevent explosion: maximum allowed observation error variance
     # For standardized data, R should typically be < 10
-    R_cap = safe_get_attr(config, "max_observation_variance", 10.0) if config is not None else 10.0
+    R_cap = safe_get_attr(config, "max_observation_variance", 10.0)
     R_diag = np.minimum(R_diag, R_cap)
     
     R_new = np.diag(R_diag)

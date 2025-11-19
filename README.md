@@ -15,13 +15,13 @@ A Dynamic Factor Model is a powerful statistical framework that:
 - **Provides nowcasts** (current-quarter GDP estimates before official release)
 - **Forecasts** future values of both factors and observed series
 
-**Key Innovation**: All latent factors evolve at a common "clock" frequency (e.g., monthly), while observed series can be at different frequencies. This is achieved through deterministic tent kernel aggregation, allowing quarterly GDP to be modeled using monthly latent factors.
+**Key Innovation**: All latent factors evolve at a common "clock" frequency (configurable: `'d'`, `'w'`, `'m'`, `'q'`, `'sa'`, `'a'`), while observed series can be at different frequencies. This is achieved through deterministic tent kernel aggregation, allowing quarterly GDP to be modeled using monthly latent factors, or any slower-frequency series to be modeled using higher-frequency latent factors.
 
 ## Features
 
 ### Core Capabilities
 - ✅ **Mixed-frequency data**: Monthly, quarterly, semi-annual, annual series in one model
-- ✅ **Clock-based framework**: All factors evolve at a common clock frequency (typically monthly)
+- ✅ **Clock-based framework**: All factors evolve at a common clock frequency (configurable: daily, weekly, monthly, quarterly, semi-annual, annual)
 - ✅ **Block structure**: Flexible factor organization (global common factor + sector-specific factors)
 - ✅ **Idiosyncratic components**: Per-series state augmentation for better fit (AR(1) for clock-frequency, tent-length chains for slower frequencies)
 - ✅ **Robust missing data**: Spline interpolation preprocessing + Kalman filter handling during estimation
@@ -48,7 +48,7 @@ pip install dfm-python
 **Requirements**: 
 - Python >= 3.10
 - numpy >= 1.24.0
-- pandas >= 2.0.0
+- polars >= 0.20.0
 - scipy >= 1.10.0
 
 Optional dependencies:
@@ -62,7 +62,8 @@ Optional dependencies:
 ```python
 import dfm_python as dfm
 import numpy as np
-import pandas as pd
+from datetime import datetime
+import polars as pl
 
 # Generate or load your data (T × N: time periods × series)
 # Data should be standardized or will be standardized automatically
@@ -86,7 +87,7 @@ result = model.fit(X, config, max_iter=100, threshold=1e-4)
 factors = result.Z          # (101 × 1) Smoothed common factor
 loadings = result.C         # (10 × 1) Factor loadings
 smoothed_data = result.X_sm # (100 × 10) Smoothed series
-forecasts = result.forecast(horizon=12)  # 12-step ahead forecasts
+forecasts = result.forecast(horizon=None)  # Default: 1 year of periods based on clock frequency
 ```
 
 ### Example 2: Mixed-Frequency Data (Monthly + Quarterly)
@@ -120,8 +121,8 @@ dfm.load_data('data/mixed_frequency_data.csv', sample_start='2000-01-01')
 # Train
 dfm.train(max_iter=5000, threshold=1e-5)
 
-# Forecast
-X_forecast, Z_forecast = dfm.predict(horizon=12)
+# Forecast (horizon=None defaults to 1 year of periods based on clock frequency)
+X_forecast, Z_forecast = dfm.predict(horizon=None)  # Or specify: horizon=12
 ```
 
 ### Example 3: Using Spec CSV (Recommended for CSV Workflows)
@@ -129,6 +130,7 @@ X_forecast, Z_forecast = dfm.predict(horizon=12)
 ```python
 import dfm_python as dfm
 from dfm_python.config import Params
+import polars as pl
 
 # 1. Create spec CSV (see Data Format section)
 # 2. Load configuration
@@ -139,7 +141,8 @@ params = Params(
     augment_idio=True,  # Enable idio components
     idio_rho0=0.1       # Initial AR coefficient for idio
 )
-dfm.from_spec('data/spec.csv', params=params)
+spec_df = pl.read_csv('data/spec.csv')
+dfm.from_spec_df(spec_df, params=params)
 
 # 3. Load data
 dfm.load_data('data/data.csv', sample_start='2020-01-01', sample_end='2023-12-31')
@@ -147,15 +150,56 @@ dfm.load_data('data/data.csv', sample_start='2020-01-01', sample_end='2023-12-31
 # 4. Train
 dfm.train()
 
-# 5. Forecast and visualize
-X_forecast, Z_forecast = dfm.predict(horizon=12)
-dfm.plot(kind='factor', factor_index=0, forecast_horizon=12, save_path='factor_forecast.png')
+# 5. Forecast and visualize (horizon=None defaults to 1 year of periods)
+X_forecast, Z_forecast = dfm.predict(horizon=None)  # Or specify: horizon=12
+dfm.plot(kind='factor', factor_index=0, forecast_horizon=None, save_path='factor_forecast.png')
 
 # 6. Access results
 result = dfm.get_result()
 print(f"Converged: {result.converged}, Iterations: {result.num_iter}")
 print(f"Log-likelihood: {result.loglik:.2f}")
 ```
+
+### Example 4: Fast Reuse with `load_pickle`
+
+Once a model has been trained you can reload it instantly for forecasting/nowcasting without
+re-running EM:
+
+```python
+import dfm_python as dfm
+import pickle
+from pathlib import Path
+
+# After training
+outputs_dir = Path("outputs")
+outputs_dir.mkdir(parents=True, exist_ok=True)
+save_path = outputs_dir / "model_result.pkl"
+payload = {
+    'result': dfm.get_result(),
+    'config': dfm.get_config(),
+}
+with open(save_path, 'wb') as f:
+    pickle.dump(payload, f)  # Or rely on the auto-save printed after train()
+
+# Later (e.g., in production job)
+model = dfm.DFM()
+model.load_pickle(
+    save_path,
+    data=dfm.get_data(),        # Or model.load_data(...)
+    time_index=dfm.get_time(),  # Optional if stored in pickle
+)
+
+# Fast inference (milliseconds instead of minutes)
+X_forecast, Z_forecast = model.predict(horizon=12)
+gdp_nowcast = model.nowcast(
+    target_series='gdp',
+    view_date='2024-03-15'
+)
+```
+
+`DFM.load_pickle()` accepts either the auto-save payload (`{'result': ..., 'config': ...}`) or a
+raw `DFMResult`. Provide `load_data_path` or `data`/`time_index` when you need nowcasting/news
+decomposition abilities (which require the data view).
 
 ## Configuration Guide
 
@@ -169,6 +213,7 @@ The package supports multiple ways to configure your model:
 
 ```python
 from dfm_python.config import Params
+import polars as pl
 
 params = Params(
     max_iter=5000,
@@ -179,7 +224,8 @@ params = Params(
     idio_rho0=0.1,
     idio_min_var=1e-8
 )
-dfm.from_spec('data/spec.csv', params=params)
+spec_df = pl.read_csv('data/spec.csv')
+dfm.from_spec_df(spec_df, params=params)
 ```
 
 #### 2. YAML Configuration
@@ -210,7 +256,9 @@ def main(cfg: DictConfig) -> None:
     dfm.load_config(hydra=cfg)
     dfm.load_data(str(get_original_cwd() / "data" / "sample_data.csv"))
     dfm.train(max_iter=cfg.max_iter)
-    X_forecast, Z_forecast = dfm.predict(horizon=cfg.get('forecast_horizon', 12))
+    # horizon=None defaults to 1 year of periods based on clock frequency
+    forecast_horizon = cfg.get('forecast_horizon', None)
+    X_forecast, Z_forecast = dfm.predict(horizon=forecast_horizon)
 
 if __name__ == "__main__":
     main()
@@ -242,6 +290,14 @@ config = DFMConfig(
 - **`clock`**: Base frequency for all latent factors (default: `'m'` for monthly)
   - Options: `'d'` (daily), `'w'` (weekly), `'m'` (monthly), `'q'` (quarterly), `'sa'` (semi-annual), `'a'` (annual)
   - All factors evolve at this frequency, regardless of observation frequencies
+  - **Generic support**: The package automatically adapts forecast horizons, period calculations, and date handling based on the clock frequency
+  - **Default behavior**: When `horizon=None` in `predict()`, defaults to 1 year of periods based on clock frequency:
+    - Monthly (`'m'`): 12 periods
+    - Quarterly (`'q'`): 4 periods
+    - Semi-annual (`'sa'`): 2 periods
+    - Annual (`'a'`): 1 period
+    - Daily (`'d'`): 365 periods (approximate)
+    - Weekly (`'w'`): 52 periods (approximate)
 
 - **`blocks`**: Factor block structure
   - `Block_Global`: Common factor affecting all series
@@ -394,28 +450,227 @@ idio_component = result.X_sm[:, series_idx] - series_factor_component
 
 ## Advanced Features
 
-### News Decomposition
+### Nowcasting API
+
+The package provides a comprehensive nowcasting API for pseudo real-time evaluation and downstream model integration:
+
+#### Basic Nowcasting
+
+```python
+import dfm_python as dfm
+from dfm_python import Nowcast
+
+# Load config and data, train model
+dfm.from_yaml('config/default.yaml')
+dfm.load_data('data/data.csv')
+dfm.train()
+
+# Get Nowcast instance
+model = dfm.DFM()
+nowcast = model.nowcast  # or: nowcast = Nowcast(model)
+
+# Calculate nowcast (simple callable interface)
+value = nowcast('gdp', view_date='2024-01-15', target_period='2024Q1')
+print(f"Nowcast value: {value:.4f}")
+
+# Or get full result with metadata
+result = nowcast('gdp', view_date='2024-01-15', target_period='2024Q1', return_result=True)
+print(f"Nowcast: {result.nowcast_value:.4f}")
+print(f"Data availability: {result.data_availability}")
+print(f"Factors at view: {result.factors_at_view}")
+```
+
+#### News Decomposition
 
 Decompose forecast updates into contributions from individual data releases:
 
 ```python
-from dfm_python import news_dfm
+# News decomposition between two data views
+news = nowcast.decompose(
+    target_series='gdp',
+    target_period='2024Q1',
+    view_date_old='2024-01-15',
+    view_date_new='2024-02-15'
+)
+
+# Access results (NewsDecompResult)
+print(f"Old forecast: {news.y_old:.4f}")
+print(f"New forecast: {news.y_new:.4f}")
+print(f"Change: {news.change:.4f}")
+print(f"Top contributors: {news.top_contributors}")
+
+# Or get dictionary format (backward compatibility)
+news_dict = nowcast.decompose(
+    target_series='gdp',
+    target_period='2024Q1',
+    view_date_old='2024-01-15',
+    view_date_new='2024-02-15',
+    return_dict=True
+)
+```
+
+#### Pseudo Real-Time Backtesting
+
+Perform backtesting to evaluate model performance in pseudo real-time:
+
+```python
+from datetime import datetime
+
+# Perform backtest
+backtest_result = nowcast.backtest(
+    target_series='gdp',
+    target_date='2024Q4',
+    backward_steps=20,  # 20 backward steps
+    higher_freq=True,   # Use frequency one step faster than clock
+    include_actual=True # Compare with actual values
+)
+
+# Access metrics
+print(f"Overall RMSE: {backtest_result.overall_rmse:.4f}")
+print(f"Overall MAE: {backtest_result.overall_mae:.4f}")
+print(f"Failed steps: {backtest_result.failed_steps}")
+
+# Access point-wise metrics
+print(f"RMSE per step: {backtest_result.rmse_per_step}")
+print(f"MAE per step: {backtest_result.mae_per_step}")
+
+# Access individual nowcast results
+for i, nowcast_result in enumerate(backtest_result.nowcast_results):
+    print(f"Step {i}: nowcast={nowcast_result.nowcast_value:.4f}, "
+          f"view_date={nowcast_result.view_date}")
+
+# Access news decomposition between steps
+for i, news_result in enumerate(backtest_result.news_results):
+    if news_result is not None:
+        print(f"Step {i}: forecast change={news_result.change:.4f}")
+
+# Visualize results
+backtest_result.plot(save_path='backtest_results.png', show=False)
+```
+
+#### Pseudo Real-Time Evaluation (Alternative Method)
+
+Generate datasets for model evaluation across multiple periods:
+
+```python
+from datetime import datetime
+
+# Define evaluation periods
+from dfm_python.core.time import datetime_range
+periods = datetime_range(start=datetime(2020, 1, 1), end=datetime(2023, 12, 31), freq='QE')
+
+# Generate evaluation dataset
+dataset = model.generate_dataset(
+    target_series='gdp',
+    periods=periods,
+    backward=4,  # 4 backward data views per period
+    forward=0    # No forward forecast for evaluation
+)
+
+# Access features and targets
+X_features = dataset['X']  # (n_samples, n_features)
+y_baseline = dataset['y_baseline']  # DFM baseline predictions
+y_actual = dataset['y_actual']  # Actual values
+y_target = dataset['y_target']  # Prediction error (for downstream models)
+```
+
+### Model Result Storage
+
+Save and load model results for later use:
+
+#### File-Based Storage (Default)
+
+```python
+from adapters import PickleModelResultSaver
+
+# Initialize saver (defaults to './model_results')
+saver = PickleModelResultSaver(base_dir='./model_results')
+
+# Save model result
+result_id = saver.save_model_result(
+    result=dfm.get_result(),
+    config=dfm.get_config(),
+    metadata={'tag': 'baseline', 'experiment': 'exp1'}
+)
+
+# Load model result
+result, config, metadata = saver.load_model_result(result_id)
+
+# List all saved results
+result_ids = saver.list_model_results()
+```
+
+#### SQLite Storage (Optional - Future Feature)
+
+SQLite storage is planned for future releases. Currently, file-based storage is fully functional and recommended for production use.
+
+```python
+# Note: SQLiteAdapter is a placeholder for future development
+# File-based storage (PickleModelResultSaver) is the recommended approach
+
+# When SQLite support is available (future release):
+# from adapters import SQLiteAdapter
+# adapter = SQLiteAdapter(database_path='./dfm_results.db')
+# result_id = adapter.save_model_result(result, config, metadata)
+# result, config, metadata = adapter.load_model_result(result_id)
+```
+
+### Data View Management
+
+Manage time-point specific data views for pseudo real-time evaluation:
+
+#### File-Based Data Views (Default)
+
+```python
+from adapters import BasicDataViewManager
+
+# Initialize with data
+X, Time, Z = dfm.get_data(), dfm.get_time(), dfm.get_original_data()
+manager = BasicDataViewManager(data_source=(X, Time, Z))
+
+# Get data view at specific date
+X_view, Time_view, Z_view = manager.get_data_view(
+    view_date='2024-01-15',
+    config=dfm.get_config()
+)
+
+# Data view filters data based on release_date in SeriesConfig
+# Series with release_date > view_date are masked (set to NaN)
+```
+
+#### SQLite Data Views (Optional - Future Feature)
+
+SQLite data view storage is planned for future releases. Currently, `BasicDataViewManager` provides in-memory data views with caching, which is sufficient for most use cases.
+
+```python
+# Note: SQLite data view storage is a placeholder for future development
+# BasicDataViewManager with in-memory caching is the recommended approach
+
+# When SQLite support is available (future release):
+# from adapters import SQLiteAdapter
+# adapter = SQLiteAdapter(database_path='./dfm_data.db')
+# view_id = adapter.save_data_view(view_date, X_view, Time_view, config)
+# X_view, Time_view, config = adapter.load_data_view(view_id)
+```
+
+### News Decomposition (Legacy API)
+
+For advanced users, the low-level `news_dfm` function is still available:
+
+```python
+from dfm_python.nowcast import para_const
 
 # Before new data release
 result_old = model.fit(X_old, config)
 
 # After new data release
 X_new = ...  # Updated data
-result_new = model.fit(X_new, config)
 
-# Decompose forecast update
-y_old, y_new, singlenews, actual, forecast, weight, t_miss, v_miss, innov = news_dfm(
-    X_old, result_old, t_fcst=100, v_news=0
-)
+# Use para_const for news calculation
+Res_old = para_const(X_old, result_old, lag=1)
+# ... (see nowcast.py for full implementation)
 
-# Forecast update
-forecast_update = y_new - y_old
-# singlenews contains contribution from each series
+# Recommended: Use Nowcast class instead (see Nowcasting API section above)
 ```
 
 ### Custom Block Structure
@@ -511,9 +766,11 @@ config = DFMConfig(series=series, blocks=blocks)
 
 ```python
 import dfm_python as dfm
+import polars as pl
 
 # Configuration
-dfm.from_spec(spec_path, params=None)      # Load from spec CSV + Params
+spec_df = pl.read_csv(spec_path)
+dfm.from_spec_df(spec_df, params=None)     # Convert spec DataFrame to YAML + load
 dfm.from_yaml(yaml_path)                    # Load from YAML file
 dfm.from_dict(config_dict)                  # Load from dictionary
 dfm.load_config(hydra=cfg)                  # Load from Hydra DictConfig
@@ -524,11 +781,18 @@ dfm.load_data(data_path, sample_start=None, sample_end=None)
 # Estimation
 dfm.train(max_iter=None, threshold=None, **kwargs)
 
-# Forecasting
-dfm.predict(horizon=12)                     # Returns (X_forecast, Z_forecast)
+# Forecasting (horizon=None defaults to 1 year of periods based on clock frequency)
+dfm.predict(horizon=None)                   # Returns (X_forecast, Z_forecast)
+# Or specify explicit horizon: dfm.predict(horizon=12)
 
 # Visualization
 dfm.plot(kind='factor', factor_index=0, forecast_horizon=None, save_path=None)
+
+# Nowcasting
+model = dfm.DFM()
+nowcast = model.nowcast                     # Get Nowcast instance
+value = nowcast('gdp', view_date='2024-01-15')  # Simple nowcast
+result = nowcast.backtest('gdp', '2024Q4', backward_steps=20)  # Backtesting
 
 # Results
 dfm.get_result()                            # Returns DFMResult object
@@ -582,25 +846,34 @@ Complete reference for `DFMResult`:
 - **`dfm.py`**: Core estimation (`DFM` class, `_dfm_core` function, EM algorithm orchestration)
 - **`core/em.py`**: EM algorithm implementation (`init_conditions`, `em_step`, `em_converged`)
 - **`core/numeric.py`**: Numerical utilities (covariance computation, regularization, stability)
+- **`core/helpers.py`**: Helper functions (datetime conversion, time index extraction, config access)
+- **`core/timestamp.py`**: Timestamp utilities (datetime operations, frequency mapping, period calculations)
 - **`kalman.py`**: Kalman filter and smoother (`run_kf`, `skf`, `fis`)
 - **`data.py`**: Data loading and preprocessing (`load_data`, `transform_data`, `rem_nans_spline`)
-- **`utils.py`**: Mixed-frequency utilities (tent weights, aggregation structure, idio chain lengths)
+- **`utils.py`**: Mixed-frequency utilities (tent weights, aggregation structure, idio chain lengths, frequency helpers)
 - **`api.py`**: High-level convenience API and module-level functions
-- **`news.py`**: News decomposition
+- **`nowcast.py`**: Nowcasting, news decomposition, and backtesting functionality
+  - `Nowcast` class: Unified interface for nowcasting operations
+  - `NowcastResult`, `NewsDecompResult`, `BacktestResult`: Structured result dataclasses
+  - `backtest()`: Pseudo real-time evaluation framework
 
 ### Key Design Principles
 
-1. **Clock-based synchronization**: All factors evolve at a common frequency
+1. **Clock-based synchronization**: All factors evolve at a common frequency (generic support for any frequency)
 2. **Tent kernel aggregation**: Deterministic weights for slower-frequency series
 3. **Idiosyncratic components**: Per-series state augmentation for better fit
-4. **Advanced numerical stability**: 
+4. **Generic frequency handling**: 
+   - No hardcoded assumptions about specific frequencies (e.g., monthly)
+   - All period calculations, forecast horizons, and date operations adapt to clock frequency
+   - Helper functions provide generic frequency operations (`get_periods_per_year()`, `get_annual_factor()`, `clock_to_datetime_freq()`)
+5. **Advanced numerical stability**: 
    - Adaptive ridge regularization (condition-number-based)
    - Q matrix floor (0.01 for factors) to prevent scale issues
    - C matrix normalization (||C[:,j]|| = 1) for clock-frequency factors
    - Spectral radius capping (< 0.99) for stationarity
    - Variance floors for all covariance matrices
-5. **Flexible configuration**: Multiple input methods (YAML, CSV, Dict, Hydra)
-6. **Backward compatibility**: Old code continues to work, new features are opt-in
+6. **Flexible configuration**: Multiple input methods (YAML, CSV, Dict, Hydra)
+7. **Backward compatibility**: Old code continues to work, new features are opt-in
 
 ## Testing
 
@@ -637,38 +910,138 @@ pytest src/test/test_dfm.py -k "idio" -v
 
 ## Tutorials
 
-### Basic Tutorial (Spec CSV Approach)
+### Basic Tutorial (Hydra-based)
+
+The tutorial demonstrates the complete DFM workflow using Hydra for configuration management:
 
 ```bash
-python tutorial/basic_tutorial.py --spec data/sample_spec.csv --data data/sample_data.csv
+# Using default YAML config
+python tutorial/basic_tutorial.py \
+  --config-path config \
+  --config-name default \
+  data_path=data/sample_data.csv
+
+# Convert spec CSV to YAML first, then use
+python -c "import dfm_python as dfm; dfm.from_spec('data/sample_spec.csv')"
+python tutorial/basic_tutorial.py \
+  --config-path config \
+  --config-name sample_spec \
+  data_path=data/sample_data.csv
+
+# With CLI overrides
+python tutorial/basic_tutorial.py \
+  --config-path config \
+  --config-name default \
+  data_path=data/sample_data.csv \
+  max_iter=10 \
+  threshold=1e-4 \
+  blocks.Block_Global.factors=2
 ```
 
 Comprehensive tutorial covering:
-- Loading configuration from spec CSV
-- Data preparation and transformation
-- Model training and convergence
-- Interpreting results
-- Forecasting and visualization
+- **Hydra-based configuration**: All configs managed through YAML files
+- **Spec CSV conversion**: Convert CSV to YAML using `dfm.from_spec()`, then load via Hydra
+- **CLI parameter overrides**: Override any parameter via command line
+- **Data preparation and transformation**
+- **Model training and convergence**
+- **Understanding DFM results**: Detailed explanation of all result components
+- **Forecasting and visualization**
+- **Model result storage**: Save/load model results
+- **Data view management**: Pseudo real-time evaluation
 
-### Hydra Tutorial (Advanced Configuration)
+## Storage and Adapters
+
+The package provides flexible storage adapters for model results and data views:
+
+### Model Result Storage
+
+- **File-based (default)**: `PickleModelResultSaver` - Saves to pickle files in `./model_results/`
+  - Fully functional and recommended for production use
+  - No additional dependencies required
+- **SQLite (optional - future)**: `SQLiteAdapter` - Planned for future releases
+  - Currently a placeholder for future development
+  - Will require `dfm-python[db]` installation when available
+
+### Data View Management
+
+- **File-based (default)**: `BasicDataViewManager` - In-memory data views with caching
+  - Fully functional and recommended for production use
+  - Efficient caching for repeated access
+  - No additional dependencies required
+- **SQLite (optional - future)**: `SQLiteAdapter` - Planned for future releases
+  - Currently a placeholder for future development
+  - Will provide persistent data view storage when available
+
+### Environment Variables
+
+For database integration, set these environment variables:
 
 ```bash
-python tutorial/hydra_tutorial.py max_iter=10 threshold=1e-4
+# Database configuration
+DATABASE_TYPE=sqlite  # or postgresql
+DATABASE_PATH=./dfm_results.db  # For SQLite
+# For PostgreSQL:
+# DATABASE_HOST=localhost
+# DATABASE_PORT=5432
+# DATABASE_NAME=dfm_db
+# DATABASE_USER=user
+# DATABASE_PASSWORD=password
+
+# Storage type selection
+MODEL_RESULT_STORAGE_TYPE=file  # or database
+DATA_VIEW_SOURCE=file  # or database
 ```
 
-Demonstrates:
-- Hydra-based configuration management
-- CLI parameter overrides
-- Complex multi-block configurations
+**Note**: File-based storage works out of the box with no configuration needed. Database storage requires `dfm-python[db]` installation and environment variable configuration.
 
 ## Project Status
 
-**Version**: 0.2.7  
+**Version**: 0.3.0  
 **Status**: Stable and production-ready  
 **Python**: 3.10+  
 **PyPI**: https://pypi.org/project/dfm-python/
 
-### Recent Improvements (v0.2.7)
+### Recent Improvements (v0.3.0)
+
+- ✅ **Polars Migration**: Core data processing migrated to Polars for improved performance and modern data manipulation
+- ✅ **Polars Data Views + Kalman Cache (v0.3.1)**:
+  - `create_data_view()` now uses Polars masking and avoids per-view numpy copies
+  - `DFM.load_data()` stores a Polars view for reuse; `Nowcast` reuses cached Kalman states
+  - Enable `logging.getLogger('dfm_python.nowcast').setLevel('DEBUG')` to see per-view timing (data view vs. Kalman)
+- ✅ **Full Nowcast Implementation**: Complete nowcasting API with `nowcast.py` module consolidating all nowcasting and news decomposition functionality
+- ✅ **Backtesting Implementation**: Pseudo real-time evaluation framework for model validation
+  - `Nowcast.backtest()` method for comprehensive backtesting with point-wise metrics
+  - `BacktestResult` dataclass with visualization capabilities
+  - Support for higher-frequency backward steps and flexible date handling
+  - Automatic error handling and failed step tracking
+- ✅ **Enhanced Nowcast API**: 
+  - `NowcastResult` and `NewsDecompResult` dataclasses for structured results
+  - `return_result` parameter in `__call__` method for full metadata
+  - Improved date parsing and error handling
+- ✅ **Module Reorganization**: `news.py` functionality integrated into `nowcast.py` for clearer module structure
+  - All nowcasting functions now available via `from dfm_python.nowcast import ...`
+  - `news.py` module removed (functionality fully migrated to `nowcast.py`)
+
+### Previous Improvements (v0.2.9)
+
+- ✅ **Generic Clock Frequency Support**: Full support for any clock frequency (daily, weekly, monthly, quarterly, semi-annual, annual)
+  - Forecast horizons default to 1 year of periods based on clock frequency (generic, not hardcoded)
+  - All period calculations and date handling are clock-frequency-agnostic
+  - Helper functions for generic frequency operations (`get_periods_per_year()`, `get_annual_factor()`, `clock_to_datetime_freq()`)
+- ✅ **Nowcasting API**: Comprehensive nowcasting API with `nowcast()`, `generate_dataset()`, and `get_state()` methods
+- ✅ **Model Result Storage**: File-based and SQLite adapters for saving/loading model results
+- ✅ **Data View Management**: Time-point specific data views for pseudo real-time evaluation
+- ✅ **Helper Function Consolidation**: Reduced code duplication with consolidated helper functions
+  - `to_python_datetime()`: Generic datetime conversion (handles polars datetime, strings, etc.)
+  - `extract_last_date()`: Generic time index extraction
+  - `clock_to_datetime_freq()`: Shared clock-to-datetime frequency mapping
+  - `get_periods_per_year()`: Generic periods-per-year calculation
+  - `get_annual_factor()`: Generic annualization factor calculation
+  - `get_next_period_end()`: Generic period end calculation
+- ✅ **Generic Naming**: All docstrings and naming made generic (no feature-specific references)
+- ✅ **Code Refactoring**: Removed all hardcoded month assumptions and magic numbers
+
+### Previous Improvements (v0.2.7)
 
 - ✅ **Fixed C normalization issue**: C normalization now only applies when C norm is in reasonable range (0.1 ~ 10)
   - Prevents Q from becoming too small when C norm is very small
