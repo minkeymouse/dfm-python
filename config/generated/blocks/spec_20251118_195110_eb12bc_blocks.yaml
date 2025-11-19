@@ -1,0 +1,29 @@
+Block-Export:
+  factors: 1
+  ar_lag: 1
+  clock: m
+
+Block-Labor:
+  factors: 1
+  ar_lag: 1
+  clock: m
+
+Block-Nominal:
+  factors: 1
+  ar_lag: 1
+  clock: m
+
+Block_Consumption:
+  factors: 1
+  ar_lag: 1
+  clock: m
+
+Block_Global:
+  factors: 1
+  ar_lag: 1
+  clock: m
+
+Block_Investment:
+  factors: 1
+  ar_lag: 1
+  clock: m

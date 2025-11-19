@@ -18,7 +18,7 @@ Database usage (requires dfm-python[db] and environment variables):
 - Set: MODEL_RESULT_STORAGE_TYPE=database, DATA_VIEW_SOURCE=database
 """
 
-__version__ = "0.2.9"
+__version__ = "0.3.0"
 
 # Protocols and base classes
 from .model_result import ModelResultSaver
@@ -27,6 +27,7 @@ from .data_view import DataViewManager
 
 # Basic implementations (file-based, no dependencies)
 from .model_result import PickleModelResultSaver
+from .data_view import BasicDataViewManager
 
 # Database implementations (require dfm-python[db])
 try:
@@ -43,6 +44,7 @@ __all__ = [
     "DataViewManager",
     # Implementations
     "PickleModelResultSaver",
+    "BasicDataViewManager",
 ]
 
 if _has_db_support:

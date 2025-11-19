@@ -394,7 +394,7 @@ class DFMConfig:
             indicating what needs to be fixed.
         """
         # Import frequency hierarchy for validation
-        from .utils import FREQUENCY_HIERARCHY
+        from .core.utils import FREQUENCY_HIERARCHY
         
         if not self.series:
             raise ValueError(
@@ -566,7 +566,7 @@ class DFMConfig:
         ...     print("Errors:", report['errors'])
         ...     print("Suggestions:", report['suggestions'])
         """
-        from .utils import FREQUENCY_HIERARCHY
+        from .core.utils import FREQUENCY_HIERARCHY
         
         report = {
             'valid': True,
@@ -684,65 +684,6 @@ class DFMConfig:
         }
     
     @classmethod
-    def _from_legacy_dict(cls, data: Dict[str, Any]) -> 'DFMConfig':
-        """Convert legacy format (separate lists) to new format (series list)."""
-        series_list = []
-        n = len(data.get('SeriesID', data.get('series_id', [])))
-        
-        # Handle Blocks - can be numpy array or list of lists
-        blocks_data = data.get('Blocks', data.get('blocks', []))
-        if isinstance(blocks_data, np.ndarray):
-            blocks_data = blocks_data.tolist()
-        elif not isinstance(blocks_data, list):
-            blocks_data = []
-        
-        # Helper to get list value with index fallback
-        def get_list_value(key: str, index: int, default=None):
-            """Get value from list, handling both camelCase and snake_case keys."""
-            val = data.get(key, data.get(key.lower(), default))
-            if isinstance(val, list) and index < len(val):
-                return val[index]
-            return default
-        
-        for i in range(n):
-            # Extract blocks for this series
-            if blocks_data and i < len(blocks_data):
-                if isinstance(blocks_data[i], (list, np.ndarray)):
-                    series_blocks = list(blocks_data[i]) if isinstance(blocks_data[i], np.ndarray) else blocks_data[i]
-                else:
-                    series_blocks = [blocks_data[i]]
-            else:
-                series_blocks = []
-            
-            series_list.append(SeriesConfig(
-                frequency=str(get_list_value('Frequency', i, 'm')),
-                transformation=str(get_list_value('Transformation', i, 'lin')),
-                blocks=series_blocks,
-                series_id=get_list_value('SeriesID', i, None),
-                series_name=get_list_value('SeriesName', i, None),
-                units=get_list_value('Units', i, None)  # Optional, for display only
-            ))
-        
-        # Convert block_names to blocks dict
-        block_names = data.get('BlockNames', data.get('block_names', []))
-        factors_per_block = data.get('factors_per_block', None)
-        
-        blocks_dict = {}
-        if block_names:
-            for i, block_name in enumerate(block_names):
-                factors = factors_per_block[i] if factors_per_block and i < len(factors_per_block) else 1
-                blocks_dict[block_name] = BlockConfig(factors=factors, clock='m')
-        else:
-            # Default: create Block_Global if no blocks specified
-            blocks_dict[DEFAULT_GLOBAL_BLOCK_NAME] = BlockConfig(factors=1, clock='m')
-        
-        return cls(
-            series=series_list,
-            blocks=blocks_dict,
-            **cls._extract_estimation_params(data)
-        )
-    
-    @classmethod
     def _from_hydra_dict(cls, data: Dict[str, Any]) -> 'DFMConfig':
         """Convert Hydra format (series as dict) to new format."""
         # Get block_names first (required for series processing)
@@ -843,16 +784,11 @@ class DFMConfig:
         """Create DFMConfig from dictionary.
         
         Handles multiple formats:
-        1. Legacy format: {'SeriesID': [...], 'Frequency': [...], 'Blocks': [[...]], ...}
-        2. New format (list): {'series': [{'series_id': ..., ...}], 'block_names': [...]}
-        3. New format (Hydra): {'series': {'series_id': {...}}, 'blocks': {'block_name': {'factors': N}}}
+        1. New format (list): {'series': [{'series_id': ..., ...}], 'block_names': [...]}
+        2. New format (Hydra): {'series': {'series_id': {...}}, 'blocks': {'block_name': {'factors': N}}}
         
         Also accepts estimation parameters: ar_lag, threshold, max_iter, nan_method, nan_k
         """
-        # Detect legacy format (has SeriesID or series_id as lists)
-        if 'SeriesID' in data or ('series_id' in data and isinstance(data.get('series_id'), list)):
-            return cls._from_legacy_dict(data)
-        
         # New Hydra format: series is a dict
         if 'series' in data and isinstance(data['series'], dict):
             return cls._from_hydra_dict(data)
@@ -943,7 +879,6 @@ from .config_sources import (
     ConfigSource,
     YamlSource,
     DictSource,
-    SpecCSVSource,
     HydraSource,
     MergedConfigSource,
     make_config_source,
@@ -953,7 +888,7 @@ from .config_sources import (
 __all__ = [
     'DFMConfig', 'SeriesConfig', 'BlockConfig', 'Params',
     'DEFAULT_GLOBAL_BLOCK_NAME',
-    'ConfigSource', 'YamlSource', 'DictSource', 'SpecCSVSource',
+    'ConfigSource', 'YamlSource', 'DictSource',
     'HydraSource', 'MergedConfigSource', 'make_config_source',
 ]
 

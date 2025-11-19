@@ -16,7 +16,7 @@ from pathlib import Path
 from dataclasses import is_dataclass, asdict
 
 from .config import DFMConfig, SeriesConfig, BlockConfig, DEFAULT_GLOBAL_BLOCK_NAME
-import pandas as pd
+import polars as pl
 
 
 def _load_config_from_defaults(cfg, root_config_dir, config_type: str) -> Optional[dict]:
@@ -198,7 +198,7 @@ class DictSource:
     """Load configuration from a dictionary.
     
     Supports multiple dict formats:
-    - Legacy format: {'SeriesID': [...], 'Frequency': [...], ...}
+    - New format: {'series': [{'series_id': ..., ...}], ...}
     - New format (list): {'series': [{'series_id': ..., ...}], ...}
     - Hydra format: {'series': {'series_id': {...}}, 'blocks': {...}}
     """
@@ -236,41 +236,6 @@ class DictSource:
             return DFMConfig.from_dict(merged)
         
         return DFMConfig.from_dict(self.mapping)
-
-
-class SpecCSVSource:
-    """Load series definitions from a spec CSV file.
-    
-    This source reads series definitions and block memberships from a CSV.
-    It constructs a valid DFMConfig with sensible defaults for other
-    parameters (e.g., clock='m', threshold=1e-5, max_iter=5000, factors=1).
-    
-    For custom main settings (threshold, max_iter, clock, per-block factors),
-    you can still merge with a base config via MergedConfigSource or
-    dfm.load_config(base=..., override=spec_path).
-    """
-    def __init__(self, spec_path: Union[str, Path]):
-        """Initialize spec CSV source.
-        
-        Parameters
-        ----------
-        spec_path : str or Path
-            Path to spec CSV file
-        """
-        self.spec_path = Path(spec_path)
-    
-    def load(self) -> DFMConfig:
-        """Load series definitions from spec CSV."""
-        specfile = Path(self.spec_path)
-        if not specfile.exists():
-            raise FileNotFoundError(f"Spec file not found: {specfile}")
-        
-        try:
-            df_full = pd.read_csv(specfile)
-        except Exception as e:
-            raise ValueError(f"Failed to read spec file {specfile}: {e}")
-        
-        return _load_config_from_dataframe(df_full)
 
 
 class HydraSource:
@@ -388,68 +353,116 @@ class MergedConfigSource:
         )
 
 
+def _write_series_blocks_yaml(
+    config: DFMConfig,
+    output_dir: Path,
+    series_filename: str,
+    blocks_filename: str
+) -> Tuple[Path, Path]:
+    """Write series and block YAML files for a given configuration."""
+    series_dir = output_dir / 'series'
+    series_dir.mkdir(parents=True, exist_ok=True)
+    series_path = series_dir / f'{series_filename}.yaml'
+    
+    blocks_dir = output_dir / 'blocks'
+    blocks_dir.mkdir(parents=True, exist_ok=True)
+    blocks_path = blocks_dir / f'{blocks_filename}.yaml'
+    
+    series_dict = {}
+    block_names = config.block_names
+    
+    for series in config.series:
+        if isinstance(series.blocks, list) and len(series.blocks) > 0:
+            if isinstance(series.blocks[0], int):
+                blocks_names = [block_names[i] for i, val in enumerate(series.blocks) if val != 0]
+            else:
+                blocks_names = list(series.blocks)
+        else:
+            blocks_names = ['Block_Global']
+        
+        series_entry = {
+            'series_name': series.series_name,
+            'frequency': series.frequency,
+            'transformation': series.transformation,
+            'blocks': blocks_names
+        }
+        if series.release_date is not None:
+            series_entry['release'] = series.release_date
+        series_dict[series.series_id] = series_entry
+    
+    blocks_dict = {}
+    for block_name, block_config in config.blocks.items():
+        block_entry = {
+            'factors': block_config.factors,
+            'ar_lag': block_config.ar_lag,
+            'clock': block_config.clock
+        }
+        if block_config.notes:
+            block_entry['notes'] = block_config.notes
+        blocks_dict[block_name] = block_entry
+    
+    def _write_yaml(path: Path, payload: Dict[str, Any]) -> None:
+        try:
+            import yaml  # type: ignore
+            yaml_kwargs = {'default_flow_style': False, 'sort_keys': False, 'allow_unicode': True}
+            import io
+            stream = io.StringIO()
+            yaml.dump(payload, stream, **yaml_kwargs)
+            yaml_content = stream.getvalue()
+            lines = yaml_content.split('\n')
+            formatted_lines = []
+            for i, line in enumerate(lines):
+                if line and not line.startswith(' ') and ':' in line and not line.strip().startswith('#'):
+                    if i > 0 and formatted_lines and formatted_lines[-1].strip():
+                        formatted_lines.append('')
+                formatted_lines.append(line)
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(formatted_lines))
+        except ImportError:
+            try:
+                from omegaconf import OmegaConf  # type: ignore
+            except ImportError as exc:  # pragma: no cover
+                raise ImportError(
+                    "Either PyYAML or omegaconf is required for YAML generation. "
+                    "Install with: pip install pyyaml or pip install omegaconf"
+                ) from exc
+            cfg = OmegaConf.create(payload)
+            OmegaConf.save(cfg, path)
+    
+    _write_yaml(series_path, series_dict)
+    _write_yaml(blocks_path, blocks_dict)
+    
+    return series_path, blocks_path
+
+
 def from_spec(
     csv_path: Union[str, Path],
     output_dir: Optional[Union[str, Path]] = None,
     series_filename: Optional[str] = None,
     blocks_filename: Optional[str] = None
 ) -> Tuple[Path, Path]:
-    """Convert spec CSV file to YAML configuration files.
-    
-    This function reads a spec CSV file and generates two YAML files:
-    - config/series/{basename}.yaml - series definitions
-    - config/blocks/{basename}.yaml - block definitions
-    
-    Parameters
-    ----------
-    csv_path : str or Path
-        Path to the spec CSV file
-    output_dir : str or Path, optional
-        Output directory for YAML files. Defaults to config/ directory relative to CSV.
-    series_filename : str, optional
-        Custom filename for series YAML (without .yaml extension).
-        Defaults to CSV basename.
-    blocks_filename : str, optional
-        Custom filename for blocks YAML (without .yaml extension).
-        Defaults to CSV basename.
-        
-    Returns
-    -------
-    Tuple[Path, Path]
-        Paths to generated series YAML and blocks YAML files
-        
-    Examples
-    --------
-    >>> series_path, blocks_path = from_spec('data/sample_spec.csv')
-    >>> # Creates config/series/sample_spec.yaml and config/blocks/sample_spec.yaml
-    """
-    
+    """Convert spec CSV file to YAML configuration files."""
     csv_path = Path(csv_path)
     if not csv_path.exists():
         raise FileNotFoundError(f"CSV file not found: {csv_path}")
     
-    # Determine output directory
     if output_dir is None:
-        # Default: config/ directory relative to CSV file's parent
         output_dir = csv_path.parent.parent / 'config'
     else:
         output_dir = Path(output_dir)
-    
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    # Determine filenames
     csv_basename = csv_path.stem
     series_filename = series_filename or csv_basename
     blocks_filename = blocks_filename or csv_basename
     
-    # Read CSV and convert to DFMConfig
     try:
-        df = pd.read_csv(csv_path)
+        df = pl.read_csv(csv_path)
     except Exception as e:
         raise ValueError(f"Failed to read CSV file {csv_path}: {e}")
     
     config = _load_config_from_dataframe(df)
-    
+    return _write_series_blocks_yaml(config, output_dir, series_filename, blocks_filename)
     # Prepare series YAML content
     series_dir = output_dir / 'series'
     series_dir.mkdir(parents=True, exist_ok=True)
@@ -653,7 +666,11 @@ def make_config_source(
     if mapping is not None:
         return DictSource(_coerce_to_mapping(mapping))
     if spec is not None:
-        return SpecCSVSource(spec)
+        raise ValueError(
+            "Direct spec CSV loading has been removed. "
+            "Use dfm_python.api.from_spec() or from_spec_df() to convert the CSV "
+            "to YAML files, then load via YAML/Hydra."
+        )
     if hydra is not None:
         return HydraSource(hydra)
     
@@ -684,7 +701,11 @@ def make_config_source(
         if suffix in ['.yaml', '.yml']:
             return YamlSource(path)
         elif suffix == '.csv':
-            return SpecCSVSource(path)
+            raise ValueError(
+                "Direct CSV configs are no longer supported. "
+                "Use dfm_python.api.from_spec() or from_spec_df() to convert the CSV "
+                "to YAML files, then load the YAML configuration."
+            )
         else:
             # Default to YAML if extension unclear
             return YamlSource(path)
@@ -708,16 +729,15 @@ def make_config_source(
 # Internal helper: Load config from DataFrame
 # ============================================================================
 
-def _load_config_from_dataframe(df: pd.DataFrame) -> DFMConfig:
+def _load_config_from_dataframe(df: pl.DataFrame) -> DFMConfig:
     """Load configuration from DataFrame (internal helper).
     
     This function converts a DataFrame with series specifications into a DFMConfig.
-    It's used internally by SpecCSVSource and other config loaders.
     
     Parameters
     ----------
-    df : pd.DataFrame
-        DataFrame with columns: series_id, series_name, frequency, transformation, blocks
+    df : pl.DataFrame
+        Polars DataFrame with columns: series_id, series_name, frequency, transformation, blocks
         Optional columns: Release (release date)
         Block_* columns: Binary indicators for block membership
         
@@ -729,38 +749,47 @@ def _load_config_from_dataframe(df: pd.DataFrame) -> DFMConfig:
     series_list = []
     block_names_set = set()
     
-    for _, row in df.iterrows():
+    # Convert polars DataFrame to dict of rows for easier access
+    df_dict = df.to_dict(as_series=False)
+    
+    # First, try to find Block_* columns (CSV format)
+    block_cols = [col for col in df.columns 
+                 if (col.startswith('Block_') or col.startswith('Block-')) 
+                 and col not in ['blocks']]
+    
+    # Iterate over rows
+    num_rows = len(df)
+    for i in range(num_rows):
         # Parse blocks from Block_* columns or 'blocks' column
         blocks = []
-        
-        # First, try to find Block_* columns (CSV format)
-        block_cols = [col for col in df.columns 
-                     if (col.startswith('Block_') or col.startswith('Block-')) 
-                     and col not in ['blocks']]
         
         if block_cols:
             # CSV format: Block_Global, Block_Consumption, etc. columns with 1/0 values
             for block_col in block_cols:
-                block_value = row.get(block_col, 0)
-                # Handle various types: int, float, numpy int/float, bool, string "1"/"0"
-                # Check numpy types first (numpy.int64, numpy.float64, etc.)
-                if hasattr(block_value, 'item'):
-                    # numpy scalar - convert to Python native type
-                    block_value = block_value.item()
-                
-                if isinstance(block_value, (int, float)) and block_value != 0:
-                    blocks.append(block_col)
-                elif isinstance(block_value, bool) and block_value:
-                    blocks.append(block_col)
-                elif isinstance(block_value, str) and block_value.strip() in ['1', 'True', 'true']:
-                    blocks.append(block_col)
+                if block_col in df_dict:
+                    block_value = df_dict[block_col][i]
+                    # Handle various types: int, float, numpy int/float, bool, string "1"/"0"
+                    # Check numpy types first (numpy.int64, numpy.float64, etc.)
+                    if hasattr(block_value, 'item'):
+                        # numpy scalar - convert to Python native type
+                        block_value = block_value.item()
+                    
+                    if isinstance(block_value, (int, float)) and block_value != 0:
+                        blocks.append(block_col)
+                    elif isinstance(block_value, bool) and block_value:
+                        blocks.append(block_col)
+                    elif isinstance(block_value, str) and block_value.strip() in ['1', 'True', 'true']:
+                        blocks.append(block_col)
         else:
             # Fallback: try 'blocks' column (comma-separated string or list)
-            blocks_str = row.get('blocks', 'Block_Global')
-            if isinstance(blocks_str, str):
-                blocks = [b.strip() for b in blocks_str.split(',')]
-            elif isinstance(blocks_str, list):
-                blocks = blocks_str
+            if 'blocks' in df_dict:
+                blocks_str = df_dict['blocks'][i]
+                if isinstance(blocks_str, str):
+                    blocks = [b.strip() for b in blocks_str.split(',')]
+                elif isinstance(blocks_str, list):
+                    blocks = blocks_str
+                else:
+                    blocks = ['Block_Global']
             else:
                 blocks = ['Block_Global']
         
@@ -773,18 +802,23 @@ def _load_config_from_dataframe(df: pd.DataFrame) -> DFMConfig:
             block_names_set.add(block)
         
         # Parse release_date if available
-        release_date = row.get('Release', None)
-        if release_date is not None:
-            try:
-                release_date = int(release_date)
-            except (ValueError, TypeError):
-                release_date = None
+        release_date = None
+        if 'Release' in df_dict:
+            release_date = df_dict['Release'][i]
+            if release_date is not None:
+                try:
+                    release_date = int(release_date)
+                except (ValueError, TypeError):
+                    release_date = None
+        
+        series_id = df_dict.get('series_id', [f"series_{j}" for j in range(num_rows)])[i]
+        series_name = df_dict.get('series_name', df_dict.get('series_id', [f"Series {j}" for j in range(num_rows)]))[i]
         
         series_list.append(SeriesConfig(
-            series_id=row.get('series_id', f"series_{len(series_list)}"),
-            series_name=row.get('series_name', row.get('series_id', f"Series {len(series_list)}")),
-            frequency=row.get('frequency', 'm'),
-            transformation=row.get('transformation', 'lin'),
+            series_id=series_id,
+            series_name=series_name,
+            frequency=df_dict.get('frequency', ['m'] * num_rows)[i],
+            transformation=df_dict.get('transformation', ['lin'] * num_rows)[i],
             blocks=blocks,
             release_date=release_date
         ))
@@ -847,7 +881,6 @@ if HYDRA_AVAILABLE and ConfigStore is not None:
             cs.store(name="model_config_schema", node=DFMConfigSchema)
             
     except Exception as e:
-        import warnings
         warnings.warn(f"Could not register Hydra structured config schemas: {e}. "
                      f"Configs will still work via from_dict() but without schema validation.")
 

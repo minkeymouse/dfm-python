@@ -1,5 +1,6 @@
 """Helper functions for DFM estimation."""
-from typing import Optional, Tuple, Any, Dict
+from typing import Optional, Tuple, Any, Dict, Union, List
+from datetime import datetime
 import numpy as np
 import logging
 from scipy.linalg import inv, pinv, block_diag
@@ -15,7 +16,23 @@ _NUMERICAL_EXCEPTIONS = (
     FloatingPointError,
 )
 
-def safe_get_method(config, method_name, default=None):
+def safe_get_method(config: Any, method_name: str, default: Any = None) -> Any:
+    """Safely get and call a method from config object.
+    
+    Parameters
+    ----------
+    config : Any
+        Configuration object (may be None)
+    method_name : str
+        Name of the method to call
+    default : Any, optional
+        Default value to return if config is None or method doesn't exist
+        
+    Returns
+    -------
+    Any
+        Result of method call, or default if method unavailable
+    """
     if config is None:
         return default
     method = getattr(config, method_name, None)
@@ -23,13 +40,53 @@ def safe_get_method(config, method_name, default=None):
         return method()
     return default
 
-def safe_get_attr(config, attr_name, default=None):
+def safe_get_attr(config: Any, attr_name: str, default: Any = None) -> Any:
+    """Safely get an attribute from config object.
+    
+    Parameters
+    ----------
+    config : Any
+        Configuration object (may be None)
+    attr_name : str
+        Name of the attribute to get
+    default : Any, optional
+        Default value to return if config is None or attribute doesn't exist
+        
+    Returns
+    -------
+    Any
+        Attribute value, or default if unavailable
+    """
     if config is None:
         return default
     return getattr(config, attr_name, default)
 
-def resolve_param(override, default):
+def resolve_param(override: Any, default: Any) -> Any:
+    """Resolve parameter value: use override if not None, otherwise use default.
+    
+    Parameters
+    ----------
+    override : Any
+        Override value (may be None)
+    default : Any
+        Default value to use if override is None
+        
+    Returns
+    -------
+    Any
+        Override value if not None, otherwise default
+    """
     return override if override is not None else default
+
+
+# Time-related functions moved to core.time module
+# Import from .time instead:
+# - to_python_datetime
+# - extract_last_date
+# - find_time_index
+# - convert_to_timestamp
+# - get_latest_time
+# - parse_period_string
 
 def safe_mean_std(X, clip_data_values=False, data_clip_threshold=10.0):
     """Compute mean and std with optional clipping."""
@@ -223,7 +280,7 @@ def infer_nQ(frequencies: Optional[np.ndarray], clock: str) -> int:
     - Uses FREQUENCY_HIERARCHY to compare frequencies
     - Clock frequency is typically 'm' (monthly)
     """
-    from ..utils import FREQUENCY_HIERARCHY
+    from .utils import FREQUENCY_HIERARCHY
     
     if frequencies is None:
         return 0
@@ -262,7 +319,7 @@ def get_tent_weights(
     - Uses FREQUENCY_HIERARCHY to determine number of periods
     - Raises ValueError if frequency pair cannot be handled
     """
-    from ..utils import FREQUENCY_HIERARCHY, get_tent_weights_for_pair, generate_tent_weights
+    from .utils import FREQUENCY_HIERARCHY, get_tent_weights_for_pair, generate_tent_weights
     
     if logger is None:
         logger = _logger
@@ -999,57 +1056,92 @@ def validate_params(
 
 
 # ============================================================================
-# Legacy config compatibility helpers
+# Config access helpers
 # ============================================================================
 
-def _get_frequencies_from_config(config: Any) -> list:
-    """Get frequencies from config, supporting both new and legacy formats.
-    
-    This function provides a unified interface for accessing frequencies
-    from DFMConfig objects, handling both:
-    - New format: config.get_frequencies() method
-    - Legacy format: config.Frequency attribute
+def get_frequencies_from_config(config: Any) -> list:
+    """Get frequencies from config.
     
     Parameters
     ----------
     config : Any
-        Configuration object (DFMConfig or legacy format)
+        Configuration object (DFMConfig)
         
     Returns
     -------
     list
         List of frequency codes for each series
         
-    Notes
-    -----
-    - Maintains backward compatibility with legacy configuration formats
-    - Returns empty list if neither format is available
+    Raises
+    ------
+    AttributeError
+        If config does not have get_frequencies() method
     """
     if hasattr(config, 'get_frequencies'):
         return config.get_frequencies()
-    elif hasattr(config, 'Frequency'):
-        # Legacy format support: Frequency attribute (for backward compatibility)
-        freq_attr = config.Frequency
-        if hasattr(freq_attr, '__iter__') and not isinstance(freq_attr, str):
-            return list(freq_attr)
-        else:
-            return [freq_attr] if freq_attr is not None else []
     else:
-        return []
+        raise AttributeError("Config must have get_frequencies() method")
 
 
-def _get_units_from_config(config: Any, series_index: int) -> Optional[str]:
-    """Get units for a series from config, supporting both new and legacy formats.
-    
-    This function provides a unified interface for accessing units from config,
-    handling both:
-    - New format: config.series[series_index].units
-    - Legacy format: config.UnitsTransformed[series_index]
+def get_clock_frequency(config: Any, default: str = 'm') -> str:
+    """Get clock frequency from config.
     
     Parameters
     ----------
     config : Any
-        Configuration object (DFMConfig or legacy format)
+        Configuration object (may be None)
+    default : str, optional
+        Default clock frequency if config is None or clock not found (default: 'm')
+        
+    Returns
+    -------
+    str
+        Clock frequency string ('d', 'w', 'm', 'q', 'sa', 'a')
+    """
+    return safe_get_attr(config, 'clock', default)
+
+
+def get_series_count(config: Any) -> int:
+    """Get number of series from config.
+    
+    Parameters
+    ----------
+    config : Any
+        Configuration object
+        
+    Returns
+    -------
+    int
+        Number of series in config
+    """
+    series_ids = get_series_ids(config)
+    return len(series_ids) if series_ids else 0
+
+
+def get_block_count(config: Any) -> int:
+    """Get number of blocks from config.
+    
+    Parameters
+    ----------
+    config : Any
+        Configuration object
+        
+    Returns
+    -------
+    int
+        Number of blocks in config
+    """
+    block_names = safe_get_attr(config, 'block_names', None)
+    return len(block_names) if block_names else 0
+
+
+def get_units_from_config(config: Any, series_index: int) -> Optional[str]:
+    """Get units for a series from config.
+    
+    Parameters
+    ----------
+    config : Any
+        Configuration object (DFMConfig)
     series_index : int
         Index of the series (0-based)
         
@@ -1057,18 +1149,189 @@ def _get_units_from_config(config: Any, series_index: int) -> Optional[str]:
     -------
     Optional[str]
         Units string or None if not available
-        
-    Notes
-    -----
-    - Maintains backward compatibility with legacy configuration formats
-    - Returns None if units are not available for the series
     """
-    # New format: SeriesConfig.units
     if hasattr(config, 'series') and series_index < len(config.series):
         return config.series[series_index].units
-    
-    # Legacy format: UnitsTransformed attribute
-    if hasattr(config, 'UnitsTransformed') and series_index < len(config.UnitsTransformed):
-        return config.UnitsTransformed[series_index]
-    
     return None
+
+
+# Backward compatibility aliases (deprecated)
+_get_frequencies_from_config = get_frequencies_from_config
+_get_units_from_config = get_units_from_config
+
+
+# Time-related functions moved to core.time module
+# Import from .time instead:
+# - find_time_index
+# - convert_to_timestamp
+# - get_latest_time
+
+
+def get_series_ids(config: Any) -> List[str]:
+    """Get series IDs from config.
+    
+    Parameters
+    ----------
+    config : Any
+        Configuration object (DFMConfig)
+        
+    Returns
+    -------
+    List[str]
+        List of series IDs
+        
+    Raises
+    ------
+    AttributeError
+        If config does not have get_series_ids() method
+    """
+    if hasattr(config, 'get_series_ids'):
+        return config.get_series_ids()
+    else:
+        raise AttributeError("Config must have get_series_ids() method")
+
+
+def get_series_names(config: Any) -> List[str]:
+    """Get series names from config.
+    
+    Parameters
+    ----------
+    config : Any
+        Configuration object (DFMConfig)
+        
+    Returns
+    -------
+    List[str]
+        List of series names (may be empty if not available)
+    """
+    if hasattr(config, 'get_series_names'):
+        return config.get_series_names()
+    else:
+        return []
+
+
+def _validate_config_loaded(config: Any, name: str = "config") -> None:
+    """Validate that config is loaded.
+    
+    Parameters
+    ----------
+    config : Any
+        Configuration object (may be None)
+    name : str, optional
+        Name of the config for error message (default: "config")
+        
+    Raises
+    ------
+    ValueError
+        If config is None
+    """
+    if config is None:
+        raise ValueError(f"{name.capitalize()} must be loaded. Call load_{name}() first.")
+
+
+def _validate_data_loaded(data: Any, name: str = "data") -> None:
+    """Validate that data is loaded.
+    
+    Parameters
+    ----------
+    data : Any
+        Data object (may be None)
+    name : str, optional
+        Name of the data for error message (default: "data")
+        
+    Raises
+    ------
+    ValueError
+        If data is None
+    """
+    if data is None:
+        raise ValueError(f"{name.capitalize()} must be loaded. Call load_{name}() first.")
+
+
+def _validate_result_loaded(result: Any) -> None:
+    """Validate that result is available (model trained).
+    
+    Parameters
+    ----------
+    result : Any
+        Result object (may be None)
+        
+    Raises
+    ------
+    ValueError
+        If result is None
+    """
+    if result is None:
+        raise ValueError("Model must be trained. Call train() first.")
+
+
+def _validate_series_id(config: Any, series_id: str) -> None:
+    """Validate that series_id exists in config.
+    
+    Parameters
+    ----------
+    config : Any
+        Configuration object
+    series_id : str
+        Series ID to validate
+        
+    Raises
+    ------
+    ValueError
+        If series_id is not found in config
+    """
+    series_ids = get_series_ids(config)
+    if series_id not in series_ids:
+        raise ValueError(f"Target series '{series_id}' not found in config")
+
+
+def find_series_index(config: Any, series_id: str) -> int:
+    """Find index of a series by its ID.
+    
+    Parameters
+    ----------
+    config : Any
+        Configuration object (DFMConfig)
+    series_id : str
+        Series ID to find
+        
+    Returns
+    -------
+    int
+        Index of the series (0-based)
+        
+    Raises
+    ------
+    ValueError
+        If series_id is not found in config
+    """
+    series_ids = get_series_ids(config)
+    if series_id not in series_ids:
+        raise ValueError(f"Series '{series_id}' not found in configuration")
+    return series_ids.index(series_id)
+
+
+def get_series_id_by_index(config: Any, index: int) -> str:
+    """Get series ID by index with safe fallback.
+    
+    Parameters
+    ----------
+    config : Any
+        Configuration object (DFMConfig)
+    index : int
+        Series index (0-based)
+        
+    Returns
+    -------
+    str
+        Series ID, or fallback "series_{index}" if index is out of bounds
+    """
+    series_ids = get_series_ids(config)
+    if index < len(series_ids):
+        return series_ids[index]
+    else:
+        return f"series_{index}"
+
+
+# parse_period_string moved to core.time module
+# Import from .time instead

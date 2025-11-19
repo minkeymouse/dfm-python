@@ -50,11 +50,11 @@ Example (Low-level API - For advanced usage):
 For detailed documentation, see the README.md file and the tutorial notebooks/scripts.
 """
 
-__version__ = "0.2.9"
+__version__ = "0.3.0"
 
 from .config import (
     DFMConfig, SeriesConfig, BlockConfig, Params, DEFAULT_GLOBAL_BLOCK_NAME,
-    ConfigSource, YamlSource, DictSource, SpecCSVSource, HydraSource,
+    ConfigSource, YamlSource, DictSource, HydraSource,
     MergedConfigSource, make_config_source,
 )
 from .data import transform_data
@@ -62,13 +62,13 @@ from .dfm import DFMResult
 from .core import calculate_rmse, diagnose_series, print_series_diagnosis
 from .dfm import DFMCore  # Core DFM class from dfm.py
 from .kalman import run_kf, skf, fis, miss_data
-from .news import update_nowcast, news_dfm, para_const
+from .nowcast import Nowcast, para_const, NowcastResult, NewsDecompResult, BacktestResult
 
 # Import high-level API (extends core DFM with convenience methods)
 # Import module-level convenience functions directly from api.py to avoid duplication
 from .api import (
     DFM, _dfm_instance, from_yaml, from_spec, from_spec_df, from_dict,
-    load_config, load_data, train, predict, plot, reset
+    load_config, load_data, load_pickle, train, predict, plot, reset
 )
 
 # Expose properties as module-level attributes
@@ -97,15 +97,17 @@ def get_original_data():
 
 __all__ = [
     # Core classes
-    'DFMConfig', 'SeriesConfig', 'BlockConfig', 'Params', 'DFM', 'DFMCore',
+    'DFMConfig', 'SeriesConfig', 'BlockConfig', 'Params', 'DFM', 'DFMCore', 'Nowcast',
+    # Nowcast result classes
+    'NowcastResult', 'NewsDecompResult', 'BacktestResult',
     # Constants
     'DEFAULT_GLOBAL_BLOCK_NAME',
     # Config sources
-    'ConfigSource', 'YamlSource', 'DictSource', 'SpecCSVSource', 'HydraSource',
+    'ConfigSource', 'YamlSource', 'DictSource', 'HydraSource',
     'MergedConfigSource', 'make_config_source',
     # High-level API (module-level - recommended)
     'load_config',
-    'load_data', 'train', 'predict', 'plot', 'reset',
+    'load_data', 'load_pickle', 'train', 'predict', 'plot', 'reset',
     'get_config', 'get_data', 'get_time', 'get_result', 'get_original_data',
     # Convenience constructors (cleaner API)
     'from_yaml', 'from_spec', 'from_spec_df', 'from_dict',
@@ -113,6 +115,6 @@ __all__ = [
     'transform_data',
     'DFMResult', 'calculate_rmse', 'diagnose_series', 'print_series_diagnosis',
     'run_kf', 'skf', 'fis', 'miss_data',
-    'update_nowcast', 'news_dfm', 'para_const',
+    'para_const',  # Internal utility, kept for backward compatibility
 ]
 

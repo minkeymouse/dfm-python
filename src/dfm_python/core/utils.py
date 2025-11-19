@@ -19,7 +19,7 @@ evolve at the same clock frequency while properly handling mixed-frequency obser
 import numpy as np
 from typing import Tuple, Optional, Dict, Any, List
 
-from .config import DFMConfig
+from ..config import DFMConfig
 
 # ============================================================================
 # Frequency Hierarchy
@@ -35,6 +35,71 @@ FREQUENCY_HIERARCHY: Dict[str, int] = {
     'sa': 5,  # Semi-annual
     'a': 6    # Annual (lowest frequency)
 }
+
+# Periods per year for each frequency (generic calculation)
+PERIODS_PER_YEAR: Dict[str, int] = {
+    'd': 365,   # Daily (approximate)
+    'w': 52,    # Weekly (approximate)
+    'm': 12,    # Monthly
+    'q': 4,     # Quarterly
+    'sa': 2,    # Semi-annual
+    'a': 1      # Annual
+}
+
+
+def get_periods_per_year(frequency: str) -> int:
+    """Get number of periods per year for a given frequency.
+    
+    Parameters
+    ----------
+    frequency : str
+        Frequency code: 'd', 'w', 'm', 'q', 'sa', 'a'
+        
+    Returns
+    -------
+    int
+        Number of periods per year
+        
+    Examples
+    --------
+    >>> get_periods_per_year('m')  # Monthly
+    12
+    >>> get_periods_per_year('q')  # Quarterly
+    4
+    >>> get_periods_per_year('sa')  # Semi-annual
+    2
+    """
+    return PERIODS_PER_YEAR.get(frequency, 12)  # Default to monthly if unknown
+
+
+def get_annual_factor(frequency: str, step: int = 1) -> float:
+    """Get annualization factor for a given frequency and step.
+    
+    Parameters
+    ----------
+    frequency : str
+        Frequency code: 'd', 'w', 'm', 'q', 'sa', 'a'
+    step : int, default 1
+        Number of periods per step
+        
+    Returns
+    -------
+    float
+        Annualization factor (periods_per_year / step)
+        
+    Examples
+    --------
+    >>> get_annual_factor('m', step=1)  # Monthly to annual
+    12.0
+    >>> get_annual_factor('q', step=1)  # Quarterly to annual
+    4.0
+    >>> get_annual_factor('m', step=3)  # 3-month change to annual
+    4.0
+    """
+    periods_per_year = get_periods_per_year(frequency)
+    if step <= 0:
+        return 1.0
+    return float(periods_per_year) / step
 
 # ============================================================================
 # Tent Kernel Configuration
@@ -225,8 +290,8 @@ def get_aggregation_structure(
     {'q': array([1, 2, 3, 2, 1]), 'sa': array([1, 2, 3, 4, 3, 2, 1])}
     """
     # Get frequencies using unified helper function (supports both new and legacy formats)
-    from .core.helpers import _get_frequencies_from_config
-    frequencies_list = _get_frequencies_from_config(config)
+    from .helpers import get_frequencies_from_config
+    frequencies_list = get_frequencies_from_config(config)
     frequencies = set(frequencies_list)
     structures = {}
     tent_weights = {}
