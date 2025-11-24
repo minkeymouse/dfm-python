@@ -27,6 +27,7 @@ A Dynamic Factor Model is a powerful statistical framework that:
 - ✅ **Robust missing data**: Spline interpolation preprocessing + Kalman filter handling during estimation
 - ✅ **News decomposition**: Attribute forecast changes to specific data releases
 - ✅ **Nowcasting & Forecasting**: Generate predictions for any horizon
+- ✅ **Deep Dynamic Factor Models (DDFM)**: Nonlinear encoder with PyTorch for capturing complex factor structures (optional, requires `dfm-python[deep]`)
 
 ### Technical Features
 - ✅ **Multiple configuration methods**: YAML files, CSV specs, Python dictionaries, or Hydra
@@ -54,6 +55,7 @@ pip install dfm-python
 Optional dependencies:
 - `hydra-core` (for Hydra configuration management)
 - `matplotlib` (for plotting)
+- `torch>=2.0.0` (for Deep Dynamic Factor Models - install with `pip install dfm-python[deep]`)
 
 ## Quick Start
 
@@ -90,7 +92,41 @@ smoothed_data = result.X_sm # (100 × 10) Smoothed series
 forecasts = result.forecast(horizon=None)  # Default: 1 year of periods based on clock frequency
 ```
 
-### Example 2: Mixed-Frequency Data (Monthly + Quarterly)
+### Example 2: Deep Dynamic Factor Model (DDFM)
+
+```python
+import dfm_python as dfm
+from dfm_python import create_model, DFMConfig, SeriesConfig, BlockConfig
+import numpy as np
+
+# Generate or load your data
+X = np.random.randn(100, 10)  # 100 months, 10 series
+
+# Create configuration
+series = [
+    SeriesConfig(series_id=f'series_{i}', frequency='m', transformation='lin', blocks=[1])
+    for i in range(10)
+]
+config = DFMConfig(
+    series=series,
+    blocks=[BlockConfig(block_name='Global', factors=1)],
+    clock='m',
+    factors_per_block=[1],
+)
+
+# Create and fit DDFM model
+ddfm = create_model('ddfm', encoder_layers=[64, 32], num_factors=1, epochs=100)
+result = ddfm.fit(X, config)
+
+# Access results (same structure as DFM)
+factors = result.Z          # (100 × 1) Extracted factors
+loadings = result.C         # (10 × 1) Factor loadings
+X_forecast, Z_forecast = ddfm.predict(horizon=12)
+```
+
+**Note**: DDFM requires PyTorch. Install with `pip install dfm-python[deep]`.
+
+### Example 3: Mixed-Frequency Data (Monthly + Quarterly)
 
 ```python
 import dfm_python as dfm
@@ -556,7 +592,7 @@ Generate datasets for model evaluation across multiple periods:
 from datetime import datetime
 
 # Define evaluation periods
-from dfm_python.core.time import datetime_range
+from dfm_python.engine.time import datetime_range
 periods = datetime_range(start=datetime(2020, 1, 1), end=datetime(2023, 12, 31), freq='QE')
 
 # Generate evaluation dataset
@@ -875,6 +911,120 @@ Complete reference for `DFMResult`:
 6. **Flexible configuration**: Multiple input methods (YAML, CSV, Dict, Hydra)
 7. **Backward compatibility**: Old code continues to work, new features are opt-in
 
+## Deep Dynamic Factor Models (DDFM)
+
+The package now includes support for **Deep Dynamic Factor Models (DDFM)**, which use nonlinear encoders to extract factors from observed data. DDFM is particularly useful when the relationship between observed variables and latent factors is nonlinear.
+
+### When to Use DDFM vs Linear DFM
+
+- **Use Linear DFM** when:
+  - The relationship between factors and observations is approximately linear
+  - You need interpretable factor loadings
+  - Computational speed is important
+  - You have limited data
+
+- **Use DDFM** when:
+  - The relationship between factors and observations is nonlinear
+  - You suspect complex interactions between variables
+  - You have sufficient data for training neural networks
+  - You want to capture non-Gaussian factor structures
+
+### DDFM Architecture
+
+The DDFM implementation uses:
+- **Nonlinear Encoder**: Multi-layer perceptron (MLP) to extract factors from observations
+- **Linear Decoder**: Linear transformation from factors back to observations (for interpretability)
+- **Linear Dynamics**: VAR(1) dynamics for factors (estimated via OLS)
+- **Kalman Smoothing**: Final smoothing step using Kalman filter
+
+### DDFM Example
+
+```python
+from dfm_python import create_model, DFMConfig, SeriesConfig, BlockConfig
+import numpy as np
+
+# Create data
+X = np.random.randn(200, 15)  # 200 time periods, 15 series
+
+# Create config
+series = [
+    SeriesConfig(series_id=f'series_{i}', frequency='m', transformation='lin', blocks=[1])
+    for i in range(15)
+]
+config = DFMConfig(
+    series=series,
+    blocks=[BlockConfig(block_name='Global', factors=2)],
+    clock='m',
+    factors_per_block=[2],
+)
+
+# Create DDFM model
+ddfm = create_model(
+    'ddfm',
+    encoder_layers=[64, 32, 16],  # Encoder architecture
+    num_factors=2,                 # Number of factors
+    activation='tanh',             # Activation function
+    epochs=100,                    # Training epochs
+    batch_size=32,                 # Batch size
+    learning_rate=0.001,           # Learning rate
+)
+
+# Fit model
+result = ddfm.fit(X, config)
+
+# Use results (same API as linear DFM)
+factors = result.Z
+loadings = result.C
+X_forecast, Z_forecast = ddfm.predict(horizon=12)
+```
+
+### Testing DDFM
+
+The package includes synthetic DGP tests for validating DDFM:
+
+```python
+from dfm_python.engine.synthetic_dgp import SyntheticDGP
+from dfm_python import create_model
+
+# Create synthetic data with known factors
+dgp = SyntheticDGP(seed=42, n=10, r=1, poly_degree=2)  # Nonlinear factors
+X = dgp.simulate(200)
+
+# Fit DDFM
+ddfm = create_model('ddfm', encoder_layers=[64, 32], num_factors=1)
+result = ddfm.fit(X, config)
+
+# Evaluate factor recovery
+r2 = dgp.evaluate(result.Z)  # Trace R² metric
+print(f"Factor recovery R²: {r2:.3f}")
+```
+
+## Package Structure
+
+The package is organized into clear layers for better maintainability and extensibility:
+
+- **`engine/`**: Pure mathematical/algorithmic code shared by all factor models
+  - EM algorithm, Kalman filter, numerical utilities
+  - Time series utilities, diagnostics, synthetic DGP
+  - Model-agnostic low-level engine code
+
+- **`models/`**: Factor model implementations
+  - `base.py`: BaseFactorModel interface
+  - `dfm/`: Linear Dynamic Factor Model (EM-based)
+  - `ddfm/`: Deep Dynamic Factor Model (PyTorch-based)
+
+- **`nowcasting/`**: Nowcasting and news decomposition domain logic
+  - `nowcast.py`: Nowcast class and core logic
+  - News decomposition and backtest functionality
+
+- **`api.py` / `__init__.py`**: Public high-level API
+  - `DFM` class, `create_model()` factory
+  - Module-level convenience functions
+
+- **`core/`**: Backward compatibility layer (re-exports from `engine/`)
+  - Maintains old import paths for existing code
+  - New code should use `engine.*` directly
+
 ## Testing
 
 Run the full test suite:
@@ -887,15 +1037,19 @@ Run specific test categories:
 
 ```bash
 # Core DFM estimation
-pytest src/test/test_dfm.py -v
+pytest src/test/test_api.py -v
 
 # Kalman filter/smoother
 pytest src/test/test_kalman.py -v
 
-# Numerical stability
-pytest src/test/test_numeric.py -v
+# DDFM tests (requires PyTorch)
+pytest src/test/test_ddfm.py -v
 
-# Idiosyncratic components (new)
+# Regression tests (ensure backward compatibility)
+pytest src/test/test_dfm_regression.py -v
+
+# Integration tests
+pytest src/test/test_integration.py -v
 pytest src/test/test_dfm.py -k "idio" -v
 ```
 
@@ -1001,26 +1155,18 @@ DATA_VIEW_SOURCE=file  # or database
 **Python**: 3.10+  
 **PyPI**: https://pypi.org/project/dfm-python/
 
-### Recent Improvements (v0.3.0)
+### Recent Improvements (v0.3.1)
 
-- ✅ **Polars Migration**: Core data processing migrated to Polars for improved performance and modern data manipulation
-- ✅ **Polars Data Views + Kalman Cache (v0.3.1)**:
-  - `create_data_view()` now uses Polars masking and avoids per-view numpy copies
-  - `DFM.load_data()` stores a Polars view for reuse; `Nowcast` reuses cached Kalman states
-  - Enable `logging.getLogger('dfm_python.nowcast').setLevel('DEBUG')` to see per-view timing (data view vs. Kalman)
-- ✅ **Full Nowcast Implementation**: Complete nowcasting API with `nowcast.py` module consolidating all nowcasting and news decomposition functionality
-- ✅ **Backtesting Implementation**: Pseudo real-time evaluation framework for model validation
-  - `Nowcast.backtest()` method for comprehensive backtesting with point-wise metrics
-  - `BacktestResult` dataclass with visualization capabilities
-  - Support for higher-frequency backward steps and flexible date handling
-  - Automatic error handling and failed step tracking
-- ✅ **Enhanced Nowcast API**: 
-  - `NowcastResult` and `NewsDecompResult` dataclasses for structured results
-  - `return_result` parameter in `__call__` method for full metadata
-  - Improved date parsing and error handling
-- ✅ **Module Reorganization**: `news.py` functionality integrated into `nowcast.py` for clearer module structure
-  - All nowcasting functions now available via `from dfm_python.nowcast import ...`
-  - `news.py` module removed (functionality fully migrated to `nowcast.py`)
+- ✅ **Polars-backed Data Views + Kalman Cache**  
+  `create_data_view()` now applies release-date masks via Polars, avoiding per-view NumPy copies. `Nowcast.backtest()` reuses cached Kalman filter/smoother states across successive data views, giving large speed-ups for 12-step pseudo real-time tests.
+- ✅ **Backtest Trajectory Plot**  
+  `BacktestResult.plot_trajectory()` draws 이전 vs. 업데이트 nowcast curves plus monthly actuals along a relative week axis (`-12주 … 현재`). The tutorial simply calls this helper—no more hand-built plotting code.
+- ✅ **Higher-Frequency Backsteps**  
+  `Nowcast.backtest(..., backward_steps=12, higher_freq=True)` now emits weekly snapshots even when the model clock is monthly, so you can inspect 12주 worth of “pseudo releases” immediately.
+- ✅ **Reload & Reuse**  
+  `DFM.load_pickle()` restores config, time index, and cached Polars data views so you can call `predict()`/`nowcast()` right after loading without re-reading CSVs.
+- ✅ **API + Docs Refresh**  
+  README/tutorial sections now highlight the faster backtests, new trajectory plots, and guidelines for interpreting flattened Q-matrix values or “strange” news decomposition outputs.
 
 ### Previous Improvements (v0.2.9)
 

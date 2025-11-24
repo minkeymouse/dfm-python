@@ -394,7 +394,7 @@ class DFMConfig:
             indicating what needs to be fixed.
         """
         # Import frequency hierarchy for validation
-        from .core.utils import FREQUENCY_HIERARCHY
+        from .engine.utils import FREQUENCY_HIERARCHY
         
         if not self.series:
             raise ValueError(
@@ -566,7 +566,7 @@ class DFMConfig:
         ...     print("Errors:", report['errors'])
         ...     print("Suggestions:", report['suggestions'])
         """
-        from .core.utils import FREQUENCY_HIERARCHY
+        from .engine.utils import FREQUENCY_HIERARCHY
         
         report = {
             'valid': True,

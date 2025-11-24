@@ -19,7 +19,7 @@ from dfm_python.config import (
     make_config_source
 )
 from dfm_python import load_config, load_data
-from dfm_python.nowcast import Nowcast
+from dfm_python.nowcasting import Nowcast
 import dfm_python as dfm
 
 # ============================================================================

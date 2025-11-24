@@ -37,11 +37,15 @@ db = [
     "sqlalchemy>=2.0.0",
     # psycopg2-binary for PostgreSQL (optional, install separately if needed)
 ]
+deep = [
+    "torch>=2.0.0",
+]
 dev = [
     "pytest>=7.0.0",
+    "scikit-learn>=1.0.0",
 ]
 all = [
-    "dfm-python[hydra,db,dev]",
+    "dfm-python[hydra,db,dev,deep]",
 ]
 
 [build-system]

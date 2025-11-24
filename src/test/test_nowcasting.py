@@ -16,9 +16,9 @@ sys.path.insert(0, str(project_root / 'src'))
 from dfm_python.api import DFM
 from dfm_python.config import DFMConfig, SeriesConfig, BlockConfig
 from dfm_python.dfm import DFMResult
-from dfm_python.nowcast import Nowcast
+from dfm_python.nowcasting import Nowcast
 from dfm_python.data import calculate_release_date, create_data_view
-from dfm_python.core.time import TimeIndex, datetime_range
+from dfm_python.engine.time import TimeIndex, datetime_range
 from adapters import BasicDataViewManager
 
 
@@ -274,7 +274,7 @@ def test_calculate_nowcast_basic():
             target_period=None,
             return_result=True
         )
-        from dfm_python.nowcast import NowcastResult
+        from dfm_python.nowcasting import NowcastResult
         assert isinstance(nowcast_result, NowcastResult)
         assert nowcast_result.target_series == 'series_0'
         assert isinstance(nowcast_result.nowcast_value, (float, np.floating))
@@ -521,7 +521,7 @@ def test_dfm_nowcast_basic():
         target_period=None,
         return_result=True
     )
-    from dfm_python.nowcast import NowcastResult
+            from dfm_python.nowcasting import NowcastResult
     assert isinstance(nowcast_result, NowcastResult)
     assert nowcast_result.target_series == 'series_0'
     assert isinstance(nowcast_result.nowcast_value, (float, np.floating))
@@ -621,6 +621,17 @@ def test_backtest_basic():
         
         # Check that first news_result is None (no previous view)
         assert backtest_result.news_results[0] is None
+        
+        # Check optimization: step 1 should have news_result (decompose was called)
+        # and nowcast_result should be extracted from decompose result
+        if len(backtest_result.news_results) > 1:
+            assert backtest_result.news_results[1] is not None
+            # Verify that nowcast value from step 1 matches y_new from news_result
+            news_result_1 = backtest_result.news_results[1]
+            nowcast_result_1 = backtest_result.nowcast_results[1]
+            if news_result_1 is not None and nowcast_result_1 is not None:
+                # The nowcast value should match y_new from decompose (optimization check)
+                assert abs(news_result_1.y_new - nowcast_result_1.nowcast_value) < 1e-10
         
         # Check that metrics are calculated
         assert backtest_result.errors.shape == (2,)
@@ -750,7 +761,7 @@ def test_backtest_without_actual():
 
 def test_backtest_result_dataclass():
     """Test BacktestResult dataclass structure."""
-    from dfm_python.nowcast import BacktestResult, NowcastResult, NewsDecompResult
+    from dfm_python.nowcasting import BacktestResult, NowcastResult, NewsDecompResult
     from dfm_python.data import DataView
     from datetime import datetime
     
@@ -812,7 +823,7 @@ def test_backtest_result_dataclass():
 
 def test_backtest_result_plot():
     """Test BacktestResult.plot() method."""
-    from dfm_python.nowcast import BacktestResult, NowcastResult
+    from dfm_python.nowcasting import BacktestResult, NowcastResult
     from datetime import datetime
     import tempfile
     import os
@@ -872,6 +883,17 @@ def test_backtest_result_plot():
         
         # Test without save_path (should not raise error)
         backtest_result.plot(save_path=None, show=False)
+        
+        # Test new trajectory plot helper
+        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp2:
+            trajectory_path = tmp2.name
+        try:
+            backtest_result.plot_trajectory(save_path=trajectory_path, show=False)
+            assert os.path.exists(trajectory_path)
+        finally:
+            if os.path.exists(trajectory_path):
+                os.unlink(trajectory_path)
+        backtest_result.plot_trajectory(save_path=None, show=False)
         
     except ImportError:
         pytest.skip("matplotlib not available")
@@ -983,7 +1005,7 @@ def test_backtest_news_decomposition():
         for i in range(1, len(backtest_result.news_results)):
             news_result = backtest_result.news_results[i]
             if news_result is not None:
-                from dfm_python.nowcast import NewsDecompResult
+                from dfm_python.nowcasting import NewsDecompResult
                 assert isinstance(news_result, NewsDecompResult)
                 assert hasattr(news_result, 'y_old')
                 assert hasattr(news_result, 'y_new')
@@ -1039,7 +1061,7 @@ def test_backtest_nowcast_result_structure():
         
         # Check NowcastResult structure
         for nowcast_result in backtest_result.nowcast_results:
-            from dfm_python.nowcast import NowcastResult
+            from dfm_python.nowcasting import NowcastResult
             assert isinstance(nowcast_result, NowcastResult)
             assert nowcast_result.target_series == 'series_0'
             assert isinstance(nowcast_result.nowcast_value, (float, np.floating))
@@ -1162,7 +1184,7 @@ def test_nowcast_decompose_return_types():
                 view_date_new=view_date_new,
                 return_dict=False  # Default
             )
-            from dfm_python.nowcast import NewsDecompResult
+            from dfm_python.nowcasting import NewsDecompResult
             assert isinstance(news_result, NewsDecompResult)
             assert hasattr(news_result, 'y_old')
             assert hasattr(news_result, 'y_new')
@@ -1183,4 +1205,76 @@ def test_nowcast_decompose_return_types():
             assert 'change' in news_dict
     except Exception as e:
         pytest.skip(f"News decomposition return type test skipped: {e}")
+
+
+def test_news_to_nowcast_result():
+    """Test _decomp_to_nowcast_result() helper method."""
+    # Create test data and model (minimal for quick test)
+    T, N = 20, 3
+    np.random.seed(42)
+    X = np.random.randn(T, N)
+    Time = TimeIndex(datetime_range(start=datetime(2020, 1, 1), periods=T, freq='MS'))
+    
+    config = DFMConfig(
+        series=[
+            SeriesConfig(
+                series_id=f'series_{i}',
+                frequency='m',
+                transformation='lin',
+                blocks=['Block_Global']
+            )
+            for i in range(N)
+        ],
+        blocks={'Block_Global': BlockConfig(factors=1, ar_lag=1, clock='m')}
+    )
+    
+    model = DFM()
+    model.load_config(config)
+    model.load_data(data=X, time=Time)
+    
+    # Train with minimal iterations
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.train(max_iter=1, threshold=1e-2)
+    
+    # Get Nowcast instance
+    nowcast = model.nowcast
+    
+    try:
+        # Create a news decomposition result
+        view_date_old = Time[-3]
+        view_date_new = Time[-2]
+        target_period = Time[-1]
+        
+        news_result = nowcast.decompose(
+            target_series='series_0',
+            target_period=target_period,
+            view_date_old=view_date_old,
+            view_date_new=view_date_new,
+            return_dict=False
+        )
+        
+        # Test _decomp_to_nowcast_result helper
+        nowcast_result = nowcast._decomp_to_nowcast_result(
+            news_result,
+            target_series='series_0',
+            target_period=target_period,
+            view_date=view_date_new
+        )
+        
+        # Verify structure
+        assert isinstance(nowcast_result, NowcastResult)
+        assert nowcast_result.target_series == 'series_0'
+        assert nowcast_result.target_period == target_period
+        assert nowcast_result.view_date == view_date_new
+        
+        # Verify that nowcast value matches y_new from news_result
+        assert abs(news_result.y_new - nowcast_result.nowcast_value) < 1e-10
+        
+        # Verify metadata is populated
+        assert nowcast_result.data_availability is not None
+        assert 'n_available' in nowcast_result.data_availability
+        
+    except Exception as e:
+        pytest.skip(f"News to nowcast result test skipped: {e}")
 

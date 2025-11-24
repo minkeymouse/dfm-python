@@ -13,10 +13,10 @@ sys.path.insert(0, str(project_root / 'src'))
 
 from dfm_python.api import DFM
 from dfm_python.dfm import DFMResult
-from dfm_python.core.em import em_step, init_conditions, em_converged
+from dfm_python.engine.em import em_step, init_conditions, em_converged
 from dfm_python.data import load_data, rem_nans_spline
 from dfm_python.config import DFMConfig, SeriesConfig, BlockConfig
-from dfm_python.core.numeric import (
+from dfm_python.engine.numeric import (
     _compute_covariance_safe,
     _compute_variance_safe,
     _ensure_innovation_variance_minimum,
@@ -56,7 +56,7 @@ def test_em_step_basic():
     xNaN_est, _ = rem_nans_spline(xNaN, method=3, k=3)
     y = xNaN_est.T
     
-    from dfm_python.core.em import EMStepParams
+    from dfm_python.engine.em import EMStepParams
     idio_chain_lengths = np.zeros(N)
     em_params = EMStepParams(
         y=y, A=A, C=C, Q=Q, R=R, Z_0=Z_0, V_0=V_0,

@@ -19,11 +19,11 @@ import warnings
 import logging
 import polars as pl
 
-from .kalman import run_kf
+from .engine.kalman import run_kf
 from .config import DFMConfig
-from .core import calculate_rmse
-from .core.utils import group_series_by_frequency
-from .core.numeric import (
+from .engine import calculate_rmse
+from .engine.utils import group_series_by_frequency
+from .engine.numeric import (
     _ensure_symmetric,
     _compute_principal_components,
     _clean_matrix,
@@ -35,21 +35,21 @@ from .core.numeric import (
     _safe_divide,
     _check_finite,
 )
-from .core import (
+from .engine import (
     _display_dfm_tables,
     diagnose_series,
     print_series_diagnosis,
 )
-from .core.em import (
+from .engine.em import (
     init_conditions,
     em_step,
     em_converged,
     NaNHandlingOptions,
 )
-from .core.helpers import safe_get_method, safe_get_attr, resolve_param, safe_mean_std, standardize_data
+from .engine.helpers import safe_get_method, safe_get_attr, resolve_param, safe_mean_std, standardize_data
 
 from .data import rem_nans_spline
-from .core.utils import (
+from .engine.utils import (
     get_aggregation_structure,
     FREQUENCY_HIERARCHY,
 )
@@ -189,14 +189,14 @@ class DFMResult:
             
             # Add time column if time_index provided
             if time_index is not None:
-                from .core.time import TimeIndex
+                from .engine.time import TimeIndex
                 if isinstance(time_index, TimeIndex):
                     time_list = time_index.to_list()
                 else:
                     time_list = list(time_index) if hasattr(time_index, '__iter__') else [time_index[i] for i in range(len(time_index))]
                 df_dict['time'] = time_list
             elif self.time_index is not None:
-                from .core.time import TimeIndex
+                from .engine.time import TimeIndex
                 if isinstance(self.time_index, TimeIndex):
                     time_list = self.time_index.to_list()
                 else:
@@ -218,14 +218,14 @@ class DFMResult:
             
             # Add time column if time_index provided
             if time_index is not None:
-                from .core.time import TimeIndex
+                from .engine.time import TimeIndex
                 if isinstance(time_index, TimeIndex):
                     time_list = time_index.to_list()
                 else:
                     time_list = list(time_index) if hasattr(time_index, '__iter__') else [time_index[i] for i in range(len(time_index))]
                 df_dict['time'] = time_list
             elif self.time_index is not None:
-                from .core.time import TimeIndex
+                from .engine.time import TimeIndex
                 if isinstance(self.time_index, TimeIndex):
                     time_list = self.time_index.to_list()
                 else:
@@ -348,13 +348,18 @@ class DFMCore:
     
     Note: This is the core implementation class. For high-level API with
     convenience methods, use the `DFM` class from `api.py` which extends this class.
+    
+    This class now inherits from BaseFactorModel for consistency with other
+    factor model implementations (e.g., DDFM).
     """
     
     def __init__(self):
         """Initialize DFM instance."""
+        # Initialize attributes (BaseFactorModel compatibility)
         self._config: Optional[DFMConfig] = None
         self._data: Optional[np.ndarray] = None
         self._result: Optional[DFMResult] = None
+        self._time: Optional[Any] = None
     
     def fit(self,
             X: np.ndarray,
@@ -456,6 +461,63 @@ class DFMCore:
     def config(self) -> Optional[DFMConfig]:
         """Get the current configuration."""
         return self._config
+    
+    def predict(self, horizon: Optional[int] = None, **kwargs) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
+        """Forecast future values using the fitted model.
+        
+        Parameters
+        ----------
+        horizon : int, optional
+            Number of periods ahead to forecast. If None, defaults to 1 year
+            of periods based on clock frequency.
+        return_series : bool, optional
+            Whether to return forecasted series (default: True)
+        return_factors : bool, optional
+            Whether to return forecasted factors (default: True)
+            
+        Returns
+        -------
+        np.ndarray or Tuple[np.ndarray, np.ndarray]
+            Forecasted series and/or factors
+        """
+        if self._result is None:
+            raise ValueError("Model must be fitted before prediction. Call fit() first.")
+        
+        return_series = kwargs.get('return_series', True)
+        return_factors = kwargs.get('return_factors', True)
+        
+        # Default horizon: 1 year of periods based on clock frequency
+        if horizon is None:
+            from .engine.utils import get_periods_per_year
+            from .engine.helpers import get_clock_frequency
+            clock = get_clock_frequency(self._config, 'm')
+            horizon = get_periods_per_year(clock)
+        
+        if horizon <= 0:
+            raise ValueError("horizon must be a positive integer.")
+        
+        # Extract model parameters
+        A = self._result.A
+        C = self._result.C
+        Wx = self._result.Wx
+        Mx = self._result.Mx
+        Z_last = self._result.Z[-1, :]
+        
+        # Deterministic forecast: iteratively apply transition matrix A
+        Z_forecast = np.zeros((horizon, Z_last.shape[0]))
+        Z_forecast[0, :] = A @ Z_last
+        for h in range(1, horizon):
+            Z_forecast[h, :] = A @ Z_forecast[h - 1, :]
+        
+        # Transform factors to observed series: X = Z @ C^T, then denormalize
+        X_forecast_std = Z_forecast @ C.T
+        X_forecast = X_forecast_std * Wx + Mx
+        
+        if return_series and return_factors:
+            return X_forecast, Z_forecast
+        if return_series:
+            return X_forecast
+        return Z_forecast
 
 
 def _prepare_data_and_params(
@@ -525,7 +587,7 @@ def _prepare_data_and_params(
     # Display blocks structure if debug logging enabled
     if _logger.isEnabledFor(logging.DEBUG):
         try:
-            from .core.helpers import get_series_names
+            from .engine.helpers import get_series_names
             series_names = get_series_names(config)
             block_names = (config.block_names if len(config.block_names) == blocks.shape[1] 
                           else [f'Block_{i+1}' for i in range(blocks.shape[1])])
@@ -565,11 +627,11 @@ def _prepare_aggregation_structure(
     idio_chain_lengths : np.ndarray
         Array of idiosyncratic chain lengths per series (0, 1, or tent length)
     """
-    from .core.utils import compute_idio_chain_lengths
+    from .engine.utils import compute_idio_chain_lengths
     
     agg_info = get_aggregation_structure(config, clock=clock)
     tent_weights_dict = agg_info.get('tent_weights', {})
-    from .core.helpers import get_frequencies_from_config
+    from .engine.helpers import get_frequencies_from_config
     frequencies = np.array(get_frequencies_from_config(config)) if config.series else None
     
     # Find R_mat and q for tent kernel constraints
@@ -658,7 +720,7 @@ def _run_em_algorithm(
     
     while num_iter < max_iter and not converged:
         # Create EMStepParams dataclass for em_step()
-        from .core.em import EMStepParams
+        from .engine.em import EMStepParams
         em_step_params = EMStepParams(
             y=y_est,
             A=A,

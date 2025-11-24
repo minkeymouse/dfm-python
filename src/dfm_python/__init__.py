@@ -59,17 +59,29 @@ from .config import (
 )
 from .data import transform_data
 from .dfm import DFMResult
-from .core import calculate_rmse, diagnose_series, print_series_diagnosis
+from .engine import calculate_rmse, diagnose_series, print_series_diagnosis
 from .dfm import DFMCore  # Core DFM class from dfm.py
-from .kalman import run_kf, skf, fis, miss_data
-from .nowcast import Nowcast, para_const, NowcastResult, NewsDecompResult, BacktestResult
+from .engine.kalman import run_kf, skf, fis, miss_data
+from .nowcasting import Nowcast, para_const, NowcastResult, NewsDecompResult, BacktestResult
 
 # Import high-level API (extends core DFM with convenience methods)
 # Import module-level convenience functions directly from api.py to avoid duplication
 from .api import (
     DFM, _dfm_instance, from_yaml, from_spec, from_spec_df, from_dict,
-    load_config, load_data, load_pickle, train, predict, plot, reset
+    load_config, load_data, load_pickle, train, predict, plot, reset, create_model
 )
+
+# Import model implementations
+from .models.base import BaseFactorModel
+from .models.dfm import DFMLinear
+
+# DDFM is optional (requires PyTorch)
+try:
+    from .models.ddfm import DDFM
+    _has_ddfm = True
+except ImportError:
+    _has_ddfm = False
+    DDFM = None  # type: ignore
 
 # Expose properties as module-level attributes
 # Use property-like access via functions or direct attribute access
@@ -98,6 +110,8 @@ def get_original_data():
 __all__ = [
     # Core classes
     'DFMConfig', 'SeriesConfig', 'BlockConfig', 'Params', 'DFM', 'DFMCore', 'Nowcast',
+    # Model base and implementations
+    'BaseFactorModel', 'DFMLinear',
     # Nowcast result classes
     'NowcastResult', 'NewsDecompResult', 'BacktestResult',
     # Constants
@@ -107,7 +121,7 @@ __all__ = [
     'MergedConfigSource', 'make_config_source',
     # High-level API (module-level - recommended)
     'load_config',
-    'load_data', 'load_pickle', 'train', 'predict', 'plot', 'reset',
+    'load_data', 'load_pickle', 'train', 'predict', 'plot', 'reset', 'create_model',
     'get_config', 'get_data', 'get_time', 'get_result', 'get_original_data',
     # Convenience constructors (cleaner API)
     'from_yaml', 'from_spec', 'from_spec_df', 'from_dict',
@@ -117,4 +131,8 @@ __all__ = [
     'run_kf', 'skf', 'fis', 'miss_data',
     'para_const',  # Internal utility, kept for backward compatibility
 ]
+
+# Add DDFM to exports if available
+if _has_ddfm:
+    __all__.append('DDFM')
 

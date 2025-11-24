@@ -243,32 +243,81 @@ def main(cfg: DictConfig) -> None:
     
     # 2. Factor Explained Variance (R Matrix Analysis)
     print(f"\n--- 2. Factor Explained Variance (R Matrix Analysis) ---")
-    R_diag = np.diag(result.R)
-    X_sm_var = np.nanvar(result.X_sm, axis=0)
+    R_diag_std = np.diag(result.R)  # R on standardized scale
     
-    # Calculate explained variance per series
-    # explained = 1 - (idio_var / total_var)
-    # If idio_var > total_var, explained becomes negative (problem!)
-    explained_variance = 1.0 - (R_diag / (R_diag + X_sm_var + 1e-10))
+    # IMPORTANT: R is computed on STANDARDIZED data (y_std)
+    # 
+    # On standardized scale: Var(y_std) = 1.0 (by definition after standardization)
+    # R_std is the idiosyncratic variance on standardized scale
+    # 
+    # The correct formula for explained variance on standardized scale is:
+    # explained = 1 - (R_std / Var(y_std))
+    #           = 1 - R_std  (since Var(y_std) = 1.0)
+    #
+    # However, if R_std > 1.0, this gives negative explained variance
+    # This indicates the model residual variance exceeds the data variance,
+    # meaning the model is fitting worse than just using the mean
+    # 
+    # For robustness, we use the actual variance of standardized smoothed data
+    # which may be slightly different from 1.0 due to smoothing effects
+    x_sm_var = np.nanvar(result.x_sm, axis=0)  # Variance of standardized smoothed data
     
-    print(f"  Idiosyncratic variance (R diagonal) statistics:")
-    print(f"    - Min: {R_diag.min():.6f}")
-    print(f"    - Max: {R_diag.max():.6f}")
-    print(f"    - Mean: {R_diag.mean():.6f}")
-    print(f"    - Median: {np.median(R_diag):.6f}")
+    # Use the larger of: actual variance or 1.0 (theoretical for standardized data)
+    # This handles cases where smoothing reduces variance below 1.0
+    # But also accounts for cases where variance might be slightly above 1.0
+    total_var_std = np.maximum(x_sm_var, 1.0)
     
-    print(f"  Factor explained variance (1 - R[i,i] / Var(y[i])):")
+    # Calculate explained variance on standardized scale
+    # explained = 1 - (R_std / total_var_std)
+    explained_variance = 1.0 - (R_diag_std / (total_var_std + 1e-10))
+    
+    # Note: Negative values are meaningful diagnostics - they indicate poor fit
+    # We allow values down to -2.0 to show the severity of poor fit
+    # Values > 1.0 are capped at 1.0 (100% explained)
+    explained_variance = np.clip(explained_variance, -2.0, 1.0)
+    
+    print(f"  Idiosyncratic variance (R diagonal, standardized scale) statistics:")
+    print(f"    - Min: {R_diag_std.min():.6f}")
+    print(f"    - Max: {R_diag_std.max():.6f}")
+    print(f"    - Mean: {R_diag_std.mean():.6f}")
+    print(f"    - Median: {np.median(R_diag_std):.6f}")
+    
+    print(f"\n  Factor explained variance (1 - R[i,i] / Var(y_std[i])) on standardized scale:")
     print(f"    - Mean: {explained_variance.mean():.2%}")
     print(f"    - Min: {explained_variance.min():.2%}")
     print(f"    - Max: {explained_variance.max():.2%}")
     print(f"    - Median: {np.median(explained_variance):.2%}")
     
+    # Diagnostic checks
     negative_explained = np.sum(explained_variance < 0)
-    if negative_explained > 0:
-        print(f"    ⚠ WARNING: {negative_explained} series have negative explained variance")
-        print(f"      This indicates model fit issues - consider increasing max_iter")
+    very_negative = np.sum(explained_variance < -1.0)
+    poor_fit = np.sum(explained_variance < 0.5)
+    R_gt_one = np.sum(R_diag_std > 1.0)
+    
+    if very_negative > 0:
+        print(f"\n    ⚠ CRITICAL: {very_negative} series have very negative explained variance (<-100%)")
+        print(f"      This means R[i,i] > 2.0 * Var(y_std[i]) - model is fitting very poorly")
+        print(f"      Recommended actions:")
+        print(f"      - Significantly increase max_iter (current: {max_iter})")
+        print(f"      - Check data quality and transformations")
+        print(f"      - Review factor structure (may need more factors)")
+    elif negative_explained > 0:
+        print(f"\n    ⚠ WARNING: {negative_explained} series have negative explained variance")
+        print(f"      This means R[i,i] > Var(y_std[i]) - model fit is poor")
+        print(f"      Recommended actions:")
+        print(f"      - Increase max_iter (current: {max_iter})")
+        print(f"      - Check if data transformations are appropriate")
+    elif poor_fit > 0:
+        print(f"\n    ⚠ WARNING: {poor_fit} series have low explained variance (<50%)")
+        print(f"      Consider increasing max_iter or reviewing model specification")
     else:
-        print(f"    ✓ All series have non-negative explained variance")
+        print(f"\n    ✓ All series have reasonable explained variance (≥50%)")
+    
+    if R_gt_one > 0:
+        print(f"\n  Diagnostic: {R_gt_one} series have R[i,i] > 1.0 (on standardized scale)")
+        print(f"    For standardized data, R[i,i] should typically be < 1.0")
+        print(f"    R[i,i] > 1.0 indicates the residual variance exceeds the data variance")
+        print(f"    This suggests the model is not capturing the data structure well")
     
     # 3. A Matrix (Transition) Stability
     print(f"\n--- 3. A Matrix (Transition) Stability ---")

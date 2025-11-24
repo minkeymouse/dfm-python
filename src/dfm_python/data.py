@@ -15,7 +15,7 @@ from datetime import datetime
 from dataclasses import dataclass
 
 from .config import DFMConfig, SeriesConfig, BlockConfig
-from .core.time import TimeIndex, parse_timestamp, to_python_datetime
+from .engine.time import TimeIndex, parse_timestamp, to_python_datetime
 
 logger = logging.getLogger(__name__)
 
@@ -151,7 +151,7 @@ def sort_data(Z: np.ndarray, Mnem: List[str], config: DFMConfig) -> Tuple[np.nda
     Mnem_sorted : List[str]
         Sorted series identifiers
     """
-    from .core.helpers import get_series_ids
+    from .engine.helpers import get_series_ids
     series_ids = get_series_ids(config)
     
     # Create mapping from series_id to index in data
@@ -206,7 +206,7 @@ def _transform_series(Z: np.ndarray, formula: str, freq: str, step: int) -> np.n
             X[step:] = Z[step:] - Z[:-step]
     elif formula == 'ch1':
         # Year-over-year difference (generic based on frequency)
-        from .core.utils import get_periods_per_year
+        from .engine.utils import get_periods_per_year
         year_step = get_periods_per_year(freq)
         if T > year_step:
             X[year_step:] = Z[year_step:] - Z[:-year_step]
@@ -216,14 +216,14 @@ def _transform_series(Z: np.ndarray, formula: str, freq: str, step: int) -> np.n
             X[step:] = 100.0 * (Z[step:] - Z[:-step]) / np.abs(Z[:-step] + 1e-10)
     elif formula == 'pc1':
         # Year-over-year percent change (generic based on frequency)
-        from .core.utils import get_periods_per_year
+        from .engine.utils import get_periods_per_year
         year_step = get_periods_per_year(freq)
         if T > year_step:
             X[year_step:] = 100.0 * (Z[year_step:] - Z[:-year_step]) / np.abs(Z[:-year_step] + 1e-10)
     elif formula == 'pca':
         # Percent change annualized (generic based on frequency)
         if T > step:
-            from .core.utils import get_annual_factor
+            from .engine.utils import get_annual_factor
             annual_factor = get_annual_factor(freq, step)
             X[step:] = annual_factor * 100.0 * (Z[step:] - Z[:-step]) / np.abs(Z[:-step] + 1e-10)
     elif formula == 'cch':
@@ -233,7 +233,7 @@ def _transform_series(Z: np.ndarray, formula: str, freq: str, step: int) -> np.n
     elif formula == 'cca':
         # Continuously compounded annual rate of change (generic based on frequency)
         if T > step:
-            from .core.utils import get_annual_factor
+            from .engine.utils import get_annual_factor
             annual_factor = get_annual_factor(freq, step)
             X[step:] = annual_factor * 100.0 * (np.log(np.abs(Z[step:]) + 1e-10) - np.log(np.abs(Z[:-step]) + 1e-10))
     elif formula == 'log':
@@ -273,19 +273,19 @@ def transform_data(Z: np.ndarray, Time: TimeIndex, config: DFMConfig) -> Tuple[n
     Z : np.ndarray
         Original data (may be truncated to match X)
     """
-    from .core.utils import FREQUENCY_HIERARCHY
+    from .engine.utils import FREQUENCY_HIERARCHY
     
     T, N = Z.shape
     X = np.full((T, N), np.nan)
     
     # Validate frequencies - reject higher frequencies than clock
-    from .core.helpers import safe_get_attr
+    from .engine.helpers import safe_get_attr
     clock = safe_get_attr(config, 'clock', 'm')
     clock_hierarchy = FREQUENCY_HIERARCHY.get(clock, 3)
     
-    from .core.helpers import get_frequencies_from_config
+    from .engine.helpers import get_frequencies_from_config
     frequencies = get_frequencies_from_config(config)
-    from .core.helpers import get_series_ids
+    from .engine.helpers import get_series_ids
     series_ids = get_series_ids(config)
     for i, freq in enumerate(frequencies):
         freq_hierarchy = FREQUENCY_HIERARCHY.get(freq, 3)
@@ -367,7 +367,7 @@ def load_data(datafile: Union[str, Path], config: DFMConfig,
     FileNotFoundError
         If datafile does not exist
     """
-    from .core.utils import FREQUENCY_HIERARCHY
+    from .engine.utils import FREQUENCY_HIERARCHY
     
     logger.info('Loading data...')
     
@@ -410,13 +410,13 @@ def load_data(datafile: Union[str, Path], config: DFMConfig,
     
     # Validate data quality
     # Note: DFMConfig always has 'clock' attribute, but use safe_get_attr for consistency
-    from .core.helpers import safe_get_attr
+    from .engine.helpers import safe_get_attr
     clock = safe_get_attr(config, 'clock', 'm')
     clock_hierarchy = FREQUENCY_HIERARCHY.get(clock, 3)
     
-    from .core.helpers import get_frequencies_from_config
+    from .engine.helpers import get_frequencies_from_config
     frequencies = get_frequencies_from_config(config)
-    from .core.helpers import get_series_ids
+    from .engine.helpers import get_series_ids
     series_ids = get_series_ids(config)
     warnings_list = []
     
@@ -458,7 +458,7 @@ def load_data(datafile: Union[str, Path], config: DFMConfig,
     extreme_missing_series = []
     for i, ratio in enumerate(missing_ratios):
         if ratio > 0.9:
-            from .core.helpers import get_series_id_by_index
+            from .engine.helpers import get_series_id_by_index
             series_id = get_series_id_by_index(config, i)
             extreme_missing_series.append((series_id, ratio))
     
@@ -632,8 +632,8 @@ def create_data_view(
     X_frame: Optional[pl.DataFrame] = None
 ) -> Tuple[np.ndarray, Union[TimeIndex, Any], Optional[np.ndarray]]:
     """Create data view at a specific view date."""
-    from .core.time import get_latest_time
-    from .core.helpers import get_series_ids
+    from .engine.time import get_latest_time
+    from .engine.helpers import get_series_ids
     
     if isinstance(view_date, str):
         view_date = parse_timestamp(view_date)

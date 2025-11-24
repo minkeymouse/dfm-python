@@ -36,8 +36,8 @@ from .config import (
 from .data import load_data as _load_data, DataView, create_data_view
 from .config_sources import _load_config_from_dataframe, _write_series_blocks_yaml
 from .dfm import DFMCore, DFMResult
-from .nowcast import Nowcast
-from .core.helpers import (
+from .nowcasting import Nowcast
+from .engine.helpers import (
     safe_get_method,
     safe_get_attr,
     get_series_ids,
@@ -50,7 +50,7 @@ from .core.helpers import (
     _validate_data_loaded,
     _validate_result_loaded,
 )
-from .core.time import (
+from .engine.time import (
     TimeIndex,
     datetime_range,
     parse_timestamp,
@@ -381,6 +381,15 @@ class DFM(DFMCore):
     def predict(self, horizon: Optional[int] = None, *, return_series: bool = True, return_factors: bool = True) -> Union[Tuple[np.ndarray, np.ndarray], np.ndarray]:
         """Forecast series and/or factors for a given horizon using the trained model.
         
+        This method performs deterministic forecasting by iteratively applying the
+        transition matrix A to the last known factor state. This is distinct from
+        nowcast() which uses Kalman filtering to estimate current/recent values
+        considering data availability constraints.
+        
+        Note: This method uses a deterministic forecast approach (A matrix iteration).
+        For nowcasting with data availability constraints, use model.nowcast() which
+        leverages the shared forecast core (_forecast_core) with Kalman filtering.
+        
         Parameters
         ----------
         horizon : int, optional
@@ -406,7 +415,7 @@ class DFM(DFMCore):
         
         # Default horizon: 1 period based on clock frequency (generic)
         if horizon is None:
-            from .core.utils import get_periods_per_year
+            from .engine.utils import get_periods_per_year
             clock = get_clock_frequency(self._config, 'm')
             # Default to 1 year worth of periods based on clock frequency
             horizon = get_periods_per_year(clock)
@@ -414,19 +423,21 @@ class DFM(DFMCore):
         if horizon <= 0:
             raise ValueError("horizon must be a positive integer.")
         
+        # Extract model parameters
         A = self._result.A
         C = self._result.C
         Wx = self._result.Wx
         Mx = self._result.Mx
         Z_last = self._result.Z[-1, :]
         
-        # Forecast latent factors: Z_{t+h} = A^h Z_t (deterministic)
+        # Deterministic forecast: iteratively apply transition matrix A
+        # Z_{t+h} = A^h Z_t (deterministic forward projection)
         Z_forecast = np.zeros((horizon, Z_last.shape[0]))
         Z_forecast[0, :] = A @ Z_last
         for h in range(1, horizon):
             Z_forecast[h, :] = A @ Z_forecast[h - 1, :]
         
-        # Forecast observed standardized series then denormalize
+        # Transform factors to observed series: X = Z @ C^T, then denormalize
         X_forecast_std = Z_forecast @ C.T
         X_forecast = X_forecast_std * Wx + Mx
         
@@ -745,7 +756,7 @@ class DFM(DFMCore):
         
         # Set default lookback based on clock frequency if not provided
         if lookback is None:
-            from .core.utils import get_periods_per_year
+            from .engine.utils import get_periods_per_year
             clock = get_clock_frequency(self._config, 'm')
             lookback = get_periods_per_year(clock)
         
@@ -938,6 +949,54 @@ def load_pickle(path: Union[str, Path], **kwargs) -> DFM:
 def reset() -> DFM:
     """Reset state (module-level convenience function)."""
     return _dfm_instance.reset()
+
+
+def create_model(model_type: str = 'dfm', **kwargs):
+    """Create a factor model instance.
+    
+    Factory function to create different types of factor models.
+    
+    Parameters
+    ----------
+    model_type : str
+        Type of model to create. Options:
+        - 'dfm' or 'linear': Linear Dynamic Factor Model (default)
+        - 'ddfm' or 'deep': Deep Dynamic Factor Model (requires PyTorch)
+    **kwargs
+        Additional arguments passed to model constructor.
+        For DDFM, these include: encoder_layers, num_factors, activation, etc.
+        
+    Returns
+    -------
+    BaseFactorModel
+        Model instance (DFM or DDFM)
+        
+    Examples
+    --------
+    >>> # Create linear DFM
+    >>> model = create_model('dfm')
+    >>> 
+    >>> # Create DDFM with custom encoder
+    >>> model = create_model('ddfm', encoder_layers=[64, 32], num_factors=2)
+    """
+    model_type = model_type.lower()
+    
+    if model_type in ('dfm', 'linear'):
+        from .models.dfm import DFMLinear
+        return DFMLinear(**kwargs)
+    elif model_type in ('ddfm', 'deep'):
+        try:
+            from .models.ddfm import DDFM
+            return DDFM(**kwargs)
+        except ImportError:
+            raise ImportError(
+                "DDFM requires PyTorch. Install with: pip install dfm-python[deep]"
+            )
+    else:
+        raise ValueError(
+            f"Unknown model_type: {model_type}. "
+            f"Supported types: 'dfm', 'linear', 'ddfm', 'deep'"
+        )
 
 
 # Convenience constructors for cleaner API
