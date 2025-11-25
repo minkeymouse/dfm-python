@@ -33,7 +33,7 @@ def _get_numeric_utils():
     """Lazy import of numeric utilities (cached)."""
     global _numeric_utils_cache
     if _numeric_utils_cache is None:
-        from .numeric import (
+        from .state_space import (
             _ensure_innovation_variance_minimum, _ensure_covariance_stable,
             _compute_principal_components, _compute_covariance_safe, _check_finite,
             _clip_ar_coefficients, _clean_matrix, _ensure_positive_definite,
@@ -58,7 +58,7 @@ def _get_helpers():
             compute_block_slice_indices, extract_block_matrix, update_block_in_matrix,
             stabilize_cov, validate_params, safe_get_attr
         )
-        from .utils import group_series_by_frequency, generate_R_mat
+        from .structure import group_series_by_frequency, generate_R_mat
         _helpers_cache = (get_block_indices, group_series_by_frequency, append_or_initialize,
                 has_valid_data, get_matrix_shape, estimate_ar_coefficients_ols,
                 compute_innovation_covariance, update_block_diag, clean_variance_array,
@@ -72,7 +72,7 @@ def _get_data_utils():
     """Lazy import of data utilities (cached)."""
     global _data_utils_cache
     if _data_utils_cache is None:
-        from ..data import rem_nans_spline
+        from ..dataloader.loader import rem_nans_spline
         _data_utils_cache = rem_nans_spline
     return _data_utils_cache
 
@@ -202,7 +202,8 @@ def init_conditions(x, r, p, blocks, opt_nan, Rcon, q, nQ, i_idio, clock='m', te
                     finite_rows = np.all(np.isfinite(res), axis=1)
                 n_finite = int(np.sum(finite_rows))
                 if n_finite < max(2, n_freq + 1):
-                    block_name = f"block {i}" if i > 0 else "Block_Global"
+                    from ..config import DEFAULT_GLOBAL_BLOCK_NAME
+                    block_name = f"block {i}" if i > 0 else DEFAULT_GLOBAL_BLOCK_NAME
                     raise ValueError(
                         f"Insufficient data for {block_name}: only {n_finite} valid time periods "
                         f"available, but need at least {max(2, n_freq + 1)}. "
@@ -330,7 +331,7 @@ def init_conditions(x, r, p, blocks, opt_nan, Rcon, q, nQ, i_idio, clock='m', te
                             tent_weights = get_tent_weights(freq, clock, tent_weights_dict, _logger)
                             if tent_weights is None:
                                 continue
-                            from .utils import generate_R_mat
+                            from .structure import generate_R_mat
                             R_mat_freq, q_freq = generate_R_mat(tent_weights)
                             pC_freq = len(tent_weights)
                             
@@ -489,7 +490,7 @@ def init_conditions(x, r, p, blocks, opt_nan, Rcon, q, nQ, i_idio, clock='m', te
     # Augment state with idiosyncratic components if enabled
     if idio_chain_lengths is not None and config is not None and config.augment_idio:
         from scipy.linalg import solve_discrete_lyapunov
-        from .utils import FREQUENCY_HIERARCHY
+        from .structure import FREQUENCY_HIERARCHY
         
         m_factor = A.shape[0] if A is not None else 0
         total_idio_dim = int(np.sum(idio_chain_lengths))
@@ -679,8 +680,8 @@ def em_step(params: EMStepParams) -> Tuple[np.ndarray, np.ndarray, np.ndarray, n
      compute_block_slice_indices, extract_block_matrix, update_block_in_matrix,
      stabilize_cov, validate_params, safe_get_attr, generate_R_mat) = _get_helpers()
     
-    # Import run_kf
-    from ..kalman import run_kf
+    # Import run_kf directly from state_space
+    from .state_space import run_kf
     
     # Common exception types
     _NUMERICAL_EXCEPTIONS = (
@@ -1192,7 +1193,7 @@ def em_step(params: EMStepParams) -> Tuple[np.ndarray, np.ndarray, np.ndarray, n
                     if has_valid_data(R_con_i) and R_con_i.shape[0] > 0 and R_con_i.shape[1] == len(C_i):
                         try:
                             # Use same regularized inverse as reg_inv for consistency
-                            from .numeric import _compute_regularization_param
+                            from .state_space import _compute_regularization_param
                             scale_factor = safe_get_attr(config, "regularization_scale", 1e-5)
                             warn_reg = safe_get_attr(config, "warn_on_regularization", True)
                             reg_param, _ = _compute_regularization_param(denom, scale_factor, warn_reg)

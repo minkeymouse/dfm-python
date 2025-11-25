@@ -15,7 +15,7 @@ from typing import Protocol, Optional, Dict, Any, Union, Tuple
 from pathlib import Path
 from dataclasses import is_dataclass, asdict
 
-from .config import DFMConfig, SeriesConfig, BlockConfig, DEFAULT_GLOBAL_BLOCK_NAME
+from .schema import DFMConfig, SeriesConfig, BlockConfig, DEFAULT_GLOBAL_BLOCK_NAME
 import polars as pl
 
 
@@ -378,7 +378,7 @@ def _write_series_blocks_yaml(
             else:
                 blocks_names = list(series.blocks)
         else:
-            blocks_names = ['Block_Global']
+            blocks_names = [DEFAULT_GLOBAL_BLOCK_NAME]
         
         series_entry = {
             'series_name': series.series_name,
@@ -482,7 +482,7 @@ def from_spec(
                 # Blocks are already names
                 blocks_names = list(series.blocks)
         else:
-            blocks_names = ['Block_Global']  # Default
+            blocks_names = [DEFAULT_GLOBAL_BLOCK_NAME]  # Default
         
         series_entry = {
             'series_name': series.series_name,
@@ -764,7 +764,7 @@ def _load_config_from_dataframe(df: pl.DataFrame) -> DFMConfig:
         blocks = []
         
         if block_cols:
-            # CSV format: Block_Global, Block_Consumption, etc. columns with 1/0 values
+            # CSV format: global block, block_1, etc. columns with 1/0 values
             for block_col in block_cols:
                 if block_col in df_dict:
                     block_value = df_dict[block_col][i]
@@ -789,13 +789,13 @@ def _load_config_from_dataframe(df: pl.DataFrame) -> DFMConfig:
                 elif isinstance(blocks_str, list):
                     blocks = blocks_str
                 else:
-                    blocks = ['Block_Global']
+                    blocks = [DEFAULT_GLOBAL_BLOCK_NAME]
             else:
-                blocks = ['Block_Global']
+                blocks = [DEFAULT_GLOBAL_BLOCK_NAME]
         
-        # Ensure at least Block_Global
+        # Ensure at least global block
         if not blocks:
-            blocks = ['Block_Global']
+            blocks = [DEFAULT_GLOBAL_BLOCK_NAME]
         
         # Track block names
         for block in blocks:
@@ -824,7 +824,7 @@ def _load_config_from_dataframe(df: pl.DataFrame) -> DFMConfig:
         ))
     
     # Create default blocks if none specified
-    block_names = sorted(block_names_set) if block_names_set else ['Block_Global']
+    block_names = sorted(block_names_set) if block_names_set else [DEFAULT_GLOBAL_BLOCK_NAME]
     blocks = {}
     for block_name in block_names:
         blocks[block_name] = BlockConfig(factors=1, ar_lag=1, clock='m')

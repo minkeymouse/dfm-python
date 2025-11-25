@@ -18,7 +18,7 @@ from dfm_python.config import DFMConfig, SeriesConfig, BlockConfig
 from dfm_python.dfm import DFMResult
 from dfm_python.nowcasting import Nowcast
 from dfm_python.data import calculate_release_date, create_data_view
-from dfm_python.engine.time import TimeIndex, datetime_range
+from dfm_python.core.time import TimeIndex, datetime_range
 from adapters import BasicDataViewManager
 
 

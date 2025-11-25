@@ -1,20 +1,7 @@
-"""High-level API for Dynamic Factor Model (convenience layer).
+"""High-level model API classes for Dynamic Factor Models.
 
-This module provides an object-oriented interface for DFM estimation
-on top of the core `DFM` in `dfm.py`. Use this for a simpler, more
-intuitive workflow:
-
-Example:
-    >>> import dfm_python as dfm
-    >>> dfm.load_config('config/default.yaml')
-    >>> dfm.load_data('data/sample_data.csv')
-    >>> dfm.train(max_iter=1)
-    >>> # Forecast and plot
-    >>> Xf, Zf = dfm.predict(horizon=6)
-    >>> dfm.plot(kind='factor', factor_index=0, forecast_horizon=6, save_path='outputs/factor_forecast.png')
-    >>> # Access results
-    >>> result = dfm.get_result()
-    >>> factors = result.Z
+This module contains the DFMBase, DFM, and DDFM classes that provide
+object-oriented interfaces for DFM estimation.
 """
 
 import os
@@ -22,38 +9,33 @@ import pickle
 from typing import Optional, Union, Dict, Any, Tuple, List, Sequence
 from pathlib import Path
 from datetime import datetime, timedelta
-import uuid
-from dataclasses import asdict
 import numpy as np
 import polars as pl
 
-from .config import (
+from ..config import (
     DFMConfig, Params,
     make_config_source,
     ConfigSource,
     MergedConfigSource,
 )
-from .data import load_data as _load_data, DataView, create_data_view
-from .config_sources import _load_config_from_dataframe, _write_series_blocks_yaml
-from .dfm import DFMCore, DFMResult
-from .nowcasting import Nowcast
-from .engine.helpers import (
+from ..dataloader.loader import load_data as _load_data, DataView, create_data_view
+from ..models.dfm import DFMLinear
+# DFMCore is now an alias for DFMLinear (backward compatibility)
+DFMCore = DFMLinear
+from ..core.results import DFMResult
+from ..nowcasting import Nowcast
+from ..core.helpers import (
     safe_get_method,
     safe_get_attr,
-    get_series_ids,
     find_series_index,
-    get_series_id_by_index,
-    get_frequencies_from_config,
     get_clock_frequency,
-    _validate_series_id,
     _validate_config_loaded,
     _validate_data_loaded,
     _validate_result_loaded,
 )
-from .engine.time import (
+from ..core.time import (
     TimeIndex,
     datetime_range,
-    parse_timestamp,
     get_next_period_end,
     clock_to_datetime_freq,
     get_latest_time,
@@ -63,26 +45,42 @@ from .engine.time import (
 )
 
 
-class DFM(DFMCore):
-    """High-level API for Dynamic Factor Model estimation.
+def _convert_time_index_to_list(time_index: Optional[Any]) -> List[Any]:
+    """Convert time index to list format for plotting/display.
     
-    This class provides a simple, object-oriented interface for DFM operations.
-    It maintains state (config, data, results) and provides convenient methods
-    for loading configuration, data, training, prediction, and plotting.
+    Parameters
+    ----------
+    time_index : TimeIndex, list, or compatible
+        Time index to convert
+        
+    Returns
+    -------
+    List[Any]
+        List representation of time index
+    """
+    if time_index is None:
+        return []
+    if isinstance(time_index, TimeIndex):
+        return time_index.to_list()
+    if hasattr(time_index, '__iter__') and not isinstance(time_index, (str, bytes)):
+        return list(time_index)
+    # Fallback: try to index
+    try:
+        return [time_index[i] for i in range(len(time_index))]
+    except (TypeError, AttributeError):
+        return []
+
+
+class DFMBase(DFMLinear):
+    """Base class for high-level DFM API classes.
     
-    Example:
-        >>> import dfm_python as dfm
-        >>> dfm.load_config('config/default.yaml')
-        >>> dfm.load_data('data/sample_data.csv')
-        >>> dfm.train(max_iter=1)
-        >>> Xf, Zf = dfm.predict(horizon=6)
-        >>> dfm.plot(kind='factor', factor_index=0, forecast_horizon=6, save_path='outputs/factor_forecast.png')
-        >>> print(dfm.get_result().converged)
-        >>> factors = dfm.get_result().Z
+    This class contains shared functionality for both linear DFM and DDFM
+    high-level API classes, including configuration loading, data loading,
+    prediction, plotting, and nowcasting.
     """
     
     def __init__(self):
-        """Initialize DFM instance with empty state."""
+        """Initialize base DFM instance with empty state."""
         super().__init__()
         self._time: Optional[TimeIndex] = None
         self._original_data: Optional[np.ndarray] = None
@@ -119,7 +117,7 @@ class DFM(DFMCore):
         base: Optional[Union[str, Path, Dict[str, Any], ConfigSource]] = None,
         override: Optional[Union[str, Path, Dict[str, Any], ConfigSource]] = None,
         config: Optional[Any] = None,
-    ) -> 'DFM':
+    ) -> 'DFMBase':
         """Load configuration from various sources.
         
         Unified interface for YAML files, dictionaries, spec CSV, or Hydra configs.
@@ -158,7 +156,7 @@ class DFM(DFMCore):
     def load_data(self, 
                   data_path: Optional[Union[str, Path]] = None,
                   data: Optional[np.ndarray] = None,
-                  **kwargs) -> 'DFM':
+                  **kwargs) -> 'DFMBase':
         """Load data from file or use provided array."""
         _validate_config_loaded(self._config, "config")
         
@@ -198,7 +196,7 @@ class DFM(DFMCore):
         data: Optional[np.ndarray] = None,
         time_index: Optional[Union[TimeIndex, Sequence[Any], np.ndarray]] = None,
         original_data: Optional[np.ndarray] = None,
-    ) -> 'DFM':
+    ) -> 'DFMBase':
         """Load a previously saved DFMResult (and optional data) for fast inference.
         
         Parameters
@@ -219,7 +217,7 @@ class DFM(DFMCore):
         
         Returns
         -------
-        DFM
+        DFMBase
             The current instance with restored state.
         """
         path = Path(path)
@@ -292,34 +290,6 @@ class DFM(DFMCore):
         self._invalidate_nowcast_cache()
         return self
     
-    def train(self, 
-              threshold: Optional[float] = None,
-              max_iter: Optional[int] = None,
-              **kwargs) -> 'DFM':
-        """Train the DFM model using EM algorithm."""
-        _validate_config_loaded(self._config, "config")
-        _validate_data_loaded(self._data, "data")
-        
-        self._result = self.fit(
-            self._data,
-            self._config,
-            threshold=threshold,
-            max_iter=max_iter,
-            **kwargs
-        )
-        # Attach metadata for convenient OOP access
-        if self._time is not None:
-            self._result.time_index = self._time
-        series_ids = safe_get_method(self._config, 'get_series_ids')
-        if series_ids is not None:
-            self._result.series_ids = series_ids
-        block_names = safe_get_attr(self._config, 'block_names')
-        if block_names is not None:
-            self._result.block_names = block_names
-        self._auto_save_result()
-        self._invalidate_nowcast_cache()
-        return self
-    
     def _invalidate_nowcast_cache(self) -> None:
         """Invalidate cached Nowcast instance.
         
@@ -343,7 +313,7 @@ class DFM(DFMCore):
             schema = list(series_ids[:self._data.shape[1]])
         self._data_frame = pl.DataFrame(self._data, schema=schema)
     
-    def reset(self) -> 'DFM':
+    def reset(self) -> 'DFMBase':
         """Reset all state (config, data, results)."""
         super().__init__()
         self._time = None
@@ -351,7 +321,7 @@ class DFM(DFMCore):
         self._data_frame = None
         self._invalidate_nowcast_cache()
         return self
-
+    
     def _auto_save_result(self) -> None:
         """Persist the latest DFMResult next to Hydra outputs (if available)."""
         if self._result is None or self._config is None:
@@ -373,11 +343,8 @@ class DFM(DFMCore):
         with open(save_path, 'wb') as f:
             pickle.dump(payload, f)
         
-        print(f"✓ Model result auto-saved to {save_path}")
+        _logger.info(f"✓ Model result auto-saved to {save_path}")
     
-    # ---------------------------------------------------------------------
-    # Inference API
-    # ---------------------------------------------------------------------
     def predict(self, horizon: Optional[int] = None, *, return_series: bool = True, return_factors: bool = True) -> Union[Tuple[np.ndarray, np.ndarray], np.ndarray]:
         """Forecast series and/or factors for a given horizon using the trained model.
         
@@ -415,7 +382,7 @@ class DFM(DFMCore):
         
         # Default horizon: 1 period based on clock frequency (generic)
         if horizon is None:
-            from .engine.utils import get_periods_per_year
+            from ..core.structure import get_periods_per_year
             clock = get_clock_frequency(self._config, 'm')
             # Default to 1 year worth of periods based on clock frequency
             horizon = get_periods_per_year(clock)
@@ -429,13 +396,40 @@ class DFM(DFMCore):
         Wx = self._result.Wx
         Mx = self._result.Mx
         Z_last = self._result.Z[-1, :]
+        p = self._result.p  # VAR order
         
-        # Deterministic forecast: iteratively apply transition matrix A
-        # Z_{t+h} = A^h Z_t (deterministic forward projection)
-        Z_forecast = np.zeros((horizon, Z_last.shape[0]))
-        Z_forecast[0, :] = A @ Z_last
-        for h in range(1, horizon):
-            Z_forecast[h, :] = A @ Z_forecast[h - 1, :]
+        # Deterministic forecast: handle VAR(1) and VAR(2)
+        if p == 1:
+            Z_forecast = np.zeros((horizon, Z_last.shape[0]))
+            Z_forecast[0, :] = A @ Z_last
+            for h in range(1, horizon):
+                Z_forecast[h, :] = A @ Z_forecast[h - 1, :]
+        elif p == 2:
+            # VAR(2): need last two factor values
+            if self._result.Z.shape[0] < 2:
+                # Fallback to VAR(1) if not enough history
+                Z_forecast = np.zeros((horizon, Z_last.shape[0]))
+                A1 = A[:, :Z_last.shape[0]]
+                Z_forecast[0, :] = A1 @ Z_last
+                for h in range(1, horizon):
+                    Z_forecast[h, :] = A1 @ Z_forecast[h - 1, :]
+            else:
+                Z_prev = self._result.Z[-2, :]  # f_{t-2}
+                A1 = A[:, :Z_last.shape[0]]
+                A2 = A[:, Z_last.shape[0]:]
+                Z_forecast = np.zeros((horizon, Z_last.shape[0]))
+                Z_forecast[0, :] = A1 @ Z_last + A2 @ Z_prev
+                if horizon > 1:
+                    Z_forecast[1, :] = A1 @ Z_forecast[0, :] + A2 @ Z_last
+                for h in range(2, horizon):
+                    Z_forecast[h, :] = A1 @ Z_forecast[h - 1, :] + A2 @ Z_forecast[h - 2, :]
+        else:
+            # Fallback to VAR(1) behavior
+            Z_forecast = np.zeros((horizon, Z_last.shape[0]))
+            A1 = A[:, :Z_last.shape[0]] if A.shape[1] > Z_last.shape[0] else A
+            Z_forecast[0, :] = A1 @ Z_last
+            for h in range(1, horizon):
+                Z_forecast[h, :] = A1 @ Z_forecast[h - 1, :]
         
         # Transform factors to observed series: X = Z @ C^T, then denormalize
         X_forecast_std = Z_forecast @ C.T
@@ -462,10 +456,7 @@ class DFM(DFMCore):
         
         # Build time axis
         if self._time is not None:
-            if isinstance(self._time, TimeIndex):
-                time_hist = self._time.to_list()
-            else:
-                time_hist = list(self._time) if hasattr(self._time, '__iter__') else [self._time[i] for i in range(len(self._time))]
+            time_hist = _convert_time_index_to_list(self._time)
         else:
             # Generate default time index based on clock frequency
             clock = get_clock_frequency(self._config, 'm')
@@ -756,7 +747,7 @@ class DFM(DFMCore):
         
         # Set default lookback based on clock frequency if not provided
         if lookback is None:
-            from .engine.utils import get_periods_per_year
+            from ..core.structure import get_periods_per_year
             clock = get_clock_frequency(self._config, 'm')
             lookback = get_periods_per_year(clock)
         
@@ -890,241 +881,268 @@ class DFM(DFMCore):
         features = np.concatenate([part for part in feature_parts if part.size > 0])
         
         return features
-
-
-# Create a singleton instance for module-level usage
-_dfm_instance = DFM()
-
-
-# Module-level convenience functions that delegate to the singleton
-def load_config(
-    source: Optional[Union[str, Path, Dict[str, Any], DFMConfig, ConfigSource]] = None,
-    *,
-    yaml: Optional[Union[str, Path]] = None,
-    mapping: Optional[Dict[str, Any]] = None,
-    hydra: Optional[Union[Dict[str, Any], 'DictConfig']] = None,
-    base: Optional[Union[str, Path, Dict[str, Any], ConfigSource]] = None,
-    override: Optional[Union[str, Path, Dict[str, Any], ConfigSource]] = None,
-) -> DFM:
-    """Load configuration (module-level convenience function)."""
-    return _dfm_instance.load_config(
-        source=source,
-        yaml=yaml,
-        mapping=mapping,
-        hydra=hydra,
-        base=base,
-        override=override,
-    )
-
-
-def load_data(data_path: Optional[Union[str, Path]] = None,
-               data: Optional[np.ndarray] = None,
-               **kwargs) -> DFM:
-    """Load data (module-level convenience function)."""
-    return _dfm_instance.load_data(data_path=data_path, data=data, **kwargs)
-
-
-def train(threshold: Optional[float] = None,
-          max_iter: Optional[int] = None,
-          **kwargs) -> DFM:
-    """Train the model (module-level convenience function)."""
-    return _dfm_instance.train(threshold=threshold, max_iter=max_iter, **kwargs)
-
-
-def predict(horizon: Optional[int] = None, **kwargs):
-    """Forecast using the trained model (module-level convenience function)."""
-    return _dfm_instance.predict(horizon=horizon, **kwargs)
-
-
-def plot(**kwargs):
-    """Plot common visualizations (module-level convenience function)."""
-    return _dfm_instance.plot(**kwargs)
-
-
-def load_pickle(path: Union[str, Path], **kwargs) -> DFM:
-    """Load a saved model payload (module-level convenience function)."""
-    return _dfm_instance.load_pickle(path, **kwargs)
-
-
-def reset() -> DFM:
-    """Reset state (module-level convenience function)."""
-    return _dfm_instance.reset()
-
-
-def create_model(model_type: str = 'dfm', **kwargs):
-    """Create a factor model instance.
     
-    Factory function to create different types of factor models.
+    def get_result(self) -> Optional[DFMResult]:
+        """Get the training result."""
+        return self._result
     
-    Parameters
-    ----------
-    model_type : str
-        Type of model to create. Options:
-        - 'dfm' or 'linear': Linear Dynamic Factor Model (default)
-        - 'ddfm' or 'deep': Deep Dynamic Factor Model (requires PyTorch)
-    **kwargs
-        Additional arguments passed to model constructor.
-        For DDFM, these include: encoder_layers, num_factors, activation, etc.
-        
-    Returns
-    -------
-    BaseFactorModel
-        Model instance (DFM or DDFM)
-        
-    Examples
-    --------
-    >>> # Create linear DFM
-    >>> model = create_model('dfm')
-    >>> 
-    >>> # Create DDFM with custom encoder
-    >>> model = create_model('ddfm', encoder_layers=[64, 32], num_factors=2)
+    @property
+    def config(self) -> Optional[DFMConfig]:
+        """Get current configuration."""
+        return self._config
+
+
+class DFM(DFMBase):
+    """High-level API for Linear Dynamic Factor Model estimation.
+    
+    This class provides a simple, object-oriented interface for linear DFM operations.
+    It maintains state (config, data, results) and provides convenient methods
+    for loading configuration, data, training, prediction, and plotting.
+    
+    This class uses the EM algorithm for linear DFM estimation. For Deep DFM,
+    use the separate `DDFM` class.
+    
+    Example:
+        >>> import dfm_python as dfm
+        >>> model = dfm.DFM()
+        >>> model.load_config('config/default.yaml')
+        >>> model.load_data('data/sample_data.csv')
+        >>> model.train(max_iter=100)
+        >>> Xf, Zf = model.predict(horizon=6)
+        >>> model.plot(kind='factor', factor_index=0, forecast_horizon=6, save_path='outputs/factor_forecast.png')
+        >>> print(model.get_result().converged)
+        >>> factors = model.get_result().Z
     """
-    model_type = model_type.lower()
     
-    if model_type in ('dfm', 'linear'):
-        from .models.dfm import DFMLinear
-        return DFMLinear(**kwargs)
-    elif model_type in ('ddfm', 'deep'):
-        try:
-            from .models.ddfm import DDFM
-            return DDFM(**kwargs)
-        except ImportError:
-            raise ImportError(
-                "DDFM requires PyTorch. Install with: pip install dfm-python[deep]"
-            )
-    else:
-        raise ValueError(
-            f"Unknown model_type: {model_type}. "
-            f"Supported types: 'dfm', 'linear', 'ddfm', 'deep'"
+    def __init__(self):
+        """Initialize DFM instance for linear DFM only."""
+        super().__init__()
+    
+    def train(self, 
+              threshold: Optional[float] = None,
+              max_iter: Optional[int] = None,
+              **kwargs) -> 'DFM':
+        """Train the linear DFM model using EM algorithm.
+        
+        Parameters
+        ----------
+        threshold : float, optional
+            EM convergence threshold. If None, uses config.threshold.
+        max_iter : int, optional
+            Maximum EM iterations. If None, uses config.max_iter.
+        **kwargs
+            Additional parameters that override config values:
+            - ar_lag: AR lag for factors
+            - nan_method: Missing data handling method
+            - And other DFM-specific parameters
+            
+        Returns
+        -------
+        DFM
+            Self for method chaining.
+        """
+        from ..core.helpers import _validate_config_loaded, _validate_data_loaded
+        
+        _validate_config_loaded(self._config, "config")
+        _validate_data_loaded(self._data, "data")
+        
+        # Use parent class fit() method (linear DFM from DFMCore)
+        self._result = self.fit(
+            self._data,
+            self._config,
+            threshold=threshold,
+            max_iter=max_iter,
+            **kwargs
         )
-
-
-# Convenience constructors for cleaner API
-def from_yaml(yaml_path: Union[str, Path]) -> DFM:
-    """Load configuration from YAML file (convenience constructor)."""
-    return _dfm_instance.load_config(yaml=yaml_path)
-
-
-def from_spec(
-    csv_path: Union[str, Path],
-    output_dir: Optional[Union[str, Path]] = None,
-    series_filename: Optional[str] = None,
-    blocks_filename: Optional[str] = None
-) -> Tuple[Path, Path]:
-    """Convert spec CSV file to YAML configuration files.
-    
-    This function reads a spec CSV file and generates two YAML files:
-    - config/series/{basename}.yaml - series definitions
-    - config/blocks/{basename}.yaml - block definitions
-    
-    Parameters
-    ----------
-    csv_path : str or Path
-        Path to the spec CSV file
-    output_dir : str or Path, optional
-        Output directory for YAML files. Defaults to config/ directory relative to CSV.
-    series_filename : str, optional
-        Custom filename for series YAML (without .yaml extension).
-        Defaults to CSV basename.
-    blocks_filename : str, optional
-        Custom filename for blocks YAML (without .yaml extension).
-        Defaults to CSV basename.
         
-    Returns
-    -------
-    Tuple[Path, Path]
-        Paths to generated series YAML and blocks YAML files
-        
-    Examples
-    --------
-    >>> series_path, blocks_path = from_spec('data/sample_spec.csv')
-    >>> # Creates config/series/sample_spec.yaml and config/blocks/sample_spec.yaml
+        # Attach metadata for convenient OOP access
+        if self._time is not None:
+            self._result.time_index = self._time
+        series_ids = safe_get_method(self._config, 'get_series_ids')
+        if series_ids is not None:
+            self._result.series_ids = series_ids
+        block_names = safe_get_attr(self._config, 'block_names')
+        if block_names is not None:
+            self._result.block_names = block_names
+        self._auto_save_result()
+        self._invalidate_nowcast_cache()
+        return self
+
+
+class DDFM(DFMBase):
+    """High-level API for Deep Dynamic Factor Model estimation.
+    
+    This class provides a simple, object-oriented interface for DDFM operations.
+    It maintains state (config, data, results) and provides convenient methods
+    for loading configuration, data, training, prediction, and plotting.
+    
+    This class uses an autoencoder (nonlinear encoder + linear decoder) for factor
+    extraction, followed by Kalman filtering. For linear DFM, use the separate
+    `DFM` class.
+    
+    Example:
+        >>> import dfm_python as dfm
+        >>> model = dfm.DDFM(encoder_layers=[64, 32], num_factors=2)
+        >>> model.load_config('config/default.yaml')
+        >>> model.load_data('data/sample_data.csv')
+        >>> model.train(epochs=100, batch_size=32)
+        >>> Xf, Zf = model.predict(horizon=6)
+        >>> model.plot(kind='factor', factor_index=0, forecast_horizon=6)
+        >>> factors = model.get_result().Z
     """
-    from .config_sources import from_spec as _from_spec
-    return _from_spec(csv_path, output_dir, series_filename, blocks_filename)
-
-
-def from_spec_df(
-    spec_df: Union[pl.DataFrame, Any],
-    params: Optional[Params] = None,
-    *,
-    output_dir: Optional[Union[str, Path]] = None,
-    config_name: Optional[str] = None
-) -> DFM:
-    """Convert spec DataFrame to YAML files and load via YAML/Hydra."""
-    if params is None:
-        params = Params()
     
-    if not isinstance(spec_df, pl.DataFrame):
-        raise TypeError(f"spec_df must be polars DataFrame, got {type(spec_df)}")
+    def __init__(
+        self,
+        encoder_layers: Optional[List[int]] = None,
+        num_factors: Optional[int] = None,
+        activation: str = 'tanh',
+        use_batch_norm: bool = True,
+        learning_rate: float = 0.001,
+        epochs: int = 100,
+        batch_size: int = 32,
+        factor_order: int = 1,
+        use_idiosyncratic: bool = True,
+        min_obs_idio: int = 5,
+        **kwargs
+    ):
+        """Initialize DDFM high-level API instance.
+        
+        Parameters
+        ----------
+        encoder_layers : List[int], optional
+            Hidden layer dimensions for encoder. Default: [64, 32]
+        num_factors : int, optional
+            Number of factors. If None, inferred from config during fit.
+        activation : str
+            Activation function ('tanh', 'relu', 'sigmoid'). Default: 'tanh'
+        use_batch_norm : bool
+            Whether to use batch normalization in encoder. Default: True
+        learning_rate : float
+            Learning rate for Adam optimizer. Default: 0.001
+        epochs : int
+            Number of training epochs. Default: 100
+        batch_size : int
+            Batch size for training. Default: 32
+        factor_order : int
+            VAR lag order for factor dynamics (1 or 2). Default: 1
+        use_idiosyncratic : bool
+            Whether to model idiosyncratic components with AR(1) dynamics. Default: True
+        min_obs_idio : int
+            Minimum number of observations required for idio AR(1) estimation. Default: 5
+        **kwargs
+            Additional arguments (ignored for now, for future compatibility)
+        """
+        super().__init__()
+        self._ddfm_model: Optional[Any] = None  # Will store models.ddfm.DDFM instance
+        self._ddfm_kwargs = {
+            'encoder_layers': encoder_layers,
+            'num_factors': num_factors,
+            'activation': activation,
+            'use_batch_norm': use_batch_norm,
+            'learning_rate': learning_rate,
+            'epochs': epochs,
+            'batch_size': batch_size,
+            'factor_order': factor_order,
+            'use_idiosyncratic': use_idiosyncratic,
+            'min_obs_idio': min_obs_idio,
+        }
     
-    config = _load_config_from_dataframe(spec_df)
-    
-    if output_dir is None:
-        output_dir = Path('config') / 'generated'
-    else:
-        output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    
-    suffix = uuid.uuid4().hex[:6]
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    base_name = config_name or f'spec_{timestamp}_{suffix}'
-    series_filename = f'{base_name}_series'
-    blocks_filename = f'{base_name}_blocks'
-    
-    series_path, blocks_path = _write_series_blocks_yaml(
-        config,
-        output_dir,
-        series_filename,
-        blocks_filename
-    )
-    
-    main_config_path = output_dir / f'{base_name}.yaml'
-    params_dict = {k: v for k, v in asdict(params).items() if v is not None}
-    main_payload: Dict[str, Any] = {
-        'defaults': [
-            {'series': series_filename},
-            {'blocks': blocks_filename},
-            '_self_'
-        ]
-    }
-    main_payload.update(params_dict)
-    
-    def _dump_yaml(path: Path, payload: Dict[str, Any]) -> None:
-        try:
-            import yaml  # type: ignore
-            with open(path, 'w', encoding='utf-8') as f:
-                yaml.dump(payload, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
-        except ImportError:
+    def train(
+        self,
+        epochs: Optional[int] = None,
+        batch_size: Optional[int] = None,
+        learning_rate: Optional[float] = None,
+        factor_order: Optional[int] = None,
+        use_idiosyncratic: Optional[bool] = None,
+        **kwargs
+    ) -> 'DDFM':
+        """Train the DDFM model using autoencoder.
+        
+        Parameters
+        ----------
+        epochs : int, optional
+            Number of training epochs. Overrides value from __init__ or config.
+        batch_size : int, optional
+            Batch size. Overrides value from __init__ or config.
+        learning_rate : float, optional
+            Learning rate. Overrides value from __init__ or config.
+        factor_order : int, optional
+            VAR lag order (1 or 2). Overrides value from __init__ or config.
+        use_idiosyncratic : bool, optional
+            Whether to model idio components. Overrides value from __init__ or config.
+        **kwargs
+            Additional parameters passed to model.fit():
+            - encoder_layers: Override encoder architecture
+            - num_factors: Override number of factors
+            - activation: Override activation function
+            - use_batch_norm: Override batch normalization
+            - min_obs_idio: Override minimum observations for idio
+        
+        Returns
+        -------
+        DDFM
+            Self for method chaining.
+        """
+        from ..core.helpers import _validate_config_loaded, _validate_data_loaded
+        
+        _validate_config_loaded(self._config, "config")
+        _validate_data_loaded(self._data, "data")
+        
+        # Create or update DDFM model instance
+        if self._ddfm_model is None:
             try:
-                from omegaconf import OmegaConf  # type: ignore
-            except ImportError as exc:  # pragma: no cover
+                from ..models.ddfm import DDFM as DDFMModel
+            except ImportError:
                 raise ImportError(
-                    "Either PyYAML or omegaconf is required for YAML generation. "
-                    "Install with: pip install pyyaml or pip install omegaconf"
-                ) from exc
-            cfg = OmegaConf.create(payload)
-            OmegaConf.save(cfg, path)
-    
-    _dump_yaml(main_config_path, main_payload)
-    
-    print("✓ Spec DataFrame converted to YAML:")
-    print(f"  - Series YAML: {series_path}")
-    print(f"  - Blocks YAML: {blocks_path}")
-    print(f"  - Main config : {main_config_path}")
-    
-    _dfm_instance.load_config(yaml=main_config_path)
-    return _dfm_instance
-
-
-def from_dict(mapping: Dict[str, Any]) -> DFM:
-    """Load configuration from dictionary (convenience constructor)."""
-    return _dfm_instance.load_config(mapping=mapping)
-
-
-# Expose singleton instance for direct access
-# Users can access: dfm.config, dfm.data, dfm.result, etc.
-__all__ = ['DFM', 'load_config', 'load_data', 'load_pickle', 'train', 'predict', 'plot', 'reset', 
-           'from_yaml', 'from_spec', 'from_spec_df', 'from_dict']
-
+                    "DDFM requires PyTorch. Install with: pip install dfm-python[deep]"
+                )
+            
+            # Build kwargs for DDFM model
+            ddfm_kwargs = self._ddfm_kwargs.copy()
+            
+            # Override from train() parameters
+            if epochs is not None:
+                ddfm_kwargs['epochs'] = epochs
+            if batch_size is not None:
+                ddfm_kwargs['batch_size'] = batch_size
+            if learning_rate is not None:
+                ddfm_kwargs['learning_rate'] = learning_rate
+            if factor_order is not None:
+                ddfm_kwargs['factor_order'] = factor_order
+            if use_idiosyncratic is not None:
+                ddfm_kwargs['use_idiosyncratic'] = use_idiosyncratic
+            
+            # Override from config if available
+            for param in ['encoder_layers', 'num_factors', 'activation', 'use_batch_norm',
+                         'learning_rate', 'epochs', 'batch_size', 'factor_order',
+                         'use_idiosyncratic', 'min_obs_idio']:
+                if hasattr(self._config, f'ddfm_{param}'):
+                    config_val = getattr(self._config, f'ddfm_{param}')
+                    if config_val is not None and param not in kwargs:
+                        ddfm_kwargs[param] = config_val
+            
+            # Override from kwargs
+            ddfm_kwargs.update(kwargs)
+            
+            self._ddfm_model = DDFMModel(**ddfm_kwargs)
+        
+        # Fit DDFM model
+        self._result = self._ddfm_model.fit(
+            self._data,
+            self._config,
+            **kwargs
+        )
+        
+        # Attach metadata for convenient OOP access
+        if self._time is not None:
+            self._result.time_index = self._time
+        series_ids = safe_get_method(self._config, 'get_series_ids')
+        if series_ids is not None:
+            self._result.series_ids = series_ids
+        block_names = safe_get_attr(self._config, 'block_names')
+        if block_names is not None:
+            self._result.block_names = block_names
+        self._auto_save_result()
+        self._invalidate_nowcast_cache()
+        return self
 

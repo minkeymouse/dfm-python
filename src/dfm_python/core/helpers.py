@@ -280,7 +280,7 @@ def infer_nQ(frequencies: Optional[np.ndarray], clock: str) -> int:
     - Uses FREQUENCY_HIERARCHY to compare frequencies
     - Clock frequency is typically 'm' (monthly)
     """
-    from .utils import FREQUENCY_HIERARCHY
+    from .structure import FREQUENCY_HIERARCHY
     
     if frequencies is None:
         return 0
@@ -289,13 +289,13 @@ def infer_nQ(frequencies: Optional[np.ndarray], clock: str) -> int:
     return sum(1 for f in frequencies if FREQUENCY_HIERARCHY.get(f, 3) > clock_h)
 
 
-def get_tent_weights(
+def resolve_tent_weights(
     freq: str,
     clock: str,
     tent_weights_dict: Optional[Dict[str, np.ndarray]],
     logger: Optional[Any] = None
 ) -> Optional[np.ndarray]:
-    """Safely get tent weights for a frequency pair with fallback generation.
+    """Resolve tent weights for a frequency pair with fallback generation.
     
     Parameters
     ----------
@@ -319,7 +319,7 @@ def get_tent_weights(
     - Uses FREQUENCY_HIERARCHY to determine number of periods
     - Raises ValueError if frequency pair cannot be handled
     """
-    from .utils import FREQUENCY_HIERARCHY, get_tent_weights_for_pair, generate_tent_weights
+    from .structure import FREQUENCY_HIERARCHY, get_tent_weights_for_pair, generate_tent_weights
     
     if logger is None:
         logger = _logger
@@ -340,10 +340,10 @@ def get_tent_weights(
     
     if 0 < n_periods_est <= 12:
         tent_weights = generate_tent_weights(n_periods_est, 'symmetric')
-        logger.warning(f"get_tent_weights: generated symmetric tent weights for '{freq}'")
+        logger.warning(f"resolve_tent_weights: generated symmetric tent weights for '{freq}'")
         return tent_weights
     else:
-        raise ValueError(f"get_tent_weights: cannot determine tent weights for '{freq}'")
+        raise ValueError(f"resolve_tent_weights: cannot determine tent weights for '{freq}'")
 
 
 # ============================================================================
@@ -666,7 +666,7 @@ def reg_inv(
     - Uses regularization for numerical stability (MATLAB uses direct inversion)
     - Handles both matrix and vector numerators
     """
-    from .numeric import _compute_regularization_param
+    from .state_space import _compute_regularization_param
     
     try:
         scale_factor = safe_get_attr(config, "regularization_scale", default_scale)
@@ -924,7 +924,7 @@ def stabilize_cov(
     - Re-applies min variance after each operation that might affect diagonal
     - Used in em_step for Q block updates
     """
-    from .numeric import (
+    from .state_space import (
         _clean_matrix,
         _ensure_positive_definite,
         _cap_max_eigenvalue,
@@ -1013,7 +1013,7 @@ def validate_params(
     - Logs warnings when cleaning is applied
     - Used in em_step for input validation
     """
-    from .numeric import _check_finite, _clean_matrix
+    from .state_space import _check_finite, _clean_matrix
     
     if not _check_finite(A, "A"):
         _logger.warning(
@@ -1158,6 +1158,7 @@ def get_units_from_config(config: Any, series_index: int) -> Optional[str]:
 # Backward compatibility aliases (deprecated)
 _get_frequencies_from_config = get_frequencies_from_config
 _get_units_from_config = get_units_from_config
+get_tent_weights = resolve_tent_weights  # Alias for backward compatibility
 
 
 # Time-related functions moved to core.time module

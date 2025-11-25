@@ -14,7 +14,7 @@ from ..config import DFMConfig
 _logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from ..dfm import DFMResult
+    from .results import DFMResult
 else:
     # Avoid circular import at runtime
     DFMResult = Any
@@ -615,35 +615,34 @@ def print_series_diagnosis(Res: DFMResult, config: DFMConfig,
         
     Notes
     -----
-    - This function uses print() for user-facing output, as it's intended
-      to be called directly by users who want to see diagnostic information
+    - This function uses logger.info() for user-facing output
     - Calls diagnose_series() internally to compute statistics
-    - Prints formatted report with section headers and clear labels
+    - Logs formatted report with section headers and clear labels
     """
     diag = diagnose_series(Res, config, series_name=series_name, series_idx=series_idx)
-    print(f"\n{'='*70}")
-    print(f"DIAGNOSTIC REPORT: {diag['series_name']}")
-    print(f"{'='*70}\n")
-    print("RMSE Statistics:")
-    print(f"  Original scale:     {diag['rmse_original']:.6e}" if diag['rmse_original'] is not None else "  Original scale:     N/A")
-    print(f"  Standardized scale: {diag['rmse_standardized']:.6f} std dev" if diag['rmse_standardized'] is not None else "  Standardized scale: N/A")
+    _logger.info(f"\n{'='*70}")
+    _logger.info(f"DIAGNOSTIC REPORT: {diag['series_name']}")
+    _logger.info(f"{'='*70}\n")
+    _logger.info("RMSE Statistics:")
+    _logger.info(f"  Original scale:     {diag['rmse_original']:.6e}" if diag['rmse_original'] is not None else "  Original scale:     N/A")
+    _logger.info(f"  Standardized scale: {diag['rmse_standardized']:.6f} std dev" if diag['rmse_standardized'] is not None else "  Standardized scale: N/A")
     if diag['rmse_pct_of_mean'] is not None:
-        print(f"  As % of mean:       {diag['rmse_pct_of_mean']:.2f}%")
+        _logger.info(f"  As % of mean:       {diag['rmse_pct_of_mean']:.2f}%")
     if diag['rmse_in_std_devs'] is not None:
-        print(f"  In std deviations: {diag['rmse_in_std_devs']:.2f}x")
-    print("\nStandardization Values:")
-    print(f"  Mean:  {diag['mean']:.6e}" if not np.isnan(diag['mean']) else "  Mean:  N/A")
-    print(f"  Std:   {diag['std']:.6e}" if not np.isnan(diag['std']) else "  Std:   N/A")
-    print("\nFactor Loadings:")
+        _logger.info(f"  In std deviations: {diag['rmse_in_std_devs']:.2f}x")
+    _logger.info("\nStandardization Values:")
+    _logger.info(f"  Mean:  {diag['mean']:.6e}" if not np.isnan(diag['mean']) else "  Mean:  N/A")
+    _logger.info(f"  Std:   {diag['std']:.6e}" if not np.isnan(diag['std']) else "  Std:   N/A")
+    _logger.info("\nFactor Loadings:")
     if len(diag['factor_loadings']) > 0:
-        print(f"  Number of loadings: {len(diag['factor_loadings'])}")
-        print(f"  Max absolute:       {diag['max_loading']:.6f}" if not np.isnan(diag['max_loading']) else "  Max absolute:       N/A")
-        print(f"  Sum of squares:     {diag['loading_sum_sq']:.6f}" if not np.isnan(diag['loading_sum_sq']) else "  Sum of squares:     N/A")
+        _logger.info(f"  Number of loadings: {len(diag['factor_loadings'])}")
+        _logger.info(f"  Max absolute:       {diag['max_loading']:.6f}" if not np.isnan(diag['max_loading']) else "  Max absolute:       N/A")
+        _logger.info(f"  Sum of squares:     {diag['loading_sum_sq']:.6f}" if not np.isnan(diag['loading_sum_sq']) else "  Sum of squares:     N/A")
         abs_loadings = np.abs(diag['factor_loadings'])
         top_indices = np.argsort(abs_loadings)[-5:][::-1]
-        print(f"  Top 5 loadings:")
+        _logger.info(f"  Top 5 loadings:")
         for idx in top_indices:
-            print(f"    Factor {idx:3d}: {diag['factor_loadings'][idx]:8.4f}")
+            _logger.info(f"    Factor {idx:3d}: {diag['factor_loadings'][idx]:8.4f}")
     else:
-        print("  No loadings available")
-    print(f"\n{'='*70}\n")
+        _logger.info("  No loadings available")
+    _logger.info(f"\n{'='*70}\n")

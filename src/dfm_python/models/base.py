@@ -9,7 +9,7 @@ from typing import Optional, Union, Tuple
 import numpy as np
 
 from ..config import DFMConfig
-from ..dfm import DFMResult
+from ..core.results import DFMResult
 
 
 class BaseFactorModel(ABC):

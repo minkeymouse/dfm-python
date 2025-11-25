@@ -7,6 +7,7 @@ This package implements a comprehensive Dynamic Factor Model framework with supp
 - Expectation-Maximization (EM) algorithm for parameter estimation
 - Kalman filtering and smoothing for factor extraction
 - News decomposition for nowcasting
+- Deep Dynamic Factor Models (DDFM) with nonlinear encoders (optional, requires PyTorch)
 
 The package implements a clock-based approach to mixed-frequency DFMs, where all latent 
 factors (global and block-level) are synchronized to a common "clock" frequency, typically 
@@ -25,16 +26,23 @@ Key Features:
 
 Example (High-level API - Recommended):
     >>> import dfm_python as dfm
-    >>> dfm.load_config('config/default.yaml')
-    >>> dfm.load_data('data/sample_data.csv')
-    >>> dfm.train(max_iter=1)
-    >>> Xf, Zf = dfm.predict(horizon=6)
-    >>> dfm.plot(kind='factor', factor_index=0, forecast_horizon=6, save_path='outputs/factor_forecast.png')
-    >>> factors = dfm.get_result().Z  # Access factors via result
+    >>> # Linear DFM
+    >>> model = dfm.DFM()
+    >>> model.load_config('config/default.yaml')
+    >>> model.load_data('data/sample_data.csv')
+    >>> model.train(max_iter=100)
+    >>> Xf, Zf = model.predict(horizon=6)
+    >>> 
+    >>> # Or use DDFM (separate class)
+    >>> ddfm_model = dfm.DDFM(encoder_layers=[64, 32], num_factors=2)
+    >>> ddfm_model.load_config('config/default.yaml')
+    >>> ddfm_model.load_data('data/sample_data.csv')
+    >>> ddfm_model.train(epochs=100)
+    >>> Xf, Zf = ddfm_model.predict(horizon=6)
     
 Example (Low-level API - For advanced usage):
     >>> from dfm_python import DFM, DFMConfig, SeriesConfig
-    >>> from dfm_python.data import load_data  # Preferred import
+    >>> from dfm_python.dataloader import load_data  # Preferred import
     >>> # Option 1: Load from YAML
     >>> config = load_config('config.yaml')
     >>> # Option 2: Create directly
@@ -52,36 +60,79 @@ For detailed documentation, see the README.md file and the tutorial notebooks/sc
 
 __version__ = "0.3.0"
 
+# ============================================================================
+# PUBLIC API DEFINITION
+# ============================================================================
+# This __init__.py is the single source of truth for the public API.
+# All symbols exported here are considered stable public API.
+# Internal reorganization should not break these imports.
+#
+# Public API categories:
+# 1. Configuration: DFMConfig, SeriesConfig, BlockConfig, Params, config sources
+# 2. High-level API: DFM, DDFM, module-level convenience functions
+# 3. Core utilities: DFMCore, run_kf, TimeIndex, diagnostics
+# 4. Models: BaseFactorModel, DFMLinear, DDFM (low-level)
+# 5. Nowcasting: Nowcast, result classes, para_const
+# 6. Data & Results: DFMResult, transform_data
+# ============================================================================
+
+# Configuration (from config/ subpackage)
 from .config import (
     DFMConfig, SeriesConfig, BlockConfig, Params, DEFAULT_GLOBAL_BLOCK_NAME,
     ConfigSource, YamlSource, DictSource, HydraSource,
     MergedConfigSource, make_config_source,
 )
-from .data import transform_data
-from .dfm import DFMResult
-from .engine import calculate_rmse, diagnose_series, print_series_diagnosis
-from .dfm import DFMCore  # Core DFM class from dfm.py
-from .engine.kalman import run_kf, skf, fis, miss_data
-from .nowcasting import Nowcast, para_const, NowcastResult, NewsDecompResult, BacktestResult
 
-# Import high-level API (extends core DFM with convenience methods)
-# Import module-level convenience functions directly from api.py to avoid duplication
+# Data utilities
+from .dataloader import transform_data
+
+# Results
+from .core import DFMResult
+
+# Core utilities (from core/ subpackage)
+from .core import calculate_rmse, diagnose_series, print_series_diagnosis
+from .core.state_space import run_kf, skf, fis, miss_data
+# DFMCore is now an alias for DFMLinear (backward compatibility)
+from .models.dfm import DFMLinear
+DFMCore = DFMLinear
+
+# Nowcasting (already in nowcasting/ subpackage)
+from .nowcasting import (
+    Nowcast,
+    para_const,
+    NowcastResult,
+    NewsDecompResult,
+    BacktestResult,
+)
+
+# High-level API (from api/ subpackage)
 from .api import (
     DFM, _dfm_instance, from_yaml, from_spec, from_spec_df, from_dict,
     load_config, load_data, load_pickle, train, predict, plot, reset, create_model
 )
 
-# Import model implementations
+# Model implementations
 from .models.base import BaseFactorModel
 from .models.dfm import DFMLinear
 
-# DDFM is optional (requires PyTorch)
+# DDFM high-level API and low-level model (both optional, requires PyTorch)
 try:
-    from .models.ddfm import DDFM
+    from .api import DDFM as DDFMAPI, _ddfm_instance
+    from .api import load_config_ddfm, load_data_ddfm, train_ddfm, predict_ddfm, plot_ddfm, reset_ddfm
+    from .models.ddfm import DDFM as DDFMModel
     _has_ddfm = True
+    # Export high-level API as DDFM
+    DDFM = DDFMAPI
 except ImportError:
     _has_ddfm = False
     DDFM = None  # type: ignore
+    DDFMModel = None  # type: ignore
+    load_config_ddfm = None  # type: ignore
+    load_data_ddfm = None  # type: ignore
+    train_ddfm = None  # type: ignore
+    predict_ddfm = None  # type: ignore
+    plot_ddfm = None  # type: ignore
+    reset_ddfm = None  # type: ignore
 
 # Expose properties as module-level attributes
 # Use property-like access via functions or direct attribute access
@@ -132,7 +183,11 @@ __all__ = [
     'para_const',  # Internal utility, kept for backward compatibility
 ]
 
-# Add DDFM to exports if available
+# Add DDFM high-level API and convenience functions if available
 if _has_ddfm:
-    __all__.append('DDFM')
+    __all__.extend([
+        'DDFM',  # High-level API class
+        'load_config_ddfm', 'load_data_ddfm', 'train_ddfm', 
+        'predict_ddfm', 'plot_ddfm', 'reset_ddfm'
+    ])
 

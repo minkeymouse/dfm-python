@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root / 'src'))
 
-from dfm_python.engine.kalman import skf, fis, miss_data, KalmanFilterState
+from dfm_python.core.state_space import skf, fis, miss_data, KalmanFilterState
 
 # ============================================================================
 # Helper Functions
@@ -187,7 +187,7 @@ def test_fis_all_missing_observations():
         Sf = skf(y_all_missing, A, C, Q, R, Z_0, V_0)
     
     # Run smoother
-    from dfm_python.engine.kalman import fis
+    from dfm_python.core.state_space import fis
     Ss = fis(A, Sf)
     
     assert Ss is not None

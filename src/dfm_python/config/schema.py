@@ -1,23 +1,17 @@
-"""Configuration models and factory methods for DFM nowcasting.
+"""Configuration schema for DFM.
 
-This module provides the core configuration system for Dynamic Factor Models:
+This module provides the core configuration dataclasses and validation:
 - Configuration dataclasses (DFMConfig, SeriesConfig, BlockConfig, Params)
 - Factory methods for creating DFMConfig from dictionaries and Hydra configs
+- Validation functions (validate_frequency, validate_transformation)
 
 The configuration dataclasses define:
 - Model structure (series, blocks, factors)
 - Estimation parameters (EM algorithm settings)
 - Numerical stability controls (regularization, clipping, damping)
 
-Factory methods support:
-- Dictionary configurations (legacy format, new format, Hydra format)
-- Hydra DictConfig objects (via from_hydra())
-
 For loading configurations from files (YAML, Spec CSV) or other sources,
-see the config_sources module which provides source adapters.
-
-Note: Source adapter classes (YamlSource, DictSource, etc.) are re-exported
-from config_sources for backward compatibility.
+see the config.io module which provides source adapters.
 """
 
 import numpy as np
@@ -371,6 +365,20 @@ class DFMConfig:
     idio_min_var: float = 1e-8  # Minimum variance for idiosyncratic innovation covariance (default: 1e-8)
     
     # ========================================================================
+    # DDFM (Deep Dynamic Factor Model) Parameters (optional)
+    # ========================================================================
+    ddfm_encoder_layers: Optional[List[int]] = None  # Hidden layer dimensions for encoder (default: [64, 32])
+    ddfm_num_factors: Optional[int] = None  # Number of factors (inferred from config if None)
+    ddfm_activation: str = 'tanh'  # Activation function ('tanh', 'relu', 'sigmoid', default: 'tanh')
+    ddfm_use_batch_norm: bool = True  # Use batch normalization in encoder (default: True)
+    ddfm_learning_rate: float = 0.001  # Learning rate for Adam optimizer (default: 0.001)
+    ddfm_epochs: int = 100  # Number of training epochs (default: 100)
+    ddfm_batch_size: int = 32  # Batch size for training (default: 32)
+    ddfm_factor_order: int = 1  # VAR lag order for factor dynamics (1 or 2, default: 1)
+    ddfm_use_idiosyncratic: bool = True  # Model idio components with AR(1) dynamics (default: True)
+    ddfm_min_obs_idio: int = 5  # Minimum observations for idio AR(1) estimation (default: 5)
+    
+    # ========================================================================
     # Internal cache (not user-configurable)
     # ========================================================================
     _cached_blocks: Optional[np.ndarray] = field(default=None, init=False, repr=False)
@@ -394,7 +402,7 @@ class DFMConfig:
             indicating what needs to be fixed.
         """
         # Import frequency hierarchy for validation
-        from .engine.utils import FREQUENCY_HIERARCHY
+        from ..core.structure import FREQUENCY_HIERARCHY
         
         if not self.series:
             raise ValueError(
@@ -566,7 +574,7 @@ class DFMConfig:
         ...     print("Errors:", report['errors'])
         ...     print("Suggestions:", report['suggestions'])
         """
-        from .engine.utils import FREQUENCY_HIERARCHY
+        from ..core.structure import FREQUENCY_HIERARCHY
         
         report = {
             'valid': True,
@@ -652,8 +660,8 @@ class DFMConfig:
     
     @classmethod
     def _extract_estimation_params(cls, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Extract estimation parameters from dictionary (helper to reduce duplication)."""
-        return {
+        """Extract estimation parameters and DDFM parameters from config dict."""
+        params = {
             'ar_lag': data.get('ar_lag', 1),
             'threshold': data.get('threshold', 1e-5),
             'max_iter': data.get('max_iter', 5000),
@@ -680,8 +688,20 @@ class DFMConfig:
             'augment_idio': data.get('augment_idio', True),
             'augment_idio_slow': data.get('augment_idio_slow', True),
             'idio_rho0': data.get('idio_rho0', 0.1),
-            'idio_min_var': data.get('idio_min_var', 1e-8)
+            'idio_min_var': data.get('idio_min_var', 1e-8),
+            # DDFM parameters (optional)
+            'ddfm_encoder_layers': data.get('ddfm_encoder_layers', None),
+            'ddfm_num_factors': data.get('ddfm_num_factors', None),
+            'ddfm_activation': data.get('ddfm_activation', 'tanh'),
+            'ddfm_use_batch_norm': data.get('ddfm_use_batch_norm', True),
+            'ddfm_learning_rate': data.get('ddfm_learning_rate', 0.001),
+            'ddfm_epochs': data.get('ddfm_epochs', 100),
+            'ddfm_batch_size': data.get('ddfm_batch_size', 32),
+            'ddfm_factor_order': data.get('ddfm_factor_order', 1),
+            'ddfm_use_idiosyncratic': data.get('ddfm_use_idiosyncratic', True),
+            'ddfm_min_obs_idio': data.get('ddfm_min_obs_idio', 5),
         }
+        return params
     
     @classmethod
     def _from_hydra_dict(cls, data: Dict[str, Any]) -> 'DFMConfig':
@@ -870,30 +890,7 @@ class DFMConfig:
         return cls.from_dict(cfg)
 
 
-# ============================================================================
-# Configuration Source Adapters
-# ============================================================================
-
-# Import ConfigSource classes from separate module
-from .config_sources import (
-    ConfigSource,
-    YamlSource,
-    DictSource,
-    HydraSource,
-    MergedConfigSource,
-    make_config_source,
-)
-
-# Re-export for backward compatibility
-__all__ = [
-    'DFMConfig', 'SeriesConfig', 'BlockConfig', 'Params',
-    'DEFAULT_GLOBAL_BLOCK_NAME',
-    'ConfigSource', 'YamlSource', 'DictSource',
-    'HydraSource', 'MergedConfigSource', 'make_config_source',
-]
-
-# Legacy class definitions removed - now in config_sources.py
-# For backward compatibility, classes are imported and re-exported above
+# Note: ConfigSource classes and IO functions are in config/io.py
 
 
 # ============================================================================

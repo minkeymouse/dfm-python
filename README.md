@@ -913,7 +913,9 @@ Complete reference for `DFMResult`:
 
 ## Deep Dynamic Factor Models (DDFM)
 
-The package now includes support for **Deep Dynamic Factor Models (DDFM)**, which use nonlinear encoders to extract factors from observed data. DDFM is particularly useful when the relationship between observed variables and latent factors is nonlinear.
+The package includes support for **Deep Dynamic Factor Models (DDFM)**, which use nonlinear encoders to extract factors from observed data. DDFM is particularly useful when the relationship between observed variables and latent factors is nonlinear.
+
+**Note**: DDFM has a **separate high-level API class** (`dfm_python.DDFM`) from the linear DFM class (`dfm_python.DFM`). Both classes share the same interface (load_config, load_data, train, predict, plot) but use different underlying models.
 
 ### When to Use DDFM vs Linear DFM
 
@@ -934,10 +936,19 @@ The package now includes support for **Deep Dynamic Factor Models (DDFM)**, whic
 The DDFM implementation uses:
 - **Nonlinear Encoder**: Multi-layer perceptron (MLP) to extract factors from observations
 - **Linear Decoder**: Linear transformation from factors back to observations (for interpretability)
-- **Linear Dynamics**: VAR(1) dynamics for factors (estimated via OLS)
-- **Kalman Smoothing**: Final smoothing step using Kalman filter
+- **Linear Dynamics**: VAR(1) or VAR(2) dynamics for factors (estimated via OLS)
+- **Idiosyncratic Modeling**: AR(1) dynamics for residual components (optional)
+- **Kalman Smoothing**: Final smoothing step using Kalman filter with full state-space (factors + idio)
 
-### DDFM Example
+**Key Features:**
+- **VAR(2) Support**: Can model factor dynamics with up to 2 lags using companion form
+- **Idiosyncratic Components**: Models residual components with AR(1) dynamics for better fit
+- **Decoder Parameter Extraction**: Directly extracts observation matrix from trained decoder (no OLS re-estimation)
+- **Full State-Space**: Complete state-space model with factors and idio in state vector
+
+### DDFM Examples
+
+#### Example 1: Basic DDFM Usage
 
 ```python
 from dfm_python import create_model, DFMConfig, SeriesConfig, BlockConfig
@@ -953,9 +964,8 @@ series = [
 ]
 config = DFMConfig(
     series=series,
-    blocks=[BlockConfig(block_name='Global', factors=2)],
+    blocks={'Block_Global': BlockConfig(factors=2, ar_lag=1, clock='m')},
     clock='m',
-    factors_per_block=[2],
 )
 
 # Create DDFM model
@@ -1010,8 +1020,10 @@ The package is organized into clear layers for better maintainability and extens
 
 - **`models/`**: Factor model implementations
   - `base.py`: BaseFactorModel interface
-  - `dfm/`: Linear Dynamic Factor Model (EM-based)
-  - `ddfm/`: Deep Dynamic Factor Model (PyTorch-based)
+  - `dfm.py`: Linear Dynamic Factor Model (EM-based)
+  - `ddfm.py`: Deep Dynamic Factor Model (PyTorch-based, fully integrated)
+  
+**Note**: The original DDFM implementation (TensorFlow/Keras) has been archived to `archive/DDFM_original/` for reference. The current implementation is fully integrated in `src/dfm_python/models/ddfm.py`.
 
 - **`nowcasting/`**: Nowcasting and news decomposition domain logic
   - `nowcast.py`: Nowcast class and core logic

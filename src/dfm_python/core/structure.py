@@ -1,19 +1,10 @@
-"""Aggregation utilities for mixed-frequency data in Dynamic Factor Models.
+"""Structure utilities: frequency hierarchy, tent kernels, and aggregation.
 
-This module implements the clock-based aggregation framework for handling mixed-frequency
-time series in Dynamic Factor Models. The key innovation is the use of deterministic
-tent kernels to map lower-frequency observed variables to higher-frequency latent states
-within the observation equation.
-
-The module provides:
+This module provides utilities for handling mixed-frequency data structures:
 - Frequency hierarchy definitions
-- Tent weight generation and lookup
-- Constraint matrix (R_mat) generation from tent weights
-- Aggregation structure computation based on global clock
-
-The tent kernel approach connects lower-frequency series to higher-frequency 
-latent factors through weighted aggregation constraints. This allows all factors to 
-evolve at the same clock frequency while properly handling mixed-frequency observations.
+- Tent kernel generation and lookup
+- Aggregation structure computation
+- Idiosyncratic chain length computation
 """
 
 import numpy as np
@@ -463,3 +454,4 @@ def compute_idio_chain_lengths(
             # If augment_idio_slow is False, length stays 0
     
     return lengths
+

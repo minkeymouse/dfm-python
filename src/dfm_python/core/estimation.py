@@ -13,511 +13,40 @@ mapped to higher-frequency latent states via deterministic tent kernels.
 """
 
 import numpy as np
-from dataclasses import dataclass
-from typing import Tuple, Optional, Any, Dict, Union, List
+from typing import Tuple, Optional, Any, Dict, Union
 import warnings
 import logging
 import polars as pl
 
-from .engine.kalman import run_kf
-from .config import DFMConfig
-from .engine import calculate_rmse
-from .engine.utils import group_series_by_frequency
-from .engine.numeric import (
-    _ensure_symmetric,
-    _compute_principal_components,
-    _clean_matrix,
-    _ensure_positive_definite,
-    _compute_regularization_param,
-    _apply_ar_clipping,
-    _cap_max_eigenvalue,
-    _estimate_ar_coefficient,
-    _safe_divide,
+from .state_space import run_kf
+from ..config import DFMConfig
+from . import calculate_rmse
+from .state_space import (
     _check_finite,
 )
-from .engine import (
+from .diagnostics import (
     _display_dfm_tables,
-    diagnose_series,
-    print_series_diagnosis,
 )
-from .engine.em import (
+from .em import (
     init_conditions,
     em_step,
     em_converged,
-    NaNHandlingOptions,
 )
-from .engine.helpers import safe_get_method, safe_get_attr, resolve_param, safe_mean_std, standardize_data
+from .helpers import safe_get_method, safe_get_attr, resolve_param, safe_mean_std, standardize_data
 
-from .data import rem_nans_spline
-from .engine.utils import (
+from ..dataloader.loader import rem_nans_spline
+from .structure import (
     get_aggregation_structure,
     FREQUENCY_HIERARCHY,
 )
 
+from .results import DFMResult, DFMParams, EMAlgorithmParams
+
 _logger = logging.getLogger(__name__)
 
-
-@dataclass
-class DFMResult:
-    """DFM estimation results structure.
-    
-    This dataclass contains all outputs from the DFM estimation procedure,
-    including estimated parameters, smoothed data, and factors.
-    
-    Attributes
-    ----------
-    x_sm : np.ndarray
-        Standardized smoothed data matrix (T x N), where T is time periods
-        and N is number of series. Data is standardized (zero mean, unit variance).
-    X_sm : np.ndarray
-        Unstandardized smoothed data matrix (T x N). This is the original-scale
-        version of x_sm, computed as X_sm = x_sm * Wx + Mx.
-    Z : np.ndarray
-        Smoothed factor estimates (T x m), where m is the state dimension.
-        Columns represent different factors (common factors and idiosyncratic components).
-    C : np.ndarray
-        Observation/loading matrix (N x m). Each row corresponds to a series,
-        each column to a factor. C[i, j] gives the loading of series i on factor j.
-    R : np.ndarray
-        Covariance matrix for observation equation residuals (N x N).
-        Typically diagonal, representing idiosyncratic variances.
-    A : np.ndarray
-        Transition matrix (m x m) for the state equation. Describes how factors
-        evolve over time: Z_t = A @ Z_{t-1} + error.
-    Q : np.ndarray
-        Covariance matrix for transition equation residuals (m x m).
-        Describes the covariance of factor innovations.
-    Mx : np.ndarray
-        Series means (N,). Used for standardization: x = (X - Mx) / Wx.
-    Wx : np.ndarray
-        Series standard deviations (N,). Used for standardization.
-    Z_0 : np.ndarray
-        Initial state vector (m,). Starting values for factors at t=0.
-    V_0 : np.ndarray
-        Initial covariance matrix (m x m) for factors. Uncertainty about Z_0.
-    r : np.ndarray
-        Number of factors per block (n_blocks,). Each element specifies
-        how many factors are in each block structure.
-    p : int
-        Number of lags in the autoregressive structure of factors. Typically p=1.
-    rmse : float, optional
-        Overall RMSE on original scale (averaged across all series).
-    rmse_per_series : np.ndarray, optional
-        RMSE per series on original scale (N,).
-    rmse_std : float, optional
-        Overall RMSE on standardized scale (averaged across all series).
-    rmse_std_per_series : np.ndarray, optional
-        RMSE per series on standardized scale (N,).
-    converged : bool, optional
-        Whether EM algorithm converged.
-    num_iter : int, optional
-        Number of EM iterations performed.
-    loglik : float, optional
-        Final log-likelihood value.
-    
-    Examples
-    --------
-    >>> from dfm_python import DFM
-    >>> model = DFM()
-    >>> Res = model.fit(X, config, threshold=1e-4)
-    >>> # Access smoothed factors
-    >>> common_factor = Res.Z[:, 0]
-    >>> # Access factor loadings for first series
-    >>> loadings = Res.C[0, :]
-    >>> # Reconstruct smoothed series from factors
-    >>> reconstructed = Res.Z @ Res.C.T
-    """
-    x_sm: np.ndarray      # Standardized smoothed data (T x N)
-    X_sm: np.ndarray      # Unstandardized smoothed data (T x N)
-    Z: np.ndarray         # Smoothed factors (T x m)
-    C: np.ndarray         # Observation matrix (N x m)
-    R: np.ndarray         # Covariance for observation residuals (N x N)
-    A: np.ndarray         # Transition matrix (m x m)
-    Q: np.ndarray         # Covariance for transition residuals (m x m)
-    Mx: np.ndarray        # Series means (N,)
-    Wx: np.ndarray        # Series standard deviations (N,)
-    Z_0: np.ndarray       # Initial state (m,)
-    V_0: np.ndarray       # Initial covariance (m x m)
-    r: np.ndarray         # Number of factors per block
-    p: int                # Number of lags
-    converged: bool = False  # Whether EM algorithm converged
-    num_iter: int = 0     # Number of iterations completed
-    loglik: float = -np.inf  # Final log-likelihood
-    rmse: Optional[float] = None  # Overall RMSE (original scale)
-    rmse_per_series: Optional[np.ndarray] = None  # RMSE per series (original scale)
-    rmse_std: Optional[float] = None  # Overall RMSE (standardized scale)
-    rmse_std_per_series: Optional[np.ndarray] = None  # RMSE per series (standardized scale)
-    # Optional metadata for object-oriented access
-    series_ids: Optional[List[str]] = None
-    block_names: Optional[List[str]] = None
-    time_index: Optional[object] = None  # Typically a TimeIndex
-
-    # ----------------------------
-    # Convenience methods (OOP)
-    # ----------------------------
-    def num_series(self) -> int:
-        """Return number of series (rows in C)."""
-        return int(self.C.shape[0])
-
-    def num_state(self) -> int:
-        """Return state dimension (columns in Z/C)."""
-        return int(self.Z.shape[1])
-
-    def num_factors(self) -> int:
-        """Return number of primary factors (sum of r)."""
-        try:
-            return int(np.sum(self.r))
-        except Exception:
-            return self.num_state()
-
-    def to_polars_factors(self, time_index: Optional[object] = None, factor_names: Optional[List[str]] = None):
-        """Return factors as polars DataFrame.
-        
-        Parameters
-        ----------
-        time_index : TimeIndex, list, or compatible, optional
-            Time index to use for rows. If None, uses stored time_index if available.
-        factor_names : List[str], optional
-            Column names. Defaults to F1..Fm.
-        """
-        try:
-            import polars as pl
-            cols = factor_names if factor_names is not None else [f"F{i+1}" for i in range(self.num_state())]
-            
-            # Create DataFrame with factors as columns
-            df_dict = {col: self.Z[:, i] for i, col in enumerate(cols)}
-            
-            # Add time column if time_index provided
-            if time_index is not None:
-                from .engine.time import TimeIndex
-                if isinstance(time_index, TimeIndex):
-                    time_list = time_index.to_list()
-                else:
-                    time_list = list(time_index) if hasattr(time_index, '__iter__') else [time_index[i] for i in range(len(time_index))]
-                df_dict['time'] = time_list
-            elif self.time_index is not None:
-                from .engine.time import TimeIndex
-                if isinstance(self.time_index, TimeIndex):
-                    time_list = self.time_index.to_list()
-                else:
-                    time_list = list(self.time_index) if hasattr(self.time_index, '__iter__') else [self.time_index[i] for i in range(len(self.time_index))]
-                df_dict['time'] = time_list
-            
-            return pl.DataFrame(df_dict)
-        except (ImportError, ValueError, TypeError):
-            return self.Z
-
-    def to_polars_smoothed(self, time_index: Optional[object] = None, series_ids: Optional[List[str]] = None):
-        """Return smoothed data (original scale) as polars DataFrame."""
-        try:
-            import polars as pl
-            cols = series_ids if series_ids is not None else (self.series_ids if self.series_ids is not None else [f"S{i+1}" for i in range(self.num_series())])
-            
-            # Create DataFrame with series as columns
-            df_dict = {col: self.X_sm[:, i] for i, col in enumerate(cols)}
-            
-            # Add time column if time_index provided
-            if time_index is not None:
-                from .engine.time import TimeIndex
-                if isinstance(time_index, TimeIndex):
-                    time_list = time_index.to_list()
-                else:
-                    time_list = list(time_index) if hasattr(time_index, '__iter__') else [time_index[i] for i in range(len(time_index))]
-                df_dict['time'] = time_list
-            elif self.time_index is not None:
-                from .engine.time import TimeIndex
-                if isinstance(self.time_index, TimeIndex):
-                    time_list = self.time_index.to_list()
-                else:
-                    time_list = list(self.time_index) if hasattr(self.time_index, '__iter__') else [self.time_index[i] for i in range(len(self.time_index))]
-                df_dict['time'] = time_list
-            
-            return pl.DataFrame(df_dict)
-        except (ImportError, ValueError, TypeError):
-            return self.X_sm
-    
-
-    def save(self, path: str) -> None:
-        """Save result to a pickle file."""
-        try:
-            import pickle
-            with open(path, 'wb') as f:
-                pickle.dump(self, f)
-        except (IOError, OSError, pickle.PickleError) as e:
-            raise RuntimeError(f"Failed to save DFMResult to {path}: {e}")
-
-
-@dataclass
-class DFMParams:
-    """DFM estimation parameter overrides.
-    
-    All parameters are optional. If None, the corresponding value
-    from DFMConfig will be used during parameter resolution.
-    
-    This dataclass groups all parameter overrides that can be passed
-    to `_dfm_core()` and `_prepare_data_and_params()` to reduce
-    function parameter count and improve readability.
-    """
-    threshold: Optional[float] = None
-    max_iter: Optional[int] = None
-    ar_lag: Optional[int] = None
-    nan_method: Optional[int] = None
-    nan_k: Optional[int] = None
-    clock: Optional[str] = None
-    clip_ar_coefficients: Optional[bool] = None
-    ar_clip_min: Optional[float] = None
-    ar_clip_max: Optional[float] = None
-    clip_data_values: Optional[bool] = None
-    data_clip_threshold: Optional[float] = None
-    use_regularization: Optional[bool] = None
-    regularization_scale: Optional[float] = None
-    min_eigenvalue: Optional[float] = None
-    max_eigenvalue: Optional[float] = None
-    use_damped_updates: Optional[bool] = None
-    damping_factor: Optional[float] = None
-    
-    @classmethod
-    def from_kwargs(cls, **kwargs) -> 'DFMParams':
-        """Create DFMParams from keyword arguments.
-        
-        Filters kwargs to only include valid parameter names,
-        ignoring any extra arguments.
-        """
-        valid_params = {
-            'threshold', 'max_iter', 'ar_lag', 'nan_method', 'nan_k',
-            'clock', 'clip_ar_coefficients', 'ar_clip_min', 'ar_clip_max',
-            'clip_data_values', 'data_clip_threshold', 'use_regularization',
-            'regularization_scale', 'min_eigenvalue', 'max_eigenvalue',
-            'use_damped_updates', 'damping_factor'
-        }
-        filtered = {k: v for k, v in kwargs.items() if k in valid_params}
-        return cls(**filtered)
-
-
-@dataclass
-class EMAlgorithmParams:
-    """Parameters for EM algorithm execution.
-    
-    This dataclass groups all parameters required for running the EM algorithm,
-    reducing function parameter count and improving readability.
-    
-    All parameters are required (no optional fields) since the EM algorithm
-    needs all of them to execute.
-    """
-    # Data
-    y: np.ndarray
-    y_est: np.ndarray
-    
-    # Model parameters
-    A: np.ndarray
-    C: np.ndarray
-    Q: np.ndarray
-    R: np.ndarray
-    Z_0: np.ndarray
-    V_0: np.ndarray
-    r: np.ndarray
-    p: int
-    
-    # Structure parameters
-    R_mat: Optional[np.ndarray]
-    q: Optional[np.ndarray]
-    nQ: int
-    i_idio: np.ndarray
-    blocks: np.ndarray
-    tent_weights_dict: Dict[str, np.ndarray]
-    clock: str
-    frequencies: Optional[np.ndarray]
-    idio_chain_lengths: np.ndarray
-    
-    # Config and algorithm parameters
-    config: DFMConfig
-    threshold: float
-    max_iter: int
-    use_damped_updates: bool
-    damping_factor: float
-
-
-# Core functions are imported directly from core modules - no proxy functions needed
-
-
-class DFMCore:
-    """Core Dynamic Factor Model class.
-    
-    This class provides the main DFM estimation functionality. The core algorithm
-    is implemented in the `fit()` method, which performs EM estimation.
-    
-    Note: This is the core implementation class. For high-level API with
-    convenience methods, use the `DFM` class from `api.py` which extends this class.
-    
-    This class now inherits from BaseFactorModel for consistency with other
-    factor model implementations (e.g., DDFM).
-    """
-    
-    def __init__(self):
-        """Initialize DFM instance."""
-        # Initialize attributes (BaseFactorModel compatibility)
-        self._config: Optional[DFMConfig] = None
-        self._data: Optional[np.ndarray] = None
-        self._result: Optional[DFMResult] = None
-        self._time: Optional[Any] = None
-    
-    def fit(self,
-            X: np.ndarray,
-            config: DFMConfig,
-            threshold: Optional[float] = None,
-            max_iter: Optional[int] = None,
-            ar_lag: Optional[int] = None,
-            nan_method: Optional[int] = None,
-            nan_k: Optional[int] = None,
-            clock: Optional[str] = None,
-            clip_ar_coefficients: Optional[bool] = None,
-            ar_clip_min: Optional[float] = None,
-            ar_clip_max: Optional[float] = None,
-            clip_data_values: Optional[bool] = None,
-            data_clip_threshold: Optional[float] = None,
-            use_regularization: Optional[bool] = None,
-            regularization_scale: Optional[float] = None,
-            min_eigenvalue: Optional[float] = None,
-            max_eigenvalue: Optional[float] = None,
-            use_damped_updates: Optional[bool] = None,
-            damping_factor: Optional[float] = None,
-            **kwargs) -> DFMResult:
-        """Fit the DFM model using EM algorithm.
-        
-        This is the core estimation method. It performs the complete EM workflow:
-        1. Initialization via PCA and OLS
-        2. EM iterations until convergence
-        3. Final Kalman smoothing
-        
-        Parameters
-        ----------
-        X : np.ndarray
-            Data matrix (T x N), where T is time periods and N is number of series.
-        config : DFMConfig
-            Unified DFM configuration object.
-        threshold : float, optional
-            EM convergence threshold. If None, uses config.threshold.
-        max_iter : int, optional
-            Maximum EM iterations. If None, uses config.max_iter.
-        **kwargs
-            Additional parameters (ar_lag, nan_method, etc.) that override config values.
-            
-        Returns
-        -------
-        DFMResult
-            Estimation results including parameters, factors, and diagnostics.
-        """
-        # Store config and data for later use
-        self._config = config
-        self._data = X
-        
-        # Create DFMParams from individual parameters
-        params = DFMParams(
-            threshold=threshold,
-            max_iter=max_iter,
-            ar_lag=ar_lag,
-            nan_method=nan_method,
-            nan_k=nan_k,
-            clock=clock,
-            clip_ar_coefficients=clip_ar_coefficients,
-            ar_clip_min=ar_clip_min,
-            ar_clip_max=ar_clip_max,
-            clip_data_values=clip_data_values,
-            data_clip_threshold=data_clip_threshold,
-            use_regularization=use_regularization,
-            regularization_scale=regularization_scale,
-            min_eigenvalue=min_eigenvalue,
-            max_eigenvalue=max_eigenvalue,
-            use_damped_updates=use_damped_updates,
-            damping_factor=damping_factor,
-        )
-        
-        # Merge kwargs into params if provided
-        if kwargs:
-            # Update params with kwargs (only valid parameter names)
-            valid_params = {
-                'threshold', 'max_iter', 'ar_lag', 'nan_method', 'nan_k',
-                'clock', 'clip_ar_coefficients', 'ar_clip_min', 'ar_clip_max',
-                'clip_data_values', 'data_clip_threshold', 'use_regularization',
-                'regularization_scale', 'min_eigenvalue', 'max_eigenvalue',
-                'use_damped_updates', 'damping_factor'
-            }
-            for k, v in kwargs.items():
-                if k in valid_params and hasattr(params, k):
-                    setattr(params, k, v)
-        
-        # Call the core _dfm_core() function logic
-        result = _dfm_core(X, config, params=params)
-        
-        self._result = result
-        return result
-    
-    @property
-    def result(self) -> Optional[DFMResult]:
-        """Get the last fit result."""
-        return self._result
-    
-    @property
-    def config(self) -> Optional[DFMConfig]:
-        """Get the current configuration."""
-        return self._config
-    
-    def predict(self, horizon: Optional[int] = None, **kwargs) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
-        """Forecast future values using the fitted model.
-        
-        Parameters
-        ----------
-        horizon : int, optional
-            Number of periods ahead to forecast. If None, defaults to 1 year
-            of periods based on clock frequency.
-        return_series : bool, optional
-            Whether to return forecasted series (default: True)
-        return_factors : bool, optional
-            Whether to return forecasted factors (default: True)
-            
-        Returns
-        -------
-        np.ndarray or Tuple[np.ndarray, np.ndarray]
-            Forecasted series and/or factors
-        """
-        if self._result is None:
-            raise ValueError("Model must be fitted before prediction. Call fit() first.")
-        
-        return_series = kwargs.get('return_series', True)
-        return_factors = kwargs.get('return_factors', True)
-        
-        # Default horizon: 1 year of periods based on clock frequency
-        if horizon is None:
-            from .engine.utils import get_periods_per_year
-            from .engine.helpers import get_clock_frequency
-            clock = get_clock_frequency(self._config, 'm')
-            horizon = get_periods_per_year(clock)
-        
-        if horizon <= 0:
-            raise ValueError("horizon must be a positive integer.")
-        
-        # Extract model parameters
-        A = self._result.A
-        C = self._result.C
-        Wx = self._result.Wx
-        Mx = self._result.Mx
-        Z_last = self._result.Z[-1, :]
-        
-        # Deterministic forecast: iteratively apply transition matrix A
-        Z_forecast = np.zeros((horizon, Z_last.shape[0]))
-        Z_forecast[0, :] = A @ Z_last
-        for h in range(1, horizon):
-            Z_forecast[h, :] = A @ Z_forecast[h - 1, :]
-        
-        # Transform factors to observed series: X = Z @ C^T, then denormalize
-        X_forecast_std = Z_forecast @ C.T
-        X_forecast = X_forecast_std * Wx + Mx
-        
-        if return_series and return_factors:
-            return X_forecast, Z_forecast
-        if return_series:
-            return X_forecast
-        return Z_forecast
+# DFMCore class has been moved to models/dfm.py and consolidated with DFMLinear.
+# This module now contains only pure functions for DFM estimation.
+# For backward compatibility, DFMCore is available as an alias: from .models.dfm import DFMCore
 
 
 def _prepare_data_and_params(
@@ -587,7 +116,7 @@ def _prepare_data_and_params(
     # Display blocks structure if debug logging enabled
     if _logger.isEnabledFor(logging.DEBUG):
         try:
-            from .engine.helpers import get_series_names
+            from .helpers import get_series_names
             series_names = get_series_names(config)
             block_names = (config.block_names if len(config.block_names) == blocks.shape[1] 
                           else [f'Block_{i+1}' for i in range(blocks.shape[1])])
@@ -627,11 +156,11 @@ def _prepare_aggregation_structure(
     idio_chain_lengths : np.ndarray
         Array of idiosyncratic chain lengths per series (0, 1, or tent length)
     """
-    from .engine.utils import compute_idio_chain_lengths
+    from .structure import compute_idio_chain_lengths
     
     agg_info = get_aggregation_structure(config, clock=clock)
     tent_weights_dict = agg_info.get('tent_weights', {})
-    from .engine.helpers import get_frequencies_from_config
+    from .helpers import get_frequencies_from_config
     frequencies = np.array(get_frequencies_from_config(config)) if config.series else None
     
     # Find R_mat and q for tent kernel constraints
@@ -717,10 +246,11 @@ def _run_em_algorithm(
     previous_loglik = -np.inf
     num_iter = 0
     converged = False
+    loglik = 0.0  # Initialize to avoid "possibly unbound" warning
     
     while num_iter < max_iter and not converged:
         # Create EMStepParams dataclass for em_step()
-        from .engine.em import EMStepParams
+        from .em import EMStepParams
         em_step_params = EMStepParams(
             y=y_est,
             A=A,
@@ -870,7 +400,8 @@ def _dfm_core(
     Examples
     --------
     >>> from dfm_python import DFM
-    >>> from dfm_python.data import load_config, load_data  # Preferred import
+    >>> from dfm_python.dataloader import load_data  # Preferred import
+    >>> from dfm_python.config import load_config  # Preferred import
     >>> from datetime import datetime
     >>> # Load configuration from YAML or create DFMConfig directly
     >>> config = load_config('config.yaml')
@@ -1019,7 +550,4 @@ def _dfm_core(
         _display_dfm_tables(Res, config, nQ)
     
     return Res
-
-
-# Diagnostic functions are imported directly from core - no proxy functions needed
 

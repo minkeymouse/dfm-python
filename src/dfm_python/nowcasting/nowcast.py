@@ -24,10 +24,10 @@ import logging
 import polars as pl
 import time
 
-from ..engine.kalman import skf, fis, miss_data
+from ..core.state_space import miss_data
 from ..config import DFMConfig
-from ..dfm import DFMResult
-from ..engine.time import (
+from ..core.results import DFMResult
+from ..core.time import (
     TimeIndex,
     parse_timestamp,
     datetime_range,
@@ -40,7 +40,7 @@ from ..engine.time import (
     convert_to_timestamp,
     to_python_datetime,
 )
-from ..engine.helpers import (
+from ..core.helpers import (
     safe_get_attr,
     get_series_ids,
     get_series_names,
@@ -50,8 +50,11 @@ from ..engine.helpers import (
     get_units_from_config,
     get_clock_frequency,
 )
-from ..data import calculate_release_date, create_data_view, DataView
+from ..dataloader.loader import calculate_release_date, create_data_view, DataView
 from dataclasses import dataclass
+
+from .news import NewsDecompResult, para_const
+from .backtest import BacktestResult
 
 # Set up logger
 _logger = logging.getLogger(__name__)
@@ -76,232 +79,6 @@ class NowcastResult:
     data_availability: Optional[Dict[str, int]] = None  # n_available, n_missing
 
 
-@dataclass
-class NewsDecompResult:
-    """Result from news decomposition calculation."""
-    y_old: float
-    y_new: float
-    change: float
-    singlenews: np.ndarray
-    top_contributors: List[Tuple[str, float]]
-    actual: np.ndarray
-    forecast: np.ndarray
-    weight: np.ndarray
-    t_miss: np.ndarray
-    v_miss: np.ndarray
-    innov: np.ndarray
-
-
-@dataclass
-class BacktestResult:
-    """Result from pseudo real-time backtest."""
-    target_series: str
-    target_date: datetime
-    backward_steps: int
-    higher_freq: bool
-    backward_freq: str  # Actual frequency used
-    
-    # List of data views and results
-    view_list: List[DataView]  # Each view with view_date set
-    nowcast_results: List[NowcastResult]  # One per view
-    news_results: List[Optional[NewsDecompResult]]  # None for first view
-    
-    # Point-wise metrics (one per backward step)
-    actual_values: np.ndarray  # (backward_steps,)
-    errors: np.ndarray  # (backward_steps,) - nowcast - actual
-    mae_per_step: np.ndarray  # (backward_steps,)
-    mse_per_step: np.ndarray  # (backward_steps,)
-    rmse_per_step: np.ndarray  # (backward_steps,)
-    
-    # Overall metrics
-    overall_mae: Optional[float] = None
-    overall_rmse: Optional[float] = None
-    overall_mse: Optional[float] = None
-    
-    # Error tracking
-    failed_steps: List[int] = None  # type: ignore  # Indices where nowcast failed
-    
-    def __post_init__(self):
-        """Initialize failed_steps if None."""
-        if self.failed_steps is None:
-            object.__setattr__(self, 'failed_steps', [])
-    
-    # ------------------------------------------------------------------ #
-    # Trajectory plotting helpers
-    # ------------------------------------------------------------------ #
-    def _get_view_datetimes(self) -> List[Optional[datetime]]:
-        """Extract view dates as datetime objects (fallback to nowcast metadata)."""
-        view_dates: List[Optional[datetime]] = []
-        for idx in range(self.backward_steps):
-            view_dt = None
-            if idx < len(self.view_list):
-                view_dt = getattr(self.view_list[idx], 'view_date', None)
-            if view_dt is None and idx < len(self.nowcast_results):
-                view_dt = getattr(self.nowcast_results[idx], 'view_date', None)
-            if view_dt is not None:
-                try:
-                    view_dates.append(to_python_datetime(view_dt))
-                    continue
-                except Exception:
-                    view_dates.append(None)
-                    continue
-            view_dates.append(None)
-        return view_dates
-    
-    def _relative_axis(self) -> Tuple[np.ndarray, List[str]]:
-        """Compute relative axis positions (defaulting to frequency-aware offsets)."""
-        fallback = np.arange(-self.backward_steps + 1, 1, dtype=float)
-        view_dates = self._get_view_datetimes()
-        target_dt = to_python_datetime(self.target_date)
-        
-        denom_map = {'d': 1, 'w': 7, 'm': 30, 'q': 91, 'sa': 182, 'a': 365}
-        label_map = {'d': '일', 'w': '주', 'm': '개월', 'q': '분기', 'sa': '반기', 'a': '년'}
-        
-        denom = denom_map.get(self.backward_freq)
-        labels_unit = label_map.get(self.backward_freq, 'step')
-        
-        offsets: List[float] = []
-        for idx, view_dt in enumerate(view_dates):
-            if view_dt is None or denom is None:
-                offsets.append(fallback[idx])
-            else:
-                diff_days = (view_dt - target_dt).days
-                offsets.append(diff_days / denom)
-        offsets_arr = np.array(offsets, dtype=float)
-        if denom is not None:
-            offsets_arr = np.round(offsets_arr).astype(int)
-        
-        labels: List[str] = []
-        for val in offsets_arr:
-            if not np.isfinite(val):
-                labels.append('')
-            elif val == 0:
-                labels.append('현재' if labels_unit != 'step' else 'current')
-            else:
-                prefix = '+' if val > 0 else ''
-                suffix = labels_unit if labels_unit != 'step' else ''
-                labels.append(f"{prefix}{int(val)}{suffix}")
-        return offsets_arr.astype(float), labels
-    
-    def plot(self, save_path: Optional[str] = None, show: bool = False) -> None:
-        """Plot point-wise metrics (RMSE, MSE, MAE) over backward steps.
-        
-        Parameters
-        ----------
-        save_path : str or Path, optional
-            Path to save the plot. If None, plot is not saved.
-        show : bool, default False
-            Whether to display the plot.
-            
-        Raises
-        ------
-        ImportError
-            If matplotlib is not installed
-        """
-        try:
-            import matplotlib.pyplot as plt
-        except ImportError:
-            raise ImportError("matplotlib is required for plotting. Install with: pip install matplotlib")
-        
-        steps = np.arange(self.backward_steps)
-        
-        # Filter out NaN values for plotting
-        valid_rmse = ~np.isnan(self.rmse_per_step)
-        valid_mse = ~np.isnan(self.mse_per_step)
-        valid_mae = ~np.isnan(self.mae_per_step)
-        
-        plt.figure(figsize=(12, 6))
-        
-        # Plot only valid (non-NaN) points
-        if np.any(valid_rmse):
-            plt.plot(steps[valid_rmse], self.rmse_per_step[valid_rmse], 'b-', 
-                    label='RMSE', linewidth=2, marker='o', markersize=4)
-        if np.any(valid_mse):
-            plt.plot(steps[valid_mse], self.mse_per_step[valid_mse], 'g--', 
-                    label='MSE', linewidth=2, marker='s', markersize=4)
-        if np.any(valid_mae):
-            plt.plot(steps[valid_mae], self.mae_per_step[valid_mae], 'r:', 
-                    label='MAE', linewidth=2, marker='^', markersize=4)
-        
-        plt.xlabel('Backward Step (0 = oldest, N-1 = target)', fontsize=12)
-        plt.ylabel('Error Metric', fontsize=12)
-        plt.title(f'Point-wise Backtest Metrics: {self.target_series} at {self.target_date}', fontsize=14)
-        plt.legend(fontsize=10)
-        plt.grid(True, alpha=0.3)
-        
-        # Add annotation for failed steps if any
-        if len(self.failed_steps) > 0:
-            plt.text(0.02, 0.98, f'Failed steps: {len(self.failed_steps)}', 
-                    transform=plt.gca().transAxes, fontsize=9,
-                    verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
-        
-        if save_path:
-            from pathlib import Path
-            save_path_obj = Path(save_path)
-            save_path_obj.parent.mkdir(parents=True, exist_ok=True)
-            plt.savefig(str(save_path_obj), dpi=150, bbox_inches='tight')
-        
-        if show:
-            plt.show()
-        else:
-            plt.close()
-    
-    def plot_trajectory(self, save_path: Optional[str] = None, show: bool = False) -> None:
-        """Plot previous vs. updated nowcasts plus actuals on relative axis.
-        
-        Parameters
-        ----------
-        save_path : str or Path, optional
-            Output path for the figure; directories are created automatically.
-        show : bool, default False
-            Display the plot interactively if True.
-        """
-        try:
-            import matplotlib.pyplot as plt
-        except ImportError:
-            raise ImportError("matplotlib is required for plotting. Install with: pip install matplotlib")
-        
-        offsets, labels = self._relative_axis()
-        n_results = len(self.nowcast_results)
-        if n_results == 0:
-            raise ValueError("No nowcast results available to plot trajectory.")
-        
-        nowcast_values = np.array(
-            [res.nowcast_value if res is not None else np.nan for res in self.nowcast_results],
-            dtype=float
-        )
-        prev_values = np.concatenate(([np.nan], nowcast_values[:-1]))
-        prev_values[0] = nowcast_values[0]
-        actual_vals = np.array(self.actual_values, dtype=float)
-        
-        fig, ax = plt.subplots(figsize=(12, 6))
-        ax.plot(offsets, prev_values, 'o--', label='Previous nowcast', alpha=0.6)
-        ax.plot(offsets, nowcast_values, 'o-', label='Updated nowcast', linewidth=2)
-        
-        if np.any(np.isfinite(actual_vals)):
-            mask = np.isfinite(actual_vals)
-            ax.plot(offsets[mask], actual_vals[mask], 's-', label='Actual', color='green')
-        
-        ax.axvline(0, color='gray', linestyle=':', linewidth=1)
-        finite_mask = np.isfinite(offsets)
-        if np.any(finite_mask):
-            ax.set_xticks(offsets[finite_mask])
-            ax.set_xticklabels([labels[i] for i, keep in enumerate(finite_mask) if keep], rotation=45, ha='right')
-        ax.set_ylabel('Value')
-        ax.set_title(f"{self.target_series} Nowcast Trajectory")
-        ax.legend()
-        ax.grid(alpha=0.3)
-        
-        if save_path:
-            from pathlib import Path
-            save_path_obj = Path(save_path)
-            save_path_obj.parent.mkdir(parents=True, exist_ok=True)
-            fig.savefig(str(save_path_obj), dpi=150, bbox_inches='tight')
-        
-        if show:
-            plt.show()
-        else:
-            plt.close(fig)
 
 
 # ============================================================================
@@ -321,7 +98,7 @@ def _get_higher_frequency(clock: str) -> Optional[str]:
     str or None
         Frequency one step faster than clock, or None if no higher frequency available
     """
-    from ..engine.utils import FREQUENCY_HIERARCHY
+    from ..core.structure import FREQUENCY_HIERARCHY
     clock_h = FREQUENCY_HIERARCHY.get(clock, 3)
     target_h = clock_h - 1
     
@@ -467,70 +244,6 @@ def _check_config_consistency(saved_config: Any, current_config: DFMConfig) -> N
     except Exception as e:
         _logger.debug(f"Config consistency check failed (non-critical): {str(e)}")
         # If comparison fails, continue anyway
-
-
-def para_const(X: np.ndarray, P: Union[DFMResult, Dict[str, Any]], lag: int) -> Dict[str, Any]:
-    """Implement Kalman filter for news calculation with fixed parameters.
-    
-    Parameters:
-    -----------
-    X : np.ndarray
-        Data matrix (T x N)
-    P : DFMResult
-        DFM parameters
-    lag : int
-        Number of lags
-        
-    Returns:
-    --------
-    Dict with keys: Plag, P, X_sm, F
-    """
-    # Set model parameters
-    Z_0 = P.Z_0
-    V_0 = P.V_0
-    A = P.A
-    C = P.C
-    Q = P.Q
-    R = P.R
-    Mx = P.Mx
-    Wx = P.Wx
-    
-    # Prepare data
-    T, _ = X.shape
-    
-    # Standardize
-    Y = ((X - Mx) / Wx).T  # n x T
-    
-    # Apply Kalman filter and smoother
-    Sf = skf(Y, A, C, Q, R, Z_0, V_0)
-    Ss = fis(A, Sf)
-    
-    # Calculate parameter output
-    Vs = Ss.VmT[:, :, 1:]  # Smoothed factor covariance
-    Vf = Sf.VmU[:, :, 1:]  # Filtered factor posterior covariance
-    Zsmooth = Ss.ZmT
-    Vsmooth = Ss.VmT
-    
-    Plag = [Vs]
-    
-    for jk in range(1, lag + 1):
-        Plag_jk = np.zeros_like(Plag[0])
-        for jt in range(Plag[0].shape[2] - 1, lag, -1):  # Backward iteration to match MATLAB
-            As = Vf[:, :, jt - jk] @ A.T @ pinv(A @ Vf[:, :, jt - jk] @ A.T + Q)
-            Plag_jk[:, :, jt] = As @ Plag[jk - 1][:, :, jt]
-        Plag.append(Plag_jk)
-    
-    # Prepare data for output
-    Zsmooth = Zsmooth.T  # T x m
-    x_sm = Zsmooth[1:, :] @ C.T  # T x N
-    X_sm = Wx * x_sm + Mx  # Unstandardized
-    
-    return {
-        'Plag': Plag,
-        'P': Vsmooth,
-        'X_sm': X_sm,
-        'F': Zsmooth[1:, :]
-    }
 
 
 class Nowcast:
@@ -1394,19 +1107,19 @@ class Nowcast:
             raise TypeError("Expected NewsDecompResult from decompose()")
         news = news_result
         
-        # Print summary
-        print(f"\n{'='*70}")
-        print(f"Nowcast Update: {target_series} at {target_period}")
-        print(f"{'='*70}")
-        print(f"Data view: {view_date_old} → {view_date_new}")
-        print(f"Old forecast: {news.y_old:.4f}")
-        print(f"New forecast: {news.y_new:.4f}")
-        print(f"Change: {news.change:.4f}")
+        # Log summary
+        _logger.info(f"\n{'='*70}")
+        _logger.info(f"Nowcast Update: {target_series} at {target_period}")
+        _logger.info(f"{'='*70}")
+        _logger.info(f"Data view: {view_date_old} → {view_date_new}")
+        _logger.info(f"Old forecast: {news.y_old:.4f}")
+        _logger.info(f"New forecast: {news.y_new:.4f}")
+        _logger.info(f"Change: {news.change:.4f}")
         
         if len(news.top_contributors) > 0:
-            print(f"\nTop 5 Contributors:")
+            _logger.info(f"\nTop 5 Contributors:")
             for series_id, impact in news.top_contributors:
-                print(f"  {series_id}: {impact:.4f}")
+                _logger.info(f"  {series_id}: {impact:.4f}")
         
         # Save via callback if provided
         if save_callback is not None:

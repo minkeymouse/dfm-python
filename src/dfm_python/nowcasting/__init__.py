@@ -1,22 +1,13 @@
-"""Nowcasting and news decomposition for factor models.
+"""Nowcasting, news decomposition, and backtesting for factor models."""
 
-This package provides nowcasting functionality and news decomposition framework
-for understanding how new data releases affect nowcasts.
-"""
-
-from .nowcast import (
-    Nowcast,
-    para_const,
-    NowcastResult,
-    NewsDecompResult,
-    BacktestResult,
-)
+from .nowcast import Nowcast, NowcastResult
+from .news import NewsDecompResult, para_const
+from .backtest import BacktestResult
 
 __all__ = [
     'Nowcast',
-    'para_const',
     'NowcastResult',
     'NewsDecompResult',
     'BacktestResult',
+    'para_const',
 ]
-

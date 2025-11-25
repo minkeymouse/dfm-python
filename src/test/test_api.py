@@ -414,7 +414,7 @@ def test_from_dict():
 
 def test_from_spec_conversion():
     """Test from_spec() utility function for CSV to YAML conversion."""
-    from dfm_python.config_sources import from_spec
+        from dfm_python.config.io import from_spec
     
     csv_file = project_root / 'data' / 'sample_spec.csv'
     if not csv_file.exists():
@@ -450,7 +450,7 @@ def test_hydra_compose_api():
         cfg = compose(config_name="default")
         assert isinstance(cfg, DictConfig)
         
-        from dfm_python.config_sources import HydraSource
+        from dfm_python.config.io import HydraSource
         config = HydraSource(cfg).load()
         
         assert isinstance(config, DFMConfig)
