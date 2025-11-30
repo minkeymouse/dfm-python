@@ -689,12 +689,12 @@ SQLite data view storage is planned for future releases. Currently, `BasicDataVi
 # X_view, Time_view, config = adapter.load_data_view(view_id)
 ```
 
-### News Decomposition (Legacy API)
+### Advanced News Decomposition
 
-For advanced users, the low-level `news_dfm` function is still available:
+For advanced users, low-level functions are available in the `nowcasting` module:
 
 ```python
-from dfm_python.nowcast import para_const
+from dfm_python.nowcasting import para_const
 
 # Before new data release
 result_old = model.fit(X_old, config)
@@ -706,7 +706,7 @@ X_new = ...  # Updated data
 Res_old = para_const(X_old, result_old, lag=1)
 # ... (see nowcast.py for full implementation)
 
-# Recommended: Use Nowcast class instead (see Nowcasting API section above)
+# Recommended: Use Nowcast class for most use cases (see Nowcasting API section above)
 ```
 
 ### Custom Block Structure
@@ -1162,7 +1162,7 @@ DATA_VIEW_SOURCE=file  # or database
 
 ## Project Status
 
-**Version**: 0.3.0  
+**Version**: 0.3.1  
 **Status**: Stable and production-ready  
 **Python**: 3.10+  
 **PyPI**: https://pypi.org/project/dfm-python/
@@ -1251,7 +1251,7 @@ If you use `dfm-python` in your research, please cite:
   author = {DFM Python Contributors},
   year = {2025},
   url = {https://pypi.org/project/dfm-python/},
-  version = {0.2.7}
+  version = {0.3.1}
 }
 ```
 
