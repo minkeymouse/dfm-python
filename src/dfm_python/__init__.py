@@ -58,7 +58,7 @@ Example (Low-level API - For advanced usage):
 For detailed documentation, see the README.md file and the tutorial notebooks/scripts.
 """
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 # ============================================================================
 # PUBLIC API DEFINITION
