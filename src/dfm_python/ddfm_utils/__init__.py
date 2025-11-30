@@ -1,8 +1,13 @@
-"""Utility functions for dfm_python.
+"""DDFM-specific utility functions.
 
-This package currently provides:
-- Conversion utilities for DDFM models (convert.py)
-- Loss functions for DDFM training (loss.py)
+This package provides utilities specific to Deep Dynamic Factor Models (DDFM):
+- Conversion utilities: Convert PyTorch models to NumPy state-space parameters (convert.py)
+- Loss functions: Missing-aware loss functions for DDFM training (loss.py)
+
+Note: These utilities are specific to DDFM. For general DFM utilities, see:
+- core/ for core DFM algorithms (EM, Kalman filter, etc.)
+- dataloader/ for data loading and preprocessing
+- config/ for configuration management
 """
 
 # Conversion utilities
