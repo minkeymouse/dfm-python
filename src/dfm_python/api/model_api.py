@@ -160,7 +160,7 @@ class DFMBase(DFMLinear):
                   data: Optional[np.ndarray] = None,
                   **kwargs) -> 'DFMBase':
         """Load data from file or use provided array."""
-        _validate_config_loaded(self._config, "config")
+        _validate_config_loaded(self._config)
         
         if data_path is not None:
             self._data, self._time, self._original_data = _load_data(
@@ -528,10 +528,10 @@ class DFMBase(DFMLinear):
         """
         # Validate model state
         _validate_result_loaded(self._result)
-        _validate_data_loaded(self._data, "data")
+        _validate_data_loaded(self._data)
         if self._time is None:
             raise ValueError("Time index must be loaded. Call load_data() first.")
-        _validate_config_loaded(self._config, "config")
+        _validate_config_loaded(self._config)
         
         # Return cached instance or create new one
         if self._nowcast_instance is None:
@@ -573,10 +573,10 @@ class DFMBase(DFMLinear):
             - 'backward_results': List[Dict] - backward results for each period (if backward > 0)
         """
         _validate_result_loaded(self._result)
-        _validate_data_loaded(self._data, "data")
+        _validate_data_loaded(self._data)
         if self._time is None:
             raise ValueError("Time index must be loaded. Call load_data() first.")
-        _validate_config_loaded(self._config, "config")
+        _validate_config_loaded(self._config)
         
         # Get target series index using helper function
         i_series = find_series_index(self._config, target_series)
@@ -742,10 +742,10 @@ class DFMBase(DFMLinear):
             - 'metadata': Dict - metadata
         """
         _validate_result_loaded(self._result)
-        _validate_data_loaded(self._data, "data")
+        _validate_data_loaded(self._data)
         if self._time is None:
             raise ValueError("Time index must be loaded. Call load_data() first.")
-        _validate_config_loaded(self._config, "config")
+        _validate_config_loaded(self._config)
         
         # Set default lookback based on clock frequency if not provided
         if lookback is None:

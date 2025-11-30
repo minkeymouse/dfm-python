@@ -217,7 +217,7 @@ def _run_em_algorithm(
     converged : bool
         Whether convergence was achieved
     """
-    # Use params directly instead of extracting all fields
+    # Use local variables for parameter values (avoid mutating params)
     previous_loglik = -np.inf
     num_iter = 0
     converged = False
