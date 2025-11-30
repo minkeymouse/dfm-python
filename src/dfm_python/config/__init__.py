@@ -18,8 +18,8 @@ from .io import (
     MergedConfigSource,
     make_config_source,
     from_spec,
-    _load_config_from_dataframe,
-    _write_series_blocks_yaml,
+    # Note: Private functions (_load_config_from_dataframe, _write_series_blocks_yaml)
+    # are available from io module but not exported as public API
 )
 
 __all__ = [
@@ -30,6 +30,8 @@ __all__ = [
     # IO
     'ConfigSource', 'YamlSource', 'DictSource',
     'HydraSource', 'MergedConfigSource', 'make_config_source',
-    'from_spec', '_load_config_from_dataframe', '_write_series_blocks_yaml',
+    'from_spec',
+    # Note: Private functions (_load_config_from_dataframe, _write_series_blocks_yaml)
+    # are available from io module but not exported as public API
 ]
 

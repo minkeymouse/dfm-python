@@ -22,17 +22,8 @@ from .state_space import (
     fis,
     miss_data,
     KalmanFilterState,
-    # Numeric utilities (re-exported from state_space)
-    _ensure_symmetric,
-    _compute_principal_components,
-    _clean_matrix,
-    _ensure_positive_definite,
-    _compute_regularization_param,
-    _apply_ar_clipping,
-    _cap_max_eigenvalue,
-    _estimate_ar_coefficient,
-    _safe_divide,
-    _check_finite,
+    # Note: Private numeric utilities (_ensure_symmetric, etc.) are available
+    # from state_space module but not exported as public API
 )
 from .structure import (
     group_series_by_frequency,
@@ -60,21 +51,17 @@ from .time import (
 )
 from .diagnostics import (
     calculate_rmse,
-    _display_dfm_tables,
     diagnose_series,
     print_series_diagnosis,
+    # Note: _display_dfm_tables is internal and not exported as public API
 )
 from .results import (
     DFMResult,
     DFMParams,
     EMAlgorithmParams,
 )
-from .estimation import (
-    _dfm_core,
-    _prepare_data_and_params,
-    _prepare_aggregation_structure,
-    _run_em_algorithm,
-)
+# Note: Internal estimation functions (_dfm_core, _prepare_*, _run_em_algorithm)
+# are available from estimation module but not exported as public API
 
 __all__ = [
     # EM algorithm
@@ -83,22 +70,12 @@ __all__ = [
     'em_converged',
     'EMStepParams',
     'NaNHandlingOptions',
-    # State-space (Kalman filter + numeric utilities)
+    # State-space (Kalman filter)
     'run_kf',
     'skf',
     'fis',
     'miss_data',
     'KalmanFilterState',
-    '_ensure_symmetric',
-    '_compute_principal_components',
-    '_clean_matrix',
-    '_ensure_positive_definite',
-    '_compute_regularization_param',
-    '_apply_ar_clipping',
-    '_cap_max_eigenvalue',
-    '_estimate_ar_coefficient',
-    '_safe_divide',
-    '_check_finite',
     # Structure utilities
     'group_series_by_frequency',
     'get_aggregation_structure',
@@ -123,17 +100,14 @@ __all__ = [
     'parse_period_string',
     # Diagnostics
     'calculate_rmse',
-    '_display_dfm_tables',
     'diagnose_series',
     'print_series_diagnosis',
     # Results
     'DFMResult',
     'DFMParams',
     'EMAlgorithmParams',
-    # Estimation functions
-    '_dfm_core',
-    '_prepare_data_and_params',
-    '_prepare_aggregation_structure',
-    '_run_em_algorithm',
+    # Note: Internal functions (_ensure_symmetric, _compute_principal_components,
+    # _dfm_core, _prepare_*, _run_em_algorithm, _display_dfm_tables, etc.) are
+    # available from their respective modules but not exported as public API
 ]
 

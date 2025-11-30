@@ -79,20 +79,31 @@ class BaseFactorModel(ABC):
         pass
     
     @abstractmethod
-    def predict(self, horizon: Optional[int] = None, **kwargs) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
+    def predict(
+        self,
+        horizon: Optional[int] = None,
+        *,
+        return_series: bool = True,
+        return_factors: bool = True
+    ) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
         """Forecast future values.
         
         Parameters
         ----------
         horizon : int, optional
             Number of periods ahead to forecast. If None, uses default based on clock frequency.
-        **kwargs
-            Additional forecast parameters.
+        return_series : bool, default True
+            Whether to return forecasted series.
+        return_factors : bool, default True
+            Whether to return forecasted factors.
             
         Returns
         -------
         np.ndarray or Tuple[np.ndarray, np.ndarray]
             Forecasted series (and optionally factors). Shape depends on model.
+            - If both return_series and return_factors are True: (X_forecast, Z_forecast)
+            - If only return_series is True: X_forecast
+            - If only return_factors is True: Z_forecast
         """
         pass
 

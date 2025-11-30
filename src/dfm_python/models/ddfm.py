@@ -9,6 +9,7 @@ Kalman filtering.
 import numpy as np
 from typing import Optional, Tuple, Union, List, Dict, Any
 import logging
+from ..core.helpers import get_logger
 
 try:
     import torch
@@ -33,8 +34,20 @@ from ..core.helpers import (
     standardize_data,
 )
 from ..core.structure import get_periods_per_year
+from ..models.ddfm_utils import (
+    train_autoencoder,
+    estimate_var1,
+    estimate_var2,
+    estimate_idiosyncratic_dynamics,
+    build_observation_matrix,
+    build_state_space,
+    extract_decoder_params,
+    fit_ddfm_mcmc,
+)
+from .ddfm_fit_mcmc import fit_ddfm_mcmc
+# Training, state-space, and utility functions are now in this file (merged from submodules)
 
-_logger = logging.getLogger(__name__)
+_logger = get_logger(__name__)
 
 
 if _has_torch:
@@ -182,6 +195,11 @@ class DDFM(BaseFactorModel):
         factor_order: int = 1,
         use_idiosyncratic: bool = True,
         min_obs_idio: int = 5,
+        lags_input: int = 0,
+        max_iter: int = 200,
+        tolerance: float = 0.0005,
+        disp: int = 10,
+        seed: Optional[int] = None,
         **kwargs
     ):
         """Initialize DDFM model.
@@ -199,7 +217,7 @@ class DDFM(BaseFactorModel):
         learning_rate : float
             Learning rate for Adam optimizer. Default: 0.001
         epochs : int
-            Number of training epochs. Default: 100
+            Number of epochs per MCMC iteration. Default: 100
         batch_size : int
             Batch size for training. Default: 32
         factor_order : int
@@ -208,6 +226,16 @@ class DDFM(BaseFactorModel):
             Whether to model idiosyncratic components with AR(1) dynamics. Default: True
         min_obs_idio : int
             Minimum number of observations required for idio AR(1) estimation. Default: 5
+        lags_input : int
+            Number of lags of inputs on encoder (default 0, i.e. same inputs and outputs). Default: 0
+        max_iter : int
+            Maximum number of MCMC iterations. Default: 200
+        tolerance : float
+            Convergence tolerance. Default: 0.0005
+        disp : int
+            Display intermediate results every 'disp' iterations. Default: 10
+        seed : int, optional
+            Random seed for reproducibility. Default: None
         """
         super().__init__()
         
@@ -224,16 +252,23 @@ class DDFM(BaseFactorModel):
         self.activation = activation
         self.use_batch_norm = use_batch_norm
         self.learning_rate = learning_rate
-        self.epochs = epochs
+        self.epochs = epochs  # Epochs per MCMC iteration
         self.batch_size = batch_size
         self.factor_order = factor_order
         self.use_idiosyncratic = use_idiosyncratic
         self.min_obs_idio = min_obs_idio
+        self.lags_input = lags_input
+        self.max_iter = max_iter
+        self.tolerance = tolerance
+        self.disp = disp
         
         # PyTorch modules (will be initialized in fit)
         self.encoder: Optional[Encoder] = None
         self.decoder: Optional[Decoder] = None
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
+        # Random number generator for MC sampling
+        self.rng = np.random.RandomState(seed if seed is not None else 3)
     
     def fit(self, X: np.ndarray, config: DFMConfig, **kwargs) -> DFMResult:
         """Fit the DDFM model.
@@ -319,47 +354,80 @@ class DDFM(BaseFactorModel):
             use_bias=True,
         ).to(self.device)
         
-        # Step 4: Train autoencoder
-        _logger.info(f"Training DDFM autoencoder: {epochs} epochs, batch_size={batch_size}")
-        self._train_autoencoder(x_clean, epochs, batch_size, learning_rate)
+        # Step 4: Optional pre-training (matching original TensorFlow implementation)
+        pre_train_epochs = kwargs.get('pre_train_epochs', None)
+        if pre_train_epochs is not None and pre_train_epochs > 0:
+            _logger.info(f"Pre-training DDFM autoencoder: {pre_train_epochs} epochs")
+            train_autoencoder(
+                self.encoder,
+                self.decoder,
+                x_clean,
+                pre_train_epochs,
+                batch_size,
+                learning_rate,
+                self.device,
+                verbose=True,
+            )
         
-        # Step 5: Extract factors
-        x_tensor = torch.FloatTensor(x_clean).to(self.device)
-        with torch.no_grad():
-            factors = self.encoder(x_tensor).cpu().numpy()  # T x num_factors
+        # Step 5: MCMC iterative training procedure
+        missing_mask = np.isnan(x_standardized)
+        _logger.info(f"Starting MCMC iterative training: epochs_per_iter={epochs}, max_iter={self.max_iter}")
+        
+        factors, prediction_iter, converged, num_iter = fit_ddfm_mcmc(
+            encoder=self.encoder,
+            decoder=self.decoder,
+            x_standardized=x_standardized,
+            x_clean=x_clean,
+            missing_mask=missing_mask,
+            epochs_per_iter=epochs,
+            batch_size=batch_size,
+            learning_rate=learning_rate,
+            max_iter=self.max_iter,
+            tolerance=self.tolerance,
+            disp=self.disp,
+            device=self.device,
+            rng=self.rng,
+            use_idiosyncratic=self.use_idiosyncratic,
+            min_obs_idio=self.min_obs_idio,
+            lags_input=self.lags_input,
+        )
         
         # Step 6: Extract decoder parameters (C, bias)
-        C, bias = self._extract_decoder_params()
+        C, bias = extract_decoder_params(self.decoder)
         
-        # Step 7: Compute residuals and estimate idiosyncratic dynamics
+        # Step 7: Compute residuals and estimate idiosyncratic dynamics for state-space
         if self.use_idiosyncratic:
-            # Reconstruct using decoder
-            factors_tensor = torch.FloatTensor(factors).to(self.device)
-            with torch.no_grad():
-                x_reconstructed = self.decoder(factors_tensor).cpu().numpy()  # T x N
+            # Use final prediction from MCMC
+            residuals = x_standardized - prediction_iter
+            # Fill missing with prediction
+            residuals_filled = residuals.copy()
+            residuals_filled[missing_mask] = 0.0  # Missing residuals set to 0
             
-            # Compute residuals
-            residuals = x_clean - x_reconstructed  # T x N
-            
-            # Missing data mask (from original standardized data)
-            missing_mask = np.isnan(x_standardized)
-            
-            # Estimate idio AR(1) dynamics
-            A_eps, Q_eps = self._estimate_idiosyncratic_dynamics(residuals, missing_mask)
+            # Estimate idio AR(1) dynamics for state-space model
+            A_eps, Q_eps = estimate_idiosyncratic_dynamics(
+                residuals_filled, missing_mask, self.min_obs_idio
+            )
         else:
             # No idio modeling: use diagonal R only
             A_eps = np.zeros((N, N))
             Q_eps = np.eye(N) * 1e-8
         
         # Step 8: Estimate factor dynamics (VAR(1) or VAR(2))
-        A_f, Q_f = self._estimate_factor_dynamics(factors)
+        if self.factor_order == 1:
+            A_f, Q_f = estimate_var1(factors)
+        elif self.factor_order == 2:
+            A_f, Q_f = estimate_var2(factors)
+        else:
+            raise ValueError(f"factor_order must be 1 or 2, got {self.factor_order}")
         
         # Step 9: Build state-space model
         if self.use_idiosyncratic:
-            A, Q, Z_0, V_0 = self._build_state_space(factors, A_f, Q_f, A_eps, Q_eps)
+            A, Q, Z_0, V_0 = build_state_space(
+                factors, A_f, Q_f, A_eps, Q_eps, self.factor_order
+            )
             
             # Build observation matrix H = [C, I] or [C, 0, I]
-            H = self._build_observation_matrix(C)
+            H = build_observation_matrix(C, self.factor_order, N)
             
             # Observation noise (small, mainly for numerical stability)
             R = np.eye(N) * 1e-15
@@ -430,8 +498,8 @@ class DDFM(BaseFactorModel):
             V_0=V_0[:num_factors, :num_factors] if self.use_idiosyncratic else V_0,  # Factor initial covariance
             r=r,
             p=p,
-            converged=True,  # Training completed
-            num_iter=epochs,
+            converged=converged,  # MCMC convergence status
+            num_iter=num_iter,  # Number of MCMC iterations
             loglik=loglik,
             series_ids=safe_get_attr(config, 'get_series_ids', lambda: [])(),
             block_names=[DEFAULT_GLOBAL_BLOCK_NAME],
@@ -440,446 +508,13 @@ class DDFM(BaseFactorModel):
         self._result = result
         return result
     
-    def _train_autoencoder(
+    def predict(
         self,
-        X: np.ndarray,
-        epochs: int,
-        batch_size: int,
-        learning_rate: float,
-    ) -> None:
-        """Train the autoencoder using PyTorch.
-        
-        Parameters
-        ----------
-        X : np.ndarray
-            Standardized data (T x N)
-        epochs : int
-            Number of training epochs
-        batch_size : int
-            Batch size
-        learning_rate : float
-            Learning rate for Adam optimizer
-        """
-        T, N = X.shape
-        
-        # Convert to PyTorch tensors
-        X_tensor = torch.FloatTensor(X).to(self.device)
-        
-        # Create dataset
-        dataset = torch.utils.data.TensorDataset(X_tensor, X_tensor)
-        dataloader = torch.utils.data.DataLoader(
-            dataset, batch_size=batch_size, shuffle=True
-        )
-        
-        # Optimizer
-        optimizer = optim.Adam(
-            list(self.encoder.parameters()) + list(self.decoder.parameters()),
-            lr=learning_rate,
-        )
-        
-        # Loss function (MSE)
-        criterion = nn.MSELoss()
-        
-        # Training loop
-        self.encoder.train()
-        self.decoder.train()
-        
-        for epoch in range(epochs):
-            epoch_loss = 0.0
-            n_batches = 0
-            
-            for batch_X, batch_target in dataloader:
-                optimizer.zero_grad()
-                
-                # Forward pass
-                factors = self.encoder(batch_X)
-                reconstructed = self.decoder(factors)
-                
-                # Compute loss (only on non-missing values)
-                loss = criterion(reconstructed, batch_target)
-                
-                # Backward pass
-                loss.backward()
-                optimizer.step()
-                
-                epoch_loss += loss.item()
-                n_batches += 1
-            
-            if (epoch + 1) % 10 == 0 or epoch == 0:
-                avg_loss = epoch_loss / n_batches if n_batches > 0 else 0.0
-                _logger.info(f"Epoch {epoch+1}/{epochs}: loss={avg_loss:.6f}")
-        
-        self.encoder.eval()
-        self.decoder.eval()
-    
-    def _extract_decoder_params(self) -> Tuple[np.ndarray, np.ndarray]:
-        """Extract observation matrix C and bias from trained decoder.
-        
-        Extracts the learned decoder parameters directly from the PyTorch model,
-        avoiding OLS re-estimation. This preserves the learned relationships
-        from the autoencoder training.
-        
-        Returns
-        -------
-        C : np.ndarray
-            Loading matrix (N x m) from decoder weights
-        bias : np.ndarray
-            Bias terms (N,)
-        """
-        decoder_layer = self.decoder.decoder
-        
-        # Extract weight matrix: (output_dim x input_dim) = (N x m)
-        weight = decoder_layer.weight.data.cpu().numpy()
-        
-        # Extract bias if present
-        if decoder_layer.bias is not None:
-            bias = decoder_layer.bias.data.cpu().numpy()
-        else:
-            bias = np.zeros(weight.shape[0])
-        
-        # C = weight.T (m x N) -> (N x m) for consistency with DFMResult
-        C = weight.T
-        
-        return C, bias
-    
-    def _estimate_idiosyncratic_dynamics(
-        self,
-        residuals: np.ndarray,
-        missing_mask: np.ndarray,
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        """Estimate AR(1) dynamics for idiosyncratic components.
-        
-        Estimates AR(1) coefficients for each series independently from residuals.
-        This models the residual component as having temporal structure rather
-        than being pure white noise.
-        
-        Parameters
-        ----------
-        residuals : np.ndarray
-            Residuals from observation equation (T x N)
-            residuals = X_t - decoder(encoder(X_t))
-        missing_mask : np.ndarray
-            Missing data mask (T x N), True where data is missing
-            
-        Returns
-        -------
-        A_eps : np.ndarray
-            AR(1) coefficients (N x N), diagonal matrix
-        Q_eps : np.ndarray
-            Innovation covariance (N x N), diagonal matrix
-        """
-        T, N = residuals.shape
-        A_eps = np.zeros((N, N))
-        Q_eps = np.zeros((N, N))
-        
-        for j in range(N):
-            # Find valid consecutive pairs (both t-1 and t must be non-missing)
-            valid = ~missing_mask[:, j]
-            valid_pairs = np.zeros(T - 1, dtype=bool)
-            valid_pairs = valid[:-1] & valid[1:]
-            
-            if np.sum(valid_pairs) < self.min_obs_idio:
-                # Insufficient data: use zero AR(1) coefficient
-                _logger.warning(
-                    f"Insufficient observations ({np.sum(valid_pairs)}) for idio AR(1) "
-                    f"estimation for series {j}. Using zero AR(1) coefficient."
-                )
-                A_eps[j, j] = 0.0
-                # Use variance of available residuals
-                if np.sum(valid) > 0:
-                    Q_eps[j, j] = np.var(residuals[valid, j])
-                else:
-                    Q_eps[j, j] = 1e-8
-            else:
-                # Extract valid consecutive pairs
-                eps_t = residuals[1:, j][valid_pairs]
-                eps_t_1 = residuals[:-1, j][valid_pairs]
-                
-                # Estimate AR(1) coefficient using covariance
-                var_eps_t_1 = np.var(eps_t_1)
-                if var_eps_t_1 > 1e-10:
-                    cov_eps = np.cov(eps_t, eps_t_1)[0, 1]
-                    A_eps[j, j] = cov_eps / var_eps_t_1
-                    
-                    # Ensure stability: clip AR(1) coefficient
-                    if abs(A_eps[j, j]) >= 0.99:
-                        sign = np.sign(A_eps[j, j])
-                        A_eps[j, j] = sign * 0.99
-                        _logger.debug(
-                            f"AR(1) coefficient for series {j} clipped to {A_eps[j, j]:.4f} for stability"
-                        )
-                else:
-                    A_eps[j, j] = 0.0
-                
-                # Estimate innovation covariance
-                residuals_ar = eps_t - A_eps[j, j] * eps_t_1
-                Q_eps[j, j] = np.var(residuals_ar)
-                Q_eps[j, j] = max(Q_eps[j, j], 1e-8)  # Floor
-        
-        return A_eps, Q_eps
-    
-    def _estimate_factor_dynamics(
-        self,
-        factors: np.ndarray,
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        """Estimate factor dynamics via OLS.
-        
-        Estimates VAR(1) or VAR(2) model for factors.
-        
-        Parameters
-        ----------
-        factors : np.ndarray
-            Extracted factors (T x m)
-            
-        Returns
-        -------
-        A : np.ndarray
-            Transition matrix (m x m) for VAR(1) or (m x 2m) for VAR(2)
-        Q : np.ndarray
-            Innovation covariance (m x m)
-        """
-        T, m = factors.shape
-        
-        if self.factor_order == 1:
-            if T < 2:
-                # Not enough data, use identity
-                A = np.eye(m)
-                Q = np.eye(m) * 0.1
-                return A, Q
-            
-            # Prepare data for OLS: f_t = A @ f_{t-1}
-            Y = factors[1:, :]  # T-1 x m (dependent)
-            X = factors[:-1, :]  # T-1 x m (independent)
-            
-            # OLS: A = (X'X)^{-1} X'Y
-            try:
-                A = np.linalg.solve(X.T @ X + np.eye(m) * 1e-6, X.T @ Y).T
-            except np.linalg.LinAlgError:
-                # Fallback to pinv
-                A = np.linalg.pinv(X) @ Y
-            
-            # Ensure stability: clip eigenvalues
-            eigenvals = np.linalg.eigvals(A)
-            max_eigenval = np.max(np.abs(eigenvals))
-            if max_eigenval >= 0.99:
-                A = A * (0.99 / max_eigenval)
-            
-            # Estimate innovation covariance
-            residuals = Y - X @ A.T
-            Q = np.cov(residuals.T)
-            
-            # Ensure Q is positive definite
-            Q = (Q + Q.T) / 2  # Symmetrize
-            eigenvals_Q = np.linalg.eigvals(Q)
-            min_eigenval = np.min(eigenvals_Q)
-            if min_eigenval < 1e-8:
-                Q = Q + np.eye(m) * (1e-8 - min_eigenval)
-            
-            # Floor for Q (similar to linear DFM)
-            Q = np.maximum(Q, np.eye(m) * 0.01)
-            
-            return A, Q
-        
-        elif self.factor_order == 2:
-            if T < 3:
-                # Not enough data, use VAR(1) fallback
-                _logger.warning(
-                    f"Insufficient data (T={T}) for VAR(2). Falling back to VAR(1)."
-                )
-                # Temporarily set factor_order to 1, estimate, then restore
-                original_order = self.factor_order
-                self.factor_order = 1
-                A, Q = self._estimate_factor_dynamics(factors)
-                self.factor_order = original_order
-                # Pad A to VAR(2) format: [A1, A2] where A2 = 0
-                A = np.hstack([A, np.zeros((A.shape[0], A.shape[1]))])
-                return A, Q
-            
-            # Prepare data for VAR(2): f_t = A1 @ f_{t-1} + A2 @ f_{t-2}
-            Y = factors[2:, :]  # T-2 x m (dependent)
-            X = np.hstack((factors[1:-1, :], factors[:-2, :]))  # T-2 x 2m (independent)
-            
-            # OLS: A = (X'X)^{-1} X'Y, where A = [A1, A2]
-            try:
-                A = np.linalg.solve(X.T @ X + np.eye(2 * m) * 1e-6, X.T @ Y).T
-            except np.linalg.LinAlgError:
-                # Fallback to pinv
-                A = np.linalg.pinv(X) @ Y
-            
-            # Split into A1 and A2
-            A1 = A[:, :m]
-            A2 = A[:, m:]
-            
-            # Ensure stability: check eigenvalues of companion form
-            companion = np.block([
-                [A1, A2],
-                [np.eye(m), np.zeros((m, m))]
-            ])
-            eigenvals = np.linalg.eigvals(companion)
-            max_eigenval = np.max(np.abs(eigenvals))
-            if max_eigenval >= 0.99:
-                scale = 0.99 / max_eigenval
-                A1 = A1 * scale
-                A2 = A2 * scale
-                A = np.hstack((A1, A2))
-            
-            # Estimate innovation covariance
-            residuals = Y - X @ A.T
-            Q = np.cov(residuals.T)
-            
-            # Ensure Q is positive definite
-            Q = (Q + Q.T) / 2  # Symmetrize
-            eigenvals_Q = np.linalg.eigvals(Q)
-            min_eigenval = np.min(eigenvals_Q)
-            if min_eigenval < 1e-8:
-                Q = Q + np.eye(m) * (1e-8 - min_eigenval)
-            
-            # Floor for Q
-            Q = np.maximum(Q, np.eye(m) * 0.01)
-            
-            return A, Q
-        
-        else:
-            raise ValueError(f"factor_order must be 1 or 2, got {self.factor_order}")
-    
-    def _build_observation_matrix(
-        self,
-        C: np.ndarray,
-    ) -> np.ndarray:
-        """Build observation matrix H including idiosyncratic components.
-        
-        Constructs the observation matrix H = [C, I] for VAR(1) or
-        H = [C, 0, I] for VAR(2), where C loads on factors and I on idio.
-        
-        Observation equation: y_t = H @ x_t + v_t
-        where x_t = [f_t, eps_t] (VAR(1)) or [f_t, f_{t-1}, eps_t] (VAR(2))
-        
-        Parameters
-        ----------
-        C : np.ndarray
-            Loading matrix (N x m) from decoder
-            
-        Returns
-        -------
-        H : np.ndarray
-            Observation matrix (N x state_dim)
-        """
-        N, m = C.shape
-        
-        if self.factor_order == 1:
-            # H = [C, I] where C loads on f_t, I loads on eps_t
-            H = np.hstack([C, np.eye(N)])
-        elif self.factor_order == 2:
-            # H = [C, 0, I] where C loads on f_t, 0 on f_{t-1}, I on eps_t
-            H = np.hstack([C, np.zeros((N, m)), np.eye(N)])
-        else:
-            raise ValueError(f"factor_order must be 1 or 2, got {self.factor_order}")
-        
-        return H
-    
-    def _build_state_space(
-        self,
-        factors: np.ndarray,
-        A_f: np.ndarray,
-        Q_f: np.ndarray,
-        A_eps: np.ndarray,
-        Q_eps: np.ndarray,
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Build state-space model with companion form.
-        
-        Constructs the complete state-space model including both factors
-        and idiosyncratic components in the state vector.
-        
-        Parameters
-        ----------
-        factors : np.ndarray
-            Extracted factors (T x m)
-        A_f : np.ndarray
-            Factor transition matrix (m x m) for VAR(1) or (m x 2m) for VAR(2)
-        Q_f : np.ndarray
-            Factor innovation covariance (m x m)
-        A_eps : np.ndarray
-            Idiosyncratic AR(1) coefficients (N x N), diagonal
-        Q_eps : np.ndarray
-            Idiosyncratic innovation covariance (N x N), diagonal
-            
-        Returns
-        -------
-        A : np.ndarray
-            Full transition matrix (state_dim x state_dim)
-        Q : np.ndarray
-            Full innovation covariance (state_dim x state_dim)
-        Z_0 : np.ndarray
-            Initial state vector (state_dim,)
-        V_0 : np.ndarray
-            Initial state covariance (state_dim x state_dim)
-        """
-        m = factors.shape[1]
-        N = A_eps.shape[0]
-        
-        if self.factor_order == 1:
-            # State: x_t = [f_t, eps_t]
-            # Transition matrix
-            A = np.block([
-                [A_f, np.zeros((m, N))],
-                [np.zeros((N, m)), A_eps]
-            ])
-            
-            # Innovation covariance
-            Q = np.block([
-                [Q_f, np.zeros((m, N))],
-                [np.zeros((N, m)), Q_eps]
-            ])
-            
-            # Initial state
-            eps_0 = np.zeros(N)  # Idiosyncratic initial values
-            Z_0 = np.concatenate([factors[0, :], eps_0])
-            
-            # Initial covariance
-            V_f = np.cov(factors.T)
-            V_eps = np.diag(np.diag(Q_eps))
-            V_0 = np.block([
-                [V_f, np.zeros((m, N))],
-                [np.zeros((N, m)), V_eps]
-            ])
-            
-        elif self.factor_order == 2:
-            # State: x_t = [f_t, f_{t-1}, eps_t]
-            # Split VAR(2) coefficients
-            A1 = A_f[:, :m]
-            A2 = A_f[:, m:]
-            
-            # Companion form transition matrix
-            A = np.block([
-                [A1, A2, np.zeros((m, N))],
-                [np.eye(m), np.zeros((m, m)), np.zeros((m, N))],
-                [np.zeros((N, m)), np.zeros((N, m)), A_eps]
-            ])
-            
-            # Innovation covariance (only f_t has innovation, f_{t-1} and eps_t are deterministic)
-            Q = np.block([
-                [Q_f, np.zeros((m, m)), np.zeros((m, N))],
-                [np.zeros((m, m)), np.zeros((m, m)), np.zeros((m, N))],
-                [np.zeros((N, m)), np.zeros((N, m)), Q_eps]
-            ])
-            
-            # Initial state
-            Z_0 = np.concatenate([factors[0, :], factors[0, :], np.zeros(N)])
-            
-            # Initial covariance
-            V_f = np.cov(factors.T)
-            V_eps = np.diag(np.diag(Q_eps))
-            V_0 = np.block([
-                [V_f, V_f, np.zeros((m, N))],
-                [V_f, V_f, np.zeros((m, N))],
-                [np.zeros((N, m)), np.zeros((N, m)), V_eps]
-            ])
-        else:
-            raise ValueError(f"factor_order must be 1 or 2, got {self.factor_order}")
-        
-        return A, Q, Z_0, V_0
-    
-    def predict(self, horizon: Optional[int] = None, **kwargs) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
+        horizon: Optional[int] = None,
+        *,
+        return_series: bool = True,
+        return_factors: bool = True
+    ) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
         """Forecast future values.
         
         Parameters
@@ -887,10 +522,10 @@ class DDFM(BaseFactorModel):
         horizon : int, optional
             Number of periods ahead to forecast. If None, defaults to 1 year
             of periods based on clock frequency.
-        return_series : bool, optional
-            Whether to return forecasted series (default: True)
-        return_factors : bool, optional
-            Whether to return forecasted factors (default: True)
+        return_series : bool, default True
+            Whether to return forecasted series.
+        return_factors : bool, default True
+            Whether to return forecasted factors.
             
         Returns
         -------
@@ -900,13 +535,13 @@ class DDFM(BaseFactorModel):
         if self._result is None:
             raise ValueError("Model must be fitted before prediction. Call fit() first.")
         
-        return_series = kwargs.get('return_series', True)
-        return_factors = kwargs.get('return_factors', True)
-        
         # Default horizon
         if horizon is None:
-            clock = get_clock_frequency(self._config, 'm')
-            horizon = get_periods_per_year(clock)
+            if self._config is not None:
+                clock = get_clock_frequency(self._config, 'm')
+                horizon = get_periods_per_year(clock)
+            else:
+                horizon = 12  # Default to 12 periods if no config
         
         if horizon <= 0:
             raise ValueError("horizon must be a positive integer.")
@@ -973,6 +608,6 @@ if not _has_torch:
         def fit(self, *args, **kwargs):
             raise ImportError("PyTorch is required for DDFM")
         
-        def predict(self, *args, **kwargs):
+        def predict(self, horizon: Optional[int] = None, *, return_series: bool = True, return_factors: bool = True):
             raise ImportError("PyTorch is required for DDFM")
 

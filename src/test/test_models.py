@@ -1,36 +1,15 @@
-"""Tests for Deep Dynamic Factor Model (DDFM).
+"""Consolidated tests: test_dfm.py, test_ddfm.py, test_factor.py, test_factor_issue.py.
 
-This module contains tests for the DDFM implementation, including:
-- Synthetic DGP tests
-- Factor recovery tests
-- Comparison with reference DDFM implementation
+This file consolidates tests from: test_dfm.py, test_ddfm.py, test_factor.py, test_factor_issue.py
 """
 
-import sys
-from pathlib import Path
 import unittest
+
+
+import sys
 import numpy as np
-from typing import Optional
 import pytest
-
-# Add src to path for imports
-project_root = Path(__file__).parent.parent.parent
-sys.path.insert(0, str(project_root / 'src'))
-
-try:
     import torch
-    _has_torch = True
-except ImportError:
-    _has_torch = False
-
-# SyntheticDGP removed from package for now
-# from dfm_python.core.synthetic_dgp import SyntheticDGP
-from dfm_python.config import DFMConfig, SeriesConfig, BlockConfig
-from dfm_python.models.ddfm import DDFM
-from dfm_python.models.dfm import DFMLinear
-
-
-@unittest.skip("SyntheticDGP removed from package")
 class TestDDFMSyntheticDGP(unittest.TestCase):
     """Test DDFM on synthetic data with known factors."""
     
@@ -642,4 +621,8 @@ class TestDDFMHighLevelAPI(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+
+
 

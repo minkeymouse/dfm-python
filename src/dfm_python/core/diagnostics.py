@@ -3,6 +3,7 @@
 from typing import Optional, Dict, Any, Tuple, TYPE_CHECKING
 import numpy as np
 import logging
+from .helpers import get_logger
 
 import polars as pl
 from scipy.linalg import orthogonal_procrustes
@@ -11,7 +12,7 @@ POLARS_AVAILABLE = True
 
 from ..config import DFMConfig
 
-_logger = logging.getLogger(__name__)
+_logger = get_logger(__name__)
 
 if TYPE_CHECKING:
     from .results import DFMResult

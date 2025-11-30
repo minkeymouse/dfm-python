@@ -7,6 +7,7 @@ It inherits from BaseFactorModel to provide a consistent interface.
 import numpy as np
 from typing import Optional, Tuple, Union, Any
 import logging
+from ..core.helpers import get_logger
 
 from .base import BaseFactorModel
 from ..config import DFMConfig
@@ -14,7 +15,7 @@ from ..core.results import DFMResult, DFMParams
 from ..core.estimation import _dfm_core
 from ..core.state_space import run_kf
 
-_logger = logging.getLogger(__name__)
+_logger = get_logger(__name__)
 
 
 class DFMLinear(BaseFactorModel):
@@ -145,7 +146,13 @@ class DFMLinear(BaseFactorModel):
         self._result = result
         return result
     
-    def predict(self, horizon: Optional[int] = None, **kwargs) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
+    def predict(
+        self,
+        horizon: Optional[int] = None,
+        *,
+        return_series: bool = True,
+        return_factors: bool = True
+    ) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
         """Forecast future values using the fitted model.
         
         Parameters
@@ -170,9 +177,6 @@ class DFMLinear(BaseFactorModel):
         """
         if self._result is None:
             raise ValueError("Model must be fitted before prediction. Call fit() first.")
-        
-        return_series = kwargs.get('return_series', True)
-        return_factors = kwargs.get('return_factors', True)
         
         # Default horizon: 1 year of periods based on clock frequency
         if horizon is None:

@@ -5,6 +5,9 @@ for Dynamic Factor Model estimation.
 """
 
 import logging
+from ..core.helpers import get_logger
+
+_logger = get_logger(__name__)
 import warnings
 from pathlib import Path
 from typing import List, Optional, Tuple, Union, Any, Dict
@@ -16,6 +19,7 @@ from dataclasses import dataclass
 
 from ..config import DFMConfig, SeriesConfig, BlockConfig
 from ..core.time import TimeIndex, parse_timestamp, to_python_datetime
+# DataLoader class is defined in this file (see below)
 
 logger = logging.getLogger(__name__)
 
@@ -165,7 +169,7 @@ def sort_data(Z: np.ndarray, Mnem: List[str], config: DFMConfig) -> Tuple[np.nda
             perm.append(mnem_to_idx[sid])
             Mnem_filt.append(sid)
         else:
-            logger.warning(f"Series '{sid}' from config not found in data")
+            _logger.warning(f"Series '{sid}' from config not found in data")
     
     if len(perm) == 0:
         raise ValueError("No matching series found between config and data")
@@ -174,149 +178,6 @@ def sort_data(Z: np.ndarray, Mnem: List[str], config: DFMConfig) -> Tuple[np.nda
     Z_filt = Z[:, perm]
     
     return Z_filt, Mnem_filt
-
-
-def _transform_series(Z: np.ndarray, formula: str, freq: str, step: int) -> np.ndarray:
-    """Transform a single time series according to formula.
-    
-    Parameters
-    ----------
-    Z : np.ndarray
-        Raw time series (T,)
-    formula : str
-        Transformation code (lin, chg, pch, etc.)
-    freq : str
-        Frequency code (m, q, sa, a)
-    step : int
-        Number of base periods per observation (1 for monthly, 3 for quarterly, etc.)
-        
-    Returns
-    -------
-    X : np.ndarray
-        Transformed series (may be shorter than Z due to differencing)
-    """
-    T = len(Z)
-    X = np.full(T, np.nan)
-    
-    if formula == 'lin':
-        X[:] = Z
-    elif formula == 'chg':
-        # First difference
-        if T > step:
-            X[step:] = Z[step:] - Z[:-step]
-    elif formula == 'ch1':
-        # Year-over-year difference (generic based on frequency)
-        from ..core.structure import get_periods_per_year
-        year_step = get_periods_per_year(freq)
-        if T > year_step:
-            X[year_step:] = Z[year_step:] - Z[:-year_step]
-    elif formula == 'pch':
-        # Percent change
-        if T > step:
-            X[step:] = 100.0 * (Z[step:] - Z[:-step]) / np.abs(Z[:-step] + 1e-10)
-    elif formula == 'pc1':
-        # Year-over-year percent change (generic based on frequency)
-        from ..core.structure import get_periods_per_year
-        year_step = get_periods_per_year(freq)
-        if T > year_step:
-            X[year_step:] = 100.0 * (Z[year_step:] - Z[:-year_step]) / np.abs(Z[:-year_step] + 1e-10)
-    elif formula == 'pca':
-        # Percent change annualized (generic based on frequency)
-        if T > step:
-            from ..core.structure import get_annual_factor
-            annual_factor = get_annual_factor(freq, step)
-            X[step:] = annual_factor * 100.0 * (Z[step:] - Z[:-step]) / np.abs(Z[:-step] + 1e-10)
-    elif formula == 'cch':
-        # Continuously compounded rate of change
-        if T > step:
-            X[step:] = 100.0 * (np.log(np.abs(Z[step:]) + 1e-10) - np.log(np.abs(Z[:-step]) + 1e-10))
-    elif formula == 'cca':
-        # Continuously compounded annual rate of change (generic based on frequency)
-        if T > step:
-            from ..core.structure import get_annual_factor
-            annual_factor = get_annual_factor(freq, step)
-            X[step:] = annual_factor * 100.0 * (np.log(np.abs(Z[step:]) + 1e-10) - np.log(np.abs(Z[:-step]) + 1e-10))
-    elif formula == 'log':
-        # Natural log
-        X[:] = np.log(np.abs(Z) + 1e-10)
-    else:
-        X[:] = Z
-    
-    return X
-
-
-def transform_data(Z: np.ndarray, Time: TimeIndex, config: DFMConfig) -> Tuple[np.ndarray, TimeIndex, np.ndarray]:
-    """Transform each data series according to configuration.
-    
-    Applies the specified transformation formula to each series based on its
-    frequency and transformation type. Handles mixed-frequency data by
-    applying transformations at the appropriate observation intervals.
-    
-    Supported frequencies: monthly (m), quarterly (q), semi-annual (sa), annual (a).
-    Frequencies faster than the clock frequency are not supported.
-    
-    Parameters
-    ----------
-    Z : np.ndarray
-        Raw data matrix (T x N)
-    Time : TimeIndex
-        Time index for the data
-    config : DFMConfig
-        Model configuration with transformation specifications
-        
-    Returns
-    -------
-    X : np.ndarray
-        Transformed data matrix (T x N)
-    Time : TimeIndex
-        Time index (may be truncated after transformation)
-    Z : np.ndarray
-        Original data (may be truncated to match X)
-    """
-    from ..core.structure import FREQUENCY_HIERARCHY
-    
-    T, N = Z.shape
-    X = np.full((T, N), np.nan)
-    
-    # Validate frequencies - reject higher frequencies than clock
-    from ..core.helpers import safe_get_attr, get_frequencies_from_config, get_series_ids
-    clock = safe_get_attr(config, 'clock', 'm')
-    clock_hierarchy = FREQUENCY_HIERARCHY.get(clock, 3)
-    
-    frequencies = get_frequencies_from_config(config)
-    series_ids = get_series_ids(config)
-    for i, freq in enumerate(frequencies):
-        freq_hierarchy = FREQUENCY_HIERARCHY.get(freq, 3)
-        if freq_hierarchy < clock_hierarchy:
-            raise ValueError(
-                f"Series '{series_ids[i]}' has frequency '{freq}' which is faster than clock '{clock}'. "
-                f"Higher frequencies (daily, weekly) are not supported. "
-                f"Please use monthly, quarterly, semi-annual, or annual frequencies only."
-            )
-    
-    # Frequency to step mapping (step = number of base periods per observation)
-    freq_to_step = {'m': 1, 'q': 3, 'sa': 6, 'a': 12}
-    
-    # DFMConfig always has series attribute, but check for safety
-    transformations = [s.transformation for s in config.series] if hasattr(config, 'series') and config.series else ['lin'] * N
-    
-    for i in range(N):
-        freq = frequencies[i] if i < len(frequencies) else clock
-        step = freq_to_step.get(freq, 1)
-        formula = transformations[i] if i < len(transformations) else 'lin'
-        X[:, i] = _transform_series(Z[:, i], formula, freq, step)
-    
-    # Remove leading NaN rows (from differencing)
-    drop = 0
-    for t in range(T):
-        if np.all(np.isnan(X[t, :])):
-            drop += 1
-        else:
-            break
-    
-    if T > drop:
-        return X[drop:], Time[drop:], Z[drop:]
-    return X, Time, Z
 
 
 def load_data(datafile: Union[str, Path], config: DFMConfig,
@@ -367,19 +228,19 @@ def load_data(datafile: Union[str, Path], config: DFMConfig,
     """
     from ..core.structure import FREQUENCY_HIERARCHY
     
-    logger.info('Loading data...')
+    _logger.info('Loading data...')
     
     datafile_path = Path(datafile)
     if datafile_path.suffix.lower() != '.csv':
-        logger.warning(f"Data file extension is not .csv: {datafile_path.suffix}. Assuming CSV format.")
+        _logger.warning(f"Data file extension is not .csv: {datafile_path.suffix}. Assuming CSV format.")
     
     # Read raw data
     Z, Time, Mnem = read_data(datafile_path)
-    logger.info(f"Read {Z.shape[0]} time periods, {Z.shape[1]} series from {datafile_path}")
+    _logger.info(f"Read {Z.shape[0]} time periods, {Z.shape[1]} series from {datafile_path}")
     
     # Sort data to match config order
     Z, Mnem = sort_data(Z, Mnem, config)
-    logger.info(f"Sorted data to match configuration order")
+    _logger.info(f"Sorted data to match configuration order")
     
     # Apply sample date filters
     if sample_start is not None:
@@ -390,7 +251,7 @@ def load_data(datafile: Union[str, Path], config: DFMConfig,
             mask = mask.to_numpy()
         Z = Z[mask]
         Time = Time.filter(mask) if hasattr(Time, 'filter') else Time[mask]
-        logger.info(f"Filtered to start date: {sample_start}")
+        _logger.info(f"Filtered to start date: {sample_start}")
     
     if sample_end is not None:
         if isinstance(sample_end, str):
@@ -400,11 +261,11 @@ def load_data(datafile: Union[str, Path], config: DFMConfig,
             mask = mask.to_numpy()
         Z = Z[mask]
         Time = Time.filter(mask) if hasattr(Time, 'filter') else Time[mask]
-        logger.info(f"Filtered to end date: {sample_end}")
+        _logger.info(f"Filtered to end date: {sample_end}")
     
     # Transform data
     X, Time, Z = transform_data(Z, Time, config)
-    logger.info(f"Transformed data: {X.shape[0]} time periods, {X.shape[1]} series")
+    _logger.info(f"Transformed data: {X.shape[0]} time periods, {X.shape[1]} series")
     
     # Validate data quality
     # Note: DFMConfig always has 'clock' attribute, but use safe_get_attr for consistency
@@ -434,12 +295,12 @@ def load_data(datafile: Union[str, Path], config: DFMConfig,
     
     if len(warnings_list) > 0:
         for series_id, T_obs, N_total in warnings_list[:5]:
-            logger.warning(
+            _logger.warning(
                 f"Series '{series_id}': T={T_obs} < N={N_total} (may cause numerical issues). "
                 f"Suggested fix: increase sample size or reduce number of series."
             )
         if len(warnings_list) > 5:
-            logger.warning(f"... and {len(warnings_list) - 5} more series with T < N")
+            _logger.warning(f"... and {len(warnings_list) - 5} more series with T < N")
         
         warnings.warn(
             f"Insufficient data: {len(warnings_list)} series have T < N (time periods < number of series). "
@@ -460,12 +321,12 @@ def load_data(datafile: Union[str, Path], config: DFMConfig,
     
     if len(extreme_missing_series) > 0:
         for series_id, ratio in extreme_missing_series[:5]:
-            logger.warning(
+            _logger.warning(
                 f"Series '{series_id}' has {ratio:.1%} missing data (>90%). "
                 f"This may cause estimation issues. Consider removing this series or increasing data coverage."
             )
         if len(extreme_missing_series) > 5:
-            logger.warning(f"... and {len(extreme_missing_series) - 5} more series with >90% missing data")
+            _logger.warning(f"... and {len(extreme_missing_series) - 5} more series with >90% missing data")
         
         warnings.warn(
             f"Extreme missing data detected: {len(extreme_missing_series)} series have >90% missing values. "
@@ -757,3 +618,324 @@ class DataView:
             description=self.description,
             X_frame=self.X_frame
         )
+
+# ============================================================================
+
+
+
+# ============================================================================
+# Additional utilities from loader_utils.py
+# ============================================================================
+
+
+# Additional helper functions
+"""Data preprocessing utilities and DataLoader class.
+
+This module contains preprocessing functions and DataLoader class
+extracted from loader.py to keep the main file under 1000 lines.
+"""
+
+# Data preprocessing functions (merged from preprocess.py)
+# ============================================================================
+
+import numpy as np
+from typing import Tuple
+from ..config import DFMConfig
+from ..core.time import TimeIndex
+from ..core.helpers import safe_get_attr, get_frequencies_from_config, get_series_ids
+from ..core.structure import FREQUENCY_HIERARCHY, get_periods_per_year, get_annual_factor
+from ..core.helpers import get_logger
+
+_logger = get_logger(__name__)
+
+
+def _transform_series(Z: np.ndarray, formula: str, freq: str, step: int) -> np.ndarray:
+    """Transform a single time series according to formula.
+    
+    Parameters
+    ----------
+    Z : np.ndarray
+        Raw time series (1D array)
+    formula : str
+        Transformation formula: 'lin', 'chg', 'ch1', 'pch', 'pc1', 'pca', 'cch', 'cca', 'log'
+    freq : str
+        Frequency code: 'm', 'q', 'sa', 'a'
+    step : int
+        Number of base periods per observation
+        
+    Returns
+    -------
+    np.ndarray
+        Transformed series
+    """
+    T = len(Z)
+    X = np.full(T, np.nan)
+    
+    if formula == 'lin':
+        X[:] = Z
+    elif formula == 'chg':
+        # First difference
+        if T > step:
+            X[step:] = Z[step:] - Z[:-step]
+    elif formula == 'ch1':
+        # Year-over-year difference (generic based on frequency)
+        year_step = get_periods_per_year(freq)
+        if T > year_step:
+            X[year_step:] = Z[year_step:] - Z[:-year_step]
+    elif formula == 'pch':
+        # Percent change
+        if T > step:
+            X[step:] = 100.0 * (Z[step:] - Z[:-step]) / np.abs(Z[:-step] + 1e-10)
+    elif formula == 'pc1':
+        # Year-over-year percent change (generic based on frequency)
+        year_step = get_periods_per_year(freq)
+        if T > year_step:
+            X[year_step:] = 100.0 * (Z[year_step:] - Z[:-year_step]) / np.abs(Z[:-year_step] + 1e-10)
+    elif formula == 'pca':
+        # Percent change annualized (generic based on frequency)
+        if T > step:
+            annual_factor = get_annual_factor(freq, step)
+            X[step:] = annual_factor * 100.0 * (Z[step:] - Z[:-step]) / np.abs(Z[:-step] + 1e-10)
+    elif formula == 'cch':
+        # Continuously compounded rate of change
+        if T > step:
+            X[step:] = 100.0 * (np.log(np.abs(Z[step:]) + 1e-10) - np.log(np.abs(Z[:-step]) + 1e-10))
+    elif formula == 'cca':
+        # Continuously compounded annual rate of change (generic based on frequency)
+        if T > step:
+            annual_factor = get_annual_factor(freq, step)
+            X[step:] = annual_factor * 100.0 * (np.log(np.abs(Z[step:]) + 1e-10) - np.log(np.abs(Z[:-step]) + 1e-10))
+    elif formula == 'log':
+        # Natural log
+        X[:] = np.log(np.abs(Z) + 1e-10)
+    else:
+        X[:] = Z
+    
+    return X
+
+
+def transform_data(Z: np.ndarray, Time: TimeIndex, config: DFMConfig) -> Tuple[np.ndarray, TimeIndex, np.ndarray]:
+    """Transform each data series according to configuration.
+    
+    Applies the specified transformation formula to each series based on its
+    frequency and transformation type. Handles mixed-frequency data by
+    applying transformations at the appropriate observation intervals.
+    
+    Supported frequencies: monthly (m), quarterly (q), semi-annual (sa), annual (a).
+    Frequencies faster than the clock frequency are not supported.
+    
+    Parameters
+    ----------
+    Z : np.ndarray
+        Raw data matrix (T x N)
+    Time : TimeIndex
+        Time index for the data
+    config : DFMConfig
+        Model configuration with transformation specifications
+        
+    Returns
+    -------
+    X : np.ndarray
+        Transformed data matrix (T x N)
+    Time : TimeIndex
+        Time index (may be truncated after transformation)
+    Z : np.ndarray
+        Original data (may be truncated to match X)
+    """
+    T, N = Z.shape
+    X = np.full((T, N), np.nan)
+    
+    # Validate frequencies - reject higher frequencies than clock
+    clock = safe_get_attr(config, 'clock', 'm')
+    clock_hierarchy = FREQUENCY_HIERARCHY.get(clock, 3)
+    
+    frequencies = get_frequencies_from_config(config)
+    series_ids = get_series_ids(config)
+    for i, freq in enumerate(frequencies):
+        freq_hierarchy = FREQUENCY_HIERARCHY.get(freq, 3)
+        if freq_hierarchy < clock_hierarchy:
+            raise ValueError(
+                f"Series '{series_ids[i]}' has frequency '{freq}' which is faster than clock '{clock}'. "
+                f"Higher frequencies (daily, weekly) are not supported. "
+                f"Please use monthly, quarterly, semi-annual, or annual frequencies only."
+            )
+    
+    # Frequency to step mapping (step = number of base periods per observation)
+    freq_to_step = {'m': 1, 'q': 3, 'sa': 6, 'a': 12}
+    
+    # DFMConfig always has series attribute, but check for safety
+    transformations = [s.transformation for s in config.series] if hasattr(config, 'series') and config.series else ['lin'] * N
+    
+    for i in range(N):
+        freq = frequencies[i] if i < len(frequencies) else clock
+        step = freq_to_step.get(freq, 1)
+        formula = transformations[i] if i < len(transformations) else 'lin'
+        X[:, i] = _transform_series(Z[:, i], formula, freq, step)
+    
+    # Remove leading NaN rows (from differencing)
+    drop = 0
+    for t in range(T):
+        if np.all(np.isnan(X[t, :])):
+            drop += 1
+        else:
+            break
+    
+    if T > drop:
+        return X[drop:], Time[drop:], Z[drop:]
+    return X, Time, Z
+
+
+# ============================================================================
+# DataLoader class (merged from data_loader.py)
+# ============================================================================
+
+# Additional functions from loader_extras.py
+"""Additional data loading functions.
+
+This module contains functions split from loader.py
+to keep files under 1000 lines.
+"""
+
+from typing import Optional, Tuple, Union
+from pathlib import Path
+from datetime import datetime
+import numpy as np
+
+from ..config import DFMConfig
+from ..core.time import TimeIndex, parse_timestamp
+from .loader import read_data, sort_data, rem_nans_spline, calculate_release_date
+# transform_data is now in this file (merged from preprocess.py)
+from ..core.helpers import get_logger
+
+_logger = get_logger(__name__)
+
+
+class DataLoader:
+    """Encapsulates data loading, transformation, and preprocessing operations.
+    
+    This class provides a unified interface for loading time series data,
+    applying transformations, and preparing data for DFM estimation.
+    
+    Parameters
+    ----------
+    config : DFMConfig
+        Model configuration object
+    """
+    
+    def __init__(self, config: DFMConfig):
+        """Initialize DataLoader with configuration.
+        
+        Parameters
+        ----------
+        config : DFMConfig
+            Model configuration object
+        """
+        self.config = config
+        self._data: Optional[np.ndarray] = None
+        self._time: Optional[TimeIndex] = None
+        self._original_data: Optional[np.ndarray] = None
+    
+    def load(
+        self,
+        datafile: Union[str, Path],
+        sample_start: Optional[Union[datetime, str]] = None,
+        sample_end: Optional[Union[datetime, str]] = None
+    ) -> 'DataLoader':
+        """Load and transform time series data.
+        
+        Parameters
+        ----------
+        datafile : str or Path
+            Path to data file (CSV format supported)
+        sample_start : datetime or str, optional
+            Start date for sample (YYYY-MM-DD). If None, uses beginning of data.
+        sample_end : datetime or str, optional
+            End date for sample (YYYY-MM-DD). If None, uses end of data.
+            
+        Returns
+        -------
+        DataLoader
+            Self for method chaining
+        """
+        from .loader import load_data
+        
+        self._data, self._time, self._original_data = load_data(
+            datafile, self.config, sample_start, sample_end
+        )
+        return self
+    
+    def load_from_array(
+        self,
+        data: np.ndarray,
+        time: Optional[TimeIndex] = None
+    ) -> 'DataLoader':
+        """Load data from numpy array.
+        
+        Parameters
+        ----------
+        data : np.ndarray
+            Raw data matrix (T x N)
+        time : TimeIndex, optional
+            Time index. If None, generates default time index.
+            
+        Returns
+        -------
+        DataLoader
+            Self for method chaining
+        """
+        from ..core.time import datetime_range, clock_to_datetime_freq
+        from ..core.helpers import get_clock_frequency
+        from datetime import datetime
+        
+        self._original_data = data.copy()
+        
+        # Generate time index if not provided
+        if time is None:
+            clock = get_clock_frequency(self.config, 'm')
+            datetime_freq = clock_to_datetime_freq(clock)
+            start_date = datetime(2000, 1, 1)
+            self._time = TimeIndex(datetime_range(start=start_date, periods=len(data), freq=datetime_freq))
+        else:
+            self._time = time
+        
+        # Transform data
+        self._data, self._time, self._original_data = transform_data(
+            self._original_data, self._time, self.config
+        )
+        
+        return self
+    
+    @property
+    def data(self) -> Optional[np.ndarray]:
+        """Get transformed data matrix (T x N)."""
+        return self._data
+    
+    @property
+    def time(self) -> Optional[TimeIndex]:
+        """Get time index."""
+        return self._time
+    
+    @property
+    def original_data(self) -> Optional[np.ndarray]:
+        """Get original (untransformed) data matrix."""
+        return self._original_data
+    
+    def get_data_tuple(self) -> Tuple[np.ndarray, TimeIndex, np.ndarray]:
+        """Get data as tuple (X, Time, Z).
+        
+        Returns
+        -------
+        Tuple[np.ndarray, TimeIndex, np.ndarray]
+            (transformed_data, time_index, original_data)
+            
+        Raises
+        ------
+        ValueError
+            If data has not been loaded
+        """
+        from ..core.helpers import DFMDataError
+        
+        if self._data is None:
+            raise DFMDataError("Data not loaded. Call load() or load_from_array() first.")
+        
+        return self._data, self._time, self._original_data

@@ -9,7 +9,6 @@ Modules:
 """
 
 from .loader import (
-    transform_data,
     load_data,
     read_data,
     rem_nans_spline,
@@ -17,6 +16,7 @@ from .loader import (
     create_data_view,
     DataView,
 )
+from .loader import transform_data
 
 __all__ = [
     'transform_data',

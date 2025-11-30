@@ -9,10 +9,15 @@ This module provides utility functions for:
 """
 
 import numpy as np
-from typing import Optional, Any, List, Callable, Union
+import sys
 import logging
+from typing import Optional, Any, List, Callable, Union, Tuple
+from pathlib import Path
+from datetime import datetime
 
 from ..config import DFMConfig
+from ..core.results import DFMParams
+from ..core.time import TimeIndex
 
 _logger = logging.getLogger(__name__)
 
@@ -96,7 +101,7 @@ def resolve_param(override: Optional[Any], config_value: Optional[Any], default:
     return default
 
 
-def safe_mean_std(data: np.ndarray, axis: int = 0, ddof: int = 0) -> tuple[np.ndarray, np.ndarray]:
+def safe_mean_std(data: np.ndarray, axis: int = 0, ddof: int = 0) -> Tuple[np.ndarray, np.ndarray]:
     """Compute mean and std safely, handling NaN values.
     
     Parameters
@@ -126,7 +131,7 @@ def standardize_data(
     X: np.ndarray,
     clip_data: bool = True,
     clip_threshold: float = 100.0
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Standardize data: (X - mean) / std.
     
     Parameters
@@ -300,13 +305,15 @@ def _validate_config_loaded(config: Optional[DFMConfig]) -> None:
         
     Raises
     ------
-    ValueError
+    DFMConfigError
         If config is None or invalid
     """
+    from .helpers import DFMConfigError
+    
     if config is None:
-        raise ValueError("Configuration not loaded. Call load_config() first.")
+        raise DFMConfigError("Configuration not loaded. Call load_config() first.")
     if not isinstance(config, DFMConfig):
-        raise ValueError(f"Invalid config type: {type(config)}. Expected DFMConfig.")
+        raise DFMConfigError(f"Invalid config type: {type(config)}. Expected DFMConfig.")
 
 
 def _validate_data_loaded(data: Optional[np.ndarray]) -> None:
@@ -319,13 +326,15 @@ def _validate_data_loaded(data: Optional[np.ndarray]) -> None:
         
     Raises
     ------
-    ValueError
+    DFMDataError
         If data is None or invalid
     """
+    from .helpers import DFMDataError
+    
     if data is None:
-        raise ValueError("Data not loaded. Call load_data() first.")
+        raise DFMDataError("Data not loaded. Call load_data() first.")
     if not isinstance(data, np.ndarray):
-        raise ValueError(f"Invalid data type: {type(data)}. Expected np.ndarray.")
+        raise DFMDataError(f"Invalid data type: {type(data)}. Expected np.ndarray.")
 
 
 def _validate_result_loaded(result: Optional[Any]) -> None:
@@ -338,9 +347,285 @@ def _validate_result_loaded(result: Optional[Any]) -> None:
         
     Raises
     ------
-    ValueError
+    DFMEstimationError
         If result is None
     """
+    from .helpers import DFMEstimationError
+    
     if result is None:
-        raise ValueError("Model not trained. Call train() or fit() first.")
+        raise DFMEstimationError("Model not trained. Call train() or fit() first.")
+
+
+# ============================================================================
+# Exception classes (merged from exceptions.py)
+# ============================================================================
+"""Exception classes for DFM package.
+
+This module provides specific exception types for better error handling
+and clearer error messages throughout the package.
+"""
+
+
+class DFMError(Exception):
+    """Base exception class for all DFM-related errors."""
+    pass
+
+
+class DFMConfigError(DFMError):
+    """Exception raised for configuration-related errors."""
+    pass
+
+
+class DFMDataError(DFMError):
+    """Exception raised for data-related errors."""
+    pass
+
+
+class DFMEstimationError(DFMError):
+    """Exception raised during model estimation."""
+    pass
+
+
+class DFMValidationError(DFMError):
+    """Exception raised for validation failures."""
+    pass
+
+
+class DFMImportError(DFMError, ImportError):
+    """Exception raised when required dependencies are missing."""
+    pass
+
+
+
+# ============================================================================
+# Logging utilities (merged from logging_utils.py)
+# ============================================================================
+"""Logging utilities for DFM package.
+
+This module provides standardized logging configuration and utilities
+for consistent logging across the package.
+"""
+
+
+
+def get_logger(name: str) -> logging.Logger:
+    """Get a logger instance for a module.
+    
+    This is the standard way to get a logger in the DFM package.
+    All modules should use: _logger = get_logger(__name__)
+    
+    Parameters
+    ----------
+    name : str
+        Logger name (typically __name__)
+        
+    Returns
+    -------
+    logging.Logger
+        Logger instance configured for the package
+    """
+    logger = logging.getLogger(name)
+    
+    # Only configure if not already configured
+    if not logger.handlers:
+        # Use package-level logger configuration
+        package_logger = logging.getLogger('dfm_python')
+        if not package_logger.handlers:
+            # Configure root logger for dfm_python package
+            handler = logging.StreamHandler(sys.stdout)
+            handler.setFormatter(
+                logging.Formatter(
+                    '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+                    datefmt='%Y-%m-%d %H:%M:%S'
+                )
+            )
+            package_logger.addHandler(handler)
+            package_logger.setLevel(logging.INFO)
+    
+    return logger
+
+
+def setup_logging(
+    level: int = logging.INFO,
+    format_string: Optional[str] = None
+) -> None:
+    """Set up logging configuration for the package.
+    
+    This is an alias for configure_logging for backward compatibility.
+    
+    Parameters
+    ----------
+    level : int, default logging.INFO
+        Logging level
+    format_string : str, optional
+        Custom format string. If None, uses default format.
+    """
+    configure_logging(level=level, format_string=format_string)
+
+
+def configure_logging(
+    level: int = logging.INFO,
+    format_string: Optional[str] = None
+) -> None:
+    """Configure package-wide logging.
+    
+    Parameters
+    ----------
+    level : int, default logging.INFO
+        Logging level
+    format_string : str, optional
+        Custom format string. If None, uses default format.
+    """
+    if format_string is None:
+        format_string = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    
+    formatter = logging.Formatter(format_string, datefmt='%Y-%m-%d %H:%M:%S')
+    
+    # Configure package logger
+    logger = logging.getLogger('dfm_python')
+    logger.setLevel(level)
+    
+    # Remove existing handlers
+    logger.handlers.clear()
+    
+    # Add console handler
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setLevel(level)
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+
+
+
+# ============================================================================
+# Parameter resolution (merged from parameter_resolver.py)
+# ============================================================================
+"""Parameter resolution utilities.
+
+This module provides a centralized ParameterResolver class to eliminate
+duplicate parameter resolution logic across the codebase.
+"""
+
+
+
+class ParameterResolver:
+    """Centralized parameter resolution for DFM estimation.
+    
+    This class provides a consistent interface for resolving parameters
+    from multiple sources (overrides, config, defaults) with proper
+    priority handling.
+    
+    Priority order: override > config_value > default
+    """
+    
+    def __init__(self, config: DFMConfig, params: Optional[DFMParams] = None):
+        """Initialize parameter resolver.
+        
+        Parameters
+        ----------
+        config : DFMConfig
+            Configuration object
+        params : DFMParams, optional
+            Parameter overrides. If None, uses empty DFMParams().
+        """
+        self.config = config
+        self.params = params if params is not None else DFMParams()
+    
+    def resolve(
+        self,
+        param_name: str,
+        default: Any = None,
+        config_attr: Optional[str] = None
+    ) -> Any:
+        """Resolve a single parameter.
+        
+        Parameters
+        ----------
+        param_name : str
+            Name of parameter in params object (e.g., 'ar_lag', 'threshold')
+        default : Any, optional
+            Default value if not found in params or config
+        config_attr : str, optional
+            Name of attribute in config object. If None, uses param_name.
+            
+        Returns
+        -------
+        Any
+            Resolved parameter value
+        """
+        if config_attr is None:
+            config_attr = param_name
+        
+        # Get override value from params
+        override = getattr(self.params, param_name, None)
+        
+        # Get config value
+        config_value = getattr(self.config, config_attr, None)
+        
+        # Resolve using standard priority
+        return resolve_param(override, config_value, default)
+    
+    def resolve_all(self, param_specs: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+        """Resolve multiple parameters at once.
+        
+        Parameters
+        ----------
+        param_specs : dict
+            Dictionary mapping parameter names to their specifications.
+            Each specification is a dict with:
+            - 'default': default value (required)
+            - 'config_attr': config attribute name (optional, defaults to param_name)
+            
+        Returns
+        -------
+        dict
+            Dictionary of resolved parameters
+            
+        Examples
+        --------
+        >>> resolver = ParameterResolver(config, params)
+        >>> resolved = resolver.resolve_all({
+        ...     'threshold': {'default': 1e-4},
+        ...     'max_iter': {'default': 5000},
+        ...     'ar_lag': {'default': 1, 'config_attr': 'ar_lag'},
+        ... })
+        """
+        result = {}
+        for param_name, spec in param_specs.items():
+            default = spec.get('default')
+            config_attr = spec.get('config_attr', param_name)
+            result[param_name] = self.resolve(param_name, default, config_attr)
+        return result
+    
+    def resolve_estimation_params(self) -> Dict[str, Any]:
+        """Resolve all standard estimation parameters.
+        
+        Returns
+        -------
+        dict
+            Dictionary containing all resolved estimation parameters
+        """
+        return self.resolve_all({
+            'p': {'default': 1, 'config_attr': 'ar_lag'},
+            'nan_method': {'default': 2, 'config_attr': 'nan_method'},
+            'nan_k': {'default': 3, 'config_attr': 'nan_k'},
+            'threshold': {'default': 1e-4, 'config_attr': 'threshold'},
+            'max_iter': {'default': 5000, 'config_attr': 'max_iter'},
+            'clock': {'default': 'm', 'config_attr': 'clock'},
+            'clip_ar_coefficients': {'default': True, 'config_attr': 'clip_ar_coefficients'},
+            'ar_clip_min': {'default': -0.99, 'config_attr': 'ar_clip_min'},
+            'ar_clip_max': {'default': 0.99, 'config_attr': 'ar_clip_max'},
+            'clip_data_values': {'default': False, 'config_attr': 'clip_data_values'},
+            'data_clip_threshold': {'default': 100.0, 'config_attr': 'data_clip_threshold'},
+            'use_regularization': {'default': False, 'config_attr': 'use_regularization'},
+            'regularization_scale': {'default': 1e-6, 'config_attr': 'regularization_scale'},
+            'min_eigenvalue': {'default': 1e-8, 'config_attr': 'min_eigenvalue'},
+            'max_eigenvalue': {'default': 1e8, 'config_attr': 'max_eigenvalue'},
+            'use_damped_updates': {'default': False, 'config_attr': 'use_damped_updates'},
+            'damping_factor': {'default': 0.5, 'config_attr': 'damping_factor'},
+        })
+
+
+
+# Additional helper functions are in their respective modules
+# (nowcasting helpers in nowcast_utils.py, loader helpers in loader.py)
 

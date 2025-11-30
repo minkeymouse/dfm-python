@@ -17,6 +17,7 @@ from typing import Tuple, Optional, Any, Dict, Union
 import warnings
 import logging
 import polars as pl
+from .helpers import get_logger
 
 from .state_space import run_kf
 from ..config import DFMConfig
@@ -44,7 +45,7 @@ from .structure import (
 
 from .results import DFMResult, DFMParams, EMAlgorithmParams
 
-_logger = logging.getLogger(__name__)
+_logger = get_logger(__name__)
 
 # DFMCore class has been moved to models/dfm.py and consolidated with DFMLinear.
 # This module now contains only pure functions for DFM estimation.
@@ -89,31 +90,16 @@ def _prepare_data_and_params(
     if params is None:
         params = DFMParams()
     
-    # Resolve all parameters
-    params_dict = {
-        'p': resolve_param(params.ar_lag, config.ar_lag),
-        'r': (np.array(config.factors_per_block) 
-              if config.factors_per_block is not None 
-              else np.ones(blocks.shape[1])),
-        'nan_method': resolve_param(params.nan_method, config.nan_method),
-        'nan_k': resolve_param(params.nan_k, config.nan_k),
-        'threshold': resolve_param(params.threshold, config.threshold),
-        'max_iter': resolve_param(params.max_iter, config.max_iter),
-        'clock': resolve_param(params.clock, config.clock),
-        'clip_ar_coefficients': resolve_param(params.clip_ar_coefficients, config.clip_ar_coefficients),
-        'ar_clip_min': resolve_param(params.ar_clip_min, config.ar_clip_min),
-        'ar_clip_max': resolve_param(params.ar_clip_max, config.ar_clip_max),
-        'clip_data_values': resolve_param(params.clip_data_values, config.clip_data_values),
-        'data_clip_threshold': resolve_param(params.data_clip_threshold, config.data_clip_threshold),
-        'use_regularization': resolve_param(params.use_regularization, config.use_regularization),
-        'regularization_scale': resolve_param(params.regularization_scale, config.regularization_scale),
-        'min_eigenvalue': resolve_param(params.min_eigenvalue, config.min_eigenvalue),
-        'max_eigenvalue': resolve_param(params.max_eigenvalue, config.max_eigenvalue),
-        'use_damped_updates': resolve_param(params.use_damped_updates, config.use_damped_updates),
-        'damping_factor': resolve_param(params.damping_factor, config.damping_factor),
-        'T': T,
-        'N': N,
-    }
+    # Use ParameterResolver for consistent parameter resolution
+    resolver = ParameterResolver(config, params)
+    params_dict = resolver.resolve_estimation_params()
+    
+    # Add model structure parameters
+    params_dict['r'] = (np.array(config.factors_per_block) 
+                        if config.factors_per_block is not None 
+                        else np.ones(blocks.shape[1]))
+    params_dict['T'] = T
+    params_dict['N'] = N
     
     # Display blocks structure if debug logging enabled
     if _logger.isEnabledFor(logging.DEBUG):

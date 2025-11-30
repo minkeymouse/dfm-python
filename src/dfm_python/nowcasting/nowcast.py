@@ -21,6 +21,7 @@ from typing import Tuple, Optional, Dict, Union, List, Any, Callable
 from datetime import datetime, timedelta
 import warnings
 import logging
+from ..core.helpers import get_logger
 import polars as pl
 import time
 
@@ -53,11 +54,14 @@ from ..core.helpers import (
 from ..dataloader.loader import calculate_release_date, create_data_view, DataView
 from dataclasses import dataclass
 
-from .news import NewsDecompResult, para_const
-from .backtest import BacktestResult
+from .nowcast_utils import (
+    NewsDecompResult,
+    BacktestResult,
+    para_const,
+)
 
 # Set up logger
-_logger = logging.getLogger(__name__)
+_logger = get_logger(__name__)
 
 DEFAULT_FALLBACK_DATE: str = '2017-01-01'
 
@@ -84,166 +88,13 @@ class NowcastResult:
 # ============================================================================
 # Helper Functions
 # ============================================================================
-
-def _get_higher_frequency(clock: str) -> Optional[str]:
-    """Get frequency one step faster than clock.
-    
-    Parameters
-    ----------
-    clock : str
-        Clock frequency code: 'd', 'w', 'm', 'q', 'sa', 'a'
-        
-    Returns
-    -------
-    str or None
-        Frequency one step faster than clock, or None if no higher frequency available
-    """
-    from ..core.structure import FREQUENCY_HIERARCHY
-    clock_h = FREQUENCY_HIERARCHY.get(clock, 3)
-    target_h = clock_h - 1
-    
-    if target_h < 1:
-        return None  # No higher frequency available (clock is already fastest)
-    
-    # Find frequency with target hierarchy
-    for freq, h in FREQUENCY_HIERARCHY.items():
-        if h == target_h:
-            return freq
-    
-    return None  # No higher frequency found
-
-
-def _calculate_backward_date(
-    target_date: datetime,
-    step: int,
-    freq: str
-) -> datetime:
-    """Calculate backward date with accurate calendar handling.
-    
-    Parameters
-    ----------
-    target_date : datetime
-        Target date to go backward from
-    step : int
-        Number of steps to go backward
-    freq : str
-        Frequency code: 'd', 'w', 'm', 'q', 'sa', 'a'
-        
-    Returns
-    -------
-    datetime
-        Calculated backward date
-    """
-    try:
-        from dateutil.relativedelta import relativedelta
-        use_relativedelta = True
-    except ImportError:
-        use_relativedelta = False
-        relativedelta = None  # type: ignore
-        _logger.debug("dateutil.relativedelta not available, using timedelta approximation")
-    
-    if freq == 'd':
-        return target_date - timedelta(days=step)
-    elif freq == 'w':
-        return target_date - timedelta(weeks=step)
-    elif freq == 'm':
-        if use_relativedelta and relativedelta is not None:
-            return target_date - relativedelta(months=step)
-        else:
-            # Approximate: 30 days per month
-            return target_date - timedelta(days=step * 30)
-    elif freq == 'q':
-        if use_relativedelta and relativedelta is not None:
-            return target_date - relativedelta(months=step * 3)
-        else:
-            # Approximate: 90 days per quarter
-            return target_date - timedelta(days=step * 90)
-    elif freq == 'sa':
-        if use_relativedelta and relativedelta is not None:
-            return target_date - relativedelta(months=step * 6)
-        else:
-            # Approximate: 180 days per semi-annual
-            return target_date - timedelta(days=step * 180)
-    elif freq == 'a':
-        if use_relativedelta and relativedelta is not None:
-            return target_date - relativedelta(years=step)
-        else:
-            # Approximate: 365 days per year
-            return target_date - timedelta(days=step * 365)
-    else:
-        # Fallback for unknown frequencies
-        _logger.warning(f"Unknown frequency '{freq}', using 30-day approximation")
-        return target_date - timedelta(days=step * 30)
-
-
-def _get_forecast_horizon_config(clock: str, horizon: Optional[int] = None) -> Tuple[int, str]:
-    """Get forecast horizon configuration based on clock frequency.
-    
-    Parameters
-    ----------
-    clock : str
-        Clock frequency code: 'd', 'w', 'm', 'q', 'sa', 'a'
-    horizon : int, optional
-        Number of periods for forecast horizon. If None, defaults to 1 timestep.
-        
-    Returns
-    -------
-    Tuple[int, str]
-        (horizon_periods, datetime_freq) where:
-        - horizon_periods: Number of periods to forecast
-        - datetime_freq: Frequency string for datetime_range() ('D', 'W', 'ME', 'QE', 'YE')
-        
-    Notes
-    -----
-    - Default horizon is 1 timestep based on clock frequency (generic)
-    - For semi-annual ('sa'), uses 6-month periods
-    """
-    if horizon is None:
-        horizon = 1  # Default: 1 timestep based on clock frequency
-    
-    # Map clock frequency to datetime frequency string (use shared mapping)
-    datetime_freq = clock_to_datetime_freq(clock)
-    
-    # For semi-annual, we need 6 months per period
-    if clock == 'sa' and horizon > 0:
-        horizon = horizon * 6  # Convert to months
-    
-    return horizon, datetime_freq
-
-
-def _check_config_consistency(saved_config: Any, current_config: DFMConfig) -> None:
-    """Check if saved config is consistent with current config.
-    
-    Parameters
-    ----------
-    saved_config : Any
-        Saved configuration object (may be DFMConfig or dict-like)
-    current_config : DFMConfig
-        Current configuration object
-        
-    Notes
-    -----
-    - Issues a warning if configs differ significantly
-    - Does not raise exceptions (allows computation to continue)
-    """
-    try:
-        # Basic checks
-        if hasattr(saved_config, 'series') and hasattr(current_config, 'series'):
-            if len(saved_config.series) != len(current_config.series):
-                _logger.warning(
-                    f"Config mismatch: saved config has {len(saved_config.series)} series, "
-                    f"current config has {len(current_config.series)} series"
-                )
-        
-        if hasattr(saved_config, 'block_names') and hasattr(current_config, 'block_names'):
-            if saved_config.block_names != current_config.block_names:
-                _logger.warning(
-                    f"Config mismatch: block names differ. "
-                    f"Saved: {saved_config.block_names}, Current: {current_config.block_names}"
-                )
-    except Exception as e:
-        _logger.debug(f"Config consistency check failed (non-critical): {str(e)}")
-        # If comparison fails, continue anyway
+# Helper functions are imported from nowcast_utils.py
+from .nowcast_utils import (
+    _get_higher_frequency,
+    _calculate_backward_date,
+    _get_forecast_horizon_config,
+    _check_config_consistency,
+)
 
 
 class Nowcast:
@@ -252,40 +103,11 @@ class Nowcast:
     This class provides a unified interface for nowcasting operations,
     news decomposition, and forecast updates. It takes a DFM model instance
     and provides methods for calculating nowcasts and decomposing forecast
-    updates into news contributions.
-    
-    Parameters
-    ----------
-    model : DFM
-        Trained DFM model instance. Must have:
-        - result: DFMResult (from training)
-        - config: DFMConfig
-        - data: np.ndarray (T x N)
-        - time: TimeIndex
-        - original_data: np.ndarray (optional)
-    
-    Examples
-    --------
-    >>> from dfm_python import DFM, Nowcast
-    >>> 
-    >>> # Train model
-    >>> model = DFM()
-    >>> model.load_config('config/default.yaml')
-    >>> model.load_data('data/sample_data.csv')
-    >>> model.train()
-    >>> 
-    >>> # Create Nowcast instance
-    >>> nowcast = Nowcast(model)
-    >>> 
-    >>> # Calculate nowcast (callable interface)
-    >>> value = nowcast('gdp', view_date='2024-01-15')
-    >>> 
-    >>> # News decomposition
-    >>> news = nowcast.decompose(
-    ...     target_series='gdp',
-    ...     target_period='2024Q1',
-    ...     view_date_old='2024-01-15',
-    ...     view_date_new='2024-02-15'
+
+# ============================================================================
+# Nowcast Class
+# ============================================================================
+
     ... )
     >>> print(f"Change: {news.change:.2f}")
     >>> print(f"Top contributors: {news.top_contributors}")
@@ -953,7 +775,6 @@ class Nowcast:
         This method analyzes how new data releases affect the nowcast by comparing
         forecasts from two different view dates. It calculates both the old and new
         nowcast values (y_old and y_new) and decomposes the change into contributions
-        from each data series.
         
         Note: The result includes y_new, which is the nowcast value at view_date_new.
         In backtest scenarios, this value can be reused via _decomp_to_nowcast_result()
@@ -1058,6 +879,12 @@ class Nowcast:
                     'forecast': news_result.forecast,
                     'weight': news_result.weight,
                     't_miss': news_result.t_miss,
+
+
+# Additional helper functions from nowcast_utils.py
+
+
+# Additional code from nowcast.py and loader functions
                     'v_miss': news_result.v_miss,
                     'innov': news_result.innov
                 }
@@ -1170,328 +997,4 @@ class Nowcast:
             news_contributions = singlenews[:, 0]
             weights = weight[:, 0] if weight.ndim > 1 else weight
         
-        # Calculate total impact
-        total_impact = np.nansum(news_contributions)
-        
-        # Get top contributors
-        abs_contributions = np.abs(news_contributions)
-        top_indices = np.argsort(abs_contributions)[::-1][:top_n]
-        
-        # Build list of top contributors
-        top_contributors = []
-        for idx in top_indices:
-            if not np.isnan(news_contributions[idx]):
-                if idx < len(series_ids):
-                    series_id = series_ids[idx]
-                else:
-                    series_id = get_series_id_by_index(self.model.config, idx)
-                impact = float(news_contributions[idx])
-                top_contributors.append((series_id, impact))
-        
-        return {
-            'total_impact': float(total_impact),
-            'top_contributors': top_contributors,
-            'revision_impact': 0.0,  # Placeholder
-            'release_impact': float(total_impact)
-        }
-    
-    def backtest(
-        self,
-        target_series: str,
-        target_date: Union[datetime, str],
-        backward_steps: int,
-        higher_freq: bool = False,
-        include_actual: bool = True
-    ) -> BacktestResult:
-        """Perform pseudo real-time backtest for target series.
-        
-        This method generates backward data views at regular intervals and calculates
-        nowcasts for each view, allowing evaluation of model performance in a pseudo
-        real-time setting.
-        
-        Optimization: To avoid redundant Kalman filter calculations, the method uses
-        an optimized approach:
-        - First step: Calculates nowcast directly (no previous view for comparison)
-        - Subsequent steps: Calculates news decomposition, which already computes the
-          nowcast value (y_new). This value is extracted and reused, avoiding duplicate
-          Kalman filter/smoother runs.
-        
-        This optimization significantly improves performance for backtests with many
-        steps while maintaining identical results.
-        
-        Parameters
-        ----------
-        target_series : str
-            Target series ID to nowcast
-        target_date : datetime or str
-            Target date to nowcast (e.g., '2024Q4' or datetime(2024, 12, 31))
-        backward_steps : int
-            Number of backward steps to test
-        higher_freq : bool, default False
-            If True, use frequency one step faster than clock frequency for backward steps.
-            If False, use clock frequency.
-        include_actual : bool, default True
-            Whether to compare nowcasts with actual values (if available)
-            
-        Returns
-        -------
-        BacktestResult
-            Backtest results with nowcasts, news decomposition, and metrics.
-            Each step contains:
-            - nowcast_results: NowcastResult for each view (extracted from decompose for steps > 0)
-            - news_results: NewsDecompResult for each step transition (None for first step)
-            - Point-wise and overall metrics (RMSE, MAE, MSE)
-            
-        Examples
-        --------
-        >>> nowcast = Nowcast(model)
-        >>> result = nowcast.backtest(
-        ...     target_series='gdp',
-        ...     target_date='2024Q4',
-        ...     backward_steps=20,
-        ...     higher_freq=True
-        ... )
-        >>> print(f"Overall RMSE: {result.overall_rmse:.4f}")
-        >>> result.plot(save_path='backtest_results.png')
-        """
-        # Get clock frequency
-        clock = get_clock_frequency(self.model.config, 'm')
-        
-        # Determine backward frequency
-        if higher_freq:
-            backward_freq = _get_higher_frequency(clock)
-            if backward_freq is None:
-                _logger.warning(
-                    f"No higher frequency available for clock '{clock}'. "
-                    f"Using clock frequency instead."
-                )
-                backward_freq = clock
-        else:
-            backward_freq = clock
-        
-        # Parse target_date
-        target_date = self._parse_target_date(target_date, target_series)
-        
-        # Get target series index
-        i_series = find_series_index(self.model.config, target_series)
-        
-        # Generate backward view dates (from oldest to newest)
-        # Step 0 = target_date, step N-1 = oldest date
-        view_dates = []
-        for step in range(backward_steps):
-            view_date = _calculate_backward_date(target_date, step, backward_freq)
-            view_dates.append(view_date)
-        
-        # Reverse to get from oldest (step 0) to newest (step N-1 = target_date)
-        # This ensures step 0 is the oldest view and step N-1 is closest to target
-        view_dates = list(reversed(view_dates))
-        
-        # Validate that we have valid dates
-        if len(view_dates) != backward_steps:
-            raise ValueError(f"Failed to generate {backward_steps} view dates. Got {len(view_dates)}")
-        
-        # Initialize result lists
-        view_list: List[DataView] = []
-        nowcast_results: List[NowcastResult] = []
-        news_results: List[Optional[NewsDecompResult]] = []
-        actual_values = []
-        failed_steps: List[int] = []
-        
-        # Create base DataView factory
-        base_view = DataView.from_arrays(
-            X=self.model.data,
-            Time=self.model.time,
-            Z=self.model.original_data,
-            config=self.model.config,
-            X_frame=getattr(self.model, 'data_frame', None)
-        )
-        
-        # Helper function to create placeholder NowcastResult
-        def _create_placeholder_nowcast(view_date: datetime) -> NowcastResult:
-            """Create placeholder NowcastResult with NaN values."""
-            return NowcastResult(
-                target_series=target_series,
-                target_period=target_date,
-                view_date=view_date,
-                nowcast_value=np.nan,
-                factors_at_view=None,
-                dfm_result=None,
-                data_availability=None
-            )
-        
-        # Helper function to get actual value
-        def _get_actual_value() -> float:
-            """Get actual value for target series at target date."""
-            if not include_actual:
-                return np.nan
-            t_idx = find_time_index(self.model.time, target_date)
-            if t_idx is not None and t_idx < self.model.data.shape[0] and i_series < self.model.data.shape[1]:
-                return self.model.data[t_idx, i_series]
-            return np.nan
-        
-        # Helper function to create NowcastResult from successful calculation
-        # (Used as fallback if __call__ returns float instead of NowcastResult)
-        def _create_nowcast_result(view_date: datetime, nowcast_value: float) -> NowcastResult:
-            """Create NowcastResult from successful nowcast calculation.
-            
-            This is a fallback helper used when __call__ returns float instead of NowcastResult.
-            Uses the consolidated _create_nowcast_result_with_metadata method.
-            """
-            # Get data view to extract additional information
-            X_view, Time_view, _ = self.get_data_view(view_date)
-            
-            # Use consolidated method
-            return self._create_nowcast_result_with_metadata(
-                target_series=target_series,
-                target_period=target_date,
-                view_date=view_date,
-                nowcast_value=nowcast_value,
-                X_view=X_view,
-                Time_view=Time_view
-            )
-        
-        # Process each backward step
-        # Optimization: First step uses nowcast, subsequent steps use decompose results
-        # to avoid redundant Kalman filter calculations
-        for step_idx, view_date in enumerate(view_dates):
-            try:
-                # Create data view for this date
-                view = base_view.with_view_date(view_date)
-                view_list.append(view)
-                
-                if step_idx == 0:
-                    # First step: calculate nowcast (no previous view for comparison)
-                    try:
-                        # Use return_result=True to get full NowcastResult
-                        nowcast_result_obj = self(
-                            target_series=target_series,
-                            view_date=view_date,
-                            target_period=target_date,
-                            return_result=True
-                        )
-                        # Type check: should be NowcastResult when return_result=True
-                        if isinstance(nowcast_result_obj, NowcastResult):
-                            nowcast_result = nowcast_result_obj
-                        else:
-                            # Fallback: create result manually (should not happen)
-                            _logger.warning(
-                                f"Expected NowcastResult but got {type(nowcast_result_obj)}. "
-                                f"Creating manually."
-                            )
-                            if isinstance(nowcast_result_obj, (int, float)):
-                                nowcast_result = _create_nowcast_result(view_date, float(nowcast_result_obj))
-                            else:
-                                # Last resort: create with NaN
-                                nowcast_result = _create_placeholder_nowcast(view_date)
-                        nowcast_results.append(nowcast_result)
-                        news_results.append(None)  # No previous view for comparison
-                        
-                    except Exception as e:
-                        _logger.warning(
-                            f"Nowcast calculation failed at step {step_idx} "
-                            f"(view_date={view_date}): {e}"
-                        )
-                        failed_steps.append(step_idx)
-                        nowcast_results.append(_create_placeholder_nowcast(view_date))
-                        news_results.append(None)
-                else:
-                    # Subsequent steps: use decompose to get both news and nowcast
-                    try:
-                        # Get previous view date
-                        prev_view_date = view_dates[step_idx - 1]
-                        
-                        # Calculate news decomposition (returns NewsDecompResult)
-                        # This already computes y_new (the nowcast value) efficiently
-                        news_result = self.decompose(
-                            target_series=target_series,
-                            target_period=target_date,
-                            view_date_old=prev_view_date,
-                            view_date_new=view_date,
-                            return_dict=False
-                        )
-                        # Type check for safety
-                        if isinstance(news_result, NewsDecompResult):
-                            news_results.append(news_result)
-                            # Extract nowcast from decompose result (avoids redundant calculation)
-                            nowcast_result = self._decomp_to_nowcast_result(
-                                news_result,
-                                target_series=target_series,
-                                target_period=target_date,
-                                view_date=view_date
-                            )
-                            nowcast_results.append(nowcast_result)
-                        else:
-                            _logger.warning(f"Unexpected return type from decompose(): {type(news_result)}")
-                            news_results.append(None)
-                            nowcast_results.append(_create_placeholder_nowcast(view_date))
-                            failed_steps.append(step_idx)
-                        
-                    except Exception as e:
-                        _logger.warning(
-                            f"News decomposition failed at step {step_idx} "
-                            f"(view_date={view_date}): {e}"
-                        )
-                        news_results.append(None)
-                        nowcast_results.append(_create_placeholder_nowcast(view_date))
-                        failed_steps.append(step_idx)
-                
-                # Get actual value (same for all steps)
-                actual_values.append(_get_actual_value())
-                    
-            except Exception as e:
-                _logger.error(
-                    f"Unexpected error at step {step_idx} (view_date={view_date}): {e}"
-                )
-                failed_steps.append(step_idx)
-                # Create placeholder entries
-                view_list.append(base_view.with_view_date(view_date))
-                nowcast_results.append(_create_placeholder_nowcast(view_date))
-                news_results.append(None)
-                actual_values.append(np.nan)
-        
-        # Convert to arrays
-        actual_values = np.array(actual_values)
-        nowcast_values = np.array([r.nowcast_value for r in nowcast_results])
-        
-        # Calculate point-wise metrics
-        errors = nowcast_values - actual_values
-        mae_per_step = np.abs(errors)
-        mse_per_step = np.where(np.isnan(errors), np.nan, errors ** 2)  # Preserve NaN
-        rmse_per_step = np.sqrt(np.where(np.isnan(mse_per_step), np.nan, mse_per_step))
-        
-        # Calculate overall metrics (excluding NaN values and failed steps)
-        # Exclude both NaN and failed steps from metric calculation
-        valid_mask = ~(np.isnan(mae_per_step) | np.isnan(mse_per_step))
-        if np.any(valid_mask):
-            overall_mae = float(np.mean(mae_per_step[valid_mask]))
-            overall_mse = float(np.mean(mse_per_step[valid_mask]))
-            overall_rmse = float(np.sqrt(overall_mse))
-        else:
-            overall_mae = None
-            overall_mse = None
-            overall_rmse = None
-            _logger.warning(
-                f"No valid metrics calculated for backtest. "
-                f"All {backward_steps} steps had NaN values or failed."
-            )
-        
-        # Create and return BacktestResult
-        return BacktestResult(
-            target_series=target_series,
-            target_date=target_date,
-            backward_steps=backward_steps,
-            higher_freq=higher_freq,
-            backward_freq=backward_freq,
-            view_list=view_list,
-            nowcast_results=nowcast_results,
-            news_results=news_results,
-            actual_values=actual_values,
-            errors=errors,
-            mae_per_step=mae_per_step,
-            mse_per_step=mse_per_step,
-            rmse_per_step=rmse_per_step,
-            overall_mae=overall_mae,
-            overall_rmse=overall_rmse,
-            overall_mse=overall_mse,
-            failed_steps=failed_steps
-        )
+        return _extract_news_summary_impl(singlenews, weight, series_ids, top_n)
