@@ -421,7 +421,7 @@ def _dfm_core(
     # Step 1: Prepare data and resolve parameters
     X, blocks, params_dict = _prepare_data_and_params(X, config, params)
     
-    # Extract parameters from dict for clarity
+    # Use params_dict directly to avoid redundant variable extraction
     p = params_dict['p']
     r = params_dict['r']
     nan_method = params_dict['nan_method']
