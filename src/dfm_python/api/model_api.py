@@ -945,8 +945,8 @@ class DFM(DFMBase):
         """
         from ..core.helpers import _validate_config_loaded, _validate_data_loaded
         
-        _validate_config_loaded(self._config, "config")
-        _validate_data_loaded(self._data, "data")
+        _validate_config_loaded(self._config)
+        _validate_data_loaded(self._data)
         
         # Use parent class fit() method (linear DFM from DFMCore)
         self._result = self.fit(
@@ -1087,8 +1087,8 @@ class DDFM(DFMBase):
         """
         from ..core.helpers import _validate_config_loaded, _validate_data_loaded
         
-        _validate_config_loaded(self._config, "config")
-        _validate_data_loaded(self._data, "data")
+        _validate_config_loaded(self._config)
+        _validate_data_loaded(self._data)
         
         # Create or update DDFM model instance
         if self._ddfm_model is None:

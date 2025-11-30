@@ -279,13 +279,11 @@ def transform_data(Z: np.ndarray, Time: TimeIndex, config: DFMConfig) -> Tuple[n
     X = np.full((T, N), np.nan)
     
     # Validate frequencies - reject higher frequencies than clock
-    from ..core.helpers import safe_get_attr
+    from ..core.helpers import safe_get_attr, get_frequencies_from_config, get_series_ids
     clock = safe_get_attr(config, 'clock', 'm')
     clock_hierarchy = FREQUENCY_HIERARCHY.get(clock, 3)
     
-    from ..core.helpers import get_frequencies_from_config
     frequencies = get_frequencies_from_config(config)
-    from ..core.helpers import get_series_ids
     series_ids = get_series_ids(config)
     for i, freq in enumerate(frequencies):
         freq_hierarchy = FREQUENCY_HIERARCHY.get(freq, 3)
@@ -410,13 +408,11 @@ def load_data(datafile: Union[str, Path], config: DFMConfig,
     
     # Validate data quality
     # Note: DFMConfig always has 'clock' attribute, but use safe_get_attr for consistency
-    from ..core.helpers import safe_get_attr
+    from ..core.helpers import safe_get_attr, get_frequencies_from_config, get_series_ids
     clock = safe_get_attr(config, 'clock', 'm')
     clock_hierarchy = FREQUENCY_HIERARCHY.get(clock, 3)
     
-    from ..core.helpers import get_frequencies_from_config
     frequencies = get_frequencies_from_config(config)
-    from ..core.helpers import get_series_ids
     series_ids = get_series_ids(config)
     warnings_list = []
     

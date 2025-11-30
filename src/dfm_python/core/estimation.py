@@ -32,7 +32,10 @@ from .em import (
     em_step,
     em_converged,
 )
-from .helpers import safe_get_method, safe_get_attr, resolve_param, safe_mean_std, standardize_data
+from .helpers import (
+    safe_get_method, safe_get_attr, resolve_param, safe_mean_std, standardize_data,
+    get_series_names, get_frequencies_from_config
+)
 
 from .structure import (
     get_aggregation_structure,
@@ -115,7 +118,6 @@ def _prepare_data_and_params(
     # Display blocks structure if debug logging enabled
     if _logger.isEnabledFor(logging.DEBUG):
         try:
-            from .helpers import get_series_names
             series_names = get_series_names(config)
             block_names = (config.block_names if len(config.block_names) == blocks.shape[1] 
                           else [f'Block_{i+1}' for i in range(blocks.shape[1])])
@@ -159,7 +161,6 @@ def _prepare_aggregation_structure(
     
     agg_info = get_aggregation_structure(config, clock=clock)
     tent_weights_dict = agg_info.get('tent_weights', {})
-    from .helpers import get_frequencies_from_config
     frequencies = np.array(get_frequencies_from_config(config)) if config.series else None
     
     # Find R_mat and q for tent kernel constraints
@@ -216,68 +217,47 @@ def _run_em_algorithm(
     converged : bool
         Whether convergence was achieved
     """
-    # Extract parameters from dataclass
-    y = params.y
-    y_est = params.y_est
-    A = params.A
-    C = params.C
-    Q = params.Q
-    R = params.R
-    Z_0 = params.Z_0
-    V_0 = params.V_0
-    r = params.r
-    p = params.p
-    R_mat = params.R_mat
-    q = params.q
-    nQ = params.nQ
-    i_idio = params.i_idio
-    blocks = params.blocks
-    tent_weights_dict = params.tent_weights_dict
-    clock = params.clock
-    frequencies = params.frequencies
-    idio_chain_lengths = params.idio_chain_lengths
-    config = params.config
-    threshold = params.threshold
-    max_iter = params.max_iter
-    use_damped_updates = params.use_damped_updates
-    damping_factor = params.damping_factor
-    
+    # Use params directly instead of extracting all fields
     previous_loglik = -np.inf
     num_iter = 0
     converged = False
     loglik = 0.0  # Initialize to avoid "possibly unbound" warning
     
-    while num_iter < max_iter and not converged:
+    # Local variables for current parameter values
+    A, C, Q, R = params.A.copy(), params.C.copy(), params.Q.copy(), params.R.copy()
+    Z_0, V_0 = params.Z_0.copy(), params.V_0.copy()
+    
+    while num_iter < params.max_iter and not converged:
         # Create EMStepParams dataclass for em_step()
         from .em import EMStepParams
         em_step_params = EMStepParams(
-            y=y_est,
+            y=params.y_est,
             A=A,
             C=C,
             Q=Q,
             R=R,
             Z_0=Z_0,
             V_0=V_0,
-            r=r,
-            p=p,
-            R_mat=R_mat,
-            q=q,
-            nQ=nQ,
-            i_idio=i_idio,
-            blocks=blocks,
-            tent_weights_dict=tent_weights_dict,
-            clock=clock,
-            frequencies=frequencies,
-            idio_chain_lengths=idio_chain_lengths,
-            config=config
+            r=params.r,
+            p=params.p,
+            R_mat=params.R_mat,
+            q=params.q,
+            nQ=params.nQ,
+            i_idio=params.i_idio,
+            blocks=params.blocks,
+            tent_weights_dict=params.tent_weights_dict,
+            clock=params.clock,
+            frequencies=params.frequencies,
+            idio_chain_lengths=params.idio_chain_lengths,
+            config=params.config
         )
         C_new, R_new, A_new, Q_new, Z_0_new, V_0_new, loglik = em_step(em_step_params)
         # Note: em_step returns (C, R, A, Q, Z_0, V_0, loglik) in this order
         
         # Handle likelihood decreases with damped updates
         if num_iter > 0 and loglik < previous_loglik - 1e-3:
-            if use_damped_updates:
-                damping = damping_factor
+            if params.use_damped_updates:
+                damping = params.damping_factor
                 C = damping * C_new + (1 - damping) * C
                 R = damping * R_new + (1 - damping) * R
                 A = damping * A_new + (1 - damping) * A
@@ -287,7 +267,7 @@ def _run_em_algorithm(
                 
                 if loglik < previous_loglik - 0.1:
                     try:
-                        _, _, _, loglik_damped = run_kf(y_est, A, C, Q, R, Z_0, V_0)
+                        _, _, _, loglik_damped = run_kf(params.y_est, A, C, Q, R, Z_0, V_0)
                         if loglik_damped > previous_loglik:
                             loglik = loglik_damped
                         else:
@@ -301,19 +281,19 @@ def _run_em_algorithm(
             Z_0, V_0 = Z_0_new, V_0_new
         
         if num_iter > 2:
-            converged, _ = em_converged(loglik, previous_loglik, threshold, True)
+            converged, _ = em_converged(loglik, previous_loglik, params.threshold, True)
         
         if (num_iter % 10 == 0) and (num_iter > 0):
             pct_change = 100 * ((loglik - previous_loglik) / abs(previous_loglik)) if previous_loglik != 0 else 0
-            _logger.info(f'Iteration {num_iter}/{max_iter}: loglik={loglik:.6f} ({pct_change:6.2f}% change)')
+            _logger.info(f'Iteration {num_iter}/{params.max_iter}: loglik={loglik:.6f} ({pct_change:6.2f}% change)')
         
         previous_loglik = loglik
         num_iter += 1
     
-    if num_iter < max_iter:
+    if num_iter < params.max_iter:
         _logger.info(f'Convergence achieved at iteration {num_iter}')
     else:
-        _logger.warning(f'Stopped at maximum iterations ({max_iter}) without convergence')
+        _logger.warning(f'Stopped at maximum iterations ({params.max_iter}) without convergence')
     
     return A, C, Q, R, Z_0, V_0, loglik, num_iter, converged
 
