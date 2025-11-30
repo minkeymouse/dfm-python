@@ -5,7 +5,7 @@ must implement, ensuring consistent API across different model types.
 """
 
 from abc import ABC, abstractmethod
-from typing import Optional, Union, Tuple
+from typing import Optional, Union, Tuple, Any
 import numpy as np
 
 from ..config import DFMConfig

@@ -1,0 +1,749 @@
+KOGDP...D:
+  series_name: Gross Domestic Product, at Market Price, Constant Prices, SA, KRW,
+    2020 Chained Prices
+  frequency: q
+  transformation: pca
+  blocks:
+  - Block_Global
+  release: 25
+
+KOCNPER.D:
+  series_name: Final Consumption Expenditure, Private, Total, Constant Prices, SA,
+    KRW, 2020 Chained Prices
+  frequency: q
+  transformation: pca
+  blocks:
+  - Block_Global
+  - Block_Consumption
+  release: 25
+
+KOCNGOV.D:
+  series_name: Final Consumption Expenditure, General Government, Total, Constant
+    Prices, SA, KRW, 2020 Chained Prices
+  frequency: q
+  transformation: pca
+  blocks:
+  - Block_Global
+  release: 25
+
+KOGFCF..D:
+  series_name: Gross Capital Formation, Fixed, Total, Constant Prices, SA, KRW, 2020
+    Chained Prices
+  frequency: q
+  transformation: pca
+  blocks:
+  - Block_Global
+  - Block_Investment
+  release: 25
+
+KOEXNGS.D:
+  series_name: Exports, Goods and Services, Total, Constant Prices, SA, KRW, 2020
+    Chained Prices
+  frequency: q
+  transformation: pca
+  blocks:
+  - Block_Global
+  - Block-Export
+  release: 25
+
+KOIMNGS.D:
+  series_name: Imports, Goods and Services, Total, Constant Prices, SA, KRW, 2020
+    Chained Prices
+  frequency: q
+  transformation: pca
+  blocks:
+  - Block_Global
+  release: 25
+
+KOUNPTOTO:
+  series_name: Unemployed, Total, SA
+  frequency: m
+  transformation: pch
+  blocks:
+  - Block_Global
+  - Block-Labor
+  release: 11
+
+KOEMPTOTO:
+  series_name: Employment, Total, SA
+  frequency: m
+  transformation: pch
+  blocks:
+  - Block_Global
+  - Block-Labor
+  release: 11
+
+KOEMPMANF:
+  series_name: Employment, by Industry, Mining and Manufacturing
+  frequency: m
+  transformation: pch
+  blocks:
+  - Block_Global
+  - Block-Labor
+  release: 11
+
+KOEMPCONF:
+  series_name: Employment, by Industry, Construction
+  frequency: m
+  transformation: pch
+  blocks:
+  - Block_Global
+  - Block-Labor
+  release: 11
+
+KOEMPWREP:
+  series_name: Employment, by Industry, Wholesale and Retail Trade
+  frequency: m
+  transformation: pch
+  blocks:
+  - Block_Global
+  - Block-Labor
+  release: 11
+
+KOPOPACTE:
+  series_name: Economic Active Population, Total, SA
+  frequency: m
+  transformation: pch
+  blocks:
+  - Block_Global
+  - Block-Labor
+  release: 11
+
+KOEXPGDSA:
+  series_name: Exports, Free on Board, USD
+  frequency: m
+  transformation: pch
+  blocks:
+  - Block_Global
+  - Block-Export
+  - Block-Nominal
+  release: 1
+
+KOEXCHINA:
+  series_name: Exports, China, USD
+  frequency: m
+  transformation: pch
+  blocks:
+  - Block_Global
+  - Block-Export
+  - Block-Nominal
+  release: 1
+
+KOEXPSCOH:
+  series_name: Exports, Semi-Conductors, Volume, Index, 2020 = 100
+  frequency: m
+  transformation: pch
+  blocks:
+  - Block_Global
+  - Block-Export
+  release: 28
+
+KOEXPMOVH:
+  series_name: Exports, Motor Vehicles, Volume, Index, 2020 = 100
+  frequency: m
+  transformation: pch
+  blocks:
+  - Block_Global
+  - Block-Export
+  release: 28
+
+KOIMPGDSA:
+  series_name: Imports Cost Insurance Freight (Customs Clearance Basis), USD
+  frequency: m
+  transformation: pch
+  blocks:
+  - Block_Global
+  - Block-Nominal
+  release: 1
+
+KOEXPPRCF:
+  series_name: Export Prices, Basic Groups, All Items, Index, 2020 = 100
+  frequency: m
+  transformation: pch
+  blocks:
+  - Block_Global
+  - Block-Nominal
+  release: 14
+
+KOIMPPRCF:
+  series_name: Import Prices, Basic Groups, All Items, Index, 2020 = 100
+  frequency: m
+  transformation: pch
+  blocks:
+  - Block_Global
+  - Block-Nominal
+  release: 14
+
+KONETTRDF:
+  series_name: Terms of Trade, Net Barter, Index, 2020 = 100
+  frequency: m
+  transformation: pch
+  blocks:
+  - Block_Global
+  - Block-Export
+  - Block-Nominal
+  release: 14
+
+KOWRCCNSE:
+  series_name: Retail Sales, Total, All Consumer Goods, SA, Index, 2020 = 100
+  frequency: m
+  transformation: pch
+  blocks:
+  - Block_Global
+  - Block_Consumption
+  release: 28
+
+KOWRCDURE:
+  series_name: Wholesale and Retail Trade, Total, Durable Goods, SA, Index, 2020 =
+    100
+  frequency: m
+  transformation: pch
+  blocks:
+  - Block_Global
+  - Block_Consumption
+  release: 28
+
+KOWRCSEME:
+  series_name: Wholesale and Retail Trade, Total, Semi-Durable Goods, SA, Index, 2020
+    = 100
+  frequency: m
+  transformation: pch
+  blocks:
+  - Block_Global
+  - Block_Consumption
+  release: 28
+
+KOWRCNODE:
+  series_name: Wholesale and Retail Trade, Total, Non-Durable Goods, SA, Index, 2020
+    = 100
+  frequency: m
+  transformation: pch
+  blocks:
+  - Block_Global
+  - Block_Consumption
+  release: 28
+
+KOCREU..A:
+  series_name: 'Consumer Credit : Credit Card, KRW'
+  frequency: m
+  transformation: pch
+  blocks:
+  - Block_Global
+  - Block-Nominal
+  - Block_Consumption
+  release: 85
+
+KOCSMTTOA:
+  series_name: Cyber Shopping Mall, Transaction Amount, Total, Total, KRW
+  frequency: m
+  transformation: pch
+  blocks:
+  - Block_Global
+  - Block-Nominal
+  - Block_Consumption
+  release: 32
+
+KOCONPRCF:
+  series_name: Consumer Prices, Total, Index, 2020 = 100
+  frequency: m
+  transformation: pch
+  blocks:
+  - Block_Global
+  - Block-Nominal
+  release: 3
+
+KOPROPRCF:
+  series_name: Producer Prices, All Items, Index, 2020 = 100
+  frequency: m
+  transformation: pch
+  blocks:
+  - Block_Global
+  - Block-Nominal
+  release: 20
+
+KOCPCOREF:
+  series_name: Consumer Prices, Excluding Agricultural Products and Oils, Index, 2020
+    = 100
+  frequency: m
+  transformation: pch
+  blocks:
+  - Block_Global
+  - Block-Nominal
+  release: 3
+
+KOCPEXFEF:
+  series_name: Consumer Prices, Excluding Food and Energy, Index, 2020 = 100
+  frequency: m
+  transformation: pch
+  blocks:
+  - Block_Global
+  - Block-Nominal
+  release: 3
+
+KOEQUIPTE:
+  series_name: Investment, Equipment, Estimation, SA, Index, 2020 = 100
+  frequency: m
+  transformation: pch
+  blocks:
+  - Block_Global
+  - Block_Investment
+  release: 30
+
+KOEQUIMAE:
+  series_name: Investment, Machinery, SA, Index, 2020 = 100
+  frequency: m
+  transformation: pch
+  blocks:
+  - Block_Global
+  - Block_Investment
+  release: 30
+
+KOEQUITTE:
+  series_name: Investment, Transportation Equipment, SA, Index, 2020 = 100
+  frequency: m
+  transformation: pch
+  blocks:
+  - Block_Global
+  - Block_Investment
+  release: 30
+
+KONEWCONA:
+  series_name: New Orders, Construction, Total, Value, KRW
+  frequency: m
+  transformation: pch
+  blocks:
+  - Block_Global
+  - Block-Nominal
+  - Block_Investment
+  release: 30
+
+KOCONPMTH:
+  series_name: Building Permits, Floor Area
+  frequency: m
+  transformation: pch
+  blocks:
+  - Block_Global
+  - Block_Investment
+  release: 31
+
+KOCONSTRP:
+  series_name: Construction Started, Floor Area
+  frequency: m
+  transformation: pch
+  blocks:
+  - Block_Global
+  - Block_Investment
+  release: 31
+
+KOVALCONA:
+  series_name: Construction Completed, Total, KRW
+  frequency: m
+  transformation: pch
+  blocks:
+  - Block_Global
+  - Block-Nominal
+  - Block_Investment
+  release: 30
+
+KOPSMANUG:
+  series_name: Shipments, Manufacturing, SA, Index, 2020 = 100
+  frequency: m
+  transformation: pch
+  blocks:
+  - Block_Global
+  release: 30
+
+KOMSCAPGG:
+  series_name: Manufacturing Shipment - Capital Goods, SA, Index, 2020 = 100
+  frequency: m
+  transformation: pch
+  blocks:
+  - Block_Global
+  - Block_Investment
+  release: 30
+
+KOMSCONGG:
+  series_name: Manufacturing Shipment - Consumer Goods, SA, Index, 2020 = 100
+  frequency: m
+  transformation: pch
+  blocks:
+  - Block_Global
+  - Block_Consumption
+  release: 30
+
+KOPIMANUG:
+  series_name: Inventories, Manufacturing, SA, Index, 2020 = 100
+  frequency: m
+  transformation: pch
+  blocks:
+  - Block_Global
+  release: 30
+
+KOPICAPGG:
+  series_name: Producers Inventory - Capital Goods, SA, Index, 2020 = 100
+  frequency: m
+  transformation: pch
+  blocks:
+  - Block_Global
+  - Block_Investment
+  release: 30
+
+KOPICONGG:
+  series_name: Producers Inventory - Consumer Goods, SA, Index, 2020 = 100
+  frequency: m
+  transformation: pch
+  blocks:
+  - Block_Global
+  - Block_Consumption
+  release: 30
+
+KOSIAI..E:
+  series_name: Service Sector, Total, SA, Index, 2020 = 100
+  frequency: m
+  transformation: pch
+  blocks:
+  - Block_Global
+  - Block_Consumption
+  release: 30
+
+KOIPMIMAG:
+  series_name: Production, Mining and Manufacturing, SA, Index, 2020 = 100
+  frequency: m
+  transformation: pch
+  blocks:
+  - Block_Global
+  release: 30
+
+KOMPCAPGG:
+  series_name: Production, Capital Goods, SA, Index, 2020 = 100
+  frequency: m
+  transformation: pch
+  blocks:
+  - Block_Global
+  - Block_Investment
+  release: 30
+
+KOMPCONGG:
+  series_name: Manufacturing Production - Consumer Goods, SA, Index, 2020 = 100
+  frequency: m
+  transformation: pch
+  blocks:
+  - Block_Global
+  - Block_Consumption
+  release: 30
+
+KOCYLEADR:
+  series_name: Leading Index, Index, 2020 = 100
+  frequency: m
+  transformation: pch
+  blocks:
+  - Block_Global
+  release: 30
+
+KOROCOINF:
+  series_name: Coincident Index, Index, 2020 = 100
+  frequency: m
+  transformation: pch
+  blocks:
+  - Block_Global
+  release: 30
+
+KOBSESI.R:
+  series_name: BoK, BSI, Economic Sentiment Index
+  frequency: m
+  transformation: lin
+  blocks:
+  - Block_Global
+  release: -5
+
+KOCOBUSIR:
+  series_name: BoK, BSI, Business Conditions, Composite Business Sentiment Index,
+    KRW
+  frequency: m
+  transformation: lin
+  blocks:
+  - Block_Global
+  release: -5
+
+KOBSIBAPR:
+  series_name: BoK, BSI, Business Conditions, All Industries, Actual
+  frequency: m
+  transformation: lin
+  blocks:
+  - Block_Global
+  release: -5
+
+KOBSISAPR:
+  series_name: BoK, BSI, Sales Growth, All Industries, Actual
+  frequency: m
+  transformation: lin
+  blocks:
+  - Block_Global
+  release: -5
+
+KOBSIHAPR:
+  series_name: BoK, BSI, Employment Conditions, All Industries, Actual
+  frequency: m
+  transformation: lin
+  blocks:
+  - Block_Global
+  - Block-Labor
+  release: -5
+
+KOBSIYAPR:
+  series_name: BoK, BSI, Profitability, All Industries, Actual
+  frequency: m
+  transformation: lin
+  blocks:
+  - Block_Global
+  release: -5
+
+KOBSIFAPR:
+  series_name: BoK, BSI, Financial Conditions, All Industries, Actual
+  frequency: m
+  transformation: lin
+  blocks:
+  - Block_Global
+  release: -5
+
+KOBSIBMPR:
+  series_name: BoK, BSI, Business Conditions, Manufacturing, Actual
+  frequency: m
+  transformation: lin
+  blocks:
+  - Block_Global
+  release: -5
+
+KOBSIIMPR:
+  series_name: BoK, BSI, Facility Investment, Manufacturing, Actual
+  frequency: m
+  transformation: lin
+  blocks:
+  - Block_Global
+  - Block_Investment
+  release: -5
+
+KOBSIBNPR:
+  series_name: BoK, BSI, Business Conditions, Non-Manufacturing, Actual
+  frequency: m
+  transformation: lin
+  blocks:
+  - Block_Global
+  release: -5
+
+KOCNFBUSR:
+  series_name: BoK, BSI, Business Conditions, All Industries, Forecast
+  frequency: m
+  transformation: lin
+  blocks:
+  - Block_Global
+  release: -35
+
+KOBSIIMER:
+  series_name: BoK, BSI, Facility Investment, Manufacturing, Forecast
+  frequency: m
+  transformation: lin
+  blocks:
+  - Block_Global
+  - Block_Investment
+  release: -35
+
+KOBSIXMER:
+  series_name: BoK, BSI, Export Sales Growth, Manufacturing, Forecast
+  frequency: m
+  transformation: lin
+  blocks:
+  - Block_Global
+  - Block-Export
+  release: -35
+
+KOBSIRMER:
+  series_name: BoK, BSI, Operation Rate, Manufacturing, Forecast
+  frequency: m
+  transformation: lin
+  blocks:
+  - Block_Global
+  release: -35
+
+KOBSIBNER:
+  series_name: BoK, BSI, Business Conditions, Non-Manufacturing, Forecast
+  frequency: m
+  transformation: lin
+  blocks:
+  - Block_Global
+  release: -35
+
+KOBSIBCOQ:
+  series_name: FKI, Business Conditions, All Industries, Actual, SA
+  frequency: m
+  transformation: lin
+  blocks:
+  - Block_Global
+  release: -5
+
+KOBSIBMAR:
+  series_name: FKI, Business Conditions, Manufacturing, Actual
+  frequency: m
+  transformation: lin
+  blocks:
+  - Block_Global
+  release: -5
+
+KOBSIBNMR:
+  series_name: FKI, Business Conditions, Non-Manufacturing, Actual
+  frequency: m
+  transformation: lin
+  blocks:
+  - Block_Global
+  release: -5
+
+KOBFDSAAF:
+  series_name: FKI, Domestic Demand, All Industries, Actual
+  frequency: m
+  transformation: lin
+  blocks:
+  - Block_Global
+  release: -5
+
+KOBFXSAAF:
+  series_name: FKI, Export, All Industries, Actual
+  frequency: m
+  transformation: lin
+  blocks:
+  - Block_Global
+  - Block-Export
+  release: -5
+
+KOBFINAAF:
+  series_name: FKI, Investment, All Industries, Actual
+  frequency: m
+  transformation: lin
+  blocks:
+  - Block_Global
+  - Block_Investment
+  release: -5
+
+KOBSIEMAR:
+  series_name: FKI, Employment, All Industries, Actual
+  frequency: m
+  transformation: lin
+  blocks:
+  - Block_Global
+  - Block-Labor
+  release: -5
+
+KOBFPRAAF:
+  series_name: FKI, Profitability, All Industries, Actual
+  frequency: m
+  transformation: lin
+  blocks:
+  - Block_Global
+  release: -5
+
+KOBSIBCEQ:
+  series_name: FKI, Business Conditions, All Industries, Prospects, SA
+  frequency: m
+  transformation: lin
+  blocks:
+  - Block_Global
+  release: -35
+
+KOBUSINVR:
+  series_name: FKI, Investment, All Industries, Prospects
+  frequency: m
+  transformation: lin
+  blocks:
+  - Block_Global
+  - Block_Investment
+  release: -35
+
+KOCNFCONR:
+  series_name: CSI, Composite Consumer Sentiment Index, Total
+  frequency: m
+  transformation: lin
+  blocks:
+  - Block_Global
+  - Block_Consumption
+  release: -5
+
+KOCSHHLMR:
+  series_name: CSI, Living Standard of Household, Total
+  frequency: m
+  transformation: lin
+  blocks:
+  - Block_Global
+  - Block_Consumption
+  release: -5
+
+KOCSHHEMR:
+  series_name: CSI, Expectations of Living Standard of Household, Total
+  frequency: m
+  transformation: lin
+  blocks:
+  - Block_Global
+  - Block_Consumption
+  release: -5
+
+KOCSPHIMR:
+  series_name: CSI, Expected Change in Total Household Income, Total
+  frequency: m
+  transformation: lin
+  blocks:
+  - Block_Global
+  - Block_Consumption
+  release: -5
+
+KOCSPSPMR:
+  series_name: CSI, Spending Plan, Total
+  frequency: m
+  transformation: lin
+  blocks:
+  - Block_Global
+  - Block_Consumption
+  release: -5
+
+KOCSECDMR:
+  series_name: CSI, Domestic Economic Situation, Total
+  frequency: m
+  transformation: lin
+  blocks:
+  - Block_Global
+  - Block_Consumption
+  release: -5
+
+KOCSECEMR:
+  series_name: CSI, Domestic Economic Situation, Next 6 Months
+  frequency: m
+  transformation: lin
+  blocks:
+  - Block_Global
+  - Block_Consumption
+  release: -5
+
+KOCSEMEMR:
+  series_name: CSI, Expectations of Employment Situation, Total
+  frequency: m
+  transformation: lin
+  blocks:
+  - Block_Global
+  - Block-Labor
+  - Block_Consumption
+  release: -5
+
+KOCSEOHSR:
+  series_name: CSI, Expectations of Household Saving, Total
+  frequency: m
+  transformation: lin
+  blocks:
+  - Block_Global
+  - Block_Consumption
+  release: -5
+
+KOCSEOHDR:
+  series_name: CSI, Expectations of Household Debt, Total
+  frequency: m
+  transformation: lin
+  blocks:
+  - Block_Global
+  - Block_Consumption
+  release: -5

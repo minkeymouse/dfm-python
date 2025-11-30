@@ -12,7 +12,7 @@ project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root / 'src'))
 
 from dfm_python.api import DFM
-from dfm_python.dfm import DFMResult
+from dfm_python import DFMResult
 from dfm_python.config import (
     DFMConfig, SeriesConfig, BlockConfig,
     YamlSource, DictSource, MergedConfigSource,
@@ -414,7 +414,7 @@ def test_from_dict():
 
 def test_from_spec_conversion():
     """Test from_spec() utility function for CSV to YAML conversion."""
-        from dfm_python.config.io import from_spec
+    from dfm_python.config.io import from_spec
     
     csv_file = project_root / 'data' / 'sample_spec.csv'
     if not csv_file.exists():

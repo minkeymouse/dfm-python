@@ -12,9 +12,9 @@ project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root / 'src'))
 
 from dfm_python.api import DFM
-from dfm_python.dfm import DFMResult
+from dfm_python import DFMResult
 from dfm_python.core.em import em_step, init_conditions, em_converged
-from dfm_python.data import load_data, rem_nans_spline
+from dfm_python.dataloader import load_data, rem_nans_spline
 from dfm_python.config import DFMConfig, SeriesConfig, BlockConfig
 from dfm_python.core.state_space import (
     _compute_covariance_safe,

@@ -15,9 +15,9 @@ sys.path.insert(0, str(project_root / 'src'))
 
 from dfm_python.api import DFM
 from dfm_python.config import DFMConfig, SeriesConfig, BlockConfig
-from dfm_python.dfm import DFMResult
+from dfm_python import DFMResult
 from dfm_python.nowcasting import Nowcast
-from dfm_python.data import calculate_release_date, create_data_view
+from dfm_python.dataloader import calculate_release_date, create_data_view
 from dfm_python.core.time import TimeIndex, datetime_range
 from adapters import BasicDataViewManager
 
@@ -226,7 +226,7 @@ def test_calculate_nowcast_basic():
     )
     
     # Create mock result (simplified)
-    from dfm_python.dfm import DFMResult
+    from dfm_python import DFMResult
     x_sm = (X - np.nanmean(X, axis=0)) / np.nanstd(X, axis=0)
     Z = np.random.randn(T, 1) * 0.5
     result = DFMResult(
@@ -344,7 +344,7 @@ def test_extract_news_summary():
         blocks={'Block_Global': BlockConfig(factors=1, ar_lag=1, clock='m')}
     )
     
-    from dfm_python.dfm import DFMResult
+    from dfm_python import DFMResult
     result = DFMResult(
         x_sm=np.random.randn(10, N),
         X_sm=np.random.randn(10, N),
@@ -521,7 +521,6 @@ def test_dfm_nowcast_basic():
         target_period=None,
         return_result=True
     )
-            from dfm_python.nowcasting import NowcastResult
     assert isinstance(nowcast_result, NowcastResult)
     assert nowcast_result.target_series == 'series_0'
     assert isinstance(nowcast_result.nowcast_value, (float, np.floating))
@@ -762,7 +761,7 @@ def test_backtest_without_actual():
 def test_backtest_result_dataclass():
     """Test BacktestResult dataclass structure."""
     from dfm_python.nowcasting import BacktestResult, NowcastResult, NewsDecompResult
-    from dfm_python.data import DataView
+    from dfm_python.dataloader import DataView
     from datetime import datetime
     
     # Create mock data (minimal for quick test)
@@ -785,7 +784,7 @@ def test_backtest_result_dataclass():
     
     # Create mock DataView objects (simplified - using actual DataView if available)
     try:
-        from dfm_python.data import DataView
+        from dfm_python.dataloader import DataView
         # Create minimal DataView objects (or use None as placeholder)
         view_list = [None] * 2  # Placeholder - actual DataView creation requires full setup
     except ImportError:

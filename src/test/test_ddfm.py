@@ -50,12 +50,12 @@ class TestDDFMSyntheticDGP(unittest.TestCase):
         #     seed=self.seed,
         #     n=self.n_series,
         #     r=self.n_factors,
-            poly_degree=1,  # Linear for now
-            sign_features=0,
-            rho=0.7,
-            alpha=0.2,
-            u=0.1,
-        )
+        #     poly_degree=1,  # Linear for now
+        #     sign_features=0,
+        #     rho=0.7,
+        #     alpha=0.2,
+        #     u=0.1,
+        # )
     
     def test_dgp_simulation(self):
         """Test that synthetic DGP works correctly."""
@@ -194,15 +194,15 @@ class TestDDFMNonlinearDGP(unittest.TestCase):
         self.skipTest("SyntheticDGP removed from package")
         # Create DGP with polynomial factors
         # dgp = SyntheticDGP(
-            seed=self.seed,
-            n=self.n_series,
-            r=self.n_factors,
-            poly_degree=2,  # Quadratic
-            sign_features=0,
-            rho=0.7,
-            alpha=0.2,
-            u=0.1,
-        )
+        #     seed=self.seed,
+        #     n=self.n_series,
+        #     r=self.n_factors,
+        #     poly_degree=2,  # Quadratic
+        #     sign_features=0,
+        #     rho=0.7,
+        #     alpha=0.2,
+        #     u=0.1,
+        # )
         
         X = dgp.simulate(self.t_obs, portion_missings=0.0)
         

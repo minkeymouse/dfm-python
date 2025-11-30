@@ -959,7 +959,7 @@ class DDFM(BaseFactorModel):
             return X_forecast
         return Z_forecast
 
-else:
+if not _has_torch:
     # Placeholder when PyTorch is not available
     class DDFM(BaseFactorModel):
         """Placeholder DDFM class when PyTorch is not available."""

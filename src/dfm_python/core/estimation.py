@@ -34,7 +34,6 @@ from .em import (
 )
 from .helpers import safe_get_method, safe_get_attr, resolve_param, safe_mean_std, standardize_data
 
-from ..dataloader.loader import rem_nans_spline
 from .structure import (
     get_aggregation_structure,
     FREQUENCY_HIERARCHY,
@@ -481,6 +480,8 @@ def _dfm_core(
     # y_est is used for initial conditions only (missing data removed)
     y = x_standardized.T  # n x T (with missing data - standard DFM approach)
     opt_nan_est = {'method': 3, 'k': nan_k}  # Remove all-NaN rows only for initial conditions
+    # Lazy import to avoid circular dependency
+    from ..dataloader.loader import rem_nans_spline
     x_est, _ = rem_nans_spline(x_standardized, method=opt_nan_est['method'], k=opt_nan_est['k'])
     y_est = x_est.T  # n x T (missing data removed)
     

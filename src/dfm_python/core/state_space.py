@@ -991,3 +991,134 @@ def _apply_ar_clipping(A: np.ndarray, config: Optional[Any] = None) -> Tuple[np.
     warn = safe_get_attr(config, 'warn_on_ar_clip', True)
     return _clip_ar_coefficients(A, min_val, max_val, warn)
 
+
+def _compute_regularization_param(
+    matrix: np.ndarray,
+    scale_factor: float = 1e-5,
+    warn: bool = True
+) -> Tuple[float, Dict[str, Any]]:
+    """Compute regularization parameter for matrix inversion."""
+    stats = {
+        'regularized': False,
+        'condition_number': None,
+        'reg_amount': 0.0
+    }
+    
+    if matrix.size == 0 or matrix.shape[0] == 0:
+        return 0.0, stats
+    
+    try:
+        eigenvals = np.linalg.eigvalsh(matrix)
+        eigenvals = eigenvals[np.isfinite(eigenvals) & (eigenvals != 0)]
+        
+        if len(eigenvals) == 0:
+            reg_param = scale_factor
+            stats['regularized'] = True
+            stats['reg_amount'] = reg_param
+            if warn:
+                _logger.warning(f"Matrix has no valid eigenvalues, using default regularization: {reg_param:.2e}")
+            return reg_param, stats
+        
+        max_eig = np.max(np.abs(eigenvals))
+        min_eig = np.min(np.abs(eigenvals[eigenvals != 0]))
+        cond_num = max_eig / max(min_eig, 1e-12)
+        stats['condition_number'] = float(cond_num)
+        
+        if cond_num > 1e8:
+            reg_param = scale_factor * (cond_num / 1e8)
+            stats['regularized'] = True
+            stats['reg_amount'] = reg_param
+            if warn:
+                _logger.warning(f"Matrix is ill-conditioned (cond={cond_num:.2e}), applying regularization: {reg_param:.2e}")
+        else:
+            reg_param = scale_factor
+            stats['reg_amount'] = reg_param
+            
+    except (np.linalg.LinAlgError, ValueError) as e:
+        reg_param = scale_factor
+        stats['regularized'] = True
+        stats['reg_amount'] = reg_param
+        if warn:
+            _logger.warning(f"Regularization computation failed ({type(e).__name__}), using default: {reg_param:.2e}")
+    
+    return reg_param, stats
+
+def _cap_max_eigenvalue(M: np.ndarray, max_eigenval: float = 1e6) -> np.ndarray:
+    """Cap maximum eigenvalue of matrix to prevent numerical explosion.
+    
+    Parameters
+    ----------
+    M : np.ndarray
+        Matrix to cap (square matrix)
+    max_eigenval : float, default 1e6
+        Maximum allowed eigenvalue
+        
+    Returns
+    -------
+    M_capped : np.ndarray
+        Matrix with capped eigenvalues
+    """
+    if M.size == 0 or M.shape[0] == 0:
+        return M
+    
+    try:
+        eigenvals = np.linalg.eigvalsh(M)
+        max_eig = float(np.max(np.abs(eigenvals)))
+        
+        if max_eig > max_eigenval:
+            # Scale matrix to cap maximum eigenvalue
+            scale_factor = max_eigenval / max_eig
+            M = M * scale_factor
+            M = _ensure_symmetric(M)
+    
+    except (np.linalg.LinAlgError, ValueError):
+        # If eigendecomposition fails, return matrix as-is
+        pass
+    
+    return M
+
+
+def _ensure_innovation_variance_minimum(Q: np.ndarray, min_variance: float = 1e-8) -> np.ndarray:
+    """Ensure minimum variance on diagonal of innovation covariance matrix.
+    
+    Parameters
+    ----------
+    Q : np.ndarray
+        Innovation covariance matrix
+    min_variance : float, default 1e-8
+        Minimum variance to enforce
+        
+    Returns
+    -------
+    Q_stable : np.ndarray
+        Matrix with minimum variance enforced
+    """
+    if Q.size == 0 or Q.shape[0] == 0:
+        return Q
+    
+    Q_diag = np.diag(Q).copy()
+    Q_diag = np.maximum(Q_diag, min_variance)
+    Q = np.diag(Q_diag) + (Q - np.diag(np.diag(Q)))  # Preserve off-diagonal
+    return Q
+
+
+def _safe_divide(numerator: np.ndarray, denominator: np.ndarray, default: float = 0.0) -> np.ndarray:
+    """Safely divide arrays, handling zero denominators.
+    
+    Parameters
+    ----------
+    numerator : np.ndarray
+        Numerator array
+    denominator : np.ndarray
+        Denominator array
+    default : float, default 0.0
+        Default value when denominator is zero
+        
+    Returns
+    -------
+    result : np.ndarray
+        Division result
+    """
+    with np.errstate(divide='ignore', invalid='ignore'):
+        result = np.divide(numerator, denominator, out=np.full_like(numerator, default), where=denominator!=0)
+    return result
