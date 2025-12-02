@@ -9,7 +9,7 @@ from typing import Optional, Union, Tuple, Any
 import numpy as np
 
 from ..config import DFMConfig
-from ..core.results import DFMResult
+from .results import BaseResult
 
 
 class BaseFactorModel(ABC):
@@ -25,7 +25,7 @@ class BaseFactorModel(ABC):
         Current configuration object
     _data : Optional[np.ndarray]
         Current data matrix (T x N)
-    _result : Optional[DFMResult]
+    _result : Optional[BaseResult]
         Last fit result
     _time : Optional[TimeIndex]
         Time index for data (optional, for models that support it)
@@ -35,7 +35,7 @@ class BaseFactorModel(ABC):
         """Initialize factor model instance."""
         self._config: Optional[DFMConfig] = None
         self._data: Optional[np.ndarray] = None
-        self._result: Optional[DFMResult] = None
+        self._result: Optional[BaseResult] = None
         self._time: Optional[Any] = None  # TimeIndex type, avoiding circular import
     
     @property
@@ -49,7 +49,7 @@ class BaseFactorModel(ABC):
         return self._data
     
     @property
-    def result(self) -> Optional[DFMResult]:
+    def result(self) -> Optional[BaseResult]:
         """Get last fit result."""
         return self._result
     
@@ -59,7 +59,7 @@ class BaseFactorModel(ABC):
         return self._time
     
     @abstractmethod
-    def fit(self, X: np.ndarray, config: DFMConfig, **kwargs) -> DFMResult:
+    def fit(self, X: np.ndarray, config: DFMConfig, **kwargs) -> BaseResult:
         """Fit the factor model.
         
         Parameters
@@ -73,8 +73,9 @@ class BaseFactorModel(ABC):
             
         Returns
         -------
-        DFMResult
+        BaseResult
             Estimation results including parameters, factors, and diagnostics.
+            Returns DFMResult for linear DFM, DDFMResult for DDFM.
         """
         pass
     

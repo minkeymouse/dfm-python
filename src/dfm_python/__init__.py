@@ -42,7 +42,7 @@ Example (High-level API - Recommended):
     
 Example (Low-level API - For advanced usage):
     >>> from dfm_python import DFM, DFMConfig, SeriesConfig
-    >>> from dfm_python.dataloader import load_data  # Preferred import
+    >>> from dfm_python.utils.data import read_data  # Preferred import
     >>> # Option 1: Load from YAML
     >>> config = load_config('config.yaml')
     >>> # Option 2: Create directly
@@ -84,45 +84,60 @@ from .config import (
 )
 
 # Data utilities
-from .dataloader import transform_data
+# Note: transform_data has been removed - use DFMScaler from dfm_python.transformations instead
 
 # Results
-from .core import DFMResult
+from .models.results import DFMResult, DDFMResult, BaseResult
 
-# Core utilities (from core/ subpackage)
-from .core import calculate_rmse, diagnose_series, print_series_diagnosis
-from .core.state_space import run_kf, skf, fis, miss_data
-# DFMCore is now an alias for DFMLinear (backward compatibility)
+# Utilities (from utils/ subpackage)
+from .utils.diagnostics import diagnose_series, print_series_diagnosis
+from .utils.time import calculate_rmse
+# DFMCore is an alias for DFMLinear (backward compatibility)
 from .models.dfm import DFMLinear
 DFMCore = DFMLinear
 
-# Nowcasting (already in nowcasting/ subpackage)
-from .nowcasting import (
+# PyTorch Lightning modules (recommended)
+try:
+    from .lightning import (
+        DFMLightningModule,
+        DDFMLightningModule,
+        DFMDataModule,
+        KalmanFilter,  # New module class
+        EMAlgorithm,  # New module class
+    )
+    _has_lightning = True
+except ImportError:
+    _has_lightning = False
+    DFMLightningModule = None  # type: ignore
+    DDFMLightningModule = None  # type: ignore
+    DFMDataModule = None  # type: ignore
+    KalmanFilter = None  # type: ignore
+    EMAlgorithm = None  # type: ignore
+
+# Nowcasting (from nowcast/ subpackage)
+from .nowcast import (
     Nowcast,
-    para_const,
     NowcastResult,
+)
+from .nowcast.helpers import (
+    para_const,
     NewsDecompResult,
     BacktestResult,
 )
 
-# High-level API (from api/ subpackage)
-from .api import (
-    DFM, _dfm_instance, from_yaml, from_spec, from_spec_df, from_dict,
+# Model implementations
+from .models.base import BaseFactorModel
+from .models.dfm import DFMLinear, DFM
+from .models.dfm import (
+    from_yaml, from_spec, from_spec_df, from_dict,
     load_config, load_data, load_pickle, train, predict, plot, reset, create_model
 )
 
-# Model implementations
-from .models.base import BaseFactorModel
-from .models.dfm import DFMLinear
-
 # DDFM high-level API and low-level model (both optional, requires PyTorch)
 try:
-    from .api import DDFM as DDFMAPI, _ddfm_instance
-    from .api import load_config_ddfm, load_data_ddfm, train_ddfm, predict_ddfm, plot_ddfm, reset_ddfm
-    from .models.ddfm import DDFM as DDFMModel
+    from .models.ddfm import DDFM, DDFMModel
+    from .models.ddfm import load_config_ddfm, load_data_ddfm, train_ddfm, predict_ddfm, plot_ddfm, reset_ddfm
     _has_ddfm = True
-    # Export high-level API as DDFM
-    DDFM = DDFMAPI
 except ImportError:
     _has_ddfm = False
     DDFM = None  # type: ignore
@@ -133,30 +148,7 @@ except ImportError:
     predict_ddfm = None  # type: ignore
     plot_ddfm = None  # type: ignore
     reset_ddfm = None  # type: ignore
-
-# Expose properties as module-level attributes
-# Use property-like access via functions or direct attribute access
-# Since 'config' conflicts with the config module, we'll use a different approach
-# Users can access: dfm.get_config(), dfm.get_data(), dfm.get_result()
-def get_config():
-    """Get current configuration."""
-    return _dfm_instance.config
-
-def get_data():
-    """Get current data matrix."""
-    return _dfm_instance.data
-
-def get_time():
-    """Get current time index."""
-    return _dfm_instance.time
-
-def get_result():
-    """Get training result."""
-    return _dfm_instance.result
-
-def get_original_data():
-    """Get original (untransformed) data matrix."""
-    return _dfm_instance.original_data
+    # DDFM module-level functions removed - create DDFM() instance directly
 
 __all__ = [
     # Core classes
@@ -173,21 +165,29 @@ __all__ = [
     # High-level API (module-level - recommended)
     'load_config',
     'load_data', 'load_pickle', 'train', 'predict', 'plot', 'reset', 'create_model',
-    'get_config', 'get_data', 'get_time', 'get_result', 'get_original_data',
     # Convenience constructors (cleaner API)
     'from_yaml', 'from_spec', 'from_spec_df', 'from_dict',
     # Low-level API (functional interface - advanced usage)
-    'transform_data',
-    'DFMResult', 'calculate_rmse', 'diagnose_series', 'print_series_diagnosis',
-    'run_kf', 'skf', 'fis', 'miss_data',
-    'para_const',  # Internal utility, kept for backward compatibility
+    'BaseResult', 'DFMResult', 'DDFMResult', 'calculate_rmse', 'diagnose_series', 'print_series_diagnosis',
+    'para_const',  # Internal utility for nowcasting
 ]
 
 # Add DDFM high-level API and convenience functions if available
 if _has_ddfm:
     __all__.extend([
         'DDFM',  # High-level API class
+        'DDFMModel',  # Low-level implementation
         'load_config_ddfm', 'load_data_ddfm', 'train_ddfm', 
         'predict_ddfm', 'plot_ddfm', 'reset_ddfm'
+    ])
+
+# Add Lightning modules if available
+if _has_lightning:
+    __all__.extend([
+        'DFMLightningModule',
+        'DDFMLightningModule',
+        'DFMDataModule',
+        'KalmanFilter',  # New module class
+        'EMAlgorithm',  # New module class
     ])
 

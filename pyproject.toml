@@ -40,12 +40,15 @@ db = [
 deep = [
     "torch>=2.0.0",
 ]
+transform = [
+    "sktime>=0.27.0",
+]
 dev = [
     "pytest>=7.0.0",
     "scikit-learn>=1.0.0",
 ]
 all = [
-    "dfm-python[hydra,db,dev,deep]",
+    "dfm-python[hydra,db,dev,deep,transform]",
 ]
 
 [build-system]
