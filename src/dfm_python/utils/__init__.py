@@ -90,7 +90,7 @@ from .helpers import (
     get_series_id_by_index,
     ParameterResolver,
     _validate_config_loaded,
-    _validate_data_loaded,
+    _validate_data_module,
     _validate_result_loaded,
     DFMError,
     DFMConfigError,

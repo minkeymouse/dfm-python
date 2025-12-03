@@ -4,10 +4,6 @@ This module provides functions for reading, sorting, transforming, and loading t
 for Dynamic Factor Model estimation.
 """
 
-import logging
-from ..logger import get_logger
-
-_logger = get_logger(__name__)
 import warnings
 from pathlib import Path
 from typing import List, Optional, Tuple, Union, Any, Dict
@@ -15,19 +11,21 @@ from typing import List, Optional, Tuple, Union, Any, Dict
 import numpy as np
 import polars as pl
 from datetime import datetime
-from dataclasses import dataclass
 
 try:
     import torch
     import torch.nn.functional as F
-    TORCH_AVAILABLE = True
+    _has_torch = True
 except ImportError:
-    TORCH_AVAILABLE = False
+    _has_torch = False
+    torch = None
+    F = None
 
+from ..logger import get_logger
 from ..config.schema import DFMConfig, SeriesConfig, BlockConfig
 from ..utils.time import TimeIndex, parse_timestamp, to_python_datetime
 
-logger = logging.getLogger(__name__)
+_logger = get_logger(__name__)
 
 
 def read_data(datafile: Union[str, Path]) -> Tuple[np.ndarray, TimeIndex, List[str]]:
@@ -262,7 +260,7 @@ def rem_nans_spline_torch(X: torch.Tensor, method: int = 2, k: int = 3) -> Tuple
     This function implements the same logic as rem_nans_spline() but uses PyTorch
     operations to stay on GPU. All operations preserve the input device and dtype.
     """
-    if not TORCH_AVAILABLE:
+    if not _has_torch:
         raise ImportError("PyTorch is required for rem_nans_spline_torch")
     
     device = X.device
@@ -565,142 +563,9 @@ def create_data_view(
     return X_view, Time, Z_view
 
 
-# DataView class has been moved to nowcast/dataview.py
+# ============================================================================
+# Note: DataView class has been moved to nowcast/dataview.py
 # Import it from there: from ..nowcast.dataview import DataView
-
+#
+# Note: DataLoader class removed - use DFMDataModule from lightning.data_module instead
 # ============================================================================
-
-
-# ============================================================================
-# DataLoader class (merged from data_loader.py)
-# ============================================================================
-
-
-class DataLoader:
-    """Encapsulates data loading, transformation, and preprocessing operations.
-    
-    This class provides a unified interface for loading time series data,
-    applying transformations, and preparing data for DFM estimation.
-    
-    Parameters
-    ----------
-    config : DFMConfig
-        Model configuration object
-    """
-    
-    def __init__(self, config: DFMConfig):
-        """Initialize DataLoader with configuration.
-        
-        Parameters
-        ----------
-        config : DFMConfig
-            Model configuration object
-        """
-        self.config = config
-        self._data: Optional[np.ndarray] = None
-        self._time: Optional[TimeIndex] = None
-        self._original_data: Optional[np.ndarray] = None
-    
-    def load(
-        self,
-        datafile: Union[str, Path],
-        sample_start: Optional[Union[datetime, str]] = None,
-        sample_end: Optional[Union[datetime, str]] = None
-    ) -> 'DataLoader':
-        """Load and transform time series data.
-        
-        Parameters
-        ----------
-        datafile : str or Path
-            Path to data file (CSV format supported)
-        sample_start : datetime or str, optional
-            Start date for sample (YYYY-MM-DD). If None, uses beginning of data.
-        sample_end : datetime or str, optional
-            End date for sample (YYYY-MM-DD). If None, uses end of data.
-            
-        Returns
-        -------
-        DataLoader
-            Self for method chaining
-        """
-        from .loader import load_data
-        
-        self._data, self._time, self._original_data = load_data(
-            datafile, self.config, sample_start, sample_end
-        )
-        return self
-    
-    def load_from_array(
-        self,
-        data: np.ndarray,
-        time: Optional[TimeIndex] = None
-    ) -> 'DataLoader':
-        """Load data from numpy array.
-        
-        Parameters
-        ----------
-        data : np.ndarray
-            Raw data matrix (T x N)
-        time : TimeIndex, optional
-            Time index. If None, generates default time index.
-            
-        Returns
-        -------
-        DataLoader
-            Self for method chaining
-        """
-        from ..utils.time import datetime_range, clock_to_datetime_freq
-        from ..utils.helpers import get_clock_frequency
-        from datetime import datetime
-        
-        self._original_data = data.copy()
-        
-        # Generate time index if not provided
-        if time is None:
-            clock = get_clock_frequency(self.config, 'm')
-            datetime_freq = clock_to_datetime_freq(clock)
-            start_date = datetime(2000, 1, 1)
-            self._time = TimeIndex(datetime_range(start=start_date, periods=len(data), freq=datetime_freq))
-        else:
-            self._time = time
-        
-        # Use raw data (transformations should be applied via custom sktime transformer in DFMDataModule)
-        self._data = data
-        self._original_data = data
-        
-        return self
-    
-    @property
-    def data(self) -> Optional[np.ndarray]:
-        """Get transformed data matrix (T x N)."""
-        return self._data
-    
-    @property
-    def time(self) -> Optional[TimeIndex]:
-        """Get time index."""
-        return self._time
-    
-    @property
-    def original_data(self) -> Optional[np.ndarray]:
-        """Get original (untransformed) data matrix."""
-        return self._original_data
-    
-    def get_data_tuple(self) -> Tuple[np.ndarray, TimeIndex, np.ndarray]:
-        """Get data as tuple (X, Time, Z).
-        
-        Returns
-        -------
-        Tuple[np.ndarray, TimeIndex, np.ndarray]
-            (transformed_data, time_index, original_data)
-            
-        Raises
-        ------
-        ValueError
-            If data has not been loaded
-        """
-        from ..utils.helpers import DFMDataError
-        
-        if self._data is None:
-            raise DFMDataError("Data not loaded. Call load() or load_from_array() first.")
-        
-        return self._data, self._time, self._original_data

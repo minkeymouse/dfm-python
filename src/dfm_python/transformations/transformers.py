@@ -8,44 +8,13 @@ pickleable functions for use with sktime's FunctionTransformer.
 import numpy as np
 from typing import Callable
 
-# Frequency → lag mappings
+# Frequency → lag mappings (for transformation functions only)
 FREQ_TO_LAG_YOY = {'m': 12, 'q': 4, 'sa': 2, 'a': 1}
 FREQ_TO_LAG_STEP = {'m': 1, 'q': 3, 'sa': 6, 'a': 12}
 
-
-def get_periods_per_year(freq: str) -> int:
-    """Get number of periods per year for a frequency.
-    
-    Parameters
-    ----------
-    freq : str
-        Frequency code: 'm', 'q', 'sa', 'a'
-        
-    Returns
-    -------
-    int
-        Number of periods per year (12 for monthly, 4 for quarterly, etc.)
-    """
-    return FREQ_TO_LAG_YOY.get(freq, 12)
-
-
-def get_annual_factor(freq: str, step: int) -> float:
-    """Get annualization factor for a frequency and step.
-    
-    Parameters
-    ----------
-    freq : str
-        Frequency code: 'm', 'q', 'sa', 'a'
-    step : int
-        Number of base periods per observation
-        
-    Returns
-    -------
-    float
-        Annualization factor (periods_per_year / step)
-    """
-    periods_per_year = get_periods_per_year(freq)
-    return periods_per_year / step
+# Import get_periods_per_year and get_annual_factor from config.structure
+# These are the canonical implementations
+from ..config.structure import get_periods_per_year, get_annual_factor
 
 
 # Transformation functions

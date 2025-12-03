@@ -212,166 +212,23 @@ def para_const(X: np.ndarray, result: DFMResult, lag: int = 0) -> Dict[str, Any]
 # ============================================================================
 # Nowcasting helper functions (merged from nowcast_helpers.py)
 # ============================================================================
+# Note: These functions are re-exported from nowcast.utils for backward compatibility.
+# The canonical implementations are in nowcast.utils (without underscore prefix).
 
+from .utils import (
+    get_higher_frequency,
+    calculate_backward_date,
+    get_forecast_horizon_config,
+    check_config_consistency,
+    extract_news_summary,
+)
 
-def _get_higher_frequency(clock: str) -> Optional[str]:
-    """Get frequency one step faster than clock.
-    
-    Parameters
-    ----------
-    clock : str
-        Clock frequency code: 'd', 'w', 'm', 'q', 'sa', 'a'
-        
-    Returns
-    -------
-    str or None
-        Frequency one step faster than clock, or None if no higher frequency available
-    """
-    clock_h = FREQUENCY_HIERARCHY.get(clock, 3)
-    target_h = clock_h - 1
-    
-    if target_h < 1:
-        return None  # No higher frequency available (clock is already fastest)
-    
-    # Find frequency with target hierarchy
-    for freq, h in FREQUENCY_HIERARCHY.items():
-        if h == target_h:
-            return freq
-    
-    return None  # No higher frequency found
-
-
-def _calculate_backward_date(
-    target_date: datetime,
-    step: int,
-    freq: str
-) -> datetime:
-    """Calculate backward date with accurate calendar handling.
-    
-    Parameters
-    ----------
-    target_date : datetime
-        Target date to go backward from
-    step : int
-        Number of steps to go backward
-    freq : str
-        Frequency code: 'd', 'w', 'm', 'q', 'sa', 'a'
-        
-    Returns
-    -------
-    datetime
-        Calculated backward date
-    """
-    try:
-        from dateutil.relativedelta import relativedelta
-        use_relativedelta = True
-    except ImportError:
-        use_relativedelta = False
-        relativedelta = None  # type: ignore
-        _logger.debug("dateutil.relativedelta not available, using timedelta approximation")
-    
-    if freq == 'd':
-        return target_date - timedelta(days=step)
-    elif freq == 'w':
-        return target_date - timedelta(weeks=step)
-    elif freq == 'm':
-        if use_relativedelta and relativedelta is not None:
-            return target_date - relativedelta(months=step)
-        else:
-            # Approximate: 30 days per month
-            return target_date - timedelta(days=step * 30)
-    elif freq == 'q':
-        if use_relativedelta and relativedelta is not None:
-            return target_date - relativedelta(months=step * 3)
-        else:
-            # Approximate: 90 days per quarter
-            return target_date - timedelta(days=step * 90)
-    elif freq == 'sa':
-        if use_relativedelta and relativedelta is not None:
-            return target_date - relativedelta(months=step * 6)
-        else:
-            # Approximate: 180 days per semi-annual
-            return target_date - timedelta(days=step * 180)
-    elif freq == 'a':
-        if use_relativedelta and relativedelta is not None:
-            return target_date - relativedelta(years=step)
-        else:
-            # Approximate: 365 days per year
-            return target_date - timedelta(days=step * 365)
-    else:
-        # Fallback for unknown frequencies
-        _logger.warning(f"Unknown frequency '{freq}', using 30-day approximation")
-        return target_date - timedelta(days=step * 30)
-
-
-def _get_forecast_horizon_config(clock: str, horizon: Optional[int] = None) -> Tuple[int, str]:
-    """Get forecast horizon configuration based on clock frequency.
-    
-    Parameters
-    ----------
-    clock : str
-        Clock frequency code: 'd', 'w', 'm', 'q', 'sa', 'a'
-    horizon : int, optional
-        Number of periods for forecast horizon. If None, defaults to 1 timestep.
-        
-    Returns
-    -------
-    Tuple[int, str]
-        (horizon_periods, datetime_freq) where:
-        - horizon_periods: Number of periods to forecast
-        - datetime_freq: Frequency string for datetime_range() ('D', 'W', 'ME', 'QE', 'YE')
-        
-    Notes
-    -----
-    - Default horizon is 1 timestep based on clock frequency (generic)
-    - For semi-annual ('sa'), uses 6-month periods
-    """
-    if horizon is None:
-        horizon = 1  # Default: 1 timestep based on clock frequency
-    
-    # Map clock frequency to datetime frequency string (use shared mapping)
-    datetime_freq = clock_to_datetime_freq(clock)
-    
-    # For semi-annual, we need 6 months per period
-    if clock == 'sa' and horizon > 0:
-        horizon = horizon * 6  # Convert to months
-    
-    return horizon, datetime_freq
-
-
-def _check_config_consistency(saved_config: Any, current_config: DFMConfig) -> None:
-    """Check if saved config is consistent with current config.
-    
-    Parameters
-    ----------
-    saved_config : Any
-        Saved configuration object (may be DFMConfig or dict-like)
-    current_config : DFMConfig
-        Current configuration object
-        
-    Notes
-    -----
-    - Issues a warning if configs differ significantly
-    - Does not raise exceptions (allows computation to continue)
-    """
-    try:
-        # Basic checks
-        if hasattr(saved_config, 'series') and hasattr(current_config, 'series'):
-            if len(saved_config.series) != len(current_config.series):
-                _logger.warning(
-                    f"Config mismatch: saved config has {len(saved_config.series)} series, "
-                    f"current config has {len(current_config.series)} series"
-                )
-        
-        if hasattr(saved_config, 'block_names') and hasattr(current_config, 'block_names'):
-            if saved_config.block_names != current_config.block_names:
-                _logger.warning(
-                    f"Config mismatch: block names differ. "
-                    f"Saved: {saved_config.block_names}, Current: {current_config.block_names}"
-                )
-    except Exception as e:
-        _logger.debug(f"Config consistency check failed (non-critical): {str(e)}")
-        # If comparison fails, continue anyway
+# Backward compatibility aliases (with underscore prefix)
+_get_higher_frequency = get_higher_frequency
+_calculate_backward_date = calculate_backward_date
+_get_forecast_horizon_config = get_forecast_horizon_config
+_check_config_consistency = check_config_consistency
+_extract_news_summary_impl = extract_news_summary
 
 # ============================================================================
 # Backtest result classes (merged from backtest.py)
@@ -548,7 +405,7 @@ def _extract_news_summary_impl(
     return {
         'total_impact': float(total_impact),
         'top_contributors': top_contributors,
-        'revision_impact': float(total_impact),  # Placeholder
-        'release_impact': 0.0  # Placeholder
+        'revision_impact': float(total_impact),  # TODO: Implement revision impact calculation
+        'release_impact': 0.0  # TODO: Implement release impact calculation
     }
 

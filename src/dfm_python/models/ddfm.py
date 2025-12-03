@@ -8,7 +8,6 @@ Kalman filtering.
 
 import numpy as np
 from typing import Optional, Tuple, Union, List, Dict, Any, TYPE_CHECKING
-import logging
 from ..logger import get_logger
 
 try:
@@ -647,217 +646,13 @@ from ..utils.helpers import (
 from ..utils.time import TimeIndex
 
 if TYPE_CHECKING:
-    from ..nowcasting import Nowcast
+    from ..nowcast import Nowcast
     from ..lightning import DFMDataModule
-        self,
-        target_series: str,
-        periods: List[datetime],
-        backward: int = 0,
-        forward: int = 0,
-        dataview: Optional[DataView] = None
-    ) -> Dict[str, Any]:
-        """Generate dataset for DFM evaluation."""
-        from ..utils.helpers import find_series_index
-        from ..utils.time import find_time_index
-        
-        i_series = find_series_index(self._config, target_series)
-        X_features, y_baseline, y_actual, metadata, backward_results = [], [], [], [], []
-        
-        if dataview is not None:
-            dataview_factory = dataview
-        else:
-            # Convert data to numpy if needed
-            if hasattr(self._data, 'to_numpy'):
-                X_data = self._data.to_numpy()
-            else:
-                X_data = np.asarray(self._data)
-            
-            # Convert data_frame to proper type
-            data_frame = None
-            if isinstance(self._data, pl.DataFrame):
-                data_frame = self._data
-            elif self._data_frame is not None:
-                data_frame = self._data_frame
-            
-            dataview_factory = DataView.from_arrays(
-                X=X_data, Time=self._time,
-                Z=self._original_data, config=self._config,
-                X_frame=data_frame
-            )
-        if dataview_factory.config is None:
-            dataview_factory.config = self._config
-        
-        for period in periods:
-            view_obj = dataview_factory.with_view_date(period)
-            X_view, Time_view, _ = view_obj.materialize()
-            
-            if backward > 0:
-                nowcasts, data_view_dates = [], []
-                for weeks_back in range(backward, -1, -1):
-                    data_view_date = period - timedelta(weeks=weeks_back)
-                    view_past = dataview_factory.with_view_date(data_view_date)
-                    X_view_past, Time_view_past, _ = view_past.materialize()
-                    # Access nowcast through _nowcast_ref (set by high-level DDFM class)
-                    nowcast_obj = getattr(self, '_nowcast_ref', None)
-                    if nowcast_obj is None:
-                        raise ValueError("nowcast() requires high-level DDFM instance. Call from DDFM class, not DDFMModel.")
-                    nowcast_val = nowcast_obj(
-                        target_series=target_series,
-                        view_date=view_past.view_date or data_view_date,
-                        target_period=period
-                    )
-                    nowcasts.append(nowcast_val)
-                    data_view_dates.append(view_past.view_date or data_view_date)
-                baseline_nowcast = nowcasts[-1]
-                backward_results.append({
-                    'nowcasts': np.array(nowcasts),
-                    'data_view_dates': data_view_dates,
-                    'target_date': period
-                })
-            else:
-                # Access nowcast through _nowcast_ref (set by high-level DDFM class)
-                nowcast_obj = getattr(self, '_nowcast_ref', None)
-                if nowcast_obj is None:
-                    raise ValueError("nowcast() requires high-level DDFM instance. Call from DDFM class, not DDFMModel.")
-                baseline_nowcast = nowcast_obj(
-                    target_series=target_series,
-                    view_date=view_obj.view_date or period,
-                    target_period=period
-                )
-            
-            y_baseline.append(baseline_nowcast)
-            t_idx = find_time_index(self._time, period)
-            actual_val = np.nan
-            # Convert data to numpy for indexing
-            if hasattr(self._data, 'to_numpy'):
-                data_array = self._data.to_numpy()
-            else:
-                data_array = np.asarray(self._data)
-            if t_idx is not None and t_idx < data_array.shape[0] and i_series < data_array.shape[1]:
-                actual_val = data_array[t_idx, i_series]
-            y_actual.append(actual_val)
-            
-            # Extract features
-            if self._result is not None and hasattr(self._result, 'Z'):
-                latest_factors = self._result.Z[-1, :] if self._result.Z.shape[0] > 0 else np.zeros(self._result.Z.shape[1])
-            else:
-                latest_factors = np.array([])
-            if X_view.shape[0] > 0:
-                mean_residual = np.nanmean(X_view[-1, :]) if X_view.shape[0] > 0 else 0.0
-            else:
-                mean_residual = 0.0
-            features = np.concatenate([latest_factors, [mean_residual]])
-            X_features.append(features)
-            metadata.append({'period': period, 'target_series': target_series})
-        
-        return {
-            'X': np.array(X_features),
-            'y_baseline': np.array(y_baseline),
-            'y_actual': np.array(y_actual),
-            'y_target': np.array(y_actual) - np.array(y_baseline),
-            'metadata': metadata,
-            'backward_results': backward_results if backward > 0 else []
-        }
-    
-    def get_state(
-        self,
-        t: Union[int, datetime],
-        target_series: str,
-        lookback: Optional[int] = None
-    ) -> Dict[str, Any]:
-        """Get DFM state at time t."""
-        from ..config.structure import get_periods_per_year
-        from ..utils.helpers import find_series_index
-        from ..utils.time import find_time_index, convert_to_timestamp
-        from ..utils.data import create_data_view
-        
-        if lookback is None:
-            clock = get_clock_frequency(self._config, 'm')
-            lookback = get_periods_per_year(clock)
-        
-        t = convert_to_timestamp(t, self._time, None)
-        i_series = find_series_index(self._config, target_series)
-        
-        # Convert data to numpy if needed
-        if hasattr(self._data, 'to_numpy'):
-            X_data = self._data.to_numpy()
-        else:
-            X_data = np.asarray(self._data)
-        
-        X_view, Time_view, _ = create_data_view(
-            X=X_data, Time=self._time,
-            Z=self._original_data, config=self._config, view_date=t
-        )
-        
-        # Access nowcast through _nowcast_ref (set by high-level DDFM class)
-        nowcast_obj = getattr(self, '_nowcast_ref', None)
-        if nowcast_obj is None:
-            raise ValueError("nowcast() requires high-level DDFM instance. Call from DDFM class, not DDFMModel.")
-        baseline_nowcast = nowcast_obj(target_series=target_series, view_date=t, target_period=None)
-        
-        baseline_forecast, actual_history, residuals, factors_history = [], [], [], []
-        t_idx = find_time_index(self._time, t)
-        if t_idx is None:
-            raise ValueError(f"Time {t} not found in model_instance._time")
-        
-        # Convert data to numpy for indexing
-        if hasattr(self._data, 'to_numpy'):
-            data_array = self._data.to_numpy()
-        else:
-            data_array = np.asarray(self._data)
-        
-        for i in range(max(0, t_idx - lookback + 1), t_idx + 1):
-            if i < data_array.shape[0]:
-                forecast_val = baseline_nowcast
-                baseline_forecast.append(forecast_val)
-                actual_val = data_array[i, i_series] if i_series < data_array.shape[1] else np.nan
-                actual_history.append(actual_val)
-                residual = actual_val - forecast_val if not np.isnan(actual_val) else np.nan
-                residuals.append(residual)
-                if self._result is not None and hasattr(self._result, 'Z') and i < self._result.Z.shape[0]:
-                    factors_history.append(self._result.Z[i, :])
-                else:
-                    factors_history.append(np.zeros(self._result.Z.shape[1]) if self._result is not None else np.array([]))
-        
-        while len(baseline_forecast) < lookback:
-            baseline_forecast.insert(0, np.nan)
-            actual_history.insert(0, np.nan)
-            residuals.insert(0, np.nan)
-            factors_history.insert(0, np.zeros(factors_history[0].shape) if factors_history else np.array([]))
-        
-        if self._result is not None and hasattr(self._result, 'Z') and t_idx < self._result.Z.shape[0]:
-            factors = self._result.Z[t_idx, :]
-        else:
-            factors = np.zeros(self._result.Z.shape[1]) if self._result is not None else np.array([])
-        
-        news_summary = {'total_impact': 0.0, 'top_contributors': [], 'revision_impact': 0.0, 'release_impact': 0.0}
-        feature_parts = [
-            factors.flatten(),
-            np.array(residuals).flatten(),
-            np.array([news_summary.get('total_impact', 0.0)]),
-            np.array([news_summary.get('revision_impact', 0.0)]),
-            np.array([news_summary.get('release_impact', 0.0)])
-        ]
-        features = np.concatenate([part for part in feature_parts if part.size > 0])
-        
-        n_missing = np.sum(np.isnan(X_view[-1, :])) if X_view.shape[0] > 0 else 0
-        n_available = X_view.shape[1] - n_missing
-        
-        return {
-            'baseline_nowcast': baseline_nowcast,
-            'baseline_forecast': np.array(baseline_forecast),
-            'actual_history': np.array(actual_history),
-            'residuals': np.array(residuals),
-            'factors': factors,
-            'factors_history': np.array(factors_history),
-            'news_summary': news_summary,
-            'features': features,
-            'metadata': {
-                't': t_idx, 'date': t, 'target_series': target_series,
-                'data_availability': {'n_missing': int(n_missing), 'n_available': int(n_available), 'missing_series': []}
-            }
-        }
 
+
+# ============================================================================
+# High-level API Classes
+# ============================================================================
 
 class DDFM(BaseFactorModel):
     """High-level API for Deep Dynamic Factor Model.
@@ -1037,10 +832,16 @@ class DDFM(BaseFactorModel):
         )
     
     def plot(self, **kwargs) -> 'DDFM':
-        """Plot common visualizations."""
+        """Plot common visualizations.
+        
+        .. note::
+            Plot functionality is not yet implemented. This method is a placeholder
+            for future visualization features. Use external plotting libraries
+            (matplotlib, plotly) with model results for visualization.
+        """
         from ..utils.helpers import _validate_result_loaded
         _validate_result_loaded(self._result)
-        _logger.info("Plot functionality not yet implemented")
+        _logger.warning("Plot functionality not yet implemented. Use external plotting libraries with model results.")
         return self
     
     def reset(self) -> 'DDFM':

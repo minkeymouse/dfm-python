@@ -275,8 +275,8 @@ def extract_news_summary(
     return {
         'total_impact': float(total_impact),
         'top_contributors': top_contributors,
-        'revision_impact': float(total_impact),  # Placeholder
-        'release_impact': 0.0  # Placeholder
+        'revision_impact': float(total_impact),  # TODO: Implement revision impact calculation
+        'release_impact': 0.0  # TODO: Implement release impact calculation
     }
 
 

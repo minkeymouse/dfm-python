@@ -7,16 +7,14 @@ It inherits from BaseFactorModel to provide a consistent interface.
 import numpy as np
 import polars as pl
 import torch
-from typing import Optional, Tuple, Union, Any, List
+from typing import Optional, Tuple, Union, Any, List, TYPE_CHECKING
 from datetime import datetime
-import logging
 from ..logger import get_logger
 
 from .base import BaseFactorModel
 from ..config import DFMConfig, SeriesConfig, BlockConfig, validate_frequency
 from ..config.results import DFMResult, DFMParams
 from ..config.params import FitParams
-from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..lightning import DFMDataModule

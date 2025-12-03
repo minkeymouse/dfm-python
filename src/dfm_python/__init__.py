@@ -163,19 +163,13 @@ from .models.dfm import (
 # DDFM high-level API and low-level model (both optional, requires PyTorch)
 try:
     from .models.ddfm import DDFM, DDFMModel
-    from .models.ddfm import load_config_ddfm, load_data_ddfm, train_ddfm, predict_ddfm, plot_ddfm, reset_ddfm
     _has_ddfm = True
 except ImportError:
     _has_ddfm = False
     DDFM = None  # type: ignore
     DDFMModel = None  # type: ignore
-    load_config_ddfm = None  # type: ignore
-    load_data_ddfm = None  # type: ignore
-    train_ddfm = None  # type: ignore
-    predict_ddfm = None  # type: ignore
-    plot_ddfm = None  # type: ignore
-    reset_ddfm = None  # type: ignore
-    # DDFM module-level functions removed - create DDFM() instance directly
+    # Note: Module-level convenience functions (load_data_ddfm, train_ddfm, etc.) 
+    # have been removed - use DDFM() instance methods directly
 
 __all__ = [
     # Core classes
@@ -199,14 +193,13 @@ __all__ = [
     'para_const',  # Internal utility for nowcasting
 ]
 
-# Add DDFM high-level API and convenience functions if available
+# Add DDFM high-level API if available
 if _has_ddfm:
     __all__.extend([
         'DDFM',  # High-level API class
         'DDFMModel',  # Low-level implementation
-        'load_config_ddfm', 'train_ddfm', 
-        'predict_ddfm', 'plot_ddfm', 'reset_ddfm'
-        # Note: load_data_ddfm has been removed - use DFMDataModule instead
+        # Note: Module-level convenience functions have been removed - 
+        # use DDFM() instance methods directly (train, predict, etc.)
     ])
 
 # Add Lightning modules if available

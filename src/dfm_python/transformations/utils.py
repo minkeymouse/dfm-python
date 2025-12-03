@@ -20,7 +20,7 @@ from ..utils.helpers import (
     safe_get_attr,
     get_frequencies_from_config,
     get_series_ids,
-    get_periods_per_year,
+    get_periods_per_year,  # From config.structure
 )
 from ..logger import get_logger
 

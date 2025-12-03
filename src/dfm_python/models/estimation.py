@@ -262,7 +262,7 @@ def _dfm_core(
     Examples
     --------
     >>> from dfm_python import DFM
-    >>> from dfm_python.dataloader import load_data  # Preferred import
+    >>> from dfm_python.transformations.utils import load_data  # Preferred import
     >>> from dfm_python.config import load_config  # Preferred import
     >>> from datetime import datetime
     >>> # Load configuration from YAML or create DFMConfig directly
