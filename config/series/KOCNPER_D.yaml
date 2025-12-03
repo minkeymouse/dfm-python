@@ -1,0 +1,12 @@
+series_id: KOCNPER.D
+series_name: Consumption, Private
+frequency: q
+transformation: cha
+blocks:
+- Block_Global
+- Block_Consumption
+nan_method: 2
+standardization: true
+units: Chained W, Billions
+category: Macro
+release: 25

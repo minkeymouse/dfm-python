@@ -1,0 +1,26 @@
+# @package _global_
+defaults:
+  - override /model: ddfm
+  - _self_
+data:
+  path: data/sample_data.csv
+  sample_start: '2000-01-01'
+  sample_end: '2023-12-31'
+description: Test DDFM model configuration for unit tests
+name: test_ddfm
+output:
+  path: outputs/test_ddfm
+  save_model: false
+  save_plots: false
+  save_results: false
+series:
+  - KO3YEARC
+  - KOGDP...D
+  - KOEMPTOTO
+  - KOEXPGDSA
+  - KOIMPGDSA
+  - KOCONPRCF
+  - KOPOPACTE
+  - KOHWRWEMP
+target: KOGDP...D
+

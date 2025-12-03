@@ -1,0 +1,12 @@
+series_id: KOSHRPRCF
+series_name: KOSPI, End of Period
+frequency: m
+transformation: chg
+blocks:
+- Block_Global
+- Block_Nominal
+nan_method: 2
+standardization: true
+units: index
+category: Finance
+release: 1

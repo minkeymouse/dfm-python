@@ -1,0 +1,13 @@
+series_id: KODBLNEQA
+series_name: South Korea, Loans With Combs and SBS, Equipment, KRW
+frequency: m
+transformation: chg
+blocks:
+- Block_Global
+- Block_Investment
+- Block_Nominal
+nan_method: 2
+standardization: true
+units: ￦, Billions
+category: Finance
+release: 45

@@ -1,0 +1,12 @@
+series_id: KOEXNGS.D
+series_name: Exports, Goods and Services
+frequency: q
+transformation: cha
+blocks:
+- Block_Global
+- Block_Export
+nan_method: 2
+standardization: true
+units: Chained W, Billions
+category: Macro
+release: 25

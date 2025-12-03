@@ -186,8 +186,9 @@ def ensure_covariance_stable(
         return M
     
     # Step 1: Ensure real (if needed)
+    # Use function directly (defined in same module, avoid name collision with parameter)
     if ensure_real:
-        M = ensure_real(M)  # type: ignore
+        M = ensure_real(M) if not isinstance(ensure_real, bool) else (torch.real(M) if torch.is_complex(M) else M)
     
     # Step 2: Ensure symmetric and positive semi-definite
     M = ensure_positive_definite(M, min_eigenval=min_eigenval, warn=False)

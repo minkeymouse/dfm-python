@@ -1,0 +1,13 @@
+series_id: KOIMPCONA
+series_name: Imports, Consumer Goods, USD
+frequency: m
+transformation: chg
+blocks:
+- Block_Global
+- Block_Consumption
+- Block_Nominal
+nan_method: 2
+standardization: true
+units: $, Millions
+category: Int. trade
+release: 14

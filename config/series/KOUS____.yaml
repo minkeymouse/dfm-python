@@ -1,0 +1,13 @@
+series_id: KOUS$...
+series_name: USD/KRW, avg
+frequency: m
+transformation: chg
+blocks:
+- Block_Global
+- Block_Export
+- Block_Nominal
+nan_method: 2
+standardization: true
+units: KRW per 1 USD
+category: Finance
+release: 1

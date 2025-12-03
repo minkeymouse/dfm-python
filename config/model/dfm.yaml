@@ -1,0 +1,42 @@
+ar_clip_max: 0.99
+ar_clip_min: -0.99
+ar_lag: 1
+augment_idio: true
+augment_idio_slow: true
+# Block configurations: define all blocks and their properties
+# Series configs specify which blocks they belong to (optional - defaults to first block)
+blocks:
+  Block_Global:
+    factors: 3
+    ar_lag: 1
+    clock: m
+  Block_Consumption:
+    factors: 1
+    ar_lag: 1
+    clock: m
+  Block_Investment:
+    factors: 1
+    ar_lag: 1
+    clock: m
+  Block_Export:
+    factors: 1
+    ar_lag: 1
+    clock: m
+  Block_Nominal:
+    factors: 1
+    ar_lag: 1
+    clock: m
+  Block_Labor:
+    factors: 1
+    ar_lag: 1
+    clock: m
+clip_ar_coefficients: true
+clock: m
+idio_min_var: 1.0e-08
+idio_rho0: 0.1
+max_iter: 5000
+nan_k: 3
+nan_method: 2
+regularization_scale: 1.0e-05
+threshold: 1.0e-05
+use_regularization: true

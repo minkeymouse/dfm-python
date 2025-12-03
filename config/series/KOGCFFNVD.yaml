@@ -1,0 +1,12 @@
+series_id: KOGCFFNVD
+series_name: Gross Capital Formation, Machinery and Equipment
+frequency: q
+transformation: cha
+blocks:
+- Block_Global
+- Block_Investment
+nan_method: 2
+standardization: true
+units: Chained W, Billions
+category: Macro
+release: 25

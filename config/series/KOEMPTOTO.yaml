@@ -1,0 +1,12 @@
+series_id: KOEMPTOTO
+series_name: Employment, Total, SA
+frequency: m
+transformation: chg
+blocks:
+- Block_Global
+- Block_Labor
+nan_method: 2
+standardization: true
+units: Thousands of Persons
+category: Labor
+release: 11

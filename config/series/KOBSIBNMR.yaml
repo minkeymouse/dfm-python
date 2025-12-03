@@ -1,0 +1,11 @@
+series_id: KOBSIBNMR
+series_name: FKI, Business Conditions, Non-Manufacturing, Actual
+frequency: m
+transformation: chg
+blocks:
+- Block_Global
+nan_method: 2
+standardization: true
+units: Index
+category: Survey, Bsnss
+release: -5

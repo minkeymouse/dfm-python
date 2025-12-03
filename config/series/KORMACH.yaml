@@ -1,0 +1,8 @@
+series_id: KORMACH
+series_name: ''
+frequency: w
+transformation: chg
+blocks:
+- Block_Global
+nan_method: 2
+standardization: true

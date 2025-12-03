@@ -8,36 +8,32 @@ Kalman filtering.
 
 import numpy as np
 from typing import Optional, Tuple, Union, List, Dict, Any, TYPE_CHECKING
+from datetime import datetime, timedelta
+from pathlib import Path
+import polars as pl
 from ..logger import get_logger
 
-try:
-    import torch
-    import torch.nn as nn
-    import torch.optim as optim
-    import pytorch_lightning as pl
-    _has_torch = True
-except ImportError:
-    _has_torch = False
-    torch = None
-    nn = None
-    optim = None
-    pl = None
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import pytorch_lightning as pl
+# PyTorch is mandatory - no optional import needed
 
 from .base import BaseFactorModel
-from ..config import DFMConfig, DEFAULT_GLOBAL_BLOCK_NAME
+from ..config import (
+    DFMConfig, DEFAULT_BLOCK_NAME,
+    make_config_source, ConfigSource, MergedConfigSource,
+)
 from ..config.results import DDFMResult
+from ..config.utils import get_periods_per_year
 from ..utils.data import rem_nans_spline
 from ..utils.helpers import (
     safe_get_attr,
     get_clock_frequency,
     resolve_param,
 )
-from ..config.structure import get_periods_per_year
-from ..encoder.vae import (
-    Encoder,
-    Decoder,
-    extract_decoder_params,
-)
+from ..encoder.vae import Encoder, Decoder, extract_decoder_params
+from ..nowcast.dataview import DataView
 
 if TYPE_CHECKING:
     from ..lightning import DFMDataModule
@@ -120,11 +116,7 @@ class DDFMModel(BaseFactorModel):
         """
         super().__init__()
         
-        if not _has_torch:
-            raise ImportError(
-                "PyTorch is required for DDFM. Install with: pip install dfm-python[deep]"
-            )
-        
+        # PyTorch is mandatory - no need to check
         if factor_order not in [1, 2]:
             raise ValueError(f"factor_order must be 1 or 2, got {factor_order}")
         
@@ -181,9 +173,7 @@ class DDFMModel(BaseFactorModel):
         DDFMResult
             Estimation results with DDFM-specific fields (training_loss, encoder_layers, etc.).
         """
-        if not _has_torch:
-            raise ImportError("PyTorch is required for DDFM")
-        
+        # PyTorch is mandatory - no need to check
         from ..lightning import DFMDataModule
         
         if not isinstance(data_module, DFMDataModule):
@@ -202,7 +192,7 @@ class DDFMModel(BaseFactorModel):
         X = X_torch.numpy() if isinstance(X_torch, torch.Tensor) else X_torch
         
         # Store raw data and time index from DataModule for utility methods (generate_dataset, get_state)
-        # This is a temporary storage for backward compatibility with utility methods
+        # Temporary storage for utility methods
         self._data = data_module.data
         self._time = data_module.time_index
         # For Z (original data), use the same as data (raw, before transformation)
@@ -322,7 +312,7 @@ class DDFMModel(BaseFactorModel):
         # Step 6: Extract results
         result = lightning_module.get_result()
         
-        # Store encoder/decoder for backward compatibility
+        # Store encoder/decoder
         self.encoder = lightning_module.encoder
         self.decoder = lightning_module.decoder
         
@@ -542,10 +532,10 @@ class DDFMModel(BaseFactorModel):
         if not hasattr(self, '_data') or self._data is None:
             raise ValueError("Model must be fitted with DataModule before calling get_state()")
         
-        from ..config.structure import get_periods_per_year
+        from ..config.utils import get_periods_per_year
         from ..utils.helpers import find_series_index
         from ..utils.time import find_time_index, convert_to_timestamp
-        from ..utils.data import create_data_view
+        # create_data_view is already imported at module level
         
         if lookback is None:
             clock = get_clock_frequency(self._config, 'm')
@@ -598,43 +588,13 @@ class DDFMModel(BaseFactorModel):
             'factors_history': factors_history
         }
 
-if not _has_torch:
-    # Placeholder when PyTorch is not available
-    class DDFMModel(BaseFactorModel):
-        """Placeholder DDFMModel class when PyTorch is not available."""
-        
-        def __init__(self, *args, **kwargs):
-            super().__init__()
-            raise ImportError(
-                "PyTorch is required for DDFM. Install with: pip install dfm-python[deep]"
-            )
-        
-        def fit(self, *args, **kwargs):
-            raise ImportError("PyTorch is required for DDFM")
-        
-        def predict(self, horizon: Optional[int] = None, *, return_series: bool = True, return_factors: bool = True):
-            raise ImportError("PyTorch is required for DDFM")
+# Note: PyTorch is now mandatory for DDFM - placeholder removed
 
 
 # ============================================================================
 # High-level API Classes
 # ============================================================================
-
-import os
-import pickle
-from pathlib import Path
-from datetime import datetime, timedelta
-from typing import Dict, Any, TYPE_CHECKING
-import polars as pl
-
-from ..config import (
-    DFMConfig, Params,
-    make_config_source,
-    ConfigSource,
-    MergedConfigSource,
-)
-from ..transformations.utils import read_data as _load_data
-from ..nowcast.dataview import DataView
+# Note: transformations.utils removed - use DFMDataModule for data loading
 from ..config.results import DFMResult
 from ..utils.helpers import (
     safe_get_method,
@@ -648,11 +608,6 @@ from ..utils.time import TimeIndex
 if TYPE_CHECKING:
     from ..nowcast import Nowcast
     from ..lightning import DFMDataModule
-
-
-# ============================================================================
-# High-level API Classes
-# ============================================================================
 
 class DDFM(BaseFactorModel):
     """High-level API for Deep Dynamic Factor Model.
@@ -858,7 +813,7 @@ class DDFM(BaseFactorModel):
         Note: DataModule is not saved in pickle. Users must create a new DataModule
         and call train() with it after loading the model.
         """
-        import pickle
+        import pickle  # Import locally to avoid unnecessary dependency
         with open(path, 'rb') as f:
             payload = pickle.load(f)
         self._config = payload.get('config')

@@ -1,0 +1,12 @@
+series_id: KOCSPHIMR
+series_name: CSI, Expected Change in Total Household Income, Total
+frequency: m
+transformation: chg
+blocks:
+- Block_Global
+- Block_Consumption
+nan_method: 2
+standardization: true
+units: Index
+category: Survey, Cnsmr
+release: -5

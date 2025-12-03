@@ -1,0 +1,13 @@
+series_id: KONEWCONA
+series_name: New Orders, Construction, Total, Value, KRW
+frequency: m
+transformation: chg
+blocks:
+- Block_Global
+- Block_Investment
+- Block_Nominal
+nan_method: 2
+standardization: true
+units: Index
+category: Investment
+release: 30

@@ -7,7 +7,7 @@ This package implements a comprehensive Dynamic Factor Model framework with supp
 - Expectation-Maximization (EM) algorithm for parameter estimation
 - Kalman filtering and smoothing for factor extraction
 - News decomposition for nowcasting
-- Deep Dynamic Factor Models (DDFM) with nonlinear encoders (optional, requires PyTorch)
+- Deep Dynamic Factor Models (DDFM) with nonlinear encoders (requires PyTorch)
 
 The package implements a clock-based approach to mixed-frequency DFMs, where all latent 
 factors (global and block-level) are synchronized to a common "clock" frequency, typically 
@@ -58,9 +58,9 @@ Example (High-level API - Recommended):
     
 Example (Low-level API - For advanced usage):
     >>> from dfm_python import DFM, DFMConfig, SeriesConfig
-    >>> from dfm_python.transformations.utils import read_data  # Preferred import
+    >>> from dfm_python.config.adapter import YamlSource
     >>> # Option 1: Load from YAML
-    >>> config = load_config('config.yaml')
+    >>> config = YamlSource('config.yaml').load()
     >>> # Option 2: Create directly
     >>> config = DFMConfig(
     ...     series=[SeriesConfig(frequency='m', transformation='lin', blocks=[1], series_id='series1')],
@@ -94,17 +94,17 @@ __version__ = "0.4.0"
 # Internal reorganization should not break these imports.
 #
 # Public API categories:
-# 1. Configuration: DFMConfig, SeriesConfig, BlockConfig, Params, config sources
+# 1. Configuration: DFMConfig, SeriesConfig, config sources
 # 2. High-level API: DFM, DDFM, module-level convenience functions
-# 3. Core utilities: DFMCore, run_kf, TimeIndex, diagnostics
+# 3. Core utilities: DFMLinear, TimeIndex, diagnostics
 # 4. Models: BaseFactorModel, DFMLinear, DDFM (low-level)
 # 5. Nowcasting: Nowcast, result classes, para_const
-# 6. Data & Results: DFMResult, transform_data
+# 6. Data & Results: DFMResult
 # ============================================================================
 
 # Configuration (from config/ subpackage)
 from .config import (
-    DFMConfig, SeriesConfig, BlockConfig, Params, DEFAULT_GLOBAL_BLOCK_NAME,
+    DFMConfig, SeriesConfig, DEFAULT_BLOCK_NAME,
     ConfigSource, YamlSource, DictSource, HydraSource,
     MergedConfigSource, make_config_source,
 )
@@ -118,27 +118,15 @@ from .config.results import DFMResult, DDFMResult, BaseResult
 # Utilities (from utils/ subpackage)
 from .utils.diagnostics import diagnose_series, print_series_diagnosis
 from .utils.time import calculate_rmse
-# DFMCore is an alias for DFMLinear (backward compatibility)
-from .models.dfm import DFMLinear
-DFMCore = DFMLinear
 
-# PyTorch Lightning modules (recommended)
-try:
-    from .lightning import (
-        DFMLightningModule,
-        DDFMLightningModule,
-        DFMDataModule,
-        KalmanFilter,  # New module class
-        EMAlgorithm,  # New module class
-    )
-    _has_lightning = True
-except ImportError:
-    _has_lightning = False
-    DFMLightningModule = None  # type: ignore
-    DDFMLightningModule = None  # type: ignore
-    DFMDataModule = None  # type: ignore
-    KalmanFilter = None  # type: ignore
-    EMAlgorithm = None  # type: ignore
+# PyTorch Lightning modules (mandatory dependency)
+from .lightning import (
+    DFMLightningModule,
+    DDFMLightningModule,
+    DFMDataModule,
+    KalmanFilter,  # New module class
+    EMAlgorithm,  # New module class
+)
 
 # Nowcasting (from nowcast/ subpackage)
 from .nowcast import (
@@ -160,26 +148,18 @@ from .models.dfm import (
 )
 # Note: load_data has been removed - use DFMDataModule instead
 
-# DDFM high-level API and low-level model (both optional, requires PyTorch)
-try:
-    from .models.ddfm import DDFM, DDFMModel
-    _has_ddfm = True
-except ImportError:
-    _has_ddfm = False
-    DDFM = None  # type: ignore
-    DDFMModel = None  # type: ignore
-    # Note: Module-level convenience functions (load_data_ddfm, train_ddfm, etc.) 
-    # have been removed - use DDFM() instance methods directly
+# DDFM high-level API and low-level model (PyTorch is mandatory)
+from .models.ddfm import DDFM, DDFMModel
 
 __all__ = [
     # Core classes
-    'DFMConfig', 'SeriesConfig', 'BlockConfig', 'Params', 'DFM', 'DFMCore', 'Nowcast',
+    'DFMConfig', 'SeriesConfig', 'DFM', 'DFMLinear', 'Nowcast',
     # Model base and implementations
-    'BaseFactorModel', 'DFMLinear',
+    'BaseFactorModel',
     # Nowcast result classes
     'NowcastResult', 'NewsDecompResult', 'BacktestResult',
     # Constants
-    'DEFAULT_GLOBAL_BLOCK_NAME',
+    'DEFAULT_BLOCK_NAME',
     # Config sources
     'ConfigSource', 'YamlSource', 'DictSource', 'HydraSource',
     'MergedConfigSource', 'make_config_source',
@@ -193,37 +173,28 @@ __all__ = [
     'para_const',  # Internal utility for nowcasting
 ]
 
-# Add DDFM high-level API if available
-if _has_ddfm:
-    __all__.extend([
-        'DDFM',  # High-level API class
-        'DDFMModel',  # Low-level implementation
-        # Note: Module-level convenience functions have been removed - 
-        # use DDFM() instance methods directly (train, predict, etc.)
-    ])
+# DDFM high-level API (PyTorch is mandatory)
+__all__.extend([
+    'DDFM',  # High-level API class
+    'DDFMModel',  # Low-level implementation
+    # Note: Module-level convenience functions have been removed - 
+    # use DDFM() instance methods directly (train, predict, etc.)
+])
 
-# Add Lightning modules if available
-if _has_lightning:
-    __all__.extend([
-        'DFMLightningModule',
-        'DDFMLightningModule',
-        'DFMDataModule',
-        'KalmanFilter',  # New module class
-        'EMAlgorithm',  # New module class
-    ])
+# Lightning modules (mandatory dependency)
+__all__.extend([
+    'DFMLightningModule',
+    'DDFMLightningModule',
+    'DFMDataModule',
+    'KalmanFilter',  # New module class
+    'EMAlgorithm',  # New module class
+])
 
-# Add Trainer classes if available
-try:
-    from .trainer import DFMTrainer, DDFMTrainer
-    _has_trainers = True
-except ImportError:
-    _has_trainers = False
-    DFMTrainer = None  # type: ignore
-    DDFMTrainer = None  # type: ignore
+# Trainer classes (mandatory dependency)
+from .trainer import DFMTrainer, DDFMTrainer
 
-if _has_trainers:
-    __all__.extend([
-        'DFMTrainer',
-        'DDFMTrainer',
-    ])
+__all__.extend([
+    'DFMTrainer',
+    'DDFMTrainer',
+])
 

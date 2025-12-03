@@ -258,7 +258,13 @@ class EMAlgorithm(nn.Module):
         idio_chain_lengths: Optional[torch.Tensor] = None,
         config: Optional[Any] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Initialize DFM parameters using PCA and OLS.
+        """Initialize DFM parameters using residual-based PCA (matching MATLAB InitCond).
+        
+        This method implements the MATLAB InitCond() approach:
+        1. Start with residuals = spline-interpolated data
+        2. For each block: compute PCA on residuals, extract factors, update residuals
+        3. Build transition matrices block-by-block
+        4. Handle idiosyncratic components (monthly AR(1) and quarterly 5-state chains)
         
         Parameters
         ----------
@@ -311,134 +317,408 @@ class EMAlgorithm(nn.Module):
         dtype = x.dtype
         
         n_blocks = blocks.shape[1]
-        total_factors = int(torch.sum(r).item())
+        nM = N - nQ  # Number of monthly series
         
         # Handle missing data for initialization using GPU-accelerated PyTorch version
         from ..utils.data import rem_nans_spline_torch
-        x_clean, _ = rem_nans_spline_torch(x, method=opt_nan.get('method', 2), k=opt_nan.get('k', 3))
+        x_clean, indNaN = rem_nans_spline_torch(x, method=opt_nan.get('method', 2), k=opt_nan.get('k', 3))
         
-        # Compute covariance matrix
         # Remove any remaining NaN/inf
         x_clean = torch.where(torch.isfinite(x_clean), x_clean, torch.tensor(0.0, device=device, dtype=dtype))
         
-        # Compute covariance: cov expects (N, T) format
-        x_clean_T = x_clean.T  # (N, T)
-        cov_matrix = torch.cov(x_clean_T)
+        # Initialize residuals: res = x_clean (spline-interpolated data)
+        # This matches MATLAB: res = xBal; resNaN = xNaN;
+        res = x_clean.clone()  # T x N
+        resNaN = x_clean.clone()
+        resNaN[indNaN] = torch.nan
         
-        # Ensure covariance is positive semi-definite
-        cov_matrix = (cov_matrix + cov_matrix.T) / 2
-        eigenvals = torch.linalg.eigvalsh(cov_matrix)
-        if torch.any(eigenvals < 0):
-            # Add small regularization
-            cov_matrix = cov_matrix + torch.eye(N, device=device, dtype=dtype) * 1e-8
+        # Determine tent kernel size (pC) for quarterly-monthly aggregation
+        pC = 5  # Default: quarterly to monthly uses 5 periods [1,2,3,2,1]
+        if R_mat is not None:
+            pC = R_mat.shape[1]
+        elif tent_weights_dict is not None and 'q' in tent_weights_dict:
+            pC = len(tent_weights_dict['q'])
+        ppC = max(p, pC)  # max(p, pC) for lag structure
         
-        # Initialize C (loading matrix) via PCA
-        # Extract first total_factors principal components
-        from ..encoder.pca import compute_principal_components_torch
-        eigenvalues, eigenvectors = compute_principal_components_torch(cov_matrix, total_factors)
-        C = eigenvectors  # N x total_factors
+        # Set first pC-1 observations as NaN for quarterly-monthly aggregation scheme
+        if pC > 1:
+            resNaN[:pC-1, :] = torch.nan
         
-        # Normalize C columns (factor loadings)
-        for j in range(total_factors):
-            norm = torch.linalg.norm(C[:, j])
-            if norm > 1e-8:
-                C[:, j] = C[:, j] / norm
+        # Initialize output matrices
+        C_list = []  # Will concatenate block loadings
+        A_list = []  # Will build block-diagonal transition matrix
+        Q_list = []  # Will build block-diagonal process noise
+        V_0_list = []  # Will build block-diagonal initial covariance
         
-        # Extract initial factors via projection
-        factors_init = x_clean @ C  # T x total_factors
-        
-        # Initialize A (transition matrix) via OLS
-        # For AR(p): f_t = A_1 f_{t-1} + ... + A_p f_{t-p}
-        if T > p:
-            # Prepare data for OLS
-            Y = factors_init[p:, :]  # (T-p) x total_factors
-            X_list = []
-            for lag in range(1, p + 1):
-                X_list.append(factors_init[p - lag:-lag, :])
-            X = torch.cat(X_list, dim=1)  # (T-p) x (p * total_factors)
+        # Process each block sequentially (residual-based approach)
+        for i in range(n_blocks):
+            r_i = int(r[i].item())  # Number of factors for this block
             
-            # OLS: A = (X'X)^{-1} X'Y
-            # Use regularized solve to prevent singular matrix errors on GPU
-            try:
-                XTX = X.T @ X
-                # Regularization prevents RuntimeError: cholesky_cpu: U(0,0) is zero
-                reg_scale = self.regularization_scale.item()
-                XTX_reg = XTX + torch.eye(XTX.shape[0], device=device, dtype=dtype) * reg_scale
-                A_flat = torch.linalg.solve(XTX_reg, X.T @ Y).T  # total_factors x (p * total_factors)
+            # Find series indices loading on this block
+            idx_i = torch.where(blocks[:, i] > 0)[0]  # Series loading block i
+            idx_iM = idx_i[idx_i < nM]  # Monthly series indices
+            idx_iQ = idx_i[idx_i >= nM]  # Quarterly series indices
+            
+            # Initialize observation matrix for this block
+            C_i = torch.zeros(N, r_i * ppC, device=device, dtype=dtype)
+            
+            if len(idx_iM) > 0:
+                # === MONTHLY SERIES: PCA on residuals ===
+                # Compute covariance of residuals for monthly series in this block
+                res_M = res[:, idx_iM]  # T x n_iM
+                # Center the data
+                res_M_centered = res_M - res_M.mean(dim=0, keepdim=True)
+                # Compute covariance
+                if res_M_centered.shape[0] > 1:
+                    cov_res = torch.cov(res_M_centered.T)  # n_iM x n_iM
+                    cov_res = (cov_res + cov_res.T) / 2  # Symmetrize
+                else:
+                    cov_res = torch.eye(len(idx_iM), device=device, dtype=dtype)
                 
-                # Reshape to VAR(p) format
-                if p == 1:
-                    A = A_flat  # total_factors x total_factors
-                else:
-                    # For VAR(p), A is block matrix [A_1, A_2, ..., A_p]
-                    A = A_flat  # Keep as is for now
-            except (RuntimeError, ValueError):
-                # Fallback: use identity for AR(1) part, zeros for higher lags
-                if p == 1:
-                    A = torch.eye(total_factors, device=device, dtype=dtype) * 0.9  # Slightly less than 1 for stability
-                else:
-                    A = torch.cat([torch.eye(total_factors, device=device, dtype=dtype) * 0.9] + 
-                                  [torch.zeros((total_factors, total_factors), device=device, dtype=dtype)] * (p - 1), dim=1)
-        else:
-            # Not enough data, use identity
-            if p == 1:
-                A = torch.eye(total_factors, device=device, dtype=dtype) * 0.9
+                # Compute PCA: extract r_i principal components
+                from ..encoder.pca import compute_principal_components_torch
+                try:
+                    eigenvalues, eigenvectors = compute_principal_components_torch(cov_res, r_i)
+                    v = eigenvectors  # n_iM x r_i
+                    
+                    # Sign flipping for cleaner output (MATLAB: if sum(v) < 0, v = -v)
+                    v_sum = torch.sum(v, dim=0)
+                    v = torch.where(v_sum < 0, -v, v)
+                except (RuntimeError, ValueError):
+                    # Fallback: use identity
+                    v = torch.eye(len(idx_iM), device=device, dtype=dtype)[:, :r_i]
+                
+                # Set loadings for monthly series
+                C_i[idx_iM, :r_i] = v
+                
+                # Extract factors: f = res(:,idx_iM) * v
+                f = res[:, idx_iM] @ v  # T x r_i
             else:
-                A = torch.cat([torch.eye(total_factors, device=device, dtype=dtype) * 0.9] + 
-                              [torch.zeros((total_factors, total_factors), device=device, dtype=dtype)] * (p - 1), dim=1)
-        
-        # Ensure stability: clip eigenvalues
-        if p == 1:
-            eigenvals_A = torch.linalg.eigvals(A)
-            max_eigenval = torch.max(torch.abs(eigenvals_A))
-            if max_eigenval >= 0.99:
-                A = A * (0.99 / max_eigenval)
-        
-        # Initialize Q (process noise covariance) from factor residuals
-        if T > p:
-            if p == 1:
-                residuals_f = Y - X @ A.T
+                # No monthly series in this block, use zeros
+                f = torch.zeros(T, r_i, device=device, dtype=dtype)
+            
+            # Build lag matrix F for quarterly series (and transition equation)
+            # MATLAB: for kk = 0:max(p+1,pC)-1, F = [F f(pC-kk:end-kk,:)]
+            F = torch.zeros(T, 0, device=device, dtype=dtype)
+            max_lag = max(p + 1, pC)
+            for kk in range(max_lag):
+                start_idx = pC - kk
+                end_idx = T - kk
+                if start_idx < 0:
+                    start_idx = 0
+                if end_idx > T:
+                    end_idx = T
+                if start_idx < end_idx:
+                    f_lag = f[start_idx:end_idx, :]
+                    # Pad to match T
+                    if start_idx > 0:
+                        f_lag = torch.cat([torch.zeros(start_idx, r_i, device=device, dtype=dtype), f_lag], dim=0)
+                    if len(f_lag) < T:
+                        f_lag = torch.cat([f_lag, torch.zeros(T - len(f_lag), r_i, device=device, dtype=dtype)], dim=0)
+                    F = torch.cat([F, f_lag], dim=1)  # T x (r_i * (kk+1))
+            
+            # Extract ff for quarterly series: ff = F(:, 1:r_i*pC)
+            ff = F[:, :r_i * pC] if F.shape[1] >= r_i * pC else F
+            
+            # === QUARTERLY SERIES: Constrained least squares with tent kernel ===
+            if R_mat is not None and q is not None and len(idx_iQ) > 0:
+                Rcon_i = torch.kron(R_mat, torch.eye(r_i, device=device, dtype=dtype))
+                q_i = torch.kron(q, torch.zeros(r_i, device=device, dtype=dtype))
+                
+                for j in idx_iQ:
+                    j_idx = int(j.item())
+                    # Extract series j data (drop first pC observations for lag structure)
+                    xx_j = resNaN[pC:, j_idx]
+                    
+                    # Check if enough non-NaN observations
+                    non_nan_mask = ~torch.isnan(xx_j)
+                    if torch.sum(non_nan_mask) < ff.shape[1] + 2:
+                        # Use spline data if too many NaNs
+                        xx_j = res[pC:, j_idx]
+                        non_nan_mask = torch.ones(len(xx_j), dtype=torch.bool, device=device)
+                    
+                    # Extract non-NaN rows
+                    ff_j = ff[pC:][non_nan_mask, :]
+                    xx_j_clean = xx_j[non_nan_mask]
+                    
+                    if len(ff_j) > 0 and ff_j.shape[0] >= ff_j.shape[1]:
+                        try:
+                            # OLS: Cc = (ff_j'*ff_j)^{-1} * ff_j' * xx_j
+                            iff_j = torch.linalg.pinv(ff_j.T @ ff_j)
+                            Cc = iff_j @ ff_j.T @ xx_j  # r_i*pC
+                            
+                            # Apply tent kernel constraint: Cc = Cc - iff_j*Rcon_i'*inv(Rcon_i*iff_j*Rcon_i')*(Rcon_i*Cc-q_i)
+                            Rcon_iff = Rcon_i @ iff_j
+                            Rcon_iff_RconT = Rcon_iff @ Rcon_i.T
+                            try:
+                                Cc_constrained = Cc - iff_j @ Rcon_i.T @ torch.linalg.solve(
+                                    Rcon_iff_RconT + torch.eye(Rcon_iff_RconT.shape[0], device=device, dtype=dtype) * 1e-6,
+                                    Rcon_i @ Cc - q_i
+                                )
+                            except (RuntimeError, ValueError):
+                                Cc_constrained = Cc
+                            
+                            # Set loadings for quarterly series
+                            C_i[j_idx, :r_i * pC] = Cc_constrained
+                        except (RuntimeError, ValueError):
+                            # Fallback: use zeros
+                            pass
+            
+            # Pad ff with zeros for first pC-1 entries (MATLAB: ff = [zeros(pC-1,pC*r_i);ff])
+            if pC > 1:
+                ff_padded = torch.cat([
+                    torch.zeros(pC - 1, r_i * pC, device=device, dtype=dtype),
+                    ff[:T - (pC - 1), :r_i * pC] if T > (pC - 1) else ff[:, :r_i * pC]
+                ], dim=0)
+                if len(ff_padded) < T:
+                    ff_padded = torch.cat([
+                        ff_padded,
+                        torch.zeros(T - len(ff_padded), r_i * pC, device=device, dtype=dtype)
+                    ], dim=0)
+                ff = ff_padded[:T, :]
+            
+            # Update residuals: res = res - ff * C_i'
+            # MATLAB: res = res - ff*C_i'
+            res = res - ff @ C_i[:, :r_i * pC].T
+            resNaN = res.clone()
+            resNaN[indNaN] = torch.nan
+            
+            # Accumulate C
+            C_list.append(C_i)
+            
+            # === TRANSITION EQUATION for this block ===
+            # MATLAB: z = F(:,1:r_i), Z = F(:,r_i+1:r_i*(p+1))
+            z = F[:, :r_i] if F.shape[1] >= r_i else torch.zeros(T, r_i, device=device, dtype=dtype)
+            Z = F[:, r_i:r_i * (p + 1)] if F.shape[1] >= r_i * (p + 1) else torch.zeros(T, r_i * p, device=device, dtype=dtype)
+            
+            # Initialize transition matrix for this block
+            A_i = torch.zeros(r_i * ppC, r_i * ppC, device=device, dtype=dtype)
+            
+            if T > p and Z.shape[1] > 0:
+                try:
+                    # OLS: A_temp = inv(Z'*Z)*Z'*z
+                    ZTZ = Z.T @ Z
+                    reg_scale = self.regularization_scale.item()
+                    ZTZ_reg = ZTZ + torch.eye(ZTZ.shape[0], device=device, dtype=dtype) * reg_scale
+                    A_temp = torch.linalg.solve(ZTZ_reg, Z.T @ z).T  # r_i x (r_i*p)
+                    
+                    # Set transition matrix: A_i(1:r_i,1:r_i*p) = A_temp'
+                    A_i[:r_i, :r_i * p] = A_temp
+                    # Identity matrices for lag structure: A_i(r_i+1:end,1:r_i*(ppC-1)) = eye
+                    if r_i * (ppC - 1) > 0:
+                        A_i[r_i:, :r_i * (ppC - 1)] = torch.eye(r_i * (ppC - 1), device=device, dtype=dtype)
+                except (RuntimeError, ValueError):
+                    # Fallback: use identity for AR(1) part
+                    A_i[:r_i, :r_i] = torch.eye(r_i, device=device, dtype=dtype) * 0.9
+                    if r_i * (ppC - 1) > 0:
+                        A_i[r_i:, :r_i * (ppC - 1)] = torch.eye(r_i * (ppC - 1), device=device, dtype=dtype)
             else:
-                # For VAR(p), need to handle block structure
-                A1 = A[:, :total_factors]  # First block
-                residuals_f = Y - X[:, :total_factors] @ A1.T
-            Q = torch.cov(residuals_f.T)
-            Q = (Q + Q.T) / 2  # Symmetrize
-            # Ensure positive definite
-            eigenvals_Q = torch.linalg.eigvalsh(Q)
-            min_eigenval = torch.min(eigenvals_Q)
+                # Not enough data: use identity
+                A_i[:r_i, :r_i] = torch.eye(r_i, device=device, dtype=dtype) * 0.9
+                if r_i * (ppC - 1) > 0:
+                    A_i[r_i:, :r_i * (ppC - 1)] = torch.eye(r_i * (ppC - 1), device=device, dtype=dtype)
+            
+            # Initialize Q_i (process noise covariance) for this block
+            Q_i = torch.zeros(r_i * ppC, r_i * ppC, device=device, dtype=dtype)
+            if T > p:
+                # Compute VAR residuals: e = z - Z*A_temp
+                if Z.shape[1] > 0:
+                    try:
+                        e = z[p:, :] - (Z[p:, :] @ A_i[:r_i, :r_i * p].T)
+                        if e.shape[0] > 1:
+                            Q_i[:r_i, :r_i] = torch.cov(e.T)
+                            Q_i[:r_i, :r_i] = (Q_i[:r_i, :r_i] + Q_i[:r_i, :r_i].T) / 2
+                        else:
+                            Q_i[:r_i, :r_i] = torch.eye(r_i, device=device, dtype=dtype) * 0.1
+                    except (RuntimeError, ValueError):
+                        Q_i[:r_i, :r_i] = torch.eye(r_i, device=device, dtype=dtype) * 0.1
+                else:
+                    Q_i[:r_i, :r_i] = torch.eye(r_i, device=device, dtype=dtype) * 0.1
+            else:
+                Q_i[:r_i, :r_i] = torch.eye(r_i, device=device, dtype=dtype) * 0.1
+            
+            # Ensure Q_i is positive definite
+            eigenvals_Qi = torch.linalg.eigvalsh(Q_i[:r_i, :r_i])
+            min_eigenval = torch.min(eigenvals_Qi)
             if min_eigenval < 1e-8:
-                Q = Q + torch.eye(total_factors, device=device, dtype=dtype) * (1e-8 - min_eigenval)
-            # Floor for Q
-            Q = torch.maximum(Q, torch.eye(total_factors, device=device, dtype=dtype) * 0.01)
+                Q_i[:r_i, :r_i] = Q_i[:r_i, :r_i] + torch.eye(r_i, device=device, dtype=dtype) * (1e-8 - min_eigenval)
+            
+            # Initial covariance for this block: initV_i = inv(eye - kron(A_i, A_i)) * Q_i(:)
+            try:
+                A_i_block = A_i[:r_i * ppC, :r_i * ppC]
+                kron_AA = torch.kron(A_i_block, A_i_block)
+                eye_kron = torch.eye((r_i * ppC) ** 2, device=device, dtype=dtype)
+                initV_i_flat = torch.linalg.solve(
+                    eye_kron - kron_AA + torch.eye((r_i * ppC) ** 2, device=device, dtype=dtype) * 1e-6,
+                    Q_i[:r_i * ppC, :r_i * ppC].flatten()
+                )
+                initV_i = initV_i_flat.reshape(r_i * ppC, r_i * ppC)
+            except (RuntimeError, ValueError):
+                initV_i = Q_i[:r_i * ppC, :r_i * ppC].clone()
+            
+            # Accumulate block matrices
+            A_list.append(A_i)
+            Q_list.append(Q_i[:r_i * ppC, :r_i * ppC])
+            V_0_list.append(initV_i)
+        
+        # Concatenate C matrices
+        C = torch.cat(C_list, dim=1) if C_list else torch.zeros(N, 0, device=device, dtype=dtype)
+        
+        # Build block-diagonal A, Q, V_0
+        if A_list:
+            A_factors = torch.block_diag(*A_list)
+            Q_factors = torch.block_diag(*Q_list)
+            V_0_factors = torch.block_diag(*V_0_list)
         else:
-            Q = torch.eye(total_factors, device=device, dtype=dtype) * 0.1
+            A_factors = torch.zeros(0, 0, device=device, dtype=dtype)
+            Q_factors = torch.zeros(0, 0, device=device, dtype=dtype)
+            V_0_factors = torch.zeros(0, 0, device=device, dtype=dtype)
         
-        # Initialize R (observation noise covariance) from observation residuals
-        reconstructed = factors_init @ C.T  # T x N
-        residuals_obs = x_clean - reconstructed
-        R = torch.cov(residuals_obs.T)
-        R = (R + R.T) / 2  # Symmetrize
-        
-        # Ensure R is diagonal (idiosyncratic variances only)
-        R = torch.diag(torch.diag(R))
-        
-        # Ensure positive definite
-        R = torch.maximum(R, torch.eye(N, device=device, dtype=dtype) * 1e-8)
-        
-        # Initialize Z_0 (initial state) and V_0 (initial covariance)
-        if T > 0:
-            Z_0 = factors_init[0, :]  # Use first period factors
+        # === IDIOSYNCRATIC COMPONENTS ===
+        # Add identity matrix for monthly idiosyncratic series
+        if i_idio is not None:
+            eyeN = torch.eye(N, device=device, dtype=dtype)
+            # Remove columns for non-idiosyncratic series
+            i_idio_bool = i_idio.bool()
+            eyeN_idio = eyeN[:, i_idio_bool]  # N x n_idio
+            C = torch.cat([C, eyeN_idio], dim=1)
         else:
-            Z_0 = torch.zeros(total_factors, device=device, dtype=dtype)
+            # Default: all monthly series have idiosyncratic components
+            eyeN_monthly = torch.eye(N, device=device, dtype=dtype)[:, :nM] if nM > 0 else torch.zeros(N, 0, device=device, dtype=dtype)
+            C = torch.cat([C, eyeN_monthly], dim=1)
         
-        # V_0: initial uncertainty (use factor covariance)
-        V_0 = Q.clone()
-        # Ensure positive definite
+        # Add quarterly idiosyncratic chains (5-state: [1, 2, 3, 2, 1])
+        if nQ > 0:
+            # Quarterly tent weights: [1, 2, 3, 2, 1]
+            tent_q = torch.tensor([1.0, 2.0, 3.0, 2.0, 1.0], device=device, dtype=dtype)
+            # C_quarterly = [zeros(nM, 5*nQ); kron(eye(nQ), tent_q)]
+            C_quarterly = torch.zeros(N, 5 * nQ, device=device, dtype=dtype)
+            C_quarterly[nM:, :] = torch.kron(torch.eye(nQ, device=device, dtype=dtype), tent_q.unsqueeze(0))
+            C = torch.cat([C, C_quarterly], dim=1)
+        
+        # Initialize R (observation noise covariance) from final residuals
+        R = torch.diag(torch.var(resNaN, dim=0, unbiased=False))  # MATLAB: R = diag(var(resNaN,'omitnan'))
+        R = torch.where(torch.isfinite(R), R, torch.tensor(1e-4, device=device, dtype=dtype))
+        
+        # Set monthly idiosyncratic variances to 1e-4 (MATLAB: R(ii_idio(i),ii_idio(i)) = 1e-04)
+        if i_idio is not None:
+            i_idio_indices = torch.where(i_idio > 0)[0]
+            for idx in i_idio_indices:
+                R[idx, idx] = 1e-4
+        else:
+            # Default: all monthly series
+            for idx in range(nM):
+                R[idx, idx] = 1e-4
+        
+        # Set quarterly variances: Rdiag(nM+1:N) = 1e-04
+        for idx in range(nM, N):
+            R[idx, idx] = 1e-4
+        
+        # === IDIOSYNCRATIC TRANSITION MATRICES ===
+        # Monthly: AR(1) for each series
+        n_idio_M = nM if i_idio is None else int(torch.sum(i_idio).item())
+        BM = torch.zeros(n_idio_M, n_idio_M, device=device, dtype=dtype)
+        SM = torch.zeros(n_idio_M, n_idio_M, device=device, dtype=dtype)
+        
+        if i_idio is not None:
+            ii_idio = torch.where(i_idio > 0)[0]
+        else:
+            ii_idio = torch.arange(nM, device=device, dtype=torch.long)
+        
+        for i, idx in enumerate(ii_idio):
+            res_i = resNaN[:, idx]
+            # Find leading and trailing NaNs
+            non_nan_mask = ~torch.isnan(res_i)
+            if torch.sum(non_nan_mask) > 1:
+                first_non_nan = torch.where(non_nan_mask)[0][0] if torch.any(non_nan_mask) else 0
+                last_non_nan = torch.where(non_nan_mask)[0][-1] if torch.any(non_nan_mask) else T - 1
+                res_i_clean = res[first_non_nan:last_non_nan + 1, idx]
+                
+                if len(res_i_clean) > 1:
+                    # AR(1): res_i(t) = BM * res_i(t-1) + error
+                    y_ar = res_i_clean[1:]
+                    x_ar = res_i_clean[:-1].unsqueeze(1)
+                    try:
+                        BM[i, i] = torch.linalg.solve(
+                            x_ar.T @ x_ar + torch.eye(1, device=device, dtype=dtype) * 1e-6,
+                            x_ar.T @ y_ar
+                        ).item()
+                        # Residual covariance
+                        residuals_ar = y_ar - x_ar.squeeze() * BM[i, i]
+                        if len(residuals_ar) > 1:
+                            SM[i, i] = torch.var(residuals_ar, unbiased=False).item()
+                        else:
+                            SM[i, i] = 0.1
+                    except (RuntimeError, ValueError):
+                        BM[i, i] = 0.1
+                        SM[i, i] = 0.1
+                else:
+                    BM[i, i] = 0.1
+                    SM[i, i] = 0.1
+            else:
+                BM[i, i] = 0.1
+                SM[i, i] = 0.1
+        
+        # Quarterly: 5-state chain with rho0 = 0.1
+        rho0 = 0.1
+        if nQ > 0:
+            # sig_e = Rdiag(nM+1:N)/19 (MATLAB approximation)
+            sig_e = R[nM:, nM:].diag() / 19.0
+            sig_e = torch.where(torch.isfinite(sig_e), sig_e, torch.tensor(1e-4, device=device, dtype=dtype))
+            
+            # temp = zeros(5); temp(1,1) = 1
+            temp = torch.zeros(5, 5, device=device, dtype=dtype)
+            temp[0, 0] = 1.0
+            
+            # SQ = kron(diag((1-rho0^2)*sig_e), temp)
+            SQ = torch.kron(torch.diag((1 - rho0 ** 2) * sig_e), temp)
+            
+            # BQ = kron(eye(nQ), [[rho0 zeros(1,4)];[eye(4),zeros(4,1)]])
+            BQ_block = torch.zeros(5, 5, device=device, dtype=dtype)
+            BQ_block[0, 0] = rho0
+            BQ_block[1:, :4] = torch.eye(4, device=device, dtype=dtype)
+            BQ = torch.kron(torch.eye(nQ, device=device, dtype=dtype), BQ_block)
+            
+            # initViQ = reshape(inv(eye - kron(BQ,BQ))*SQ(:), 5*nQ, 5*nQ)
+            try:
+                kron_BQBQ = torch.kron(BQ, BQ)
+                eye_kron = torch.eye((5 * nQ) ** 2, device=device, dtype=dtype)
+                initViQ_flat = torch.linalg.solve(
+                    eye_kron - kron_BQBQ + torch.eye((5 * nQ) ** 2, device=device, dtype=dtype) * 1e-6,
+                    SQ.flatten()
+                )
+                initViQ = initViQ_flat.reshape(5 * nQ, 5 * nQ)
+            except (RuntimeError, ValueError):
+                initViQ = SQ.clone()
+        else:
+            BQ = torch.zeros(0, 0, device=device, dtype=dtype)
+            SQ = torch.zeros(0, 0, device=device, dtype=dtype)
+            initViQ = torch.zeros(0, 0, device=device, dtype=dtype)
+        
+        # Monthly initial covariance: initViM = diag(1./diag(eye - BM.^2)).*SM
+        try:
+            eye_BM = torch.eye(n_idio_M, device=device, dtype=dtype)
+            BM_sq = BM ** 2
+            diag_inv = 1.0 / torch.diag(eye_BM - BM_sq)
+            diag_inv = torch.where(torch.isfinite(diag_inv), diag_inv, torch.ones_like(diag_inv))
+            initViM = torch.diag(diag_inv) @ SM
+        except (RuntimeError, ValueError):
+            initViM = SM.clone()
+        
+        # Combine all transition matrices: A = blkdiag(A_factors, BM, BQ)
+        A = torch.block_diag(A_factors, BM, BQ)
+        Q = torch.block_diag(Q_factors, SM, SQ)
+        V_0 = torch.block_diag(V_0_factors, initViM, initViQ)
+        
+        # Initial state: Z_0 = zeros
+        m = A.shape[0]
+        Z_0 = torch.zeros(m, device=device, dtype=dtype)
+        
+        # Ensure all matrices are positive definite
         eigenvals_V0 = torch.linalg.eigvalsh(V_0)
         min_eigenval = torch.min(eigenvals_V0)
         if min_eigenval < 1e-8:
-            V_0 = V_0 + torch.eye(total_factors, device=device, dtype=dtype) * (1e-8 - min_eigenval)
+            V_0 = V_0 + torch.eye(m, device=device, dtype=dtype) * (1e-8 - min_eigenval)
         
         return A, C, Q, R, Z_0, V_0
     

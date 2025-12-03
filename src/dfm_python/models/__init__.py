@@ -12,7 +12,7 @@ from .dfm import (
     load_config, load_pickle, train, predict, plot, reset, create_model,
 )
 # Note: load_data has been removed - use DFMDataModule instead
-from ..config.results import BaseResult, DFMResult, DDFMResult, DFMParams
+from ..config.results import BaseResult, DFMResult, DDFMResult, FitParams, DFMParams
 
 __all__ = [
     'BaseFactorModel', 'DFMLinear', 'DFM',
@@ -22,15 +22,11 @@ __all__ = [
     'BaseResult', 'DFMResult', 'DDFMResult', 'DFMParams',
 ]
 
-# DDFM is optional (requires PyTorch)
-try:
-    from .ddfm import DDFM, DDFMModel
-    # Note: load_data_ddfm has been removed - use DFMDataModule instead
-    __all__.extend([
-        'DDFM',  # High-level API
-        'DDFMModel',  # Low-level implementation
-    ])
-except ImportError:
-    DDFM = None  # type: ignore
-    DDFMModel = None  # type: ignore
+# DDFM (PyTorch is mandatory)
+from .ddfm import DDFM, DDFMModel
+# Note: load_data_ddfm has been removed - use DFMDataModule instead
+__all__.extend([
+    'DDFM',  # High-level API
+    'DDFMModel',  # Low-level implementation
+])
 

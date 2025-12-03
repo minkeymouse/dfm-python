@@ -271,48 +271,75 @@ class DDFMResult(BaseResult):
 
 
 @dataclass
-class DFMParams:
-    """DFM estimation parameter overrides.
+class FitParams:
+    """Parameter overrides for DFM model fitting.
+    
+    This dataclass groups all optional parameters that can override
+    DFMConfig values during model fitting. This reduces method signature
+    complexity and improves code readability.
     
     All parameters are optional. If None, the corresponding value
     from DFMConfig will be used during parameter resolution.
     
-    This dataclass groups all parameter overrides that can be passed
-    to `_dfm_core()` and `_prepare_data_and_params()` to reduce
-    function parameter count and improve readability.
+    This class replaces both the old FitParams and DFMParams classes
+    for consistency across the codebase.
     """
+    # Convergence parameters
     threshold: Optional[float] = None
     max_iter: Optional[int] = None
+    
+    # Model structure
     ar_lag: Optional[int] = None
+    num_factors: Optional[int] = None
+    
+    # Missing data handling
     nan_method: Optional[int] = None
     nan_k: Optional[int] = None
     clock: Optional[str] = None
+    
+    # AR coefficient clipping
     clip_ar_coefficients: Optional[bool] = None
     ar_clip_min: Optional[float] = None
     ar_clip_max: Optional[float] = None
+    
+    # Data clipping
     clip_data_values: Optional[bool] = None
     data_clip_threshold: Optional[float] = None
+    
+    # Regularization
     use_regularization: Optional[bool] = None
     regularization_scale: Optional[float] = None
     min_eigenvalue: Optional[float] = None
     max_eigenvalue: Optional[float] = None
+    
+    # Damping
     use_damped_updates: Optional[bool] = None
     damping_factor: Optional[float] = None
     
+    def to_dict(self) -> dict:
+        """Convert to dictionary, excluding None values."""
+        return {k: v for k, v in self.__dict__.items() if v is not None}
+    
     @classmethod
-    def from_kwargs(cls, **kwargs) -> 'DFMParams':
-        """Create DFMParams from keyword arguments.
+    def from_kwargs(cls, **kwargs) -> 'FitParams':
+        """Create FitParams from keyword arguments.
         
         Filters kwargs to only include valid parameter names,
         ignoring any extra arguments.
         """
         valid_params = {
-            'threshold', 'max_iter', 'ar_lag', 'nan_method', 'nan_k',
-            'clock', 'clip_ar_coefficients', 'ar_clip_min', 'ar_clip_max',
-            'clip_data_values', 'data_clip_threshold', 'use_regularization',
-            'regularization_scale', 'min_eigenvalue', 'max_eigenvalue',
+            'threshold', 'max_iter', 'ar_lag', 'num_factors',
+            'nan_method', 'nan_k', 'clock',
+            'clip_ar_coefficients', 'ar_clip_min', 'ar_clip_max',
+            'clip_data_values', 'data_clip_threshold',
+            'use_regularization', 'regularization_scale',
+            'min_eigenvalue', 'max_eigenvalue',
             'use_damped_updates', 'damping_factor'
         }
         filtered = {k: v for k, v in kwargs.items() if k in valid_params}
         return cls(**filtered)
+
+
+# Backward compatibility alias (deprecated - use FitParams instead)
+DFMParams = FitParams
 

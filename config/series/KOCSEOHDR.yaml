@@ -1,0 +1,12 @@
+series_id: KOCSEOHDR
+series_name: CSI, Expectations of Household Debt, Total
+frequency: m
+transformation: chg
+blocks:
+- Block_Global
+- Block_Consumption
+nan_method: 2
+standardization: true
+units: Index
+category: Survey, Cnsmr
+release: -5

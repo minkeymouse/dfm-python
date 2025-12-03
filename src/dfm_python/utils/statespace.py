@@ -159,17 +159,6 @@ def _safe_determinant(M: np.ndarray, use_logdet: bool = True) -> float:
     return 0.0
 
 
-# Re-export for backward compatibility
-# These functions are used by other modules
-def _compute_principal_components(cov_matrix: np.ndarray, n_components: int,
-                                   block_idx: Optional[int] = None) -> Tuple[np.ndarray, np.ndarray]:
-    """Compute top principal components via eigendecomposition with fallbacks.
-    
-    This function is a wrapper around encoder.pca.compute_principal_components
-    for backward compatibility.
-    """
-    from ..encoder.pca import compute_principal_components
-    return compute_principal_components(cov_matrix, n_components, block_idx=block_idx)
 
 
 def _compute_covariance_safe(data: np.ndarray, rowvar: bool = True, 
@@ -1134,52 +1123,55 @@ get_idio = estimate_idiosyncratic_params
 
 
 def mse_missing(
-    y_actual: Any,  # torch.Tensor when torch is available
-    y_predicted: Any,  # torch.Tensor when torch is available
-) -> Any:  # torch.Tensor when torch is available
+    y_actual: Any,  # torch.Tensor or np.ndarray
+    y_predicted: Any,  # torch.Tensor or np.ndarray
+) -> Any:  # torch.Tensor or float
     """Mean Squared Error loss function that handles missing data.
     
     Computes MSE only on non-missing values. Missing values in y_actual
     (represented as NaN) are masked out from the loss computation.
     
+    Supports both PyTorch tensors and NumPy arrays automatically.
+    
     Parameters
     ----------
-    y_actual : torch.Tensor
-        Actual values (batch_size x N) with NaN for missing values
-    y_predicted : torch.Tensor
-        Predicted values (batch_size x N)
+    y_actual : torch.Tensor or np.ndarray
+        Actual values (batch_size x N or T x N) with NaN for missing values
+    y_predicted : torch.Tensor or np.ndarray
+        Predicted values (batch_size x N or T x N)
         
     Returns
     -------
-    torch.Tensor
+    torch.Tensor or float
         Scalar MSE loss computed only on non-missing values
-        
-    --------
+        Returns torch.Tensor for PyTorch inputs, float for NumPy inputs
     """
-    if not _has_torch:
-        raise ImportError("PyTorch is required for mse_missing")
-    
-    # Create mask: 1 for non-missing, 0 for missing
-    mask = torch.where(
-        torch.isnan(y_actual),
-        torch.zeros_like(y_actual),
-        torch.ones_like(y_actual)
-    )
-    
-    # Replace NaN with 0 for computation
-    y_actual_clean = torch.where(
-        torch.isnan(y_actual),
-        torch.zeros_like(y_actual),
-        y_actual
-    )
-    
-    # Apply mask to predictions
-    y_predicted_masked = y_predicted * mask
-    
-    # Compute MSE (automatically ignores masked values)
-    loss = nn.functional.mse_loss(y_actual_clean, y_predicted_masked, reduction='mean')
-    
-    return loss
+    # Auto-detect input type
+    if _has_torch and isinstance(y_actual, torch.Tensor):
+        # PyTorch path
+        # Create mask: 1 for non-missing, 0 for missing
+        mask = torch.where(
+            torch.isnan(y_actual),
+            torch.zeros_like(y_actual),
+            torch.ones_like(y_actual)
+        )
+        
+        # Replace NaN with 0 for computation
+        y_actual_clean = torch.where(
+            torch.isnan(y_actual),
+            torch.zeros_like(y_actual),
+            y_actual
+        )
+        
+        # Apply mask to predictions
+        y_predicted_masked = y_predicted * mask
+        
+        # Compute MSE (automatically ignores masked values)
+        loss = nn.functional.mse_loss(y_actual_clean, y_predicted_masked, reduction='mean')
+        return loss
+    else:
+        # NumPy path (fallback)
+        return mse_missing_numpy(y_actual, y_predicted)
 
 
 def convergence_checker(
@@ -1236,7 +1228,8 @@ def check_convergence(
     """Check convergence of reconstruction error.
     
     Computes the relative change in MSE between two iterations and checks
-    if convergence has been reached.
+    if convergence has been reached. This is a wrapper around convergence_checker()
+    that adds a converged flag.
     
     Parameters
     ----------
@@ -1257,33 +1250,11 @@ def check_convergence(
         Current MSE loss (on non-missing values)
     converged : bool
         True if relative change is below threshold
-        
-    --------
-    True
     """
-    # Mask for non-missing values
-    mask = ~np.isnan(y_actual)
-    
-    # Compute MSE on non-missing values (NumPy implementation, no sklearn dependency)
-    # Previous loss
-    y_prev_valid = y_prev[mask]
-    y_actual_valid = y_actual[mask]
-    loss_prev = np.mean((y_actual_valid - y_prev_valid) ** 2)
-    
-    # Current loss
-    y_now_valid = y_now[mask]
-    loss_now = np.mean((y_actual_valid - y_now_valid) ** 2)
-    
-    # Relative change
-    if loss_prev < 1e-10:
-        # Near-zero loss, consider converged
-        relative_change = 0.0
-    else:
-        relative_change = abs(loss_now - loss_prev) / loss_prev
-    
-    converged = relative_change < threshold
-    
-    return relative_change, loss_now, converged
+    # Use convergence_checker for the core computation
+    delta, loss_now = convergence_checker(y_prev, y_now, y_actual)
+    converged = delta < threshold
+    return delta, loss_now, converged
 
 
 def mse_missing_numpy(

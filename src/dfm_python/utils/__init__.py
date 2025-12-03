@@ -17,17 +17,7 @@ from .statespace import (
     build_observation_matrix,
     build_state_space,
     estimate_state_space_params,
-    _safe_determinant,
-    _compute_principal_components,  # From encoder.pca (backward compatibility)
-    _estimate_ar_coefficient,
-    _clip_ar_coefficients,
-    _compute_covariance_safe,
-    _compute_variance_safe,
-    _apply_ar_clipping,
-    _compute_regularization_param,
-    _cap_max_eigenvalue,
-    _ensure_innovation_variance_minimum,
-    _safe_divide,
+    # Private functions are not exported - they're internal utilities
 )
 
 from .time import (
@@ -48,27 +38,28 @@ from .time import (
     to_python_datetime,
 )
 
-# These are in config.structure, not utils.time
-from ..config.structure import get_periods_per_year, FREQUENCY_HIERARCHY
+# Frequency utilities from config.utils
+from ..config.utils import get_periods_per_year, FREQUENCY_HIERARCHY
 
-# Backward compatibility: Re-export nowcast utilities from nowcast package
+# Re-export nowcast utilities from nowcast package
 from ..nowcast.helpers import (
     NewsDecompResult,
     BacktestResult,
     para_const,
-    _get_higher_frequency,
-    _calculate_backward_date,
-    _get_forecast_horizon_config,
-    _check_config_consistency,
-    _extract_news_summary_impl,
 )
-# Note: _transform_series and transform_data removed - use DataModule with custom transformers
+from ..nowcast.utils import (
+    get_higher_frequency,
+    calculate_backward_date,
+    get_forecast_horizon_config,
+    check_config_consistency,
+    extract_news_summary,
+)
+# Note: transform_data removed - use DataModule with custom transformers
 
 from ..nowcast.dataview import DataView
 
 # Data loading utilities (from core.loader)
 from .data import (
-    read_data,
     sort_data,
     rem_nans_spline,
     calculate_release_date,
@@ -80,18 +71,13 @@ from .helpers import (
     safe_get_attr,
     safe_get_method,
     resolve_param,
-    safe_mean_std,
     get_clock_frequency,
     get_series_ids,
     get_series_names,
     get_frequencies_from_config,
-    get_units_from_config,
     find_series_index,
     get_series_id_by_index,
     ParameterResolver,
-    _validate_config_loaded,
-    _validate_data_module,
-    _validate_result_loaded,
     DFMError,
     DFMConfigError,
     DFMDataError,
@@ -125,17 +111,7 @@ __all__ = [
     'build_observation_matrix',
     'build_state_space',
     'estimate_state_space_params',
-    '_safe_determinant',
-    '_compute_principal_components',
-    '_estimate_ar_coefficient',
-    '_clip_ar_coefficients',
-    '_compute_covariance_safe',
-    '_compute_variance_safe',
-    '_apply_ar_clipping',
-    '_compute_regularization_param',
-    '_cap_max_eigenvalue',
-    '_ensure_innovation_variance_minimum',
-    '_safe_divide',
+    # Private functions (_safe_determinant, etc.) are internal and not exported
     # Time utilities (includes metrics)
     'calculate_rmse',
     'calculate_mae',
@@ -154,19 +130,18 @@ __all__ = [
     'to_python_datetime',
     'get_periods_per_year',
     'FREQUENCY_HIERARCHY',
-    # Nowcasting utilities (backward compatibility)
+    # Nowcasting utilities
     'NewsDecompResult',
     'BacktestResult',
     'para_const',
-    '_get_higher_frequency',
-    '_calculate_backward_date',
-    '_get_forecast_horizon_config',
-    '_check_config_consistency',
-    '_extract_news_summary_impl',
+    'get_higher_frequency',
+    'calculate_backward_date',
+    'get_forecast_horizon_config',
+    'check_config_consistency',
+    'extract_news_summary',
     # DataView
     'DataView',
     # Data loading utilities (from core.loader)
-    'read_data',
     'sort_data',
     'rem_nans_spline',
     'calculate_release_date',
@@ -175,18 +150,14 @@ __all__ = [
     'safe_get_attr',
     'safe_get_method',
     'resolve_param',
-    'safe_mean_std',
     'get_clock_frequency',
     'get_series_ids',
     'get_series_names',
     'get_frequencies_from_config',
-    'get_units_from_config',
     'find_series_index',
     'get_series_id_by_index',
     'ParameterResolver',
-    '_validate_config_loaded',
-    '_validate_data_module',
-    '_validate_result_loaded',
+    # Note: Private validation functions (_validate_*) are internal and not exported
     'DFMError',
     'DFMConfigError',
     'DFMDataError',

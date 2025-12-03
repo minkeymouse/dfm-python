@@ -1,0 +1,79 @@
+# @package _global_
+defaults:
+  - override /model: ddfm
+  - _self_
+data:
+  path: data/sample_data.csv
+  sample_start: '2000-01-01'
+  sample_end: '2023-12-31'
+description: DDFM model for investment indicators
+name: investment_ddfm
+output:
+  path: outputs/investment_ddfm
+  save_model: true
+  save_plots: true
+  save_results: true
+series:
+- KO3YEARC
+- KOBFDSAAF
+- KOBFINAAF
+- KOBFXSAAF
+- KOBSESI.R
+- KOBSIBCEQ
+- KOBSIBCOQ
+- KOBSIIMER
+- KOBSIIMPR
+- KOBSIXMER
+- KOBUSINVR
+- KOCALL.
+- KOCNFBUSR
+- KOCNFCONR
+- KOCNGOV.D
+- KOCOBUSIR
+- KOCONPMTH
+- KOCONSTRP
+- KOCSEMEMR
+- KOCYLEADR
+- KODBLNEQA
+- KOEMPCONF
+- KOEMPMANF
+- KOEQUIMAE
+- KOEQUIPTE
+- KOEQUITTE
+- KOEXCHINA
+- KOEXNGS.D
+- KOEXPGDSA
+- KOEXPPRCF
+- KOGCFCNSD
+- KOGCFFNVD
+- KOGDP...D
+- KOGFCF..D
+- KOIMNGS.D
+- KOIMPGDDA
+- KOIMPGDSA
+- KOIMPPRCF
+- KOIPALL.G
+- KOIPMIMAG
+- KOLRLTCO
+- KOMPCAPGG
+- KOMPCONDG
+- KOMPRI30G
+- KOMSCAPGG
+- KONETTRDF
+- KONEWCONA
+- KOPICAPGG
+- KOPIMANUG
+- KOPPSRM.F
+- KOPROPRCF
+- KOPSMANUG
+- KORCNST
+- KORELEC
+- KORMACH
+- KORMCMP
+- KOROCOINF
+- KOSHRPRCF
+- KOSIARRLE
+- KOSSBFMBE
+- KOUS$...
+- KOVALCONA
+target: KOGFCF..D

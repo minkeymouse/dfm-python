@@ -1,0 +1,13 @@
+series_id: KOIMPGDDA
+series_name: Imports, Capital Goods, USD
+frequency: m
+transformation: chg
+blocks:
+- Block_Global
+- Block_Investment
+- Block_Nominal
+nan_method: 2
+standardization: true
+units: $, Millions
+category: Int. trade
+release: 14

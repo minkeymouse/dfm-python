@@ -4,7 +4,7 @@ This module provides the core configuration dataclasses:
 - BaseModelConfig: Base class with shared model structure
 - DFMConfig(BaseModelConfig): Linear DFM with EM algorithm parameters
 - DDFMConfig(BaseModelConfig): Deep DFM with neural network training parameters
-- SeriesConfig, BlockConfig: Component configurations
+- SeriesConfig: Component configurations
 
 Note: Parameter classes (Params, FitParams) are in config/params.py
 Note: Validation functions are in config/utils.py
@@ -14,8 +14,13 @@ The configuration hierarchy:
 - DFMConfig: Adds EM algorithm parameters (max_iter, threshold, regularization)
 - DDFMConfig: Adds neural network parameters (epochs, learning_rate, encoder_layers)
 
+Blocks are defined as Dict[str, Dict[str, Any]] where each block is a dict with:
+- factors: int (number of factors)
+- ar_lag: int (AR lag order)
+- clock: str (block clock frequency)
+
 For loading configurations from files (YAML, Spec CSV) or other sources,
-see the config.io module which provides source adapters.
+see the config.adapter module which provides source adapters.
 """
 
 import numpy as np
@@ -27,45 +32,11 @@ try:
 except ImportError:
     from typing_extensions import Protocol
 
-# Default global block name (can be overridden in config)
-DEFAULT_GLOBAL_BLOCK_NAME = 'Block_Global'
+# Default block name when no blocks specified (generic, compatible with DDFM)
+DEFAULT_BLOCK_NAME = 'Block_0'
 
 # Import validation functions from utils
 from .utils import validate_frequency, validate_transformation
-
-
-@dataclass
-class BlockConfig:
-    """Configuration for a single factor block.
-    
-    Each block represents a group of related time series that share common
-    latent factors. Blocks can have their own clock frequency, which must be
-    >= the global clock frequency.
-    
-    Attributes
-    ----------
-    factors : int
-        Number of latent factors in this block (typically 1)
-    ar_lag : int
-        Autoregressive lag order for the block-level factor (typically 1)
-    clock : str
-        Block-level clock frequency. Must be >= global clock.
-        Series in this block must have frequency <= block clock.
-    notes : str, optional
-        Optional comments/description for the block
-    """
-    factors: int = 1
-    ar_lag: int = 1
-    clock: str = 'm'
-    notes: Optional[str] = None
-    
-    def __post_init__(self):
-        """Validate block configuration."""
-        self.clock = validate_frequency(self.clock)
-        if self.factors < 1:
-            raise ValueError(f"Block must have at least 1 factor, got {self.factors}")
-        if self.ar_lag < 1:
-            raise ValueError(f"AR lag must be at least 1, got {self.ar_lag}")
 
 
 @dataclass
@@ -183,7 +154,7 @@ class BaseModelConfig:
     # Model Structure (WHAT - defines the model)
     # ========================================================================
     series: List[SeriesConfig]  # Series specifications
-    blocks: Dict[str, BlockConfig]  # Block configurations (block_name -> BlockConfig)
+    blocks: Dict[str, Dict[str, Any]]  # Block configurations (block_name -> {factors, ar_lag, clock, notes})
     block_names: List[str] = field(init=False)  # Block names in order (derived from blocks dict)
     factors_per_block: List[int] = field(init=False)  # Number of factors per block (derived from blocks)
     
@@ -218,7 +189,7 @@ class BaseModelConfig:
             indicating what needs to be fixed.
         """
         # Import frequency hierarchy for validation
-        from .structure import FREQUENCY_HIERARCHY
+        from .utils import FREQUENCY_HIERARCHY
         
         if not self.series:
             raise ValueError(
@@ -238,9 +209,11 @@ class BaseModelConfig:
         block_names_list = list(self.blocks.keys())
         global_block_name = None
         
-        # Try to find Block_Global first (convention)
-        if DEFAULT_GLOBAL_BLOCK_NAME in self.blocks:
-            global_block_name = DEFAULT_GLOBAL_BLOCK_NAME
+        # Try to find first block (use first block as default)
+        if block_names_list:
+            global_block_name = block_names_list[0]
+        elif DEFAULT_BLOCK_NAME in self.blocks:
+            global_block_name = DEFAULT_BLOCK_NAME
         elif block_names_list:
             # Use first block as global if Block_Global not found
             global_block_name = block_names_list[0]
@@ -255,7 +228,7 @@ class BaseModelConfig:
         other_blocks = [name for name in block_names_list if name != global_block_name]
         object.__setattr__(self, 'block_names', [global_block_name] + other_blocks)
         object.__setattr__(self, 'factors_per_block', 
-                         [self.blocks[name].factors for name in self.block_names])
+                         [self.blocks[name].get('factors', 1) for name in self.block_names])
         
         # Validate global clock
         self.clock = validate_frequency(self.clock)
@@ -263,14 +236,23 @@ class BaseModelConfig:
         
         # Validate block clocks (must be >= global clock)
         for block_name, block_cfg in self.blocks.items():
-            block_clock_hierarchy = FREQUENCY_HIERARCHY.get(block_cfg.clock, 3)
+            block_clock = block_cfg.get('clock', self.clock)
+            block_clock = validate_frequency(block_clock)
+            block_clock_hierarchy = FREQUENCY_HIERARCHY.get(block_clock, 3)
             if block_clock_hierarchy < global_clock_hierarchy:
                 raise ValueError(
-                    f"Block '{block_name}' has clock '{block_cfg.clock}' which is faster than "
+                    f"Block '{block_name}' has clock '{block_clock}' which is faster than "
                     f"global clock '{self.clock}'. Block clocks must be >= global clock. "
                     f"Suggested fix: change block '{block_name}' clock to '{self.clock}' or slower, "
-                    f"or set global clock to '{block_cfg.clock}' or faster."
+                    f"or set global clock to '{block_clock}' or faster."
                 )
+            # Validate block properties
+            factors = block_cfg.get('factors', 1)
+            ar_lag = block_cfg.get('ar_lag', 1)
+            if factors < 1:
+                raise ValueError(f"Block '{block_name}' must have at least 1 factor, got {factors}")
+            if ar_lag < 1:
+                raise ValueError(f"Block '{block_name}' AR lag must be at least 1, got {ar_lag}")
         
         # Auto-generate series_id if not provided and convert blocks to indices
         n_blocks = len(self.block_names)
@@ -315,7 +297,8 @@ class BaseModelConfig:
                 if loads_on_block == 1:
                     block_name = self.block_names[block_idx]
                     block_cfg = self.blocks[block_name]
-                    block_clock_hierarchy = FREQUENCY_HIERARCHY.get(block_cfg.clock, 3)
+                    block_clock = block_cfg.get('clock', self.clock)
+                    block_clock_hierarchy = FREQUENCY_HIERARCHY.get(block_clock, 3)
                     
                     # Series frequency must be <= block clock (slower or equal)
                     if series_freq_hierarchy < block_clock_hierarchy:
@@ -325,10 +308,10 @@ class BaseModelConfig:
                         valid_freqs_str = ', '.join(sorted(valid_freqs))
                         raise ValueError(
                             f"Series '{s.series_id}' has frequency '{s.frequency}' which is faster than "
-                            f"block '{block_name}' clock '{block_cfg.clock}'. "
+                            f"block '{block_name}' clock '{block_clock}'. "
                             f"Series in a block must have frequency <= block clock. "
                             f"Suggested fix: change series frequency to one of [{valid_freqs_str}] "
-                            f"(slower or equal to block clock '{block_cfg.clock}'), "
+                            f"(slower or equal to block clock '{block_clock}'), "
                             f"or set block clock to '{s.frequency}' or faster."
                         )
         
@@ -382,7 +365,7 @@ class BaseModelConfig:
             - 'warnings': List[str] - List of warning messages
             - 'suggestions': List[str] - List of actionable suggestions
         """
-        from .structure import FREQUENCY_HIERARCHY
+        from .utils import FREQUENCY_HIERARCHY
         
         report = {
             'valid': True,
@@ -415,7 +398,8 @@ class BaseModelConfig:
                     if block_idx < len(self.block_names):
                         block_name = self.block_names[block_idx]
                         block_cfg = self.blocks[block_name]
-                        block_clock_hierarchy = FREQUENCY_HIERARCHY.get(block_cfg.clock, 3)
+                        block_clock = block_cfg.get('clock', self.clock)
+                        block_clock_hierarchy = FREQUENCY_HIERARCHY.get(block_clock, 3)
                         
                         if series_freq_hierarchy < block_clock_hierarchy:
                             valid_freqs = [freq for freq, hier in FREQUENCY_HIERARCHY.items() 
@@ -424,7 +408,7 @@ class BaseModelConfig:
                             report['valid'] = False
                             report['errors'].append(
                                 f"Series '{s.series_id}' has frequency '{s.frequency}' which is faster than "
-                                f"block '{block_name}' clock '{block_cfg.clock}'."
+                                f"block '{block_name}' clock '{block_clock}'."
                             )
                             report['suggestions'].append(
                                 f"For series '{s.series_id}': change frequency to one of [{valid_freqs_str}], "
@@ -433,16 +417,17 @@ class BaseModelConfig:
         
         # Check block clock constraints
         for block_name, block_cfg in self.blocks.items():
-            block_clock_hierarchy = FREQUENCY_HIERARCHY.get(block_cfg.clock, 3)
+            block_clock = block_cfg.get('clock', self.clock)
+            block_clock_hierarchy = FREQUENCY_HIERARCHY.get(block_clock, 3)
             if block_clock_hierarchy < global_clock_hierarchy:
                 report['valid'] = False
                 report['errors'].append(
-                    f"Block '{block_name}' has clock '{block_cfg.clock}' which is faster than "
+                    f"Block '{block_name}' has clock '{block_clock}' which is faster than "
                     f"global clock '{self.clock}'."
                 )
                 report['suggestions'].append(
                     f"Change block '{block_name}' clock to '{self.clock}' or slower, "
-                    f"or set global clock to '{block_cfg.clock}' or faster."
+                    f"or set global clock to '{block_clock}' or faster."
                 )
         
         # Check factors_per_block
@@ -641,12 +626,9 @@ class DDFMConfig(BaseModelConfig):
                     if isinstance(series_blocks, list):
                         all_blocks.update(series_blocks)
             if all_blocks:
-                # Ensure global block is first (prefer DEFAULT_GLOBAL_BLOCK_NAME)
+                # Ensure first block is used as default
                 block_names = []
-                if DEFAULT_GLOBAL_BLOCK_NAME in all_blocks:
-                    block_names.append(DEFAULT_GLOBAL_BLOCK_NAME)
-                    all_blocks.remove(DEFAULT_GLOBAL_BLOCK_NAME)
-                elif all_blocks:
+                if all_blocks:
                     # Use first block as global
                     first_block = sorted(all_blocks)[0]
                     block_names.append(first_block)
@@ -684,27 +666,28 @@ class DDFMConfig(BaseModelConfig):
                     units=series_cfg.get('units', None)  # Optional, for display only
                 ))
         
-        # Convert blocks_dict to BlockConfig dict
+        # Convert blocks_dict to dict of block properties
         blocks_dict_final = {}
         if isinstance(blocks_dict, dict) and blocks_dict:
             # Already have blocks dict from input
             for block_name, block_data in blocks_dict.items():
                 if isinstance(block_data, dict):
-                    blocks_dict_final[block_name] = BlockConfig(
-                        factors=block_data.get('factors', 1),
-                        ar_lag=block_data.get('ar_lag', 1),
-                        clock=block_data.get('clock', 'm')
-                    )
+                    blocks_dict_final[block_name] = {
+                        'factors': block_data.get('factors', 1),
+                        'ar_lag': block_data.get('ar_lag', 1),
+                        'clock': block_data.get('clock', 'm'),
+                        'notes': block_data.get('notes', None)
+                    }
                 else:
-                    blocks_dict_final[block_name] = BlockConfig(factors=1, clock='m')
+                    blocks_dict_final[block_name] = {'factors': 1, 'ar_lag': 1, 'clock': 'm'}
         elif block_names:
             # Create blocks dict from block_names (fallback)
             for i, block_name in enumerate(block_names):
                 factors = factors_per_block[i] if factors_per_block and i < len(factors_per_block) else 1
-                blocks_dict_final[block_name] = BlockConfig(factors=factors, clock='m')
+                blocks_dict_final[block_name] = {'factors': factors, 'ar_lag': 1, 'clock': 'm'}
         else:
-            # Default: create Block_Global if no blocks specified
-            blocks_dict_final[DEFAULT_GLOBAL_BLOCK_NAME] = BlockConfig(factors=1, clock='m')
+            # Default: create default block if no blocks specified
+            blocks_dict_final[DEFAULT_BLOCK_NAME] = {'factors': 1, 'ar_lag': 1, 'clock': 'm'}
         
         # Determine config type based on model_type or presence of DDFM parameters
         model_type = data.get('model_type', '').lower()
@@ -721,7 +704,7 @@ class DDFMConfig(BaseModelConfig):
             return DFMConfig(
                 series=series_list,
                 blocks=blocks_dict_final,
-                **DFMConfig._extract_dfm_params(data)
+                **DDFMConfig._extract_dfm_params(data)
             )
     
     @classmethod
@@ -744,18 +727,16 @@ class DDFMConfig(BaseModelConfig):
                 SeriesConfig(**s) if isinstance(s, dict) else s
                 for s in data['series']
             ]
-            # Handle blocks: can be dict of BlockConfig or dict with BlockConfig-like dicts
+            # Handle blocks: dict of block properties
             blocks_dict = {}
             if 'blocks' in data:
                 blocks_data = data['blocks']
                 if isinstance(blocks_data, dict):
                     for block_name, block_cfg in blocks_data.items():
-                        if isinstance(block_cfg, BlockConfig):
+                        if isinstance(block_cfg, dict):
                             blocks_dict[block_name] = block_cfg
-                        elif isinstance(block_cfg, dict):
-                            blocks_dict[block_name] = BlockConfig(**block_cfg)
                         else:
-                            raise ValueError(f"Invalid block config for {block_name}: {block_cfg}")
+                            raise ValueError(f"Invalid block config for {block_name}: {block_cfg}. Must be a dict.")
                 else:
                     raise ValueError(f"blocks must be a dict, got {type(blocks_data)}")
             else:
@@ -778,7 +759,7 @@ class DDFMConfig(BaseModelConfig):
                                     block_names_set.add(block_names_list[idx])
                 # Create default blocks
                 for block_name in sorted(block_names_set):
-                    blocks_dict[block_name] = BlockConfig(factors=1, clock=data.get('clock', 'm'))
+                    blocks_dict[block_name] = {'factors': 1, 'ar_lag': 1, 'clock': data.get('clock', 'm')}
             
             # Determine config type
             model_type = data.get('model_type', '').lower()
@@ -805,7 +786,7 @@ class DDFMConfig(BaseModelConfig):
         elif isinstance(cls, type) and issubclass(cls, DFMConfig):
             return cls(**data)
         else:
-            # Default to DFMConfig for backward compatibility
+            # Default to DFMConfig
             return DFMConfig(**data)
 
     @classmethod
@@ -831,22 +812,65 @@ class DDFMConfig(BaseModelConfig):
             pass
         if not isinstance(cfg, dict):
             raise TypeError("from_hydra expects a DictConfig or dict.")
-        # Use BaseModelConfig.from_dict which handles type detection
-        return BaseModelConfig.from_dict(cfg)
+        # Use DFMConfig.from_dict which handles type detection (defined on DFMConfig, not BaseModelConfig)
+        return DFMConfig.from_dict(cfg)
 
 
 # Add factory methods to DFMConfig class
 def _dfm_from_dict(cls, data: Dict[str, Any]) -> 'DFMConfig':
     """Create DFMConfig from dictionary."""
-    result = BaseModelConfig.from_dict(data)
-    if isinstance(result, DFMConfig):
+    # Handle Hydra format (series as dict)
+    if 'series' in data and isinstance(data['series'], dict):
+        # _from_hydra_dict is defined on DDFMConfig but shared logic
+        result = DDFMConfig._from_hydra_dict(data)
+        # If auto-detection created DDFMConfig, extract DFM params and create DFMConfig
+        if isinstance(result, DDFMConfig):
+            return DFMConfig(
+                series=result.series,
+                blocks=result.blocks,
+                **DFMConfig._extract_dfm_params(data)
+            )
         return result
-    # If auto-detection created DDFMConfig, extract DFM params and create DFMConfig
-    return DFMConfig(
-        series=result.series,
-        blocks=result.blocks,
-        **DFMConfig._extract_dfm_params(data)
-    )
+    
+    # Handle list format - use the logic from DFMConfig.from_dict but ensure DFMConfig type
+    if 'series' in data and isinstance(data['series'], list):
+        series_list = [
+            SeriesConfig(**s) if isinstance(s, dict) else s
+            for s in data['series']
+        ]
+        blocks_dict = {}
+        if 'blocks' in data:
+            blocks_data = data['blocks']
+            if isinstance(blocks_data, dict):
+                for block_name, block_cfg in blocks_data.items():
+                    if isinstance(block_cfg, dict):
+                        blocks_dict[block_name] = block_cfg
+                    else:
+                        raise ValueError(f"Invalid block config for {block_name}: {block_cfg}. Must be a dict.")
+            else:
+                raise ValueError(f"blocks must be a dict, got {type(blocks_data)}")
+        else:
+            # Infer blocks from series
+            block_names_set = set()
+            for s in series_list:
+                if isinstance(s, dict):
+                    blocks = s.get('blocks', [])
+                else:
+                    blocks = s.blocks
+                if isinstance(blocks, list) and len(blocks) > 0:
+                    if isinstance(blocks[0], str):
+                        block_names_set.update(blocks)
+            for block_name in sorted(block_names_set):
+                blocks_dict[block_name] = {'factors': 1, 'ar_lag': 1, 'clock': data.get('clock', 'm')}
+        
+        return DFMConfig(
+            series=series_list,
+            blocks=blocks_dict,
+            **DFMConfig._extract_dfm_params(data)
+        )
+    
+    # Direct instantiation
+    return DFMConfig(**data)
 
 def _dfm_from_hydra(cls, cfg: Any) -> 'DFMConfig':
     """Create DFMConfig from Hydra config."""
@@ -866,15 +890,57 @@ DFMConfig.from_hydra = classmethod(_dfm_from_hydra)
 # Add factory methods to DDFMConfig class
 def _ddfm_from_dict(cls, data: Dict[str, Any]) -> 'DDFMConfig':
     """Create DDFMConfig from dictionary."""
-    result = BaseModelConfig.from_dict(data)
-    if isinstance(result, DDFMConfig):
+    # Handle Hydra format (series as dict)
+    if 'series' in data and isinstance(data['series'], dict):
+        result = DFMConfig._from_hydra_dict(data)  # Use DFMConfig since it's shared
+        # If auto-detection created DFMConfig, extract DDFM params and create DDFMConfig
+        if isinstance(result, DFMConfig):
+            return DDFMConfig(
+                series=result.series,
+                blocks=result.blocks,
+                **DDFMConfig._extract_ddfm_params(data)
+            )
         return result
-    # If auto-detection created DFMConfig, extract DDFM params and create DDFMConfig
-    return DDFMConfig(
-        series=result.series,
-        blocks=result.blocks,
-        **DDFMConfig._extract_ddfm_params(data)
-    )
+    
+    # Handle list format - use the logic from DFMConfig.from_dict but ensure DDFMConfig type
+    if 'series' in data and isinstance(data['series'], list):
+        series_list = [
+            SeriesConfig(**s) if isinstance(s, dict) else s
+            for s in data['series']
+        ]
+        blocks_dict = {}
+        if 'blocks' in data:
+            blocks_data = data['blocks']
+            if isinstance(blocks_data, dict):
+                for block_name, block_cfg in blocks_data.items():
+                    if isinstance(block_cfg, dict):
+                        blocks_dict[block_name] = block_cfg
+                    else:
+                        raise ValueError(f"Invalid block config for {block_name}: {block_cfg}. Must be a dict.")
+            else:
+                raise ValueError(f"blocks must be a dict, got {type(blocks_data)}")
+        else:
+            # Infer blocks from series
+            block_names_set = set()
+            for s in series_list:
+                if isinstance(s, dict):
+                    blocks = s.get('blocks', [])
+                else:
+                    blocks = s.blocks
+                if isinstance(blocks, list) and len(blocks) > 0:
+                    if isinstance(blocks[0], str):
+                        block_names_set.update(blocks)
+            for block_name in sorted(block_names_set):
+                blocks_dict[block_name] = {'factors': 1, 'ar_lag': 1, 'clock': data.get('clock', 'm')}
+        
+        return DDFMConfig(
+            series=series_list,
+            blocks=blocks_dict,
+            **DDFMConfig._extract_ddfm_params(data)
+        )
+    
+    # Direct instantiation
+    return DDFMConfig(**data)
 
 def _ddfm_from_hydra(cls, cfg: Any) -> 'DDFMConfig':
     """Create DDFMConfig from Hydra config."""
@@ -892,6 +958,6 @@ DDFMConfig.from_dict = classmethod(_ddfm_from_dict)
 DDFMConfig.from_hydra = classmethod(_ddfm_from_hydra)
 
 
-# Note: ConfigSource classes and IO functions are in config/io.py
-# Note: Parameter classes (Params, FitParams) are in config/params.py
+# Note: ConfigSource classes and adapter functions are in config/adapter.py
+# Note: Parameter classes (FitParams) are in config/results.py
 # Note: Validation functions are in config/utils.py

@@ -3,20 +3,15 @@
 This module provides utility functions for:
 - Safe configuration access (safe_get_attr, safe_get_method)
 - Parameter resolution (resolve_param)
-- Data standardization (standardize_data, safe_mean_std)
 - Config access helpers (get_clock_frequency, get_series_ids, get_frequencies_from_config, etc.)
 - Validation helpers (_validate_config_loaded, _validate_data_module, _validate_result_loaded)
 """
 
 import numpy as np
-import sys
-from typing import Optional, Any, List, Callable, Union, Tuple, Dict
-from pathlib import Path
-from datetime import datetime
+from typing import Optional, Any, List, Union, Tuple, Dict
 
 from ..config.schema import DFMConfig
-from ..config.results import DFMParams
-from ..utils.time import TimeIndex
+from ..config.results import FitParams
 from ..logger import get_logger
 
 _logger = get_logger(__name__)
@@ -101,34 +96,6 @@ def resolve_param(override: Optional[Any], config_value: Optional[Any], default:
     return default
 
 
-def safe_mean_std(data: np.ndarray, axis: int = 0, ddof: int = 0) -> Tuple[np.ndarray, np.ndarray]:
-    """Compute mean and std safely, handling NaN values.
-    
-    Parameters
-    ----------
-    data : np.ndarray
-        Input data
-    axis : int, default 0
-        Axis along which to compute
-    ddof : int, default 0
-        Delta degrees of freedom for std calculation
-        
-    Returns
-    -------
-    mean : np.ndarray
-        Mean values
-    std : np.ndarray
-        Standard deviation values
-    """
-    mean = np.nanmean(data, axis=axis)
-    std = np.nanstd(data, axis=axis, ddof=ddof)
-    # Replace zero std with 1.0 to avoid division by zero
-    std = np.where(std == 0, 1.0, std)
-    return mean, std
-
-
-
-
 def get_clock_frequency(config: DFMConfig, default: str = 'm') -> str:
     """Get clock frequency from config.
     
@@ -150,6 +117,8 @@ def get_clock_frequency(config: DFMConfig, default: str = 'm') -> str:
 def get_series_ids(config: DFMConfig) -> List[str]:
     """Get list of series IDs from config.
     
+    This is a convenience wrapper around config.get_series_ids().
+    
     Parameters
     ----------
     config : DFMConfig
@@ -160,18 +129,15 @@ def get_series_ids(config: DFMConfig) -> List[str]:
     List[str]
         List of series IDs
     """
-    result = safe_get_method(config, 'get_series_ids')
-    if result is None:
-        # Fallback: extract from series configs
-        if hasattr(config, 'series') and config.series:
-            return [safe_get_attr(s, 'series_id', f'series_{i}') 
-                   for i, s in enumerate(config.series)]
+    if config is None:
         return []
-    return result if isinstance(result, list) else []
+    return config.get_series_ids()
 
 
 def get_series_names(config: DFMConfig) -> List[str]:
     """Get list of series names from config.
+    
+    This is a convenience wrapper around config.get_series_names().
     
     Parameters
     ----------
@@ -183,15 +149,15 @@ def get_series_names(config: DFMConfig) -> List[str]:
     List[str]
         List of series names
     """
-    result = safe_get_method(config, 'get_series_names')
-    if result is None:
-        # Fallback: use series_ids
-        return get_series_ids(config)
-    return result if isinstance(result, list) else []
+    if config is None:
+        return []
+    return config.get_series_names()
 
 
 def get_frequencies_from_config(config: DFMConfig) -> List[str]:
     """Get list of frequencies from config.
+    
+    This is a convenience wrapper around config.get_frequencies().
     
     Parameters
     ----------
@@ -203,15 +169,9 @@ def get_frequencies_from_config(config: DFMConfig) -> List[str]:
     List[str]
         List of frequency codes for each series
     """
-    if not hasattr(config, 'series') or not config.series:
+    if config is None:
         return []
-    
-    frequencies = []
-    for series_config in config.series:
-        freq = safe_get_attr(series_config, 'frequency', 'm')
-        frequencies.append(freq)
-    
-    return frequencies
+    return config.get_frequencies()
 
 
 def get_series_id_by_index(config: DFMConfig, index: int) -> Optional[str]:
@@ -382,18 +342,18 @@ class ParameterResolver:
     Priority order: override > config_value > default
     """
     
-    def __init__(self, config: DFMConfig, params: Optional[DFMParams] = None):
+    def __init__(self, config: DFMConfig, params: Optional[FitParams] = None):
         """Initialize parameter resolver.
         
         Parameters
         ----------
         config : DFMConfig
             Configuration object
-        params : DFMParams, optional
-            Parameter overrides. If None, uses empty DFMParams().
+        params : FitParams, optional
+            Parameter overrides. If None, uses empty FitParams().
         """
         self.config = config
-        self.params = params if params is not None else DFMParams()
+        self.params = params if params is not None else FitParams()
     
     def resolve(
         self,
@@ -491,43 +451,6 @@ class ParameterResolver:
 
 
 
-# (nowcasting helpers in utils.nowcast, loader helpers in loader.py)
-
-def get_units_from_config(config: DFMConfig) -> Optional[List[str]]:
-    """Get units from config if available.
-    
-    Parameters
-    ----------
-    config : DFMConfig
-        Configuration object
-        
-    Returns
-    -------
-    Optional[List[str]]
-        List of units for each series, or None if not available
-    """
-    if not config.series:
-        return None
-    units = []
-    for series in config.series:
-        unit = getattr(series, 'unit', None)
-        units.append(unit)
-    return units if any(u is not None for u in units) else None
-
-
-def get_periods_per_year(frequency: str) -> int:
-    """Get number of periods per year for a given frequency.
-    
-    Parameters
-    ----------
-    frequency : str
-        Frequency code ('d', 'w', 'm', 'q', 'sa', 'a')
-        
-    Returns
-    -------
-    int
-        Number of periods per year
-    """
-    from ..config.structure import get_periods_per_year as _get_periods_per_year
-    return _get_periods_per_year(frequency)
+# Note: Nowcasting helpers are in nowcast/ package
+# Note: Data loading helpers are in data/ package
 

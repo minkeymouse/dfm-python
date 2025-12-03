@@ -1,0 +1,12 @@
+series_id: KOWRCDURE
+series_name: Wholesale and Retail Trade, Total, Durable Goods, SA
+frequency: m
+transformation: chg
+blocks:
+- Block_Global
+- Block_Consumption
+nan_method: 2
+standardization: true
+units: Index
+category: Consumption
+release: 28

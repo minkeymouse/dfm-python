@@ -1,0 +1,12 @@
+series_id: KOBSIIMPR
+series_name: BoK, BSI, Facility Investment, Manufacturing, Actual
+frequency: m
+transformation: chg
+blocks:
+- Block_Global
+- Block_Investment
+nan_method: 2
+standardization: true
+units: Index
+category: Survey, Bsnss
+release: -5

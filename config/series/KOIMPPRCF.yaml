@@ -1,0 +1,12 @@
+series_id: KOIMPPRCF
+series_name: Import Prices, All Items
+frequency: m
+transformation: chg
+blocks:
+- Block_Global
+- Block_Nominal
+nan_method: 2
+standardization: true
+units: Index
+category: Int. trade
+release: 14

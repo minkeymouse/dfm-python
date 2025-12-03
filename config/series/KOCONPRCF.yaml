@@ -1,0 +1,12 @@
+series_id: KOCONPRCF
+series_name: Consumer Prices, Total
+frequency: m
+transformation: chg
+blocks:
+- Block_Global
+- Block_Nominal
+nan_method: 2
+standardization: true
+units: Index
+category: Price
+release: 3

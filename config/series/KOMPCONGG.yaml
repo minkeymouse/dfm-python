@@ -1,0 +1,12 @@
+series_id: KOMPCONGG
+series_name: Production, Consumer Goods, SA
+frequency: m
+transformation: chg
+blocks:
+- Block_Global
+- Block_Consumption
+nan_method: 2
+standardization: true
+units: Index
+category: Production
+release: 30

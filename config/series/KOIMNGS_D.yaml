@@ -1,0 +1,11 @@
+series_id: KOIMNGS.D
+series_name: Imports, Goods and Services
+frequency: q
+transformation: cha
+blocks:
+- Block_Global
+nan_method: 2
+standardization: true
+units: Chained W, Billions
+category: Macro
+release: 25

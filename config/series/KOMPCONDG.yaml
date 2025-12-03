@@ -1,0 +1,12 @@
+series_id: KOMPCONDG
+series_name: Production, Consumer Durable Goods, SA
+frequency: m
+transformation: chg
+blocks:
+- Block_Global
+- Block_Investment
+nan_method: 2
+standardization: true
+units: Index
+category: Production
+release: 30

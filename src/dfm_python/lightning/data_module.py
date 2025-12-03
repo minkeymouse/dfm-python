@@ -5,82 +5,33 @@ preprocessing data for Dynamic Factor Model training.
 """
 
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader
 import numpy as np
 import polars as pl
-from typing import Optional, Union, Tuple, List, Any
+from typing import Optional, Union, Tuple, Any
 from pathlib import Path
 import pytorch_lightning as lightning_pl
 
 from ..config import DFMConfig
-from ..transformations.utils import load_data as _load_data
-from ..transformations.sktime import check_sktime_available
+from ..data.utils import load_data as _load_data
+from ..data.dataset import DFMDataset, DDFMDataset
+from ..data.dataloader import create_dfm_dataloader, create_ddfm_dataloader
 from ..utils.time import TimeIndex
 from ..logger import get_logger
 
 _logger = get_logger(__name__)
 
 
-class DFMDataset(Dataset):
-    """PyTorch Dataset for DFM time series data.
-    
-    This dataset handles time series data for DFM training. For standard
-    DFM training, the entire sequence is used. For batch training (DDFM),
-    sequences are split into windows.
-    
-    Parameters
-    ----------
-    data : torch.Tensor
-        Data tensor (T x N) where T is time periods and N is number of series
-    window_size : int, optional
-        Window size for creating sequences. If None, uses full sequence.
-    stride : int, default 1
-        Stride for windowing. Default 1 means overlapping windows.
-    """
-    
-    def __init__(
-        self,
-        data: torch.Tensor,
-        window_size: Optional[int] = None,
-        stride: int = 1
-    ):
-        self.data = data
-        self.T, self.N = data.shape
-        self.window_size = window_size if window_size is not None else self.T
-        self.stride = stride
-        
-        # Compute number of samples
-        if self.window_size >= self.T:
-            self.n_samples = 1
-        else:
-            self.n_samples = (self.T - self.window_size) // stride + 1
-    
-    def __len__(self) -> int:
-        return self.n_samples
-    
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Get a data sample.
-        
-        Returns
-        -------
-        x : torch.Tensor
-            Input data (window_size x N)
-        target : torch.Tensor
-            Target data (same as x for autoencoder/reconstruction)
-        """
-        if self.window_size >= self.T:
-            # Return full sequence
-            x = self.data
-        else:
-            # Return window
-            start_idx = idx * self.stride
-            end_idx = start_idx + self.window_size
-            x = self.data[start_idx:end_idx, :]
-        
-        # For autoencoder/reconstruction tasks, target is same as input
-        target = x.clone()
-        
-        return x, target
+def _check_sktime_available():
+    """Check if sktime is available and raise ImportError if not."""
+    try:
+        import sktime
+        return True
+    except ImportError:
+        raise ImportError(
+            "sktime is required for sktime transformers. "
+            "Install it with: pip install sktime"
+        )
 
 
 class DFMDataModule(lightning_pl.LightningDataModule):
@@ -96,6 +47,9 @@ class DFMDataModule(lightning_pl.LightningDataModule):
     TransformerPipeline) that handles transformations and standardization.
     The transformer should support Polars DataFrames via set_output(transform="polars").
     
+    For linear DFM, this uses DFMDataset which returns full sequences.
+    For DDFM, use DDFMDataModule which uses DDFMDataset with windowing.
+    
     Parameters
     ----------
     config : DFMConfig
@@ -110,12 +64,8 @@ class DFMDataModule(lightning_pl.LightningDataModule):
         Data array or DataFrame. If None, data_path must be provided.
     time_index : TimeIndex, optional
         Time index for the data
-    batch_size : int, default 32
-        Batch size for DataLoader
-    window_size : int, optional
-        Window size for sequence batching. If None, uses full sequence.
-    stride : int, default 1
-        Stride for windowing
+    batch_size : int, optional
+        Batch size for DataLoader. For DFM, typically 1 (full sequence).
     num_workers : int, default 0
         Number of worker processes for DataLoader
     val_split : float, optional
@@ -129,15 +79,13 @@ class DFMDataModule(lightning_pl.LightningDataModule):
         data_path: Optional[Union[str, Path]] = None,
         data: Optional[Union[np.ndarray, pl.DataFrame]] = None,
         time_index: Optional[TimeIndex] = None,
-        batch_size: int = 32,
-        window_size: Optional[int] = None,
-        stride: int = 1,
+        batch_size: Optional[int] = None,
         num_workers: int = 0,
         val_split: Optional[float] = None,
         **kwargs
     ):
         super().__init__()
-        check_sktime_available()
+        _check_sktime_available()
         
         if transformer is None:
             raise ValueError(
@@ -152,8 +100,6 @@ class DFMDataModule(lightning_pl.LightningDataModule):
         self.data = data
         self.time_index = time_index
         self.batch_size = batch_size
-        self.window_size = window_size
-        self.stride = stride
         self.num_workers = num_workers
         self.val_split = val_split
         
@@ -228,46 +174,44 @@ class DFMDataModule(lightning_pl.LightningDataModule):
         # This is optional - some transformers may not have standardization
         # Mx and Wx are already initialized in __init__
         
-        # Check if transformer has StandardScaler in its pipeline
-        if hasattr(self.transformer, 'steps') or hasattr(self.transformer, 'transformers'):
-            # Try to find StandardScaler in pipeline
-            try:
-                from sklearn.preprocessing import StandardScaler
-                from ..transformations.sktime import StandardScaler as SktimeStandardScaler
-                
-                # Check if transformer is a pipeline with StandardScaler
-                if hasattr(self.transformer, 'steps'):
-                    for name, step in self.transformer.steps:
-                        if isinstance(step, (StandardScaler, SktimeStandardScaler)):
-                            if hasattr(step, 'mean_') and hasattr(step, 'scale_'):
-                                mean_val = step.mean_
-                                scale_val = step.scale_
-                                # Convert to numpy array if needed
-                                if not isinstance(mean_val, np.ndarray):
-                                    mean_val = np.asarray(mean_val)
-                                if not isinstance(scale_val, np.ndarray):
-                                    scale_val = np.asarray(scale_val)
-                                self.Mx = mean_val
-                                self.Wx = scale_val
-                                break
-                elif hasattr(self.transformer, 'transformers'):
-                    # ColumnTransformer - check each transformer
-                    for name, trans, cols in self.transformer.transformers:
-                        if isinstance(trans, (StandardScaler, SktimeStandardScaler)):
-                            if hasattr(trans, 'mean_') and hasattr(trans, 'scale_'):
-                                mean_val = trans.mean_
-                                scale_val = trans.scale_
-                                # Convert to numpy array if needed
-                                if not isinstance(mean_val, np.ndarray):
-                                    mean_val = np.asarray(mean_val)
-                                if not isinstance(scale_val, np.ndarray):
-                                    scale_val = np.asarray(scale_val)
-                                self.Mx = mean_val
-                                self.Wx = scale_val
-                                break
-            except (AttributeError, ImportError):
-                # StandardScaler not found or not accessible
-                pass
+        # Try to extract standardization parameters if transformer includes StandardScaler
+        # This is optional - some transformers may not have standardization
+        try:
+            from sklearn.preprocessing import StandardScaler
+            
+            # Check if transformer is a pipeline with StandardScaler
+            if hasattr(self.transformer, 'steps'):
+                for name, step in self.transformer.steps:
+                    if isinstance(step, StandardScaler):
+                        if hasattr(step, 'mean_') and hasattr(step, 'scale_'):
+                            mean_val = step.mean_
+                            scale_val = step.scale_
+                            # Convert to numpy array if needed
+                            if not isinstance(mean_val, np.ndarray):
+                                mean_val = np.asarray(mean_val)
+                            if not isinstance(scale_val, np.ndarray):
+                                scale_val = np.asarray(scale_val)
+                            self.Mx = mean_val
+                            self.Wx = scale_val
+                            break
+            elif hasattr(self.transformer, 'transformers'):
+                # ColumnTransformer - check each transformer
+                for name, trans, cols in self.transformer.transformers:
+                    if isinstance(trans, StandardScaler):
+                        if hasattr(trans, 'mean_') and hasattr(trans, 'scale_'):
+                            mean_val = trans.mean_
+                            scale_val = trans.scale_
+                            # Convert to numpy array if needed
+                            if not isinstance(mean_val, np.ndarray):
+                                mean_val = np.asarray(mean_val)
+                            if not isinstance(scale_val, np.ndarray):
+                                scale_val = np.asarray(scale_val)
+                            self.Mx = mean_val
+                            self.Wx = scale_val
+                            break
+        except (AttributeError, ImportError):
+            # StandardScaler not found or not accessible
+            pass
         
         # Convert to numpy then to torch tensor
         X_processed_np = X_transformed.to_numpy()
@@ -281,23 +225,12 @@ class DFMDataModule(lightning_pl.LightningDataModule):
             train_data = self.data_processed[:split_idx, :]
             val_data = self.data_processed[split_idx:, :]
             
-            self.train_dataset = DFMDataset(
-                train_data,
-                window_size=self.window_size,
-                stride=self.stride
-            )
-            self.val_dataset = DFMDataset(
-                val_data,
-                window_size=self.window_size,
-                stride=self.stride
-            )
+            # For linear DFM, use full sequences (no windowing)
+            self.train_dataset = DFMDataset(train_data)
+            self.val_dataset = DFMDataset(val_data)
         else:
             # Use all data for training
-            self.train_dataset = DFMDataset(
-                self.data_processed,
-                window_size=self.window_size,
-                stride=self.stride
-            )
+            self.train_dataset = DFMDataset(self.data_processed)
             self.val_dataset = None
     
     def train_dataloader(self) -> DataLoader:
@@ -305,12 +238,11 @@ class DFMDataModule(lightning_pl.LightningDataModule):
         if self.train_dataset is None:
             raise RuntimeError("setup() must be called before train_dataloader()")
         
-        return DataLoader(
+        return create_dfm_dataloader(
             self.train_dataset,
             batch_size=self.batch_size,
-            shuffle=True,  # Shuffle for training
             num_workers=self.num_workers,
-            pin_memory=True if torch.cuda.is_available() else False
+            pin_memory=torch.cuda.is_available()
         )
     
     def val_dataloader(self) -> Optional[DataLoader]:
@@ -318,12 +250,11 @@ class DFMDataModule(lightning_pl.LightningDataModule):
         if self.val_dataset is None:
             return None
         
-        return DataLoader(
+        return create_dfm_dataloader(
             self.val_dataset,
             batch_size=self.batch_size,
-            shuffle=False,  # No shuffle for validation
             num_workers=self.num_workers,
-            pin_memory=True if torch.cuda.is_available() else False
+            pin_memory=torch.cuda.is_available()
         )
     
     def get_standardization_params(self) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:

@@ -1,0 +1,11 @@
+series_id: KOROCOINF
+series_name: Coincident Index, Index
+frequency: m
+transformation: chg
+blocks:
+- Block_Global
+nan_method: 2
+standardization: true
+units: Index
+category: Production
+release: 30

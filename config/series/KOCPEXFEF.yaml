@@ -1,0 +1,12 @@
+series_id: KOCPEXFEF
+series_name: Consumer Prices, Excluding Food and Energy
+frequency: m
+transformation: chg
+blocks:
+- Block_Global
+- Block_Nominal
+nan_method: 2
+standardization: true
+units: Index
+category: Price
+release: 3

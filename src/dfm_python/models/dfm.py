@@ -7,14 +7,13 @@ It inherits from BaseFactorModel to provide a consistent interface.
 import numpy as np
 import polars as pl
 import torch
-from typing import Optional, Tuple, Union, Any, List, TYPE_CHECKING
+from typing import Optional, Tuple, Union, Any, List, Dict, TYPE_CHECKING
 from datetime import datetime
 from ..logger import get_logger
 
 from .base import BaseFactorModel
-from ..config import DFMConfig, SeriesConfig, BlockConfig, validate_frequency
-from ..config.results import DFMResult, DFMParams
-from ..config.params import FitParams
+from ..config import DFMConfig, SeriesConfig, validate_frequency
+from ..config.results import DFMResult, FitParams
 
 if TYPE_CHECKING:
     from ..lightning import DFMDataModule
@@ -36,9 +35,8 @@ class DFMLinear(BaseFactorModel):
     
     Parameters are estimated via Expectation-Maximization (EM) algorithm.
     
-    Note: This class consolidates the functionality previously split between
-    DFMCore and DFMLinear. For backward compatibility, DFMCore is available
-    as an alias to this class.
+    Note: This class provides the low-level implementation of the linear DFM.
+    The high-level DFM class wraps this for convenience.
     """
     
     def fit(
@@ -231,11 +229,11 @@ class DFMLinear(BaseFactorModel):
         
         # Create block config (single global block)
         block_configs = {
-            'Block_Global': BlockConfig(
-                factors=num_factors,
-                ar_lag=1,
-                clock=clock
-            )
+            'Block_Global': {
+                'factors': num_factors,
+                'ar_lag': 1,
+                'clock': clock
+            }
         }
         
         # Create DFMConfig with defaults
@@ -352,7 +350,7 @@ class DFMLinear(BaseFactorModel):
         
         # Default horizon: 1 year of periods based on clock frequency
         if horizon is None:
-            from ..config.structure import get_periods_per_year
+            from ..config.utils import get_periods_per_year
             from ..utils.helpers import get_clock_frequency
             if self._config is None:
                 clock = 'm'  # Default to monthly
@@ -387,8 +385,6 @@ class DFMLinear(BaseFactorModel):
         return Z_forecast
 
 
-# Backward compatibility: DFMCore is an alias for DFMLinear
-DFMCore = DFMLinear
 
 
 # ============================================================================
@@ -402,12 +398,12 @@ from datetime import datetime, timedelta
 from typing import Dict, Any, TYPE_CHECKING
 
 from ..config import (
-    DFMConfig, Params,
+    DFMConfig,
     make_config_source,
     ConfigSource,
     MergedConfigSource,
 )
-from ..transformations.utils import read_data as _load_data
+# Note: transformations.utils removed - use DFMDataModule for data loading
 from ..nowcast.dataview import DataView
 from ..utils.helpers import (
     safe_get_method,
@@ -641,7 +637,7 @@ def train(data_module: 'DFMDataModule', fit_params: Optional[FitParams] = None, 
     
     Note: This creates a new instance. For stateful usage, create a DFM() instance directly.
     """
-    from ..config.params import FitParams
+    from ..config.results import FitParams
     if fit_params is None:
         fit_params = FitParams.from_kwargs(**kwargs)
     model = DFM()
@@ -732,26 +728,39 @@ def from_spec(
     blocks_filename: Optional[str] = None
 ) -> Tuple[Path, Path]:
     """Convert spec CSV file to YAML configuration files."""
-    from ..config.io import from_spec as _from_spec
+    from ..config.adapter import from_spec as _from_spec
     return _from_spec(csv_path, output_dir, series_filename, blocks_filename)
 
 
 def from_spec_df(
     spec_df: Any,  # polars.DataFrame
-    params: Optional[Params] = None,
+    params: Optional[Dict[str, Any]] = None,
     *,
     output_dir: Optional[Union[str, Path]] = None,
     config_name: Optional[str] = None
 ) -> DFM:
-    """Convert spec DataFrame to YAML files and load via YAML/Hydra."""
-    from ..config.io import _load_config_from_dataframe, _write_series_blocks_yaml
-    from dataclasses import asdict
+    """Convert spec DataFrame to YAML files and load via YAML/Hydra.
+    
+    Parameters
+    ----------
+    spec_df : polars.DataFrame
+        Specification DataFrame with series definitions
+    params : dict, optional
+        Parameter overrides (e.g., max_iter, threshold). If None, uses DFMConfig defaults.
+    output_dir : str or Path, optional
+        Directory to write YAML files. Defaults to 'config/generated'.
+    config_name : str, optional
+        Base name for generated config files. Auto-generated if None.
+        
+    Returns
+    -------
+    DFM
+        Configured DFM model instance
+    """
+    from ..config.adapter import _load_config_from_dataframe, _write_series_blocks_yaml
     import uuid
     from datetime import datetime
     import polars as pl
-    
-    if params is None:
-        params = Params()
     
     if not isinstance(spec_df, pl.DataFrame):
         raise TypeError(f"spec_df must be polars DataFrame, got {type(spec_df)}")
@@ -778,7 +787,26 @@ def from_spec_df(
     )
     
     main_config_path = output_dir / f'{base_name}.yaml'
-    params_dict = {k: v for k, v in asdict(params).items() if v is not None}
+    # Use params dict directly, or extract from config if params is None
+    if params is None:
+        # Extract only the estimation parameters from config (not series/blocks)
+        from dataclasses import asdict, fields
+        params_dict = {}
+        config_dict = asdict(config)
+        # Only include estimation parameters, not series/blocks
+        estimation_fields = {
+            'ar_lag', 'threshold', 'max_iter', 'nan_method', 'nan_k', 'clock',
+            'clip_ar_coefficients', 'ar_clip_min', 'ar_clip_max',
+            'clip_data_values', 'data_clip_threshold',
+            'use_regularization', 'regularization_scale',
+            'min_eigenvalue', 'max_eigenvalue',
+            'use_damped_updates', 'damping_factor',
+            'augment_idio', 'augment_idio_slow', 'idio_rho0', 'idio_min_var'
+        }
+        params_dict = {k: v for k, v in config_dict.items() if k in estimation_fields and v is not None}
+    else:
+        params_dict = {k: v for k, v in params.items() if v is not None}
+    
     main_payload: Dict[str, Any] = {
         'defaults': [
             {'series': series_filename},

@@ -27,16 +27,16 @@ from ..utils.diagnostics import (
 # Use Lightning modules instead of legacy NumPy implementations
 from ..lightning import DFMLightningModule
 from ..utils.helpers import (
-    safe_get_method, safe_get_attr, resolve_param, safe_mean_std,
+    safe_get_method, safe_get_attr, resolve_param,
     get_series_names, get_frequencies_from_config, ParameterResolver
 )
 
-from ..config.structure import (
+from ..config.utils import (
     get_aggregation_structure,
     FREQUENCY_HIERARCHY,
 )
 
-from ..config.results import DFMResult, DFMParams
+from ..config.results import DFMResult, FitParams
 
 _logger = get_logger(__name__)
 
@@ -44,7 +44,7 @@ _logger = get_logger(__name__)
 def _prepare_data_and_params(
     X: np.ndarray,
     config: DFMConfig,
-    params: Optional[DFMParams] = None,
+    params: Optional[FitParams] = None,
 ) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
     """Prepare data and resolve all parameters from config and overrides.
     
@@ -54,7 +54,7 @@ def _prepare_data_and_params(
         Input data matrix (T x N)
     config : DFMConfig
         Configuration object
-    params : DFMParams, optional
+    params : FitParams, optional
         Parameter overrides. If None, all values from config are used.
     
     Returns
@@ -77,7 +77,7 @@ def _prepare_data_and_params(
     
     # Initialize params if not provided
     if params is None:
-        params = DFMParams()
+        params = FitParams()
     
     # Use ParameterResolver for consistent parameter resolution
     resolver = ParameterResolver(config, params)
@@ -132,7 +132,7 @@ def _prepare_aggregation_structure(
     idio_chain_lengths : np.ndarray
         Array of idiosyncratic chain lengths per series (0, 1, or tent length)
     """
-    from .structure import compute_idio_chain_lengths
+    from ..config.utils import compute_idio_chain_lengths
     
     agg_info = get_aggregation_structure(config, clock=clock)
     tent_weights_dict = agg_info.get('tent_weights', {})
@@ -176,7 +176,7 @@ def _prepare_aggregation_structure(
 def _dfm_core(
     X: np.ndarray,
     config: DFMConfig,
-    params: Optional[DFMParams] = None,
+    params: Optional[FitParams] = None,
     Mx: Optional[np.ndarray] = None,
     Wx: Optional[np.ndarray] = None,
     **kwargs
@@ -217,9 +217,9 @@ def _dfm_core(
           Transformation (per series), factors_per_block
         - Estimation parameters: ar_lag, threshold, max_iter, nan_method, nan_k
         Typically obtained from `load_config()`.
-    params : DFMParams, optional
+    params : FitParams, optional
         Parameter overrides. If None, all values from config are used.
-        All parameters in DFMParams are optional and override corresponding config values.
+        All parameters in FitParams are optional and override corresponding config values.
     Mx : np.ndarray, optional
         Mean values used for standardization (N,). Required if data is already standardized.
     Wx : np.ndarray, optional
@@ -262,11 +262,12 @@ def _dfm_core(
     Examples
     --------
     >>> from dfm_python import DFM
-    >>> from dfm_python.transformations.utils import load_data  # Preferred import
-    >>> from dfm_python.config import load_config  # Preferred import
+    >>> from dfm_python.config.adapter import YamlSource
+    >>> from dfm_python.lightning import DFMDataModule
+    >>> from dfm_python.data.utils import load_data
     >>> from datetime import datetime
     >>> # Load configuration from YAML or create DFMConfig directly
-    >>> config = load_config('config.yaml')
+    >>> config = YamlSource('config.yaml').load()
     >>> # Load data from file
     >>> X, Time, Z = load_data('data.csv', config, sample_start=datetime(2000, 1, 1))
     >>> # Estimate DFM
@@ -287,7 +288,7 @@ def _dfm_core(
     # Merge kwargs into params if provided
     if kwargs:
         if params is None:
-            params = DFMParams.from_kwargs(**kwargs)
+            params = FitParams.from_kwargs(**kwargs)
         else:
             # Update params with kwargs (only valid parameter names)
             valid_params = {
@@ -321,6 +322,26 @@ def _dfm_core(
             "Mx and Wx must be provided. Data should be preprocessed using DFMDataModule with custom transformer. "
             "before calling _dfm_core()."
         )
+    
+    # Step 3.5: Handle missing data implicitly
+    # Missing data (NaN) is handled automatically by the Kalman filter during estimation.
+    # The Kalman filter's handle_missing_data() method removes NaN observations at each time step,
+    # allowing the EM algorithm to work with incomplete data. This is the standard approach
+    # in state-space models (see Harvey 1989, Mariano & Murasawa 2003).
+    # Preprocessing (rem_nans_spline) handles leading/trailing NaNs, but remaining NaNs
+    # are handled implicitly during Kalman filtering.
+    if np.any(np.isnan(X)):
+        nan_ratio = np.sum(np.isnan(X)) / X.size
+        if nan_ratio > 0.5:
+            _logger.warning(
+                f"High proportion of missing data ({nan_ratio:.1%}). "
+                "Results may be unstable. Consider preprocessing data more thoroughly."
+            )
+        else:
+            _logger.debug(
+                f"Data contains {nan_ratio:.1%} missing values. "
+                "These will be handled implicitly by the Kalman filter during estimation."
+            )
     
     # Step 4-8: Use Lightning module for estimation
     import torch

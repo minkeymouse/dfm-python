@@ -1,0 +1,61 @@
+# @package _global_
+defaults:
+  - override /model: dfm
+  - _self_
+data:
+  path: data/sample_data.csv
+  sample_start: '2000-01-01'
+  sample_end: '2023-12-31'
+description: DFM model for production indicators
+name: production_dfm
+output:
+  path: outputs/production_dfm
+  save_model: true
+  save_plots: true
+  save_results: true
+series:
+- KOBFDSAAF
+- KOBFXSAAF
+- KOBSESI.R
+- KOBSIBCEQ
+- KOBSIBCOQ
+- KOBSIHAPR
+- KOBSIXMER
+- KOCALL.
+- KOCNFBUSR
+- KOCNFCONR
+- KOCNGOV.D
+- KOCOBUSIR
+- KOCONPRCF
+- KOCSECEMR
+- KOCSEMEMR
+- KOCSPHIMR
+- KOCYLEADR
+- KOEMPTOTO
+- KOEQUIPTE
+- KOEXCHINA
+- KOEXNGS.D
+- KOEXPGDSA
+- KOEXPPRCF
+- KOGDP...D
+- KOHWRWEMP
+- KOIMNGS.D
+- KOIMPGDSA
+- KOIMPPRCF
+- KOIPALL.G
+- KONETTRDF
+- KONEWCONA
+- KOPIMANUG
+- KOPOPACTE
+- KOPPSRM.F
+- KOPROPRCF
+- KOPSMANUG
+- KORELEC
+- KORMCMP
+- KOROCOINF
+- KOSIAI..E
+- KOUN%TOTQ
+- KOUS$...
+- KOVALCONA
+- KOWRCCNSE
+target: KOGDP...D

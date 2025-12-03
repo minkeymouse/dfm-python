@@ -1,0 +1,11 @@
+series_id: KOSSBFMBE
+series_name: Service Sector, Business Facilities Management and Business Support Services
+frequency: m
+transformation: chg
+blocks:
+- Block_Global
+nan_method: 2
+standardization: true
+units: Index
+category: Production
+release: 30

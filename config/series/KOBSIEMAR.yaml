@@ -1,0 +1,12 @@
+series_id: KOBSIEMAR
+series_name: FKI, Employment, All Industries, Actual
+frequency: m
+transformation: chg
+blocks:
+- Block_Global
+- Block_Labor
+nan_method: 2
+standardization: true
+units: Index
+category: Survey, Bsnss
+release: -5

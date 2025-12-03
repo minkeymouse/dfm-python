@@ -1,0 +1,13 @@
+series_id: KOEMPCONF
+series_name: Employment, Construction
+frequency: m
+transformation: chg
+blocks:
+- Block_Global
+- Block_Investment
+- Block_Labor
+nan_method: 2
+standardization: true
+units: Thousands of Persons
+category: Labor
+release: 11

@@ -1,0 +1,15 @@
+defaults:
+- 'model: dfm'
+- _self_
+data:
+  path: data/sample_data.csv
+  sample_start: null
+  sample_end: null
+output:
+  path: outputs/${experiment.name}
+  save_model: true
+  save_plots: true
+  save_results: true
+description: Base experiment template
+name: base_experiment
+target: null

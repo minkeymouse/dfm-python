@@ -1,0 +1,11 @@
+series_id: KOBFDSAAF
+series_name: FKI, Domestic Demand, All Industries, Actual
+frequency: m
+transformation: chg
+blocks:
+- Block_Global
+nan_method: 2
+standardization: true
+units: Index
+category: Survey, Bsnss
+release: -5

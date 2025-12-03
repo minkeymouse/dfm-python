@@ -557,7 +557,7 @@ class KalmanFilter(nn.Module):
         """Ensure covariance matrix is real, symmetric, and positive semi-definite."""
         if min_eigenval is None:
             min_eigenval = self.min_eigenval.item()
-        return ensure_covariance_stable(M, min_eigenval=min_eigenval, ensure_real_flag=ensure_real)
+        return ensure_covariance_stable(M, min_eigenval=min_eigenval, ensure_real=ensure_real)
     
     def _ensure_positive_definite(
         self,

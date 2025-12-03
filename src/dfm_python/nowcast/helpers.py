@@ -20,15 +20,13 @@ if TYPE_CHECKING:
     from ..nowcast.nowcast import NowcastResult
 from ..utils.helpers import (
     get_series_id_by_index,
-    get_periods_per_year,
     get_frequencies_from_config,
     get_series_ids,
     safe_get_attr,
 )
-from ..config.structure import FREQUENCY_HIERARCHY
+from ..config.utils import FREQUENCY_HIERARCHY, get_periods_per_year
 from ..utils.time import clock_to_datetime_freq
-from ..transformations.utils import read_data
-# transform_data and _transform_series removed - use DataModule with custom transformers instead
+# Note: transformations.utils removed - use DataModule with custom transformers instead
 from ..utils.data import sort_data, rem_nans_spline, calculate_release_date
 
 _logger = get_logger(__name__)
@@ -176,17 +174,34 @@ def para_const(X: np.ndarray, result: DFMResult, lag: int = 0) -> Dict[str, Any]
         )
     
     # Calculate Plag (smoothed factor covariances for different lags)
+    # MATLAB: Plag{1} = Vs; then for jk = 1:lag, jt = size(Plag{1},3):-1:lag+1
+    # Note: MATLAB uses 1-based indexing, we use 0-based
+    # size(Plag{1},3) in MATLAB = T, so jt goes from T down to lag+1
+    # In 0-based: jt goes from T-1 down to lag (equivalent to lag+1 to T in 1-based)
     Plag = [Vs]  # Plag[0] = Vs (lag 0)
     
     if lag > 0:
         for jk in range(1, lag + 1):
             Plag_jk = np.zeros_like(Vs)
-            for jt in range(lag, T):
+            # MATLAB: for jt = size(Plag{1},3):-1:lag+1
+            # In 0-based: jt from T-1 down to lag (inclusive)
+            for jt in range(T - 1, lag - 1, -1):  # Backwards from T-1 to lag
                 # Calculate smoothed covariance for lag jk at time jt
-                # As = V_{t-jk|t} * A' * (A * V_{t-jk|t} * A' + Q)^{-1}
-                V_t_jk = Vf[:, :, jt - jk] if jt - jk >= 0 else Vs[0]
+                # MATLAB: As = Vf(:,:,jt-jk)*A'*pinv(A*Vf(:,:,jt-jk)*A'+Q)
+                # Note: Vf is r x r x T, we need to index it correctly
+                # jt-jk in MATLAB (1-based) = jt-jk in Python (0-based) if jt-jk >= 0
+                if jt - jk >= 0:
+                    # Vf is r x r x T, index as Vf[:, :, jt - jk]
+                    V_t_jk = Vf[:, :, jt - jk]
+                else:
+                    # Use first smoothed covariance as fallback
+                    V_t_jk = Vs[0]
+                
                 try:
+                    # MATLAB: As = Vf(:,:,jt-jk)*A'*pinv(A*Vf(:,:,jt-jk)*A'+Q)
                     As = V_t_jk @ A.T @ np.linalg.pinv(A @ V_t_jk @ A.T + Q)
+                    # MATLAB: Plag{jk+1}(:,:,jt) = As*Plag{jk}(:,:,jt)
+                    # Plag[jk-1] is previous lag (jk-1 in 0-based = jk in 1-based)
                     Plag_jk[jt] = As @ Plag[jk - 1][jt]
                 except (np.linalg.LinAlgError, ValueError):
                     # Fallback if inversion fails
@@ -223,12 +238,7 @@ from .utils import (
     extract_news_summary,
 )
 
-# Backward compatibility aliases (with underscore prefix)
-_get_higher_frequency = get_higher_frequency
-_calculate_backward_date = calculate_backward_date
-_get_forecast_horizon_config = get_forecast_horizon_config
-_check_config_consistency = check_config_consistency
-_extract_news_summary_impl = extract_news_summary
+# Backward compatibility aliases removed - use direct imports from nowcast.utils
 
 # ============================================================================
 # Backtest result classes (merged from backtest.py)
@@ -347,65 +357,5 @@ class BacktestResult:
 # transform_data and _transform_series removed - use DataModule with custom transformers instead
 
 
-# ============================================================================
-# News summary extraction (from nowcast.py)
-# ============================================================================
-
-
-def _extract_news_summary_impl(
-    singlenews: np.ndarray,
-    weight: np.ndarray,
-    series_ids: List[str],
-    top_n: int = 5
-) -> Dict[str, Any]:
-    """Extract summary statistics from news decomposition (implementation).
-    
-    Parameters
-    ----------
-    singlenews : np.ndarray
-        News contributions (N,) or (N, n_targets)
-    weight : np.ndarray
-        Weights (N,) or (N, n_targets)
-    series_ids : List[str]
-        Series IDs
-    top_n : int, default 5
-        Number of top contributors to include
-        
-    Returns
-    -------
-    Dict[str, Any]
-        Dictionary with 'total_impact', 'top_contributors', etc.
-    """
-    # Handle both 1D and 2D arrays
-    if singlenews.ndim == 1:
-        news_contributions = singlenews
-        weights = weight
-    else:
-        # If 2D, use first target (column 0)
-        news_contributions = singlenews[:, 0]
-        weights = weight[:, 0] if weight.ndim > 1 else weight
-    
-    # Calculate total impact
-    total_impact = np.nansum(news_contributions)
-    
-    # Get top contributors
-    abs_contributions = np.abs(news_contributions)
-    top_indices = np.argsort(abs_contributions)[::-1][:top_n]
-    
-    # Build list of top contributors
-    top_contributors = []
-    for idx in top_indices:
-        if idx < len(series_ids):
-            top_contributors.append({
-                'series_id': series_ids[idx],
-                'contribution': float(news_contributions[idx]),
-                'weight': float(weights[idx]) if idx < len(weights) else 0.0
-            })
-    
-    return {
-        'total_impact': float(total_impact),
-        'top_contributors': top_contributors,
-        'revision_impact': float(total_impact),  # TODO: Implement revision impact calculation
-        'release_impact': 0.0  # TODO: Implement release impact calculation
-    }
+# Note: _extract_news_summary_impl removed - use extract_news_summary from nowcast.utils instead
 

@@ -1,0 +1,11 @@
+series_id: KOPIMANUG
+series_name: Inventories, Manufacturing, SA, Index
+frequency: m
+transformation: chg
+blocks:
+- Block_Global
+nan_method: 2
+standardization: true
+units: Index
+category: Production
+release: 30

@@ -5,7 +5,7 @@ initializing factor models via eigendecomposition.
 """
 
 import numpy as np
-from typing import Tuple, Optional, TYPE_CHECKING
+from typing import Tuple, Optional, Union, TYPE_CHECKING
 import logging
 
 if TYPE_CHECKING:
@@ -29,6 +29,7 @@ except ImportError:
     eigs = None
     csc_matrix = None
 
+from .base import BaseEncoder
 from ..logger import get_logger
 
 _logger = get_logger(__name__)
@@ -152,6 +153,144 @@ def compute_principal_components_torch(
         return eigenvalues, eigenvectors
 
 
-# Backward compatibility: alias for the NumPy version
-_compute_principal_components = compute_principal_components
+class PCAEncoder(BaseEncoder):
+    """Principal Component Analysis encoder for factor extraction.
+    
+    This encoder extracts factors via eigendecomposition of the covariance matrix.
+    It supports both NumPy and PyTorch backends.
+    
+    Parameters
+    ----------
+    n_components : int
+        Number of factors to extract
+    use_torch : bool, default False
+        Whether to use PyTorch backend (True) or NumPy backend (False)
+    block_idx : int, optional
+        Block index for error messages
+    """
+    
+    def __init__(
+        self,
+        n_components: int,
+        use_torch: bool = False,
+        block_idx: Optional[int] = None
+    ):
+        super().__init__(n_components)
+        self.use_torch = use_torch
+        self.block_idx = block_idx
+        
+        if use_torch and not _has_torch:
+            raise ImportError("PyTorch is required for use_torch=True")
+        
+        # Will be set in fit()
+        self.eigenvectors: Optional[Union[np.ndarray, "torch.Tensor"]] = None
+        self.eigenvalues: Optional[Union[np.ndarray, "torch.Tensor"]] = None
+        self.cov_matrix: Optional[Union[np.ndarray, "torch.Tensor"]] = None
+    
+    def fit(
+        self,
+        X: Union[np.ndarray, "torch.Tensor"],
+        cov_matrix: Optional[Union[np.ndarray, "torch.Tensor"]] = None,
+        **kwargs
+    ) -> "PCAEncoder":
+        """Fit PCA encoder by computing covariance matrix and eigendecomposition.
+        
+        Parameters
+        ----------
+        X : np.ndarray or torch.Tensor
+            Training data (T x N). If cov_matrix is provided, this is ignored.
+        cov_matrix : np.ndarray or torch.Tensor, optional
+            Precomputed covariance matrix (N x N). If None, computed from X.
+        **kwargs
+            Additional parameters (ignored)
+            
+        Returns
+        -------
+        self : PCAEncoder
+            Returns self for method chaining
+        """
+        if cov_matrix is not None:
+            self.cov_matrix = cov_matrix
+        else:
+            # Compute covariance matrix
+            if self.use_torch:
+                if not isinstance(X, torch.Tensor):
+                    X = torch.tensor(X, dtype=torch.float32)
+                # Center the data
+                X_centered = X - X.mean(dim=0, keepdim=True)
+                # Compute covariance: (1/(T-1)) * X^T @ X
+                T = X_centered.shape[0]
+                self.cov_matrix = (X_centered.T @ X_centered) / (T - 1)
+            else:
+                if isinstance(X, torch.Tensor):
+                    X = X.cpu().numpy()
+                # Center the data
+                X_mean = np.mean(X, axis=0, keepdims=True)
+                X_centered = X - X_mean
+                # Compute covariance
+                self.cov_matrix = np.cov(X_centered.T)
+        
+        # Compute principal components
+        if self.use_torch:
+            self.eigenvalues, self.eigenvectors = compute_principal_components_torch(
+                self.cov_matrix,
+                self.n_components
+            )
+        else:
+            if isinstance(self.cov_matrix, torch.Tensor):
+                self.cov_matrix = self.cov_matrix.cpu().numpy()
+            self.eigenvalues, self.eigenvectors = compute_principal_components(
+                self.cov_matrix,
+                self.n_components,
+                block_idx=self.block_idx
+            )
+        
+        return self
+    
+    def encode(
+        self,
+        X: Union[np.ndarray, "torch.Tensor"],
+        **kwargs
+    ) -> Union[np.ndarray, "torch.Tensor"]:
+        """Extract factors using fitted PCA encoder.
+        
+        Parameters
+        ----------
+        X : np.ndarray or torch.Tensor
+            Observed data (T x N)
+        **kwargs
+            Additional parameters (ignored)
+            
+        Returns
+        -------
+        factors : np.ndarray or torch.Tensor
+            Extracted factors (T x n_components)
+        """
+        if self.eigenvectors is None:
+            raise RuntimeError("PCAEncoder must be fitted before encoding. Call fit() first.")
+        
+        # Project data onto principal components
+        if self.use_torch:
+            if not isinstance(X, torch.Tensor):
+                X = torch.tensor(X, dtype=torch.float32)
+            if not isinstance(self.eigenvectors, torch.Tensor):
+                self.eigenvectors = torch.tensor(self.eigenvectors, dtype=X.dtype, device=X.device)
+            # Center the data
+            X_centered = X - X.mean(dim=0, keepdim=True)
+            # Project: X @ eigenvectors
+            factors = X_centered @ self.eigenvectors
+        else:
+            if isinstance(X, torch.Tensor):
+                X = X.cpu().numpy()
+            if isinstance(self.eigenvectors, torch.Tensor):
+                self.eigenvectors = self.eigenvectors.cpu().numpy()
+            # Center the data
+            X_mean = np.mean(X, axis=0, keepdims=True)
+            X_centered = X - X_mean
+            # Project: X @ eigenvectors
+            factors = X_centered @ self.eigenvectors
+        
+        return factors
+
+
 

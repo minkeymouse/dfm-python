@@ -1,0 +1,12 @@
+series_id: KOBFINAAF
+series_name: FKI, Investment, All Industries, Actual
+frequency: m
+transformation: chg
+blocks:
+- Block_Global
+- Block_Investment
+nan_method: 2
+standardization: true
+units: Index
+category: Survey, Bsnss
+release: -5

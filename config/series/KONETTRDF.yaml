@@ -1,0 +1,13 @@
+series_id: KONETTRDF
+series_name: Terms of Trade, Net Barter
+frequency: m
+transformation: chg
+blocks:
+- Block_Global
+- Block_Export
+- Block_Nominal
+nan_method: 2
+standardization: true
+units: Index
+category: Int. trade
+release: 14

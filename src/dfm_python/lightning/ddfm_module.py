@@ -180,25 +180,41 @@ class DDFMLightningModule(pl.LightningModule):
         This is used for standard autoencoder training and also called
         during MCMC procedure for each MC sample.
         
+        Missing data (NaN values) are handled by masking them in the loss function,
+        similar to the original DDFM implementation (mse_missing).
+        
         Parameters
         ----------
         batch : tuple
-            (data, target) where both are the same for reconstruction
+            (data, target) where both are the same for reconstruction.
+            Data may contain NaN values which are masked in the loss.
         batch_idx : int
             Batch index
             
         Returns
         -------
         loss : torch.Tensor
-            Reconstruction loss (MSE)
+            Reconstruction loss (MSE with missing data masking)
         """
         data, target = batch
         
         # Forward pass
         reconstructed = self.forward(data)
         
-        # Compute loss (MSE)
-        loss = nn.functional.mse_loss(reconstructed, target)
+        # Compute loss with missing data masking (mse_missing)
+        # Create mask: 1 for non-missing, 0 for missing (NaN)
+        mask = torch.where(torch.isnan(target), torch.zeros_like(target), torch.ones_like(target))
+        
+        # Replace NaN with zeros for computation
+        target_clean = torch.where(torch.isnan(target), torch.zeros_like(target), target)
+        
+        # Apply mask to predictions
+        reconstructed_masked = reconstructed * mask
+        
+        # Compute MSE only on non-missing values
+        # MSE = mean((target_clean - reconstructed_masked)^2) over non-missing elements
+        squared_diff = (target_clean - reconstructed_masked) ** 2
+        loss = torch.sum(squared_diff) / (torch.sum(mask) + 1e-8)  # Avoid division by zero
         
         # Log metrics
         self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True)
@@ -378,12 +394,19 @@ class DDFMLightningModule(pl.LightningModule):
                 # Train for 1 epoch
                 self.encoder.train()
                 self.decoder.train()
-                optimizer = self.configure_optimizers()
+                optimizers = self.configure_optimizers()
+                optimizer = optimizers[0] if isinstance(optimizers, list) and len(optimizers) > 0 else optimizers
                 
                 for batch_data, batch_target in dataloader:
                     optimizer.zero_grad()
                     reconstructed = self.forward(batch_data)
-                    loss = nn.functional.mse_loss(reconstructed, batch_target)
+                    # Use missing-aware loss (mse_missing) for consistency
+                    # Create mask for missing values (though in MCMC loop, missing values are filled)
+                    mask = torch.where(torch.isnan(batch_target), torch.zeros_like(batch_target), torch.ones_like(batch_target))
+                    target_clean = torch.where(torch.isnan(batch_target), torch.zeros_like(batch_target), batch_target)
+                    reconstructed_masked = reconstructed * mask
+                    squared_diff = (target_clean - reconstructed_masked) ** 2
+                    loss = torch.sum(squared_diff) / (torch.sum(mask) + 1e-8)
                     loss.backward()
                     optimizer.step()
                 

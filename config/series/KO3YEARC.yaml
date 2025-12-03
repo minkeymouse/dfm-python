@@ -1,0 +1,12 @@
+series_id: KO3YEARC
+series_name: Corporate 3YR, AA-, Spread
+frequency: m
+transformation: chg
+blocks:
+- Block_Global
+- Block_Investment
+nan_method: 2
+standardization: true
+units: Percent, Annual
+category: Finance
+release: 1

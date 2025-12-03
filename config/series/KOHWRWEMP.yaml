@@ -1,0 +1,12 @@
+series_id: KOHWRWEMP
+series_name: Hours Worked, Average Per Week, All Employees
+frequency: m
+transformation: chg
+blocks:
+- Block_Global
+- Block_Labor
+nan_method: 2
+standardization: true
+units: hours
+category: Labor
+release: 11

@@ -1,0 +1,11 @@
+series_id: KORWHLS
+series_name: KOSPI Distribution
+frequency: w
+transformation: chg
+blocks:
+- Block_Global
+nan_method: 2
+standardization: true
+units: index
+category: Finance
+release: 1

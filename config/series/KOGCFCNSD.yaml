@@ -1,0 +1,12 @@
+series_id: KOGCFCNSD
+series_name: Gross Capital Formation, Construction,
+frequency: q
+transformation: cha
+blocks:
+- Block_Global
+- Block_Investment
+nan_method: 2
+standardization: true
+units: Chained W, Billions
+category: Macro
+release: 25

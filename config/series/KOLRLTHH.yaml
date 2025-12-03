@@ -1,0 +1,11 @@
+series_id: KOLRLTHH
+series_name: Lending Rates, Loans to Households (On New Lending), Average
+frequency: m
+transformation: chg
+blocks:
+- Block_Global
+nan_method: 2
+standardization: true
+units: Percent, Annual
+category: Finance
+release: 30

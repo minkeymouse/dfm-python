@@ -1,0 +1,13 @@
+series_id: KOCREU..A
+series_name: 'Consumer Credit : Credit Card, KRW'
+frequency: m
+transformation: chg
+blocks:
+- Block_Global
+- Block_Consumption
+- Block_Nominal
+nan_method: 2
+standardization: true
+units: Index
+category: Consumption
+release: 85

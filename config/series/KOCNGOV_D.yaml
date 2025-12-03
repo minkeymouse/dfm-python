@@ -1,0 +1,11 @@
+series_id: KOCNGOV.D
+series_name: Consumption, General Government
+frequency: q
+transformation: cha
+blocks:
+- Block_Global
+nan_method: 2
+standardization: true
+units: Chained W, Billions
+category: Macro
+release: 25

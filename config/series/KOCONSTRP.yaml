@@ -1,0 +1,12 @@
+series_id: KOCONSTRP
+series_name: Construction Started, Floor Area
+frequency: m
+transformation: chg
+blocks:
+- Block_Global
+- Block_Investment
+nan_method: 2
+standardization: true
+units: Index
+category: Investment
+release: 31

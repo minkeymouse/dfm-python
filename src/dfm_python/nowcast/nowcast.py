@@ -47,7 +47,6 @@ from ..utils.helpers import (
     find_series_index,
     get_series_id_by_index,
     get_frequencies_from_config,
-    get_units_from_config,
     get_clock_frequency,
 )
 from ..utils.data import calculate_release_date, create_data_view
@@ -94,8 +93,6 @@ from .utils import (
     get_forecast_horizon_config,
     check_config_consistency,
     extract_news_summary,
-    # Backward compatibility aliases
-    _get_higher_frequency,
 )
 # transform_data removed - use DataModule with custom transformers instead
 

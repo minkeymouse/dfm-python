@@ -22,7 +22,7 @@ from ..utils.helpers import (
     get_frequencies_from_config,
     safe_get_attr,
 )
-from ..config.structure import FREQUENCY_HIERARCHY, get_periods_per_year
+from ..config.utils import FREQUENCY_HIERARCHY, get_periods_per_year
 from ..utils.time import clock_to_datetime_freq
 from ..logger import get_logger
 
@@ -280,11 +280,5 @@ def extract_news_summary(
     }
 
 
-# Backward compatibility aliases (with underscore prefix)
-_get_higher_frequency = get_higher_frequency
-_calculate_backward_date = calculate_backward_date
-_get_forecast_horizon_config = get_forecast_horizon_config
-_check_config_consistency = check_config_consistency
-# transform_series removed - use DataModule with custom transformers instead
-_extract_news_summary_impl = extract_news_summary
+# Backward compatibility aliases removed - use direct function names
 

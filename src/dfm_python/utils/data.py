@@ -4,7 +4,6 @@ This module provides functions for reading, sorting, transforming, and loading t
 for Dynamic Factor Model estimation.
 """
 
-import warnings
 from pathlib import Path
 from typing import List, Optional, Tuple, Union, Any, Dict
 
@@ -22,30 +21,10 @@ except ImportError:
     F = None
 
 from ..logger import get_logger
-from ..config.schema import DFMConfig, SeriesConfig, BlockConfig
+from ..config.schema import DFMConfig, SeriesConfig
 from ..utils.time import TimeIndex, parse_timestamp, to_python_datetime
 
 _logger = get_logger(__name__)
-
-
-def read_data(datafile: Union[str, Path]) -> Tuple[np.ndarray, TimeIndex, List[str]]:
-    """Read time series data from file.
-    
-    .. deprecated:: 
-        This function has been moved to `dfm_python.transformations.utils.read_data`.
-        Please update your imports to use `from dfm_python.transformations import read_data`.
-    
-    This function now delegates to the implementation in transformations.utils.
-    """
-    import warnings
-    warnings.warn(
-        "read_data() in dfm_python.utils.data is deprecated. "
-        "Use 'from dfm_python.transformations import read_data' instead.",
-        DeprecationWarning,
-        stacklevel=2
-    )
-    from ..transformations.utils import read_data as _read_data
-    return _read_data(datafile)
 
 
 def sort_data(Z: np.ndarray, Mnem: List[str], config: DFMConfig) -> Tuple[np.ndarray, List[str]]:
@@ -90,28 +69,6 @@ def sort_data(Z: np.ndarray, Mnem: List[str], config: DFMConfig) -> Tuple[np.nda
     Z_filt = Z[:, perm]
     
     return Z_filt, Mnem_filt
-
-
-def load_data(datafile: Union[str, Path], config: DFMConfig,
-              sample_start: Optional[Union[datetime, str]] = None,
-              sample_end: Optional[Union[datetime, str]] = None) -> Tuple[np.ndarray, TimeIndex, np.ndarray]:
-    """Load time series data for DFM estimation.
-    
-    .. deprecated:: 
-        This function has been moved to `dfm_python.transformations.utils.load_data`.
-        Please update your imports to use `from dfm_python.transformations import load_data`.
-    
-    This function now delegates to the implementation in transformations.utils.
-    """
-    import warnings
-    warnings.warn(
-        "load_data() in dfm_python.utils.data is deprecated. "
-        "Use 'from dfm_python.transformations import load_data' instead.",
-        DeprecationWarning,
-        stacklevel=2
-    )
-    from ..transformations.utils import load_data as _load_data
-    return _load_data(datafile, config, sample_start=sample_start, sample_end=sample_end)
 
 
 def rem_nans_spline(X: np.ndarray, method: int = 2, k: int = 3) -> Tuple[np.ndarray, np.ndarray]:
@@ -563,9 +520,3 @@ def create_data_view(
     return X_view, Time, Z_view
 
 
-# ============================================================================
-# Note: DataView class has been moved to nowcast/dataview.py
-# Import it from there: from ..nowcast.dataview import DataView
-#
-# Note: DataLoader class removed - use DFMDataModule from lightning.data_module instead
-# ============================================================================
