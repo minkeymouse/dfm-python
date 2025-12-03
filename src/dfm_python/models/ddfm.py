@@ -26,20 +26,22 @@ except ImportError:
 
 from .base import BaseFactorModel
 from ..config import DFMConfig, DEFAULT_GLOBAL_BLOCK_NAME
-from .results import DDFMResult
+from ..config.results import DDFMResult
 from ..utils.data import rem_nans_spline
 from ..utils.helpers import (
     safe_get_attr,
     get_clock_frequency,
     resolve_param,
 )
-from ..transformations import DFMScaler
-        from ..config.structure import get_periods_per_year
+from ..config.structure import get_periods_per_year
 from ..encoder.vae import (
     Encoder,
     Decoder,
     extract_decoder_params,
 )
+
+if TYPE_CHECKING:
+    from ..lightning import DFMDataModule
 
 _logger = get_logger(__name__)
 
@@ -150,11 +152,11 @@ class DDFMModel(BaseFactorModel):
         # Random number generator for MC sampling
         self.rng = np.random.RandomState(seed if seed is not None else 3)
     
-    def fit(self, X: np.ndarray, config: DFMConfig, **kwargs) -> DDFMResult:
+    def fit(self, data_module: 'DFMDataModule', config: DFMConfig, **kwargs) -> DDFMResult:
         """Fit the DDFM model.
         
         Training process:
-        1. Standardize data
+        1. Get preprocessed data from DataModule
         2. Train autoencoder (encoder + decoder) to minimize reconstruction error
         3. Extract factors using trained encoder
         4. Extract decoder parameters (C, bias) directly from trained decoder
@@ -165,8 +167,8 @@ class DDFMModel(BaseFactorModel):
         
         Parameters
         ----------
-        X : np.ndarray
-            Data matrix (T x N), where T is time periods and N is number of series.
+        data_module : DFMDataModule
+            DataModule containing preprocessed data. Must have setup() called.
         config : DFMConfig
             Configuration object. Used to determine number of factors if not specified.
         **kwargs
@@ -183,9 +185,33 @@ class DDFMModel(BaseFactorModel):
         if not _has_torch:
             raise ImportError("PyTorch is required for DDFM")
         
-        # Store config and data
+        from ..lightning import DFMDataModule
+        
+        if not isinstance(data_module, DFMDataModule):
+            raise TypeError(f"data_module must be DFMDataModule, got {type(data_module)}")
+        
+        # Ensure DataModule is set up
+        if data_module.data_processed is None:
+            data_module.setup()
+        
+        # Store config and DataModule for later use
         self._config = config
-        self._data = X
+        self._data_module = data_module
+        
+        # Get processed data from DataModule
+        X_torch = data_module.get_processed_data()
+        X = X_torch.numpy() if isinstance(X_torch, torch.Tensor) else X_torch
+        
+        # Store raw data and time index from DataModule for utility methods (generate_dataset, get_state)
+        # This is a temporary storage for backward compatibility with utility methods
+        self._data = data_module.data
+        self._time = data_module.time_index
+        # For Z (original data), use the same as data (raw, before transformation)
+        if hasattr(self._data, 'to_numpy'):
+            self._original_data = self._data.to_numpy()
+        else:
+            self._original_data = np.asarray(self._data)
+        self._data_frame = self._data if isinstance(self._data, pl.DataFrame) else None
         
         # Override hyperparameters from kwargs
         epochs = kwargs.get('epochs', self.epochs)
@@ -207,25 +233,27 @@ class DDFMModel(BaseFactorModel):
         else:
             num_factors = self.num_factors
         
-        T, N = X.shape
+        # Get standardization parameters from DataModule (may be None)
+        Mx, Wx = data_module.get_standardization_params()
         
-        # Step 1: Convert to polars DataFrame and apply transformations + standardization
-        import polars as pl
-        series_ids = config.get_series_ids()
-        X_polars = pl.DataFrame(X, schema=series_ids)
+        # Handle case where standardization params might be None
+        # (if transformer doesn't include StandardScaler)
+        if Mx is None or Wx is None:
+            # Use zeros/ones as defaults (no standardization)
+            N = X_torch.shape[1] if isinstance(X_torch, torch.Tensor) else X_torch.shape[1]
+            Mx = np.zeros(N, dtype=np.float32)
+            Wx = np.ones(N, dtype=np.float32)
         
-        # Create and fit DFMScaler
-        scaler = DFMScaler(config)
-        X_transformed = scaler.fit_transform(X_polars)
+        # Data is already transformed and standardized in DataModule
+        # Convert torch tensor to numpy for processing
+        if isinstance(X_torch, torch.Tensor):
+            x_standardized = X_torch.cpu().numpy()
+        else:
+            x_standardized = X
         
-        # Extract standardization parameters
-        Mx = scaler.Mx
-        Wx = scaler.Wx
+        T, N = x_standardized.shape
         
-        # Convert back to numpy then to torch
-        x_standardized = X_transformed.to_numpy()
-        
-        # Step 2: Handle missing data (simple interpolation for now)
+        # Step 1: Handle missing data (simple interpolation for now)
         nan_method = kwargs.get('nan_method', safe_get_attr(config, 'nan_method', 2))
         nan_k = kwargs.get('nan_k', safe_get_attr(config, 'nan_k', 3))
         x_clean, _ = rem_nans_spline(x_standardized, method=nan_method, k=nan_k)
@@ -266,8 +294,9 @@ class DDFMModel(BaseFactorModel):
             dataloader = torch.utils.data.DataLoader(
                 dataset, batch_size=batch_size, shuffle=True
             )
-            # Train using Lightning trainer
-            trainer = pl.Trainer(
+            # Train using DDFM trainer
+            from ..trainer import DDFMTrainer
+            trainer = DDFMTrainer(
                 max_epochs=pre_train_epochs,
                 enable_progress_bar=True,
                 logger=False,
@@ -298,8 +327,7 @@ class DDFMModel(BaseFactorModel):
         self.encoder = lightning_module.encoder
         self.decoder = lightning_module.decoder
         
-        # Store scaler and result
-        self._scaler = scaler
+        # Store result
         self._result = result
         return result
     
@@ -388,6 +416,188 @@ class DDFMModel(BaseFactorModel):
         if return_series:
             return X_forecast
         return Z_forecast
+    
+    def generate_dataset(
+        self,
+        target_series: str,
+        periods: List[datetime],
+        backward: int = 0,
+        forward: int = 0,
+        dataview: Optional['DataView'] = None
+    ) -> Dict[str, Any]:
+        """Generate dataset for DFM evaluation.
+        
+        Note: Requires data to be stored during fit(). Data is automatically
+        stored from DataModule during fit().
+        """
+        if not hasattr(self, '_data') or self._data is None:
+            raise ValueError("Model must be fitted with DataModule before calling generate_dataset()")
+        
+        from ..utils.helpers import find_series_index
+        from ..utils.time import find_time_index
+        from ..nowcast.dataview import DataView
+        
+        i_series = find_series_index(self._config, target_series)
+        X_features, y_baseline, y_actual, metadata, backward_results = [], [], [], [], []
+        
+        if dataview is not None:
+            dataview_factory = dataview
+        else:
+            # Convert data to numpy if needed
+            if hasattr(self._data, 'to_numpy'):
+                X_data = self._data.to_numpy()
+            else:
+                X_data = np.asarray(self._data)
+            
+            dataview_factory = DataView.from_arrays(
+                X=X_data, Time=self._time,
+                Z=self._original_data, config=self._config,
+                X_frame=self._data_frame
+            )
+        if dataview_factory.config is None:
+            dataview_factory.config = self._config
+        
+        for period in periods:
+            view_obj = dataview_factory.with_view_date(period)
+            X_view, Time_view, _ = view_obj.materialize()
+            
+            if backward > 0:
+                nowcasts, data_view_dates = [], []
+                for weeks_back in range(backward, -1, -1):
+                    data_view_date = period - timedelta(weeks=weeks_back)
+                    view_past = dataview_factory.with_view_date(data_view_date)
+                    X_view_past, Time_view_past, _ = view_past.materialize()
+                    # Access nowcast through _nowcast_ref (set by high-level DDFM class)
+                    nowcast_obj = getattr(self, '_nowcast_ref', None)
+                    if nowcast_obj is None:
+                        raise ValueError("nowcast() requires high-level DDFM instance. Call from DDFM class, not DDFMModel.")
+                    nowcast_val = nowcast_obj(
+                        target_series=target_series,
+                        view_date=view_past.view_date or data_view_date,
+                        target_period=period
+                    )
+                    nowcasts.append(nowcast_val)
+                    data_view_dates.append(view_past.view_date or data_view_date)
+                baseline_nowcast = nowcasts[-1]
+                backward_results.append({
+                    'nowcasts': np.array(nowcasts),
+                    'data_view_dates': data_view_dates,
+                    'target_date': period
+                })
+            else:
+                # Access nowcast through _nowcast_ref (set by high-level DDFM class)
+                nowcast_obj = getattr(self, '_nowcast_ref', None)
+                if nowcast_obj is None:
+                    raise ValueError("nowcast() requires high-level DDFM instance. Call from DDFM class, not DDFMModel.")
+                baseline_nowcast = nowcast_obj(
+                    target_series=target_series,
+                    view_date=view_obj.view_date or period,
+                    target_period=period
+                )
+            
+            y_baseline.append(baseline_nowcast)
+            t_idx = find_time_index(self._time, period)
+            actual_val = np.nan
+            # Convert data to numpy for indexing
+            if hasattr(self._data, 'to_numpy'):
+                data_array = self._data.to_numpy()
+            else:
+                data_array = np.asarray(self._data)
+            if t_idx is not None and t_idx < data_array.shape[0] and i_series < data_array.shape[1]:
+                actual_val = data_array[t_idx, i_series]
+            y_actual.append(actual_val)
+            
+            # Extract features
+            if self._result is not None and hasattr(self._result, 'Z'):
+                latest_factors = self._result.Z[-1, :] if self._result.Z.shape[0] > 0 else np.zeros(self._result.Z.shape[1])
+            else:
+                latest_factors = np.array([])
+            if X_view.shape[0] > 0:
+                mean_residual = np.nanmean(X_view[-1, :]) if X_view.shape[0] > 0 else 0.0
+            else:
+                mean_residual = 0.0
+            features = np.concatenate([latest_factors, [mean_residual]])
+            X_features.append(features)
+            metadata.append({'period': period, 'target_series': target_series})
+        
+        return {
+            'X': np.array(X_features),
+            'y_baseline': np.array(y_baseline),
+            'y_actual': np.array(y_actual),
+            'y_target': np.array(y_actual) - np.array(y_baseline),
+            'metadata': metadata,
+            'backward_results': backward_results if backward > 0 else []
+        }
+    
+    def get_state(
+        self,
+        t: Union[int, datetime],
+        target_series: str,
+        lookback: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """Get DFM state at time t.
+        
+        Note: Requires data to be stored during fit(). Data is automatically
+        stored from DataModule during fit().
+        """
+        if not hasattr(self, '_data') or self._data is None:
+            raise ValueError("Model must be fitted with DataModule before calling get_state()")
+        
+        from ..config.structure import get_periods_per_year
+        from ..utils.helpers import find_series_index
+        from ..utils.time import find_time_index, convert_to_timestamp
+        from ..utils.data import create_data_view
+        
+        if lookback is None:
+            clock = get_clock_frequency(self._config, 'm')
+            lookback = get_periods_per_year(clock)
+        
+        t = convert_to_timestamp(t, self._time, None)
+        i_series = find_series_index(self._config, target_series)
+        
+        # Convert data to numpy if needed
+        if hasattr(self._data, 'to_numpy'):
+            X_data = self._data.to_numpy()
+        else:
+            X_data = np.asarray(self._data)
+        
+        X_view, Time_view, _ = create_data_view(
+            X=X_data, Time=self._time,
+            Z=self._original_data, config=self._config, view_date=t
+        )
+        
+        # Access nowcast through _nowcast_ref (set by high-level DDFM class)
+        nowcast_obj = getattr(self, '_nowcast_ref', None)
+        if nowcast_obj is None:
+            raise ValueError("nowcast() requires high-level DDFM instance. Call from DDFM class, not DDFMModel.")
+        baseline_nowcast = nowcast_obj(target_series=target_series, view_date=t, target_period=None)
+        
+        baseline_forecast, actual_history, residuals, factors_history = [], [], [], []
+        t_idx = find_time_index(self._time, t)
+        if t_idx is None:
+            raise ValueError(f"Time {t} not found in model_instance._time")
+        
+        for i in range(max(0, t_idx - lookback + 1), t_idx + 1):
+            if i < X_data.shape[0]:
+                forecast_val = baseline_nowcast
+                baseline_forecast.append(forecast_val)
+                actual_val = X_data[i, i_series] if i_series < X_data.shape[1] else np.nan
+                actual_history.append(actual_val)
+                residuals.append(actual_val - forecast_val)
+                if self._result is not None and hasattr(self._result, 'Z') and i < self._result.Z.shape[0]:
+                    factors_history.append(self._result.Z[i, :])
+                else:
+                    factors_history.append(np.array([]))
+        
+        return {
+            'time': t,
+            'target_series': target_series,
+            'baseline_nowcast': baseline_nowcast,
+            'baseline_forecast': np.array(baseline_forecast),
+            'actual_history': np.array(actual_history),
+            'residuals': np.array(residuals),
+            'factors_history': factors_history
+        }
 
 if not _has_torch:
     # Placeholder when PyTorch is not available
@@ -424,25 +634,21 @@ from ..config import (
     ConfigSource,
     MergedConfigSource,
 )
-from ..utils.data import read_data as _load_data
+from ..transformations.utils import read_data as _load_data
 from ..nowcast.dataview import DataView
-from .results import DFMResult
+from ..config.results import DFMResult
 from ..utils.helpers import (
     safe_get_method,
     safe_get_attr,
     get_clock_frequency,
     _validate_config_loaded,
-    _validate_data_loaded,
     _validate_result_loaded,
 )
 from ..utils.time import TimeIndex
 
 if TYPE_CHECKING:
     from ..nowcasting import Nowcast
-
-
-    
-    def generate_dataset(
+    from ..lightning import DFMDataModule
         self,
         target_series: str,
         periods: List[datetime],
@@ -460,10 +666,23 @@ if TYPE_CHECKING:
         if dataview is not None:
             dataview_factory = dataview
         else:
+            # Convert data to numpy if needed
+            if hasattr(self._data, 'to_numpy'):
+                X_data = self._data.to_numpy()
+            else:
+                X_data = np.asarray(self._data)
+            
+            # Convert data_frame to proper type
+            data_frame = None
+            if isinstance(self._data, pl.DataFrame):
+                data_frame = self._data
+            elif self._data_frame is not None:
+                data_frame = self._data_frame
+            
             dataview_factory = DataView.from_arrays(
-                X=self._data, Time=self._time,
+                X=X_data, Time=self._time,
                 Z=self._original_data, config=self._config,
-                X_frame=self._data_frame
+                X_frame=data_frame
             )
         if dataview_factory.config is None:
             dataview_factory.config = self._config
@@ -478,7 +697,11 @@ if TYPE_CHECKING:
                     data_view_date = period - timedelta(weeks=weeks_back)
                     view_past = dataview_factory.with_view_date(data_view_date)
                     X_view_past, Time_view_past, _ = view_past.materialize()
-                    nowcast_val = self.nowcast(
+                    # Access nowcast through _nowcast_ref (set by high-level DDFM class)
+                    nowcast_obj = getattr(self, '_nowcast_ref', None)
+                    if nowcast_obj is None:
+                        raise ValueError("nowcast() requires high-level DDFM instance. Call from DDFM class, not DDFMModel.")
+                    nowcast_val = nowcast_obj(
                         target_series=target_series,
                         view_date=view_past.view_date or data_view_date,
                         target_period=period
@@ -492,7 +715,11 @@ if TYPE_CHECKING:
                     'target_date': period
                 })
             else:
-                baseline_nowcast = self.nowcast(
+                # Access nowcast through _nowcast_ref (set by high-level DDFM class)
+                nowcast_obj = getattr(self, '_nowcast_ref', None)
+                if nowcast_obj is None:
+                    raise ValueError("nowcast() requires high-level DDFM instance. Call from DDFM class, not DDFMModel.")
+                baseline_nowcast = nowcast_obj(
                     target_series=target_series,
                     view_date=view_obj.view_date or period,
                     target_period=period
@@ -501,8 +728,13 @@ if TYPE_CHECKING:
             y_baseline.append(baseline_nowcast)
             t_idx = find_time_index(self._time, period)
             actual_val = np.nan
-            if t_idx is not None and t_idx < self._data.shape[0] and i_series < self._data.shape[1]:
-                actual_val = self._data[t_idx, i_series]
+            # Convert data to numpy for indexing
+            if hasattr(self._data, 'to_numpy'):
+                data_array = self._data.to_numpy()
+            else:
+                data_array = np.asarray(self._data)
+            if t_idx is not None and t_idx < data_array.shape[0] and i_series < data_array.shape[1]:
+                actual_val = data_array[t_idx, i_series]
             y_actual.append(actual_val)
             
             # Extract features
@@ -546,23 +778,39 @@ if TYPE_CHECKING:
         t = convert_to_timestamp(t, self._time, None)
         i_series = find_series_index(self._config, target_series)
         
+        # Convert data to numpy if needed
+        if hasattr(self._data, 'to_numpy'):
+            X_data = self._data.to_numpy()
+        else:
+            X_data = np.asarray(self._data)
+        
         X_view, Time_view, _ = create_data_view(
-            X=self._data, Time=self._time,
+            X=X_data, Time=self._time,
             Z=self._original_data, config=self._config, view_date=t
         )
         
-        baseline_nowcast = self.nowcast(target_series=target_series, view_date=t, target_period=None)
+        # Access nowcast through _nowcast_ref (set by high-level DDFM class)
+        nowcast_obj = getattr(self, '_nowcast_ref', None)
+        if nowcast_obj is None:
+            raise ValueError("nowcast() requires high-level DDFM instance. Call from DDFM class, not DDFMModel.")
+        baseline_nowcast = nowcast_obj(target_series=target_series, view_date=t, target_period=None)
         
         baseline_forecast, actual_history, residuals, factors_history = [], [], [], []
         t_idx = find_time_index(self._time, t)
         if t_idx is None:
             raise ValueError(f"Time {t} not found in model_instance._time")
         
+        # Convert data to numpy for indexing
+        if hasattr(self._data, 'to_numpy'):
+            data_array = self._data.to_numpy()
+        else:
+            data_array = np.asarray(self._data)
+        
         for i in range(max(0, t_idx - lookback + 1), t_idx + 1):
-            if i < self._data.shape[0]:
+            if i < data_array.shape[0]:
                 forecast_val = baseline_nowcast
                 baseline_forecast.append(forecast_val)
-                actual_val = self._data[i, i_series] if i_series < self._data.shape[1] else np.nan
+                actual_val = data_array[i, i_series] if i_series < data_array.shape[1] else np.nan
                 actual_history.append(actual_val)
                 residual = actual_val - forecast_val if not np.isnan(actual_val) else np.nan
                 residuals.append(residual)
@@ -619,10 +867,21 @@ class DDFM(BaseFactorModel):
     model implementation.
     
     Example:
+        >>> from dfm_python.lightning import DFMDataModule
+        >>> from sktime.transformations.compose import ColumnTransformer
+        >>> 
         >>> model = DDFM(encoder_layers=[64, 32], num_factors=2)
         >>> model.load_config('config.yaml')
-        >>> model.load_data('data.csv')
-        >>> model.train(epochs=100)
+        >>> 
+        >>> # Create transformer (user must provide)
+        >>> transformer = ColumnTransformer([...])  # User-defined
+        >>> 
+        >>> # Create DataModule
+        >>> data_module = DFMDataModule(config=model.config, transformer=transformer, data_path='data.csv')
+        >>> data_module.setup()
+        >>> 
+        >>> # Train
+        >>> model.train(data_module, epochs=100)
         >>> Xf, Zf = model.predict(horizon=6)
     """
     
@@ -655,29 +914,19 @@ class DDFM(BaseFactorModel):
             min_obs_idio=min_obs_idio,
             **kwargs
         )
-        self._original_data: Optional[np.ndarray] = None
-        self._data_frame: Optional[pl.DataFrame] = None
+        self._data_module: Optional['DFMDataModule'] = None
         self._nowcast: Optional['Nowcast'] = None
-    
-    @property
-    def original_data(self) -> Optional[np.ndarray]:
-        """Get original (untransformed) data matrix."""
-        return self._original_data
     
     @property
     def nowcast(self) -> 'Nowcast':
         """Get nowcasting manager instance."""
         if self._nowcast is None:
             _validate_config_loaded(self._config)
-            _validate_data_loaded(self._data)
+            if self._data_module is None:
+                raise ValueError("DataModule must be provided via train() before accessing nowcast")
             _validate_result_loaded(self._result)
-            from ..nowcast import Nowcast
-            self._nowcast = Nowcast(
-                config=self._config,
-                data=self._data,
-                time=self._time,
-                result=self._result
-            )
+            from ..nowcast.nowcast import Nowcast
+            self._nowcast = Nowcast(model=self, data_module=self._data_module)
         return self._nowcast
     
     def load_config(
@@ -712,59 +961,48 @@ class DDFM(BaseFactorModel):
         self._config = config_source.load()
         return self
     
-    def load_data(
-        self,
-        data_path: Optional[Union[str, Path]] = None,
-        data: Optional[Any] = None,
-        **kwargs
-    ) -> 'DDFM':
-        """Load data from file or array."""
-        from ..utils.data import read_data as _load_data
-        from ..utils.helpers import _validate_config_loaded, _validate_data_loaded, get_clock_frequency
-        from ..utils.time import datetime_range, clock_to_datetime_freq, TimeIndex
-        from datetime import datetime
-        
-        _validate_config_loaded(self._config)
-        
-        if data_path is not None:
-            self._data, self._time, self._original_data = _load_data(
-                data_path, self._config, **kwargs
-            )
-        elif data is not None:
-            if isinstance(data, pl.DataFrame):
-                self._data_frame = data
-                self._data = data.to_numpy()
-            else:
-                self._data = np.asarray(data)
-            # Generate time index if not provided
-            if self._time is None:
-                clock = get_clock_frequency(self._config, 'm')
-                datetime_freq = clock_to_datetime_freq(clock)
-                start_date = datetime(2000, 1, 1)
-                self._time = TimeIndex(datetime_range(start=start_date, periods=len(self._data), freq=datetime_freq))
-            self._original_data = self._data.copy()
-        else:
-            raise ValueError("Either data_path or data must be provided")
-        
-        return self
     
-    def fit(self, X: np.ndarray, config: DFMConfig, **kwargs) -> DFMResult:
+    def fit(self, data_module: 'DFMDataModule', config: DFMConfig, **kwargs) -> DFMResult:
         """Fit the DDFM model (implements abstract method from BaseFactorModel)."""
         self._config = config
-        self._data = X
-        self._result = self._model_impl.fit(X, config, **kwargs)
+        self._data_module = data_module
+        self._result = self._model_impl.fit(data_module, config, **kwargs)
         return self._result
     
     def train(
         self,
+        data_module: 'DFMDataModule',
         epochs: Optional[int] = None,
         batch_size: Optional[int] = None,
         learning_rate: Optional[float] = None,
         **kwargs
     ) -> 'DDFM':
-        """Train the DDFM model."""
+        """Train the DDFM model.
+        
+        Parameters
+        ----------
+        data_module : DFMDataModule
+            DataModule containing preprocessed data. Must have setup() called.
+        epochs : int, optional
+            Number of training epochs
+        batch_size : int, optional
+            Batch size for training
+        learning_rate : float, optional
+            Learning rate for optimizer
+        **kwargs
+            Additional parameters
+        """
+        from ..lightning import DFMDataModule
         _validate_config_loaded(self._config)
-        _validate_data_loaded(self._data)
+        
+        if not isinstance(data_module, DFMDataModule):
+            raise TypeError(f"data_module must be DFMDataModule, got {type(data_module)}")
+        
+        # Ensure DataModule is set up
+        if data_module.data_processed is None:
+            data_module.setup()
+        
+        self._data_module = data_module
         
         train_kwargs = {}
         if epochs is not None:
@@ -776,7 +1014,7 @@ class DDFM(BaseFactorModel):
         train_kwargs.update(kwargs)
         
         self._result = self._model_impl.fit(
-            self._data,
+            data_module,
             self._config,
             **train_kwargs
         )
@@ -808,23 +1046,75 @@ class DDFM(BaseFactorModel):
     def reset(self) -> 'DDFM':
         """Reset model state."""
         self._config = None
-        self._data = None
-        self._time = None
+        self._data_module = None
         self._result = None
-        self._original_data = None
-        self._data_frame = None
         self._nowcast = None
         return self
     
     def load_pickle(self, path: Union[str, Path], **kwargs) -> 'DDFM':
-        """Load a saved model from pickle file."""
+        """Load a saved model from pickle file.
+        
+        Note: DataModule is not saved in pickle. Users must create a new DataModule
+        and call train() with it after loading the model.
+        """
         import pickle
         with open(path, 'rb') as f:
             payload = pickle.load(f)
         self._config = payload.get('config')
-        self._data = payload.get('data')
-        self._time = payload.get('time')
         self._result = payload.get('result')
-        self._original_data = payload.get('original_data')
+        # Note: data_module is not loaded - users must provide it via train()
         return self
+    
+    def generate_dataset(
+        self,
+        target_series: str,
+        periods: List[datetime],
+        backward: int = 0,
+        forward: int = 0,
+        dataview: Optional['DataView'] = None
+    ) -> Dict[str, Any]:
+        """Generate dataset for DFM evaluation.
+        
+        Delegates to model_impl.generate_dataset() with access to high-level nowcast.
+        """
+        # Store nowcast reference in model_impl for the method call
+        # This allows generate_dataset to access nowcast property
+        setattr(self._model_impl, '_nowcast_ref', self.nowcast)
+        try:
+            result = self._model_impl.generate_dataset(
+                target_series=target_series,
+                periods=periods,
+                backward=backward,
+                forward=forward,
+                dataview=dataview
+            )
+        finally:
+            # Clean up
+            if hasattr(self._model_impl, '_nowcast_ref'):
+                delattr(self._model_impl, '_nowcast_ref')
+        return result
+    
+    def get_state(
+        self,
+        t: Union[int, datetime],
+        target_series: str,
+        lookback: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """Get DFM state at time t.
+        
+        Delegates to model_impl.get_state() with access to high-level nowcast.
+        """
+        # Store nowcast reference in model_impl for the method call
+        setattr(self._model_impl, '_nowcast_ref', self.nowcast)
+        try:
+            result = self._model_impl.get_state(
+                t=t,
+                target_series=target_series,
+                lookback=lookback
+            )
+        finally:
+            # Clean up
+            if hasattr(self._model_impl, '_nowcast_ref'):
+                delattr(self._model_impl, '_nowcast_ref')
+        return result
 

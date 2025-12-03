@@ -12,7 +12,7 @@ import pytorch_lightning as pl
 from dataclasses import dataclass
 
 from ..config import DFMConfig
-from ..models.results import DFMResult
+from ..config.results import DFMResult
 from ..ssm.kalman import KalmanFilter
 from ..ssm.em import EMAlgorithm, EMStepParams
 from ..logger import get_logger

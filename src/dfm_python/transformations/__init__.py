@@ -1,10 +1,9 @@
 """Transformations module for DFM.
 
-This module provides the DFMScaler class and related transformation utilities
-for applying series-specific transformations and global standardization.
+This module provides transformation utilities and data reading functions.
+Users should provide their own sktime transformers to DFMDataModule.
 """
 
-from .scaler import DFMScaler
 from .transformers import (
     get_periods_per_year,
     get_annual_factor,
@@ -15,9 +14,12 @@ from .transformers import (
     make_cch_transformer,
     make_cca_transformer,
 )
+from .utils import (
+    read_data,
+    load_data,
+)
 
 __all__ = [
-    'DFMScaler',
     'get_periods_per_year',
     'get_annual_factor',
     'identity_transform',
@@ -26,5 +28,8 @@ __all__ = [
     'make_pca_transformer',
     'make_cch_transformer',
     'make_cca_transformer',
+    # Data reading
+    'read_data',
+    'load_data',
 ]
 

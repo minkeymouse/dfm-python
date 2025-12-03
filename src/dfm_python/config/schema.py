@@ -1,16 +1,18 @@
 """Configuration schema for DFM.
 
 This module provides the core configuration dataclasses:
-- Configuration dataclasses (DFMConfig, SeriesConfig, BlockConfig)
-- Factory methods for creating DFMConfig from dictionaries and Hydra configs
+- BaseModelConfig: Base class with shared model structure
+- DFMConfig(BaseModelConfig): Linear DFM with EM algorithm parameters
+- DDFMConfig(BaseModelConfig): Deep DFM with neural network training parameters
+- SeriesConfig, BlockConfig: Component configurations
 
 Note: Parameter classes (Params, FitParams) are in config/params.py
 Note: Validation functions are in config/utils.py
 
-The configuration dataclasses define:
-- Model structure (series, blocks, factors)
-- Estimation parameters (EM algorithm settings)
-- Numerical stability controls (regularization, clipping, damping)
+The configuration hierarchy:
+- BaseModelConfig: Model structure (series, blocks, factors, clock, data handling)
+- DFMConfig: Adds EM algorithm parameters (max_iter, threshold, regularization)
+- DDFMConfig: Adds neural network parameters (epochs, learning_rate, encoder_layers)
 
 For loading configurations from files (YAML, Spec CSV) or other sources,
 see the config.io module which provides source adapters.
@@ -165,18 +167,17 @@ class SeriesConfig:
 
 
 @dataclass
-class DFMConfig:
-    """Unified DFM configuration - model structure + estimation parameters.
+class BaseModelConfig:
+    """Base configuration class with shared model structure.
     
-    This is the single configuration class for the DFM module, combining:
-    - Model structure (what series, blocks, factors)
-    - Estimation parameters (how to run EM algorithm)
-    - Numerical stability controls (regularization, damping, clipping)
+    This base class contains the model structure that is common to both
+    DFM (linear) and DDFM (deep) models:
+    - Series definitions
+    - Block structure
+    - Clock frequency
+    - Data preprocessing (missing data handling)
     
-    The configuration can be built from:
-    - Main settings (estimation parameters) from config/default.yaml
-    - Series definitions from config/series/default.yaml or CSV
-    - Block definitions from config/blocks/default.yaml
+    Subclasses (DFMConfig, DDFMConfig) add model-specific training parameters.
     """
     # ========================================================================
     # Model Structure (WHAT - defines the model)
@@ -187,60 +188,11 @@ class DFMConfig:
     factors_per_block: List[int] = field(init=False)  # Number of factors per block (derived from blocks)
     
     # ========================================================================
-    # Estimation Parameters (HOW - controls the algorithm)
+    # Shared Data Handling Parameters
     # ========================================================================
-    ar_lag: int = 1  # Number of lags in AR transition equation (lookback window)
-    threshold: float = 1e-5  # EM convergence threshold
-    max_iter: int = 5000  # Maximum EM iterations
     nan_method: int = 2  # Missing data handling method (1-5). Preprocessing step before Kalman Filter-based handling
     nan_k: int = 3  # Spline parameter for NaN interpolation (cubic spline)
     clock: str = 'm'  # Base frequency for nowcasting (global clock): 'd', 'w', 'm', 'q', 'sa', 'a' (defaults to 'm' for monthly)
-    
-    # ========================================================================
-    # Numerical Stability Parameters (transparent and configurable)
-    # ========================================================================
-    # AR Coefficient Clipping
-    clip_ar_coefficients: bool = True  # Enable AR coefficient clipping for stationarity
-    ar_clip_min: float = -0.99  # Minimum AR coefficient (must be > -1 for stationarity)
-    ar_clip_max: float = 0.99   # Maximum AR coefficient (must be < 1 for stationarity)
-    warn_on_ar_clip: bool = True  # Warn when AR coefficients are clipped (indicates near-unit root)
-    
-    # Data Value Clipping
-    clip_data_values: bool = True  # Enable clipping of extreme data values
-    data_clip_threshold: float = 100.0  # Clip values beyond this many standard deviations
-    warn_on_data_clip: bool = True  # Warn when data values are clipped (indicates outliers)
-    
-    # Regularization
-    use_regularization: bool = True  # Enable regularization for numerical stability
-    regularization_scale: float = 1e-5  # Scale factor for ridge regularization (relative to trace, default 1e-5)
-    min_eigenvalue: float = 1e-8  # Minimum eigenvalue for positive definite matrices
-    max_eigenvalue: float = 1e6   # Maximum eigenvalue cap to prevent explosion
-    warn_on_regularization: bool = True  # Warn when regularization is applied
-    
-    # Damped Updates
-    use_damped_updates: bool = True  # Enable damped updates when likelihood decreases
-    damping_factor: float = 0.8  # Damping factor (0.8 = 80% new, 20% old)
-    warn_on_damped_update: bool = True  # Warn when damped updates are used
-    
-    # Idiosyncratic Component Augmentation
-    augment_idio: bool = True  # Enable state augmentation with idiosyncratic components (default: True)
-    augment_idio_slow: bool = True  # Enable tent-length chains for slower-frequency series (default: True)
-    idio_rho0: float = 0.1  # Initial AR coefficient for idiosyncratic components (default: 0.1)
-    idio_min_var: float = 1e-8  # Minimum variance for idiosyncratic innovation covariance (default: 1e-8)
-    
-    # ========================================================================
-    # DDFM (Deep Dynamic Factor Model) Parameters (optional)
-    # ========================================================================
-    ddfm_encoder_layers: Optional[List[int]] = None  # Hidden layer dimensions for encoder (default: [64, 32])
-    ddfm_num_factors: Optional[int] = None  # Number of factors (inferred from config if None)
-    ddfm_activation: str = 'tanh'  # Activation function ('tanh', 'relu', 'sigmoid', default: 'tanh')
-    ddfm_use_batch_norm: bool = True  # Use batch normalization in encoder (default: True)
-    ddfm_learning_rate: float = 0.001  # Learning rate for Adam optimizer (default: 0.001)
-    ddfm_epochs: int = 100  # Number of training epochs (default: 100)
-    ddfm_batch_size: int = 32  # Batch size for training (default: 32)
-    ddfm_factor_order: int = 1  # VAR lag order for factor dynamics (1 or 2, default: 1)
-    ddfm_use_idiosyncratic: bool = True  # Model idio components with AR(1) dynamics (default: True)
-    ddfm_min_obs_idio: int = 5  # Minimum observations for idio AR(1) estimation (default: 5)
     
     # ========================================================================
     # Internal cache (not user-configurable)
@@ -250,7 +202,7 @@ class DFMConfig:
     def __post_init__(self):
         """Validate blocks structure and consistency.
         
-        This method performs comprehensive validation of the DFM configuration:
+        This method performs comprehensive validation of the model configuration:
         - Derives block_names and factors_per_block from blocks dict
         - Ensures at least one series is specified
         - Validates block structure consistency across all series
@@ -270,13 +222,13 @@ class DFMConfig:
         
         if not self.series:
             raise ValueError(
-                "DFM configuration must contain at least one series. "
+                "Model configuration must contain at least one series. "
                 "Please add series definitions to your configuration."
             )
         
         if not self.blocks:
             raise ValueError(
-                "DFM configuration must contain at least one block. "
+                "Model configuration must contain at least one block. "
                 "Please add block definitions to your configuration."
             )
         
@@ -295,7 +247,7 @@ class DFMConfig:
         
         if global_block_name is None:
             raise ValueError(
-                "DFM configuration must include at least one block. "
+                "Model configuration must include at least one block. "
                 "The first block serves as the global/common factor that all series load on."
             )
         
@@ -429,14 +381,6 @@ class DFMConfig:
             - 'errors': List[str] - List of error messages
             - 'warnings': List[str] - List of warning messages
             - 'suggestions': List[str] - List of actionable suggestions
-            
-        Examples
-        --------
-        >>> config = DFMConfig(...)
-        >>> report = config.validate_and_report()
-        >>> if not report['valid']:
-        ...     print("Errors:", report['errors'])
-        ...     print("Suggestions:", report['suggestions'])
         """
         from .structure import FREQUENCY_HIERARCHY
         
@@ -450,14 +394,14 @@ class DFMConfig:
         # Check for empty series
         if not self.series:
             report['valid'] = False
-            report['errors'].append("DFM configuration must contain at least one series.")
+            report['errors'].append("Model configuration must contain at least one series.")
             report['suggestions'].append("Add series definitions to your configuration.")
             return report
         
         # Check for empty blocks
         if not self.blocks:
             report['valid'] = False
-            report['errors'].append("DFM configuration must contain at least one block.")
+            report['errors'].append("Model configuration must contain at least one block.")
             report['suggestions'].append("Add block definitions to your configuration.")
             return report
         
@@ -514,24 +458,117 @@ class DFMConfig:
             )
         
         return report
+
+
+@dataclass
+class DFMConfig(BaseModelConfig):
+    """Linear DFM configuration - EM algorithm parameters.
+    
+    This configuration class extends BaseModelConfig with parameters specific
+    to linear Dynamic Factor Models trained using the Expectation-Maximization
+    (EM) algorithm.
+    
+    The configuration can be built from:
+    - Main settings (estimation parameters) from config/default.yaml
+    - Series definitions from config/series/default.yaml or CSV
+    - Block definitions from config/blocks/default.yaml
+    """
+    # ========================================================================
+    # EM Algorithm Parameters (HOW - controls the algorithm)
+    # ========================================================================
+    ar_lag: int = 1  # Number of lags in AR transition equation (lookback window)
+    threshold: float = 1e-5  # EM convergence threshold
+    max_iter: int = 5000  # Maximum EM iterations
+    
+    # ========================================================================
+    # Numerical Stability Parameters (transparent and configurable)
+    # ========================================================================
+    # AR Coefficient Clipping
+    clip_ar_coefficients: bool = True  # Enable AR coefficient clipping for stationarity
+    ar_clip_min: float = -0.99  # Minimum AR coefficient (must be > -1 for stationarity)
+    ar_clip_max: float = 0.99   # Maximum AR coefficient (must be < 1 for stationarity)
+    warn_on_ar_clip: bool = True  # Warn when AR coefficients are clipped (indicates near-unit root)
+    
+    # Data Value Clipping
+    clip_data_values: bool = True  # Enable clipping of extreme data values
+    data_clip_threshold: float = 100.0  # Clip values beyond this many standard deviations
+    warn_on_data_clip: bool = True  # Warn when data values are clipped (indicates outliers)
+    
+    # Regularization
+    use_regularization: bool = True  # Enable regularization for numerical stability
+    regularization_scale: float = 1e-5  # Scale factor for ridge regularization (relative to trace, default 1e-5)
+    min_eigenvalue: float = 1e-8  # Minimum eigenvalue for positive definite matrices
+    max_eigenvalue: float = 1e6   # Maximum eigenvalue cap to prevent explosion
+    warn_on_regularization: bool = True  # Warn when regularization is applied
+    
+    # Damped Updates
+    use_damped_updates: bool = True  # Enable damped updates when likelihood decreases
+    damping_factor: float = 0.8  # Damping factor (0.8 = 80% new, 20% old)
+    warn_on_damped_update: bool = True  # Warn when damped updates are used
+    
+    # Idiosyncratic Component Augmentation
+    augment_idio: bool = True  # Enable state augmentation with idiosyncratic components (default: True)
+    augment_idio_slow: bool = True  # Enable tent-length chains for slower-frequency series (default: True)
+    idio_rho0: float = 0.1  # Initial AR coefficient for idiosyncratic components (default: 0.1)
+    idio_min_var: float = 1e-8  # Minimum variance for idiosyncratic innovation covariance (default: 1e-8)
+
+
+@dataclass
+class DDFMConfig(BaseModelConfig):
+    """Deep Dynamic Factor Model configuration - neural network training parameters.
+    
+    This configuration class extends BaseModelConfig with parameters specific
+    to Deep Dynamic Factor Models trained using neural networks (autoencoders).
+    
+    The configuration can be built from:
+    - Main settings (training parameters) from config/default.yaml
+    - Series definitions from config/series/default.yaml or CSV
+    - Block definitions from config/blocks/default.yaml
+    """
+    # ========================================================================
+    # Neural Network Training Parameters
+    # ========================================================================
+    encoder_layers: Optional[List[int]] = None  # Hidden layer dimensions for encoder (default: [64, 32])
+    num_factors: Optional[int] = None  # Number of factors (inferred from config if None)
+    activation: str = 'tanh'  # Activation function ('tanh', 'relu', 'sigmoid', default: 'tanh')
+    use_batch_norm: bool = True  # Use batch normalization in encoder (default: True)
+    learning_rate: float = 0.001  # Learning rate for Adam optimizer (default: 0.001)
+    epochs: int = 100  # Number of training epochs (default: 100)
+    batch_size: int = 32  # Batch size for training (default: 32)
+    factor_order: int = 1  # VAR lag order for factor dynamics (1 or 2, default: 1)
+    use_idiosyncratic: bool = True  # Model idio components with AR(1) dynamics (default: True)
+    min_obs_idio: int = 5  # Minimum observations for idio AR(1) estimation (default: 5)
+    
+    # Additional training parameters
+    max_iter: int = 200  # Maximum MCMC iterations for iterative factor extraction
+    tolerance: float = 0.0005  # Convergence tolerance for MCMC iterations
+    disp: int = 10  # Display frequency for training progress
+    seed: Optional[int] = None  # Random seed for reproducibility
     
     # Note: Legacy PascalCase properties were removed to keep the API clean and generic.
     # Use the snake_case helper methods above.
     
     # ========================================================================
-    # Factory Methods
+    # Factory Methods (shared base methods)
     # ========================================================================
     
     @classmethod
-    def _extract_estimation_params(cls, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Extract estimation parameters and DDFM parameters from config dict."""
-        params = {
-            'ar_lag': data.get('ar_lag', 1),
-            'threshold': data.get('threshold', 1e-5),
-            'max_iter': data.get('max_iter', 5000),
+    def _extract_base_params(cls, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract shared base parameters from config dict."""
+        return {
             'nan_method': data.get('nan_method', 2),
             'nan_k': data.get('nan_k', 3),
             'clock': data.get('clock', 'm'),
+        }
+    
+    @classmethod
+    def _extract_dfm_params(cls, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract DFM-specific parameters from config dict."""
+        base_params = cls._extract_base_params(data)
+        base_params.update({
+            'ar_lag': data.get('ar_lag', 1),
+            'threshold': data.get('threshold', 1e-5),
+            'max_iter': data.get('max_iter', 5000),
             # Numerical stability parameters
             'clip_ar_coefficients': data.get('clip_ar_coefficients', True),
             'ar_clip_min': data.get('ar_clip_min', -0.99),
@@ -553,22 +590,34 @@ class DFMConfig:
             'augment_idio_slow': data.get('augment_idio_slow', True),
             'idio_rho0': data.get('idio_rho0', 0.1),
             'idio_min_var': data.get('idio_min_var', 1e-8),
-            # DDFM parameters (optional)
-            'ddfm_encoder_layers': data.get('ddfm_encoder_layers', None),
-            'ddfm_num_factors': data.get('ddfm_num_factors', None),
-            'ddfm_activation': data.get('ddfm_activation', 'tanh'),
-            'ddfm_use_batch_norm': data.get('ddfm_use_batch_norm', True),
-            'ddfm_learning_rate': data.get('ddfm_learning_rate', 0.001),
-            'ddfm_epochs': data.get('ddfm_epochs', 100),
-            'ddfm_batch_size': data.get('ddfm_batch_size', 32),
-            'ddfm_factor_order': data.get('ddfm_factor_order', 1),
-            'ddfm_use_idiosyncratic': data.get('ddfm_use_idiosyncratic', True),
-            'ddfm_min_obs_idio': data.get('ddfm_min_obs_idio', 5),
-        }
-        return params
+        })
+        return base_params
     
     @classmethod
-    def _from_hydra_dict(cls, data: Dict[str, Any]) -> 'DFMConfig':
+    def _extract_ddfm_params(cls, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract DDFM-specific parameters from config dict."""
+        base_params = cls._extract_base_params(data)
+        # Handle both new format (direct keys) and legacy format (ddfm_ prefix)
+        base_params.update({
+            'encoder_layers': data.get('encoder_layers') or data.get('ddfm_encoder_layers', None),
+            'num_factors': data.get('num_factors') or data.get('ddfm_num_factors', None),
+            'activation': data.get('activation') or data.get('ddfm_activation', 'tanh'),
+            'use_batch_norm': data.get('use_batch_norm', data.get('ddfm_use_batch_norm', True)),
+            'learning_rate': data.get('learning_rate', data.get('ddfm_learning_rate', 0.001)),
+            'epochs': data.get('epochs', data.get('ddfm_epochs', 100)),
+            'batch_size': data.get('batch_size', data.get('ddfm_batch_size', 32)),
+            'factor_order': data.get('factor_order', data.get('ddfm_factor_order', 1)),
+            'use_idiosyncratic': data.get('use_idiosyncratic', data.get('ddfm_use_idiosyncratic', True)),
+            'min_obs_idio': data.get('min_obs_idio', data.get('ddfm_min_obs_idio', 5)),
+            'max_iter': data.get('max_iter', 200),
+            'tolerance': data.get('tolerance', 0.0005),
+            'disp': data.get('disp', 10),
+            'seed': data.get('seed', None),
+        })
+        return base_params
+    
+    @classmethod
+    def _from_hydra_dict(cls, data: Dict[str, Any]) -> Union['DFMConfig', 'DDFMConfig']:
         """Convert Hydra format (series as dict) to new format."""
         # Get block_names first (required for series processing)
         blocks_dict = data.get('blocks', {})
@@ -657,14 +706,26 @@ class DFMConfig:
             # Default: create Block_Global if no blocks specified
             blocks_dict_final[DEFAULT_GLOBAL_BLOCK_NAME] = BlockConfig(factors=1, clock='m')
         
-        return cls(
-            series=series_list,
-            blocks=blocks_dict_final,
-            **cls._extract_estimation_params(data)
-        )
+        # Determine config type based on model_type or presence of DDFM parameters
+        model_type = data.get('model_type', '').lower()
+        has_ddfm_params = any(key.startswith('ddfm_') or key in ['encoder_layers', 'epochs', 'learning_rate', 'batch_size'] 
+                              for key in data.keys())
+        
+        if model_type in ('ddfm', 'deep') or (has_ddfm_params and model_type != 'dfm'):
+            return DDFMConfig(
+                series=series_list,
+                blocks=blocks_dict_final,
+                **DDFMConfig._extract_ddfm_params(data)
+            )
+        else:
+            return DFMConfig(
+                series=series_list,
+                blocks=blocks_dict_final,
+                **DFMConfig._extract_dfm_params(data)
+            )
     
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'DFMConfig':
+    def from_dict(cls, data: Dict[str, Any]) -> Union['DFMConfig', 'DDFMConfig']:
         """Create DFMConfig from dictionary.
         
         Handles multiple formats:
@@ -719,18 +780,37 @@ class DFMConfig:
                 for block_name in sorted(block_names_set):
                     blocks_dict[block_name] = BlockConfig(factors=1, clock=data.get('clock', 'm'))
             
-            return cls(
-                series=series_list,
-                blocks=blocks_dict,
-                **cls._extract_estimation_params(data)
-            )
+            # Determine config type
+            model_type = data.get('model_type', '').lower()
+            has_ddfm_params = any(key.startswith('ddfm_') or key in ['encoder_layers', 'epochs', 'learning_rate', 'batch_size'] 
+                                  for key in data.keys())
+            
+            if model_type in ('ddfm', 'deep') or (has_ddfm_params and model_type != 'dfm'):
+                return DDFMConfig(
+                    series=series_list,
+                    blocks=blocks_dict,
+                    **DDFMConfig._extract_ddfm_params(data)
+                )
+            else:
+                return DFMConfig(
+                    series=series_list,
+                    blocks=blocks_dict,
+                    **DFMConfig._extract_dfm_params(data)
+                )
         
         # Direct instantiation (shouldn't happen often, but handle it)
-        return cls(**data)
+        # Try to determine type from instance
+        if isinstance(cls, type) and issubclass(cls, DDFMConfig):
+            return cls(**data)
+        elif isinstance(cls, type) and issubclass(cls, DFMConfig):
+            return cls(**data)
+        else:
+            # Default to DFMConfig for backward compatibility
+            return DFMConfig(**data)
 
     @classmethod
-    def from_hydra(cls, cfg: Any) -> 'DFMConfig':
-        """Create DFMConfig from a Hydra DictConfig or plain dict.
+    def from_hydra(cls, cfg: Any) -> Union['DFMConfig', 'DDFMConfig']:
+        """Create config from a Hydra DictConfig or plain dict.
         
         Parameters
         ----------
@@ -739,8 +819,8 @@ class DFMConfig:
         
         Returns
         -------
-        DFMConfig
-            Validated configuration instance.
+        DFMConfig or DDFMConfig
+            Validated configuration instance (type determined automatically).
         """
         try:
             from omegaconf import DictConfig, OmegaConf  # type: ignore
@@ -751,7 +831,65 @@ class DFMConfig:
             pass
         if not isinstance(cfg, dict):
             raise TypeError("from_hydra expects a DictConfig or dict.")
-        return cls.from_dict(cfg)
+        # Use BaseModelConfig.from_dict which handles type detection
+        return BaseModelConfig.from_dict(cfg)
+
+
+# Add factory methods to DFMConfig class
+def _dfm_from_dict(cls, data: Dict[str, Any]) -> 'DFMConfig':
+    """Create DFMConfig from dictionary."""
+    result = BaseModelConfig.from_dict(data)
+    if isinstance(result, DFMConfig):
+        return result
+    # If auto-detection created DDFMConfig, extract DFM params and create DFMConfig
+    return DFMConfig(
+        series=result.series,
+        blocks=result.blocks,
+        **DFMConfig._extract_dfm_params(data)
+    )
+
+def _dfm_from_hydra(cls, cfg: Any) -> 'DFMConfig':
+    """Create DFMConfig from Hydra config."""
+    try:
+        from omegaconf import DictConfig, OmegaConf
+        if isinstance(cfg, DictConfig):
+            cfg = OmegaConf.to_container(cfg, resolve=True)
+    except Exception:
+        pass
+    if not isinstance(cfg, dict):
+        raise TypeError("from_hydra expects a DictConfig or dict.")
+    return DFMConfig.from_dict(cfg)
+
+DFMConfig.from_dict = classmethod(_dfm_from_dict)
+DFMConfig.from_hydra = classmethod(_dfm_from_hydra)
+
+# Add factory methods to DDFMConfig class
+def _ddfm_from_dict(cls, data: Dict[str, Any]) -> 'DDFMConfig':
+    """Create DDFMConfig from dictionary."""
+    result = BaseModelConfig.from_dict(data)
+    if isinstance(result, DDFMConfig):
+        return result
+    # If auto-detection created DFMConfig, extract DDFM params and create DDFMConfig
+    return DDFMConfig(
+        series=result.series,
+        blocks=result.blocks,
+        **DDFMConfig._extract_ddfm_params(data)
+    )
+
+def _ddfm_from_hydra(cls, cfg: Any) -> 'DDFMConfig':
+    """Create DDFMConfig from Hydra config."""
+    try:
+        from omegaconf import DictConfig, OmegaConf
+        if isinstance(cfg, DictConfig):
+            cfg = OmegaConf.to_container(cfg, resolve=True)
+    except Exception:
+        pass
+    if not isinstance(cfg, dict):
+        raise TypeError("from_hydra expects a DictConfig or dict.")
+    return DDFMConfig.from_dict(cfg)
+
+DDFMConfig.from_dict = classmethod(_ddfm_from_dict)
+DDFMConfig.from_hydra = classmethod(_ddfm_from_hydra)
 
 
 # Note: ConfigSource classes and IO functions are in config/io.py

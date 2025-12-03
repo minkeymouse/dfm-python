@@ -6,8 +6,6 @@ from .utils import (
     calculate_backward_date,
     get_forecast_horizon_config,
     check_config_consistency,
-    transform_series,
-    transform_data,
     extract_news_summary,
 )
 from .helpers import NewsDecompResult, para_const, BacktestResult
@@ -26,7 +24,5 @@ __all__ = [
     'calculate_backward_date',
     'get_forecast_horizon_config',
     'check_config_consistency',
-    'transform_series',
-    'transform_data',
     'extract_news_summary',
 ]

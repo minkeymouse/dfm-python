@@ -36,7 +36,7 @@ from ..config.structure import (
     FREQUENCY_HIERARCHY,
 )
 
-from .results import DFMResult, DFMParams
+from ..config.results import DFMResult, DFMParams
 
 _logger = get_logger(__name__)
 
@@ -208,7 +208,7 @@ def _dfm_core(
     ----------
     X : np.ndarray
         Data matrix (T x N), where T is time periods and N is number of series.
-        Data should already be transformed and standardized (use DFMScaler before calling).
+        Data should already be transformed and standardized (use DFMDataModule with custom transformer).
         Data can contain missing values (NaN), which are handled via spline interpolation.
         Missing values are allowed but excessive missing data (>50%) will trigger warnings.
     config : DFMConfig
@@ -253,7 +253,7 @@ def _dfm_core(
     Notes
     -----
     - The function expects data to already be transformed and standardized.
-      Use DFMScaler before calling this function to apply transformations and standardization.
+      Use DFMDataModule with custom sktime transformer to apply transformations and standardization.
     - Initial conditions are computed via `init_conditions()`
     - EM iterations continue until convergence or max_iter=5000
     - Missing data is handled by the Kalman filter during estimation
@@ -318,7 +318,7 @@ def _dfm_core(
     # Step 3: Validate preprocessing
     if Mx is None or Wx is None:
         raise ValueError(
-            "Mx and Wx must be provided. Data should be preprocessed using DFMScaler "
+            "Mx and Wx must be provided. Data should be preprocessed using DFMDataModule with custom transformer. "
             "before calling _dfm_core()."
         )
     

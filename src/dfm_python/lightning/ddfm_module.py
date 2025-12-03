@@ -12,7 +12,7 @@ import pytorch_lightning as pl
 from dataclasses import dataclass
 
 from ..config import DFMConfig
-from ..models.results import DDFMResult
+from ..config.results import DDFMResult
 from ..encoder.vae import Encoder, Decoder, extract_decoder_params
 from ..utils.statespace import estimate_idiosyncratic_dynamics
 from ..logger import get_logger
@@ -206,16 +206,22 @@ class DDFMLightningModule(pl.LightningModule):
         return loss
     
     def configure_optimizers(self):
-        """Configure optimizer for autoencoder training."""
+        """Configure optimizer for autoencoder training.
+        
+        Returns
+        -------
+        list
+            List containing the optimizer (PyTorch Lightning expects list/dict/tuple)
+        """
         if self.encoder is None or self.decoder is None:
-            return None
+            return []
         
         optimizer = torch.optim.Adam(
             list(self.encoder.parameters()) + list(self.decoder.parameters()),
             lr=self.learning_rate
         )
         
-        return optimizer
+        return [optimizer]
     
     def fit_mcmc(
         self,

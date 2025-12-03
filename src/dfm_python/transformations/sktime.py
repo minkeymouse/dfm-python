@@ -34,7 +34,7 @@ def check_sktime_available():
     """
     if not HAS_SKTIME:
         raise ImportError(
-            "sktime is required for DFMScaler. "
+            "sktime is required for sktime transformers. "
             "Install it with: pip install dfm-python[transform]"
         )
 

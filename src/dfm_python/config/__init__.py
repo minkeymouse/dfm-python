@@ -6,10 +6,11 @@ This subpackage provides:
 """
 
 from .schema import (
-    DFMConfig, SeriesConfig, BlockConfig,
+    BaseModelConfig, DFMConfig, DDFMConfig, SeriesConfig, BlockConfig,
     DEFAULT_GLOBAL_BLOCK_NAME,
 )
 from .params import Params, FitParams
+from .results import BaseResult, DFMResult, DDFMResult, DFMParams
 from .utils import validate_frequency, validate_transformation
 from .io import (
     ConfigSource,
@@ -36,10 +37,12 @@ from .structure import (
 
 __all__ = [
     # Schema
-    'DFMConfig', 'SeriesConfig', 'BlockConfig',
+    'BaseModelConfig', 'DFMConfig', 'DDFMConfig', 'SeriesConfig', 'BlockConfig',
     'DEFAULT_GLOBAL_BLOCK_NAME',
     # Parameters
     'Params', 'FitParams',
+    # Results
+    'BaseResult', 'DFMResult', 'DDFMResult', 'DFMParams',
     # Utilities
     'validate_frequency', 'validate_transformation',
     # IO

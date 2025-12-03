@@ -1,6 +1,6 @@
 [project]
 name = "dfm-python"
-version = "0.3.12"
+version = "0.4.0"
 description = "Dynamic Factor Model (DFM) estimation and nowcasting in Python"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -25,6 +25,7 @@ dependencies = [
     "numpy>=1.24.0",
     "polars>=0.20.0",
     "scipy>=1.10.0",
+    "torch>=2.0.0",
     "twine>=6.2.0",
 ]
 
@@ -38,7 +39,8 @@ db = [
     # psycopg2-binary for PostgreSQL (optional, install separately if needed)
 ]
 deep = [
-    "torch>=2.0.0",
+    # torch is now a core dependency (required for DFM EM algorithm)
+    # This section kept for backward compatibility
 ]
 transform = [
     "sktime>=0.27.0",

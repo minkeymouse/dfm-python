@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Optional, List, Dict, Any
 from abc import ABC
 
-from ..config.schema import DFMConfig
+from .schema import DFMConfig
 
 
 @dataclass
@@ -130,7 +130,7 @@ class BaseResult(ABC):
         """
         try:
             import polars as pl
-            from .time import TimeIndex
+            from ..utils.time import TimeIndex
             
             cols = factor_names if factor_names is not None else [f"F{i+1}" for i in range(self.num_state())]
             
@@ -160,7 +160,7 @@ class BaseResult(ABC):
         """Return smoothed data (original scale) as polars DataFrame."""
         try:
             import polars as pl
-            from .time import TimeIndex
+            from ..utils.time import TimeIndex
             
             cols = series_ids if series_ids is not None else (self.series_ids if self.series_ids is not None else [f"S{i+1}" for i in range(self.num_series())])
             

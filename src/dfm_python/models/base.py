@@ -9,7 +9,7 @@ from typing import Optional, Union, Tuple, Any
 import numpy as np
 
 from ..config import DFMConfig
-from .results import BaseResult
+from ..config.results import BaseResult
 
 
 class BaseFactorModel(ABC):
@@ -23,20 +23,14 @@ class BaseFactorModel(ABC):
     ----------
     _config : Optional[DFMConfig]
         Current configuration object
-    _data : Optional[np.ndarray]
-        Current data matrix (T x N)
     _result : Optional[BaseResult]
         Last fit result
-    _time : Optional[TimeIndex]
-        Time index for data (optional, for models that support it)
     """
     
     def __init__(self):
         """Initialize factor model instance."""
         self._config: Optional[DFMConfig] = None
-        self._data: Optional[np.ndarray] = None
         self._result: Optional[BaseResult] = None
-        self._time: Optional[Any] = None  # TimeIndex type, avoiding circular import
     
     @property
     def config(self) -> Optional[DFMConfig]:
@@ -44,28 +38,18 @@ class BaseFactorModel(ABC):
         return self._config
     
     @property
-    def data(self) -> Optional[np.ndarray]:
-        """Get current data matrix (T x N)."""
-        return self._data
-    
-    @property
     def result(self) -> Optional[BaseResult]:
         """Get last fit result."""
         return self._result
     
-    @property
-    def time(self) -> Optional[Any]:
-        """Get time index (if available)."""
-        return self._time
-    
     @abstractmethod
-    def fit(self, X: np.ndarray, config: DFMConfig, **kwargs) -> BaseResult:
+    def fit(self, data_module: Any, config: DFMConfig, **kwargs) -> BaseResult:
         """Fit the factor model.
         
         Parameters
         ----------
-        X : np.ndarray
-            Data matrix (T x N), where T is time periods and N is number of series.
+        data_module : DFMDataModule
+            DataModule containing preprocessed data. Must have setup() called.
         config : DFMConfig
             Configuration object specifying model structure and parameters.
         **kwargs

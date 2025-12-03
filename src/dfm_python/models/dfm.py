@@ -14,9 +14,12 @@ from ..logger import get_logger
 
 from .base import BaseFactorModel
 from ..config import DFMConfig, SeriesConfig, BlockConfig, validate_frequency
-from .results import DFMResult, DFMParams
+from ..config.results import DFMResult, DFMParams
 from ..config.params import FitParams
-from ..transformations import DFMScaler
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..lightning import DFMDataModule
 
 _logger = get_logger(__name__)
 
@@ -42,14 +45,9 @@ class DFMLinear(BaseFactorModel):
     
     def fit(
         self,
-        X: Union[np.ndarray, pl.DataFrame],
+        data_module: 'DFMDataModule',
         config: Optional[DFMConfig] = None,
         *,
-        time_index: Optional[Union[List[datetime], np.ndarray, pl.Series]] = None,
-        series_ids: Optional[List[str]] = None,
-        num_factors: int = 1,
-        clock: Optional[str] = None,
-        transformation: str = 'lin',
         fit_params: Optional[FitParams] = None,
         **kwargs
     ) -> DFMResult:
@@ -62,25 +60,10 @@ class DFMLinear(BaseFactorModel):
         
         Parameters
         ----------
-        X : np.ndarray or pl.DataFrame
-            Data matrix (T x N), where T is time periods and N is number of series.
-            Can be polars DataFrame or numpy array.
+        data_module : DFMDataModule
+            DataModule containing preprocessed data. Must have setup() called.
         config : DFMConfig, optional
-            Unified DFM configuration object. If None, smart defaults are used
-            to create a simple config with a single global factor.
-        time_index : list of datetime, np.ndarray, or pl.Series, optional
-            Time index for the data. Used to infer frequency if clock is not provided.
-            Required if config is None and clock is not provided.
-        series_ids : list of str, optional
-            Series identifiers. If None, auto-generated as "series_0", "series_1", etc.
-        num_factors : int, default 1
-            Number of factors in the global block. Used only when config is None.
-        clock : str, optional
-            Clock frequency ('d', 'w', 'm', 'q', 'sa', 'a'). If None and config is None,
-            inferred from time_index if available, otherwise defaults to 'm'.
-        transformation : str, default 'lin'
-            Transformation code for all series ('lin', 'pch', 'log', etc.).
-            Used only when config is None.
+            Unified DFM configuration object. If None, uses config from data_module.
         fit_params : FitParams, optional
             Fit parameters object. If None, parameters are extracted from kwargs or config.
         **kwargs
@@ -91,16 +74,33 @@ class DFMLinear(BaseFactorModel):
         DFMResult
             Estimation results including parameters, factors, and diagnostics.
         """
+        from ..lightning import DFMDataModule
+        
+        if not isinstance(data_module, DFMDataModule):
+            raise TypeError(f"data_module must be DFMDataModule, got {type(data_module)}")
+        
+        # Ensure DataModule is set up
+        if data_module.data_processed is None:
+            data_module.setup()
+        
+        # Use config from data_module if not provided
+        if config is None:
+            config = data_module.config
+        
         # Extract fit parameters from kwargs or use provided FitParams
         fit_params = self._prepare_fit_params(fit_params, **kwargs)
         
-        # Prepare data and config
-        X_df, config = self._prepare_data_and_config(
-            X, config, time_index, series_ids, num_factors, clock, transformation
-        )
+        # Get processed data and standardization params from DataModule
+        X_torch = data_module.get_processed_data()
+        Mx, Wx = data_module.get_standardization_params()
         
-        # Transform and standardize data
-        scaler, X_torch, Mx, Wx = self._prepare_data_for_training(X_df, config)
+        # Handle case where standardization params might be None
+        # (if transformer doesn't include StandardScaler)
+        if Mx is None or Wx is None:
+            # Use zeros/ones as defaults (no standardization)
+            N = X_torch.shape[1]
+            Mx = np.zeros(N, dtype=np.float32)
+            Wx = np.ones(N, dtype=np.float32)
         
         # Get training parameters
         num_factors, training_params = self._extract_training_params(config, fit_params)
@@ -109,7 +109,6 @@ class DFMLinear(BaseFactorModel):
         result = self._train_with_lightning(X_torch, config, num_factors, training_params, Mx, Wx)
         
         # Store results
-        self._scaler = scaler
         self._result = result
         return result
     
@@ -121,61 +120,6 @@ class DFMLinear(BaseFactorModel):
         fit_dict = fit_params.to_dict()
         fit_dict.update({k: v for k, v in kwargs.items() if v is not None})
         return FitParams.from_kwargs(**fit_dict)
-    
-    def _prepare_data_and_config(
-        self,
-        X: Union[np.ndarray, pl.DataFrame],
-        config: Optional[DFMConfig],
-        time_index: Optional[Union[List[datetime], np.ndarray, pl.Series]],
-        series_ids: Optional[List[str]],
-        num_factors: int,
-        clock: Optional[str],
-        transformation: str
-    ) -> Tuple[pl.DataFrame, DFMConfig]:
-        """Prepare data and configuration for fitting."""
-        # Convert numpy array to polars DataFrame if needed
-        if isinstance(X, np.ndarray):
-            if config is None:
-                temp_config = self._create_default_config(
-                    X, time_index, series_ids, num_factors, clock, transformation
-                )
-                series_ids = temp_config.get_series_ids()
-            else:
-                series_ids = config.get_series_ids()
-            X_df = pl.DataFrame(X, schema=series_ids)
-        elif isinstance(X, pl.DataFrame):
-            if config is None and series_ids is None:
-                cols = X.columns
-                series_ids = list(cols) if isinstance(cols, list) else cols.tolist()
-            elif config is not None:
-                series_ids = config.get_series_ids()
-            X_df = X
-        else:
-            raise TypeError(f"X must be np.ndarray or pl.DataFrame, got {type(X)}")
-        
-        # Create config if not provided
-        if config is None:
-            config = self._create_default_config(
-                X_df.to_numpy(), time_index, series_ids, num_factors, clock, transformation
-            )
-        
-        # Store config and original data
-        self._config = config
-        self._data = X_df.to_numpy()
-        
-        return X_df, config
-    
-    def _prepare_data_for_training(
-        self, X_df: pl.DataFrame, config: DFMConfig
-    ) -> Tuple[DFMScaler, torch.Tensor, np.ndarray, np.ndarray]:
-        """Transform and standardize data for training."""
-        scaler = DFMScaler(config)
-        X_transformed = scaler.fit_transform(X_df)
-        Mx = scaler.Mx
-        Wx = scaler.Wx
-        X_processed = X_transformed.to_numpy()
-        X_torch = torch.tensor(X_processed, dtype=torch.float32)
-        return scaler, X_torch, Mx, Wx
     
     def _extract_training_params(
         self, config: DFMConfig, fit_params: FitParams
@@ -465,14 +409,13 @@ from ..config import (
     ConfigSource,
     MergedConfigSource,
 )
-from ..utils.data import read_data as _load_data
+from ..transformations.utils import read_data as _load_data
 from ..nowcast.dataview import DataView
 from ..utils.helpers import (
     safe_get_method,
     safe_get_attr,
     get_clock_frequency,
     _validate_config_loaded,
-    _validate_data_loaded,
     _validate_result_loaded,
 )
 from ..utils.time import TimeIndex
@@ -489,10 +432,21 @@ class DFM(BaseFactorModel):
     model implementation.
     
     Example:
+        >>> from dfm_python.lightning import DFMDataModule
+        >>> from sktime.transformations.compose import ColumnTransformer
+        >>> 
         >>> model = DFM()
         >>> model.load_config('config.yaml')
-        >>> model.load_data('data.csv')
-        >>> model.train(max_iter=100)
+        >>> 
+        >>> # Create transformer (user must provide)
+        >>> transformer = ColumnTransformer([...])  # User-defined
+        >>> 
+        >>> # Create DataModule
+        >>> data_module = DFMDataModule(config=model.config, transformer=transformer, data_path='data.csv')
+        >>> data_module.setup()
+        >>> 
+        >>> # Train
+        >>> model.train(data_module, max_iter=100)
         >>> Xf, Zf = model.predict(horizon=6)
     """
     
@@ -500,29 +454,19 @@ class DFM(BaseFactorModel):
         """Initialize DFM instance."""
         super().__init__()
         self._model_impl = DFMLinear()
-        self._original_data: Optional[np.ndarray] = None
-        self._data_frame: Optional[pl.DataFrame] = None
+        self._data_module: Optional['DFMDataModule'] = None
         self._nowcast: Optional['Nowcast'] = None
-    
-    @property
-    def original_data(self) -> Optional[np.ndarray]:
-        """Get original (untransformed) data matrix."""
-        return self._original_data
     
     @property
     def nowcast(self) -> 'Nowcast':
         """Get nowcasting manager instance."""
         if self._nowcast is None:
             _validate_config_loaded(self._config)
-            _validate_data_loaded(self._data)
+            if self._data_module is None:
+                raise ValueError("DataModule must be provided via train() before accessing nowcast")
             _validate_result_loaded(self._result)
             from ..nowcast import Nowcast
-            self._nowcast = Nowcast(
-                config=self._config,
-                data=self._data,
-                time=self._time,
-                result=self._result
-            )
+            self._nowcast = Nowcast(model=self, data_module=self._data_module)
         return self._nowcast
     
     def load_config(
@@ -556,57 +500,44 @@ class DFM(BaseFactorModel):
         self._config = config_source.load()
         return self
     
-    def load_data(
-        self,
-        data_path: Optional[Union[str, Path]] = None,
-        data: Optional[Any] = None,
-        **kwargs
-    ) -> 'DFM':
-        """Load data from file or array."""
-        _validate_config_loaded(self._config)
-        
-        if data_path is not None:
-            self._data, self._time, self._original_data = _load_data(
-                data_path, self._config, **kwargs
-            )
-        elif data is not None:
-            if isinstance(data, pl.DataFrame):
-                self._data_frame = data
-                self._data = data.to_numpy()
-            else:
-                self._data = np.asarray(data)
-            # Generate time index if not provided
-            if self._time is None:
-                from ..utils.time import datetime_range, clock_to_datetime_freq
-                clock = get_clock_frequency(self._config, 'm')
-                datetime_freq = clock_to_datetime_freq(clock)
-                from datetime import datetime
-                start_date = datetime(2000, 1, 1)
-                self._time = TimeIndex(datetime_range(start=start_date, periods=len(self._data), freq=datetime_freq))
-            self._original_data = self._data.copy()
-        else:
-            raise ValueError("Either data_path or data must be provided")
-        
-        return self
     
-    def fit(self, X: np.ndarray, config: DFMConfig, **kwargs) -> DFMResult:
+    def fit(self, data_module: 'DFMDataModule', config: DFMConfig, **kwargs) -> DFMResult:
         """Fit the linear DFM model (implements abstract method from BaseFactorModel)."""
         self._config = config
-        self._data = X
-        self._result = self._model_impl.fit(X, config, **kwargs)
+        self._data_module = data_module
+        self._result = self._model_impl.fit(data_module, config, **kwargs)
         return self._result
     
     def train(
         self,
+        data_module: 'DFMDataModule',
         fit_params: Optional[FitParams] = None,
         **kwargs
     ) -> 'DFM':
-        """Train the linear DFM model."""
-        _validate_config_loaded(self._config)
-        _validate_data_loaded(self._data)
+        """Train the linear DFM model.
         
+        Parameters
+        ----------
+        data_module : DFMDataModule
+            DataModule containing preprocessed data. Must have setup() called.
+        fit_params : FitParams, optional
+            Fit parameters object
+        **kwargs
+            Additional parameters
+        """
+        from ..lightning import DFMDataModule
+        _validate_config_loaded(self._config)
+        
+        if not isinstance(data_module, DFMDataModule):
+            raise TypeError(f"data_module must be DFMDataModule, got {type(data_module)}")
+        
+        # Ensure DataModule is set up
+        if data_module.data_processed is None:
+            data_module.setup()
+        
+        self._data_module = data_module
         self._result = self._model_impl.fit(
-            self._data,
+            data_module,
             self._config,
             fit_params=fit_params,
             **kwargs
@@ -637,24 +568,23 @@ class DFM(BaseFactorModel):
     def reset(self) -> 'DFM':
         """Reset model state."""
         self._config = None
-        self._data = None
-        self._time = None
+        self._data_module = None
         self._result = None
-        self._original_data = None
-        self._data_frame = None
         self._nowcast = None
         return self
     
     def load_pickle(self, path: Union[str, Path], **kwargs) -> 'DFM':
-        """Load a saved model from pickle file."""
+        """Load a saved model from pickle file.
+        
+        Note: DataModule is not saved in pickle. Users must create a new DataModule
+        and call train() with it after loading the model.
+        """
         import pickle
         with open(path, 'rb') as f:
             payload = pickle.load(f)
         self._config = payload.get('config')
-        self._data = payload.get('data')
-        self._time = payload.get('time')
         self._result = payload.get('result')
-        self._original_data = payload.get('original_data')
+        # Note: data_module is not loaded - users must provide it via train()
         return self
 
 
@@ -708,15 +638,7 @@ def load_config(
     )
 
 
-def load_data(data_path: Optional[Union[str, Path]] = None,
-               data: Optional[Any] = None,
-               **kwargs) -> DFM:
-    """Load data (module-level convenience function)."""
-    model = DFM()
-    return model.load_data(data_path=data_path, data=data, **kwargs)
-
-
-def train(fit_params: Optional[FitParams] = None, **kwargs) -> DFM:
+def train(data_module: 'DFMDataModule', fit_params: Optional[FitParams] = None, **kwargs) -> DFM:
     """Train the model (module-level convenience function).
     
     Note: This creates a new instance. For stateful usage, create a DFM() instance directly.
@@ -725,7 +647,7 @@ def train(fit_params: Optional[FitParams] = None, **kwargs) -> DFM:
     if fit_params is None:
         fit_params = FitParams.from_kwargs(**kwargs)
     model = DFM()
-    return model.train(fit_params=fit_params)
+    return model.train(data_module, fit_params=fit_params)
 
 
 def predict(

@@ -5,7 +5,7 @@ This module provides utility functions for:
 - Parameter resolution (resolve_param)
 - Data standardization (standardize_data, safe_mean_std)
 - Config access helpers (get_clock_frequency, get_series_ids, get_frequencies_from_config, etc.)
-- Validation helpers (_validate_config_loaded, _validate_data_loaded, _validate_result_loaded)
+- Validation helpers (_validate_config_loaded, _validate_data_module, _validate_result_loaded)
 """
 
 import numpy as np
@@ -15,7 +15,7 @@ from pathlib import Path
 from datetime import datetime
 
 from ..config.schema import DFMConfig
-from ..models.results import DFMParams
+from ..config.results import DFMParams
 from ..utils.time import TimeIndex
 from ..logger import get_logger
 
@@ -278,25 +278,27 @@ def _validate_config_loaded(config: Optional[DFMConfig]) -> None:
         raise DFMConfigError(f"Invalid config type: {type(config)}. Expected DFMConfig.")
 
 
-def _validate_data_loaded(data: Optional[np.ndarray]) -> None:
-    """Validate that data is loaded.
+def _validate_data_module(data_module: Optional[Any]) -> None:
+    """Validate that DataModule is provided and set up.
     
     Parameters
     ----------
-    data : np.ndarray, optional
-        Data array
+    data_module : DFMDataModule, optional
+        DataModule instance
         
     Raises
     ------
     DFMDataError
-        If data is None or invalid
+        If data_module is None or not set up
     """
-    # DFMDataError is defined in this module below
+    from ..lightning import DFMDataModule
     
-    if data is None:
-        raise DFMDataError("Data not loaded. Call load_data() first.")
-    if not isinstance(data, np.ndarray):
-        raise DFMDataError(f"Invalid data type: {type(data)}. Expected np.ndarray.")
+    if data_module is None:
+        raise DFMDataError("DataModule not provided. Provide a DFMDataModule instance via train().")
+    if not isinstance(data_module, DFMDataModule):
+        raise DFMDataError(f"Invalid data_module type: {type(data_module)}. Expected DFMDataModule.")
+    if data_module.data_processed is None:
+        raise DFMDataError("DataModule not set up. Call data_module.setup() first.")
 
 
 def _validate_result_loaded(result: Optional[Any]) -> None:

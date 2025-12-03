@@ -26,7 +26,7 @@ import polars as pl
 import time
 
 from ..config import DFMConfig
-from ..models.results import DFMResult
+from ..config.results import DFMResult
 from ..utils.time import (
     TimeIndex,
     parse_timestamp,
@@ -93,15 +93,11 @@ from .utils import (
     calculate_backward_date,
     get_forecast_horizon_config,
     check_config_consistency,
-    transform_data,
     extract_news_summary,
     # Backward compatibility aliases
     _get_higher_frequency,
-    _calculate_backward_date,
-    _get_forecast_horizon_config,
-    _check_config_consistency,
-    _extract_news_summary_impl,
 )
+# transform_data removed - use DataModule with custom transformers instead
 
 
 class Nowcast:
@@ -120,21 +116,28 @@ class Nowcast:
     >>> print(f"Top contributors: {news.top_contributors}")
     """
     
-    def __init__(self, model: Any):  # type: ignore
+    def __init__(self, model: Any, data_module: Optional[Any] = None):  # type: ignore
         """Initialize Nowcast manager.
         
         Parameters
         ----------
         model : DFM
             Trained DFM model instance (validation is done in DFM.nowcast property)
+        data_module : DFMDataModule, optional
+            DataModule containing data. If None, will try to get from model._data_module.
         
         Note
         ----
         Validation is performed in DFM.nowcast property before creating instance.
-        This class directly references model.data, model.time, etc. for efficiency.
+        This class uses DataModule to access data instead of model.data.
         """
         self.model = model
-        # Direct references (no copying) - always use latest data
+        # Get DataModule from model if not provided
+        if data_module is None:
+            data_module = getattr(model, '_data_module', None)
+        if data_module is None:
+            raise ValueError("DataModule must be provided either directly or via model._data_module")
+        self.data_module = data_module
         # Caching for performance
         self._para_const_cache: Dict[Tuple[str, int], Dict[str, Any]] = {}
         self._data_view_cache: Dict[str, Tuple[np.ndarray, TimeIndex, Optional[np.ndarray]]] = {}
@@ -157,13 +160,23 @@ class Nowcast:
             return self._data_view_cache[view_date_str]
         
         start = time.perf_counter()
+        # Get raw data from DataModule
+        raw_data = self.data_module.data
+        time_index = self.data_module.time_index
+        
+        # Convert to numpy if needed
+        if hasattr(raw_data, 'to_numpy'):
+            X = raw_data.to_numpy()
+        else:
+            X = np.asarray(raw_data)
+        
         X_view, Time_view, Z_view = create_data_view(
-            X=self.model.data,
-            Time=self.model.time,
-            Z=self.model.original_data,
+            X=X,
+            Time=time_index,
+            Z=X,  # Use same data for Z (original data)
             config=self.model.config,
             view_date=view_date,
-            X_frame=getattr(self.model, 'data_frame', None)
+            X_frame=raw_data if isinstance(raw_data, pl.DataFrame) else None
         )
         if _logger.isEnabledFor(logging.DEBUG):
             _logger.debug(

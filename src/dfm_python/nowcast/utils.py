@@ -213,134 +213,8 @@ def check_config_consistency(saved_config: Any, current_config: DFMConfig) -> No
         # If comparison fails, continue anyway
 
 
-def transform_series(Z: np.ndarray, formula: str, freq: str, step: int) -> np.ndarray:
-    """Transform a single time series according to formula.
-    
-    Parameters
-    ----------
-    Z : np.ndarray
-        Raw time series (1D array)
-    formula : str
-        Transformation formula: 'lin', 'chg', 'ch1', 'pch', 'pc1', 'pca', 'cch', 'cca', 'log'
-    freq : str
-        Frequency code: 'm', 'q', 'sa', 'a'
-    step : int
-        Number of base periods per observation
-        
-    Returns
-    -------
-    np.ndarray
-        Transformed series
-        
-    Examples
-    --------
-    >>> Z = np.array([100, 105, 110, 115])
-    >>> transform_series(Z, 'pch', 'm', 1)
-    array([nan, 5.0, 4.76, 4.55])  # Percent changes
-    """
-    T = len(Z)
-    X = np.full(T, np.nan)
-    
-    if formula == 'lin':
-        X[:] = Z
-    elif formula == 'chg':
-        # First difference
-        if T > step:
-            X[step:] = Z[step:] - Z[:-step]
-    elif formula == 'ch1':
-        # Year-over-year difference (generic based on frequency)
-        year_step = get_periods_per_year(freq)
-        if T > year_step:
-            X[year_step:] = Z[year_step:] - Z[:-year_step]
-    elif formula == 'pch':
-        # Percent change
-        if T > step:
-            X[step:] = 100.0 * (Z[step:] - Z[:-step]) / np.abs(Z[:-step] + 1e-10)
-    elif formula == 'pc1':
-        # Year-over-year percent change (generic based on frequency)
-        year_step = get_periods_per_year(freq)
-        if T > year_step:
-            X[year_step:] = 100.0 * (Z[year_step:] - Z[:-year_step]) / np.abs(Z[:-year_step] + 1e-10)
-    # Add other transformation formulas as needed: 'pca', 'cch', 'cca', 'log'
-    # For now, return X (may contain NaN for unsupported formulas)
-    return X
-
-
-def transform_data(Z: np.ndarray, Time: TimeIndex, config: DFMConfig) -> Tuple[np.ndarray, TimeIndex, np.ndarray]:
-    """Transform each data series according to configuration.
-    
-    Applies the specified transformation formula to each series based on its
-    frequency and transformation type. Handles mixed-frequency data by
-    applying transformations at the appropriate observation intervals.
-    
-    Supported frequencies: monthly (m), quarterly (q), semi-annual (sa), annual (a).
-    Frequencies faster than the clock frequency are not supported.
-    
-    Parameters
-    ----------
-    Z : np.ndarray
-        Raw data matrix (T x N)
-    Time : TimeIndex
-        Time index for the data
-    config : DFMConfig
-        Model configuration with transformation specifications
-        
-    Returns
-    -------
-    X : np.ndarray
-        Transformed data matrix (T x N)
-    Time : TimeIndex
-        Time index (may be truncated after transformation)
-    Z : np.ndarray
-        Original data (may be truncated to match X)
-        
-    Examples
-    --------
-    >>> X, Time_new, Z_new = transform_data(Z, Time, config)
-    """
-    T, N = Z.shape
-    X = np.full((T, N), np.nan)
-    
-    # Validate frequencies - reject higher frequencies than clock
-    clock = safe_get_attr(config, 'clock', 'm')
-    clock_hierarchy = FREQUENCY_HIERARCHY.get(clock, 3)
-    
-    frequencies = get_frequencies_from_config(config)
-    series_ids = get_series_ids(config)
-    for i, freq in enumerate(frequencies):
-        freq_hierarchy = FREQUENCY_HIERARCHY.get(freq, 3)
-        if freq_hierarchy < clock_hierarchy:
-            raise ValueError(
-                f"Series '{series_ids[i]}' has frequency '{freq}' which is faster than clock '{clock}'. "
-                f"Higher frequencies (daily, weekly) are not supported. "
-                f"Please use monthly, quarterly, semi-annual, or annual frequencies only."
-            )
-    
-    # Frequency to step mapping (step = number of base periods per observation)
-    freq_to_step = {'m': 1, 'q': 3, 'sa': 6, 'a': 12}
-    
-    # DFMConfig always has series attribute, but check for safety
-    transformations = [s.transformation for s in config.series] if hasattr(config, 'series') and config.series else ['lin'] * N
-    
-    for i in range(N):
-        freq = frequencies[i] if i < len(frequencies) else clock
-        step = freq_to_step.get(freq, 1)
-        formula = transformations[i] if i < len(transformations) else 'lin'
-        X[:, i] = transform_series(Z[:, i], formula, freq, step)
-    
-    # Remove leading NaN rows (from differencing)
-    drop = 0
-    for t in range(T):
-        if np.all(np.isnan(X[t, :])):
-            drop += 1
-        else:
-            break
-    
-    if T > drop:
-        # TimeIndex slicing returns TimeIndex
-        time_sliced = Time[drop:] if isinstance(Time, TimeIndex) else Time[drop:]
-        return X[drop:], time_sliced, Z[drop:]  # type: ignore
-    return X, Time, Z
+# transform_data and _transform_series removed - use DataModule with custom transformers instead
+# transform_series alias removed
 
 
 def extract_news_summary(
@@ -411,6 +285,6 @@ _get_higher_frequency = get_higher_frequency
 _calculate_backward_date = calculate_backward_date
 _get_forecast_horizon_config = get_forecast_horizon_config
 _check_config_consistency = check_config_consistency
-_transform_series = transform_series
+# transform_series removed - use DataModule with custom transformers instead
 _extract_news_summary_impl = extract_news_summary
 

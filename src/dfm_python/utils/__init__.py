@@ -60,10 +60,9 @@ from ..nowcast.helpers import (
     _calculate_backward_date,
     _get_forecast_horizon_config,
     _check_config_consistency,
-    _transform_series,
-    transform_data,
     _extract_news_summary_impl,
 )
+# Note: _transform_series and transform_data removed - use DataModule with custom transformers
 
 from ..nowcast.dataview import DataView
 
@@ -163,8 +162,6 @@ __all__ = [
     '_calculate_backward_date',
     '_get_forecast_horizon_config',
     '_check_config_consistency',
-    '_transform_series',
-    'transform_data',
     '_extract_news_summary_impl',
     # DataView
     'DataView',
@@ -188,7 +185,7 @@ __all__ = [
     'get_series_id_by_index',
     'ParameterResolver',
     '_validate_config_loaded',
-    '_validate_data_loaded',
+    '_validate_data_module',
     '_validate_result_loaded',
     'DFMError',
     'DFMConfigError',

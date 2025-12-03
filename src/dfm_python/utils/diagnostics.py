@@ -16,7 +16,7 @@ from .time import calculate_rmse
 _logger = get_logger(__name__)
 
 if TYPE_CHECKING:
-    from ..models.results import DFMResult
+    from ..config.results import DFMResult
 else:
     # Avoid circular import at runtime
     DFMResult = Any

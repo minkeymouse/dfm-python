@@ -26,23 +26,39 @@ Key Features:
 
 Example (High-level API - Recommended):
     >>> import dfm_python as dfm
+    >>> from dfm_python.lightning import DFMDataModule
+    >>> from sktime.transformations.compose import ColumnTransformer
+    >>> 
     >>> # Linear DFM
     >>> model = dfm.DFM()
     >>> model.load_config('config/default.yaml')
-    >>> model.load_data('data/sample_data.csv')
-    >>> model.train(max_iter=100)
+    >>> 
+    >>> # Create transformer (user must provide)
+    >>> transformer = ColumnTransformer([...])  # User-defined sktime transformer
+    >>> 
+    >>> # Create DataModule
+    >>> data_module = DFMDataModule(config=model.config, transformer=transformer, data_path='data/sample_data.csv')
+    >>> data_module.setup()
+    >>> 
+    >>> # Train
+    >>> model.train(data_module, max_iter=100)
     >>> Xf, Zf = model.predict(horizon=6)
     >>> 
     >>> # Or use DDFM (separate class)
     >>> ddfm_model = dfm.DDFM(encoder_layers=[64, 32], num_factors=2)
     >>> ddfm_model.load_config('config/default.yaml')
-    >>> ddfm_model.load_data('data/sample_data.csv')
-    >>> ddfm_model.train(epochs=100)
+    >>> 
+    >>> # Create DataModule for DDFM
+    >>> data_module_ddfm = DFMDataModule(config=ddfm_model.config, transformer=transformer, data_path='data/sample_data.csv')
+    >>> data_module_ddfm.setup()
+    >>> 
+    >>> # Train
+    >>> ddfm_model.train(data_module_ddfm, epochs=100)
     >>> Xf, Zf = ddfm_model.predict(horizon=6)
     
 Example (Low-level API - For advanced usage):
     >>> from dfm_python import DFM, DFMConfig, SeriesConfig
-    >>> from dfm_python.utils.data import read_data  # Preferred import
+    >>> from dfm_python.transformations.utils import read_data  # Preferred import
     >>> # Option 1: Load from YAML
     >>> config = load_config('config.yaml')
     >>> # Option 2: Create directly
@@ -50,15 +66,25 @@ Example (Low-level API - For advanced usage):
     ...     series=[SeriesConfig(frequency='m', transformation='lin', blocks=[1], series_id='series1')],
     ...     block_names=['Global']
     ... )
-    >>> X, Time, _ = load_data('data.csv', config)  # or use database adapter
+    >>> from dfm_python.lightning import DFMDataModule
+    >>> from sktime.transformations.compose import ColumnTransformer
+    >>> 
+    >>> # Create transformer (user must provide)
+    >>> transformer = ColumnTransformer([...])  # User-defined
+    >>> 
+    >>> # Create DataModule
+    >>> data_module = DFMDataModule(config=config, transformer=transformer, data_path='data.csv')
+    >>> data_module.setup()
+    >>> 
+    >>> # Fit model
     >>> model = DFM()
-    >>> result = model.fit(X, config)
+    >>> result = model.fit(data_module, config)
     >>> factors = result.Z  # Extract estimated factors
 
 For detailed documentation, see the README.md file and the tutorial notebooks/scripts.
 """
 
-__version__ = "0.3.12"
+__version__ = "0.4.0"
 
 # ============================================================================
 # PUBLIC API DEFINITION
@@ -84,10 +110,10 @@ from .config import (
 )
 
 # Data utilities
-# Note: transform_data has been removed - use DFMScaler from dfm_python.transformations instead
+# Note: transform_data and DFMScaler have been removed - users must provide their own sktime transformers to DFMDataModule
 
 # Results
-from .models.results import DFMResult, DDFMResult, BaseResult
+from .config.results import DFMResult, DDFMResult, BaseResult
 
 # Utilities (from utils/ subpackage)
 from .utils.diagnostics import diagnose_series, print_series_diagnosis
@@ -130,8 +156,9 @@ from .models.base import BaseFactorModel
 from .models.dfm import DFMLinear, DFM
 from .models.dfm import (
     from_yaml, from_spec, from_spec_df, from_dict,
-    load_config, load_data, load_pickle, train, predict, plot, reset, create_model
+    load_config, load_pickle, train, predict, plot, reset, create_model
 )
+# Note: load_data has been removed - use DFMDataModule instead
 
 # DDFM high-level API and low-level model (both optional, requires PyTorch)
 try:
@@ -164,7 +191,7 @@ __all__ = [
     'MergedConfigSource', 'make_config_source',
     # High-level API (module-level - recommended)
     'load_config',
-    'load_data', 'load_pickle', 'train', 'predict', 'plot', 'reset', 'create_model',
+    'load_pickle', 'train', 'predict', 'plot', 'reset', 'create_model',
     # Convenience constructors (cleaner API)
     'from_yaml', 'from_spec', 'from_spec_df', 'from_dict',
     # Low-level API (functional interface - advanced usage)
@@ -177,8 +204,9 @@ if _has_ddfm:
     __all__.extend([
         'DDFM',  # High-level API class
         'DDFMModel',  # Low-level implementation
-        'load_config_ddfm', 'load_data_ddfm', 'train_ddfm', 
+        'load_config_ddfm', 'train_ddfm', 
         'predict_ddfm', 'plot_ddfm', 'reset_ddfm'
+        # Note: load_data_ddfm has been removed - use DFMDataModule instead
     ])
 
 # Add Lightning modules if available
@@ -189,5 +217,20 @@ if _has_lightning:
         'DFMDataModule',
         'KalmanFilter',  # New module class
         'EMAlgorithm',  # New module class
+    ])
+
+# Add Trainer classes if available
+try:
+    from .trainer import DFMTrainer, DDFMTrainer
+    _has_trainers = True
+except ImportError:
+    _has_trainers = False
+    DFMTrainer = None  # type: ignore
+    DDFMTrainer = None  # type: ignore
+
+if _has_trainers:
+    __all__.extend([
+        'DFMTrainer',
+        'DDFMTrainer',
     ])
 
