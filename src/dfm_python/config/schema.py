@@ -696,10 +696,14 @@ class DDFMConfig(BaseModelConfig):
     This configuration class extends BaseModelConfig with parameters specific
     to Deep Dynamic Factor Models trained using neural networks (autoencoders).
     
+    Note: DDFM does not use block structure. Blocks are only required because
+    DDFMConfig inherits from BaseModelConfig. The blocks field will be ignored
+    by DDFM - use num_factors directly to specify the number of factors.
+    
     The configuration can be built from:
     - Main settings (training parameters) from config/default.yaml
     - Series definitions from config/series/default.yaml or CSV
-    - Block definitions from config/blocks/default.yaml
+    - Block definitions are not used by DDFM (only for DFM compatibility)
     """
     # ========================================================================
     # Neural Network Training Parameters
@@ -721,8 +725,6 @@ class DDFMConfig(BaseModelConfig):
     disp: int = 10  # Display frequency for training progress
     seed: Optional[int] = None  # Random seed for reproducibility
     
-    # Note: Legacy PascalCase properties were removed to keep the API clean and generic.
-    # Use the snake_case helper methods above.
     
     # ========================================================================
     # Factory Methods (shared base methods)
@@ -773,7 +775,7 @@ class DDFMConfig(BaseModelConfig):
     def _extract_ddfm_params(cls, data: Dict[str, Any]) -> Dict[str, Any]:
         """Extract DDFM-specific parameters from config dict."""
         base_params = cls._extract_base_params(data)
-        # Handle both new format (direct keys) and legacy format (ddfm_ prefix)
+        # Handle both direct keys and ddfm_ prefix format (for backward compatibility)
         base_params.update({
             'encoder_layers': data.get('encoder_layers') or data.get('ddfm_encoder_layers', None),
             'num_factors': data.get('num_factors') or data.get('ddfm_num_factors', None),
@@ -884,6 +886,10 @@ class DDFMConfig(BaseModelConfig):
         config_type = _detect_config_type(data)
         
         if config_type == 'ddfm':
+            # DDFM does not use block structure - create minimal default block if needed
+            # This is required by BaseModelConfig but will be ignored by DDFM
+            if not blocks_dict_final:
+                blocks_dict_final = {DEFAULT_BLOCK_NAME: {'factors': 1, 'ar_lag': 1, 'clock': 'm'}}
             return DDFMConfig(
                 series=series_list,
                 blocks=blocks_dict_final,
@@ -1070,6 +1076,10 @@ def _ddfm_from_dict(cls, data: Dict[str, Any]) -> Union['DFMConfig', 'DDFMConfig
         config_type = _detect_config_type(data)
         
         if config_type == 'ddfm':
+            # DDFM does not use block structure - create minimal default block if needed
+            # This is required by BaseModelConfig but will be ignored by DDFM
+            if not blocks_dict:
+                blocks_dict = {DEFAULT_BLOCK_NAME: {'factors': 1, 'ar_lag': 1, 'clock': 'm'}}
             return DDFMConfig(
                 series=series_list,
                 blocks=blocks_dict,
@@ -1086,6 +1096,11 @@ def _ddfm_from_dict(cls, data: Dict[str, Any]) -> Union['DFMConfig', 'DDFMConfig
     config_type = _detect_config_type(data)
     
     if config_type == 'ddfm':
+        # DDFM does not use block structure - create minimal default block if needed
+        # This is required by BaseModelConfig but will be ignored by DDFM
+        if 'blocks' not in data or not data.get('blocks'):
+            data = data.copy()
+            data['blocks'] = {DEFAULT_BLOCK_NAME: {'factors': 1, 'ar_lag': 1, 'clock': 'm'}}
         return DDFMConfig(**data)
     else:
         return DFMConfig(**data)
@@ -1106,6 +1121,3 @@ DDFMConfig.from_dict = classmethod(_ddfm_from_dict)
 DDFMConfig.from_hydra = classmethod(_ddfm_from_hydra)
 
 
-# Note: ConfigSource classes and adapter functions are in config/adapter.py
-# Note: Parameter classes (FitParams) are in config/results.py
-# Note: Validation functions are in config/utils.py

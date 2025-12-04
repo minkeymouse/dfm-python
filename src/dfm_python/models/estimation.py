@@ -1,8 +1,7 @@
 """Dynamic Factor Model (DFM) estimation using PyTorch Lightning.
 
-This module provides the core DFM estimation function (_dfm_core) which now
-uses PyTorch Lightning modules for training. The legacy NumPy-based implementations
-have been replaced with PyTorch versions for better performance and GPU support.
+This module provides the core DFM estimation function (_dfm_core) which
+uses PyTorch Lightning modules for training.
 
 The implementation uses a clock-based approach, where all latent factors
 evolve at a common clock frequency, with lower-frequency observations
@@ -24,7 +23,6 @@ from ..utils.time import calculate_rmse
 from ..utils.diagnostics import (
     _display_dfm_tables,
 )
-# Use Lightning modules instead of legacy NumPy implementations
 from ..lightning import DFMLightningModule
 from ..utils.helpers import (
     safe_get_method, safe_get_attr, resolve_param,

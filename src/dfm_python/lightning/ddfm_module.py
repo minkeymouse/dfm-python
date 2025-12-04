@@ -2,6 +2,10 @@
 
 This module provides DDFMLightningModule which integrates autoencoder training
 and MCMC procedure with PyTorch Lightning for training deep DFM models.
+
+Note: This module is currently not used. The DDFM class (in models.ddfm) uses
+DDFMModel directly rather than DDFMLightningModule. This module is kept for
+potential future use or backward compatibility.
 """
 
 import torch

@@ -200,17 +200,20 @@ def _compute_mx_wx_from_data(data: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
 class DFMDataModule(lightning_pl.LightningDataModule):
     """PyTorch Lightning DataModule for DFM training.
     
-    This DataModule handles:
-    1. Data loading from file or array (expects preprocessed data from users)
-    2. Internal transformations (standardization, missing data handling, clipping)
-    3. Creating DataLoaders for training
-    4. Optional train/val splits
+    This DataModule handles data loading and preprocessing for DFM/DDFM models.
+    It supports two usage patterns:
     
-    Users are expected to provide completely preprocessed data. The package then
-    applies internal transformations automatically:
-    - Spline interpolation for remaining missing values
-    - Standardization (mean=0, std=1) using sktime transformers
-    - Data clipping to prevent extreme values
+    1. **Preprocessed Data**: Provide already-preprocessed data (standardized, no missing values).
+       Use a passthrough transformer to avoid double standardization.
+    
+    2. **Raw Data with TransformerPipeline**: Provide raw data and a sktime TransformerPipeline
+       for preprocessing. The pipeline will be applied in setup().
+    
+    The preprocessing pipeline (if provided) should handle:
+    - Missing value imputation (forward fill, backward fill, etc.)
+    - Outlier treatment (clipping, winsorization, etc.)
+    - Standardization/scaling (mean=0, std=1)
+    - Any other transformations needed
     
     For linear DFM, this uses DFMDataset which returns full sequences.
     For DDFM, use DDFMDataModule which uses DDFMDataset with windowing.
@@ -220,13 +223,22 @@ class DFMDataModule(lightning_pl.LightningDataModule):
     config : DFMConfig
         DFM configuration object
     transformer : Any, optional
-        Optional sktime-compatible transformer for custom preprocessing.
-        If None, uses default internal transformer (StandardScaler).
-        Users typically don't need to provide this - internal transformations are applied automatically.
+        sktime-compatible transformer or TransformerPipeline for preprocessing.
+        
+        **If data is already preprocessed**: Use a passthrough transformer (e.g., from
+        `create_passthrough_transformer()`) to avoid double standardization.
+        
+        **If data is raw**: Provide a TransformerPipeline (from sktime.transformations.compose)
+        that handles imputation, scaling, and other preprocessing steps. The pipeline
+        will be applied in setup() using fit_transform().
+        
+        **If None**: Uses default StandardScaler (assumes data is already cleaned but needs scaling).
     data_path : str or Path, optional
         Path to data file (CSV). If None, data must be provided.
     data : np.ndarray or pl.DataFrame, optional
-        Preprocessed data array or DataFrame. Users should provide clean, preprocessed data.
+        Data array or DataFrame. Can be:
+        - Preprocessed data (standardized, no missing values) - use passthrough transformer
+        - Raw data (may have missing values, not standardized) - use TransformerPipeline
         If None, data_path must be provided.
     time_index : TimeIndex, optional
         Time index for the data
@@ -236,6 +248,50 @@ class DFMDataModule(lightning_pl.LightningDataModule):
         Number of worker processes for DataLoader
     val_split : float, optional
         Validation split ratio (0.0 to 1.0). If None, no validation split.
+    
+    Examples
+    --------
+    **Using preprocessed data with passthrough transformer**:
+    
+    >>> from dfm_python import DFMDataModule
+    >>> from sktime.transformations.series.adapt import TabularToSeriesAdaptor
+    >>> from sklearn.preprocessing import FunctionTransformer
+    >>> 
+    >>> # Create passthrough transformer
+    >>> passthrough = TabularToSeriesAdaptor(
+    ...     FunctionTransformer(func=None, inverse_func=None, validate=False)
+    ... )
+    >>> 
+    >>> # Data is already preprocessed
+    >>> dm = DFMDataModule(
+    ...     config=model.config,
+    ...     transformer=passthrough,  # Avoid double standardization
+    ...     data=df_preprocessed  # Already standardized, no missing values
+    ... )
+    >>> dm.setup()
+    
+    **Using raw data with TransformerPipeline**:
+    
+    >>> from dfm_python import DFMDataModule
+    >>> from sktime.transformations.compose import TransformerPipeline
+    >>> from sktime.transformations.series.impute import Imputer
+    >>> from sktime.transformations.series.adapt import TabularToSeriesAdaptor
+    >>> from sklearn.preprocessing import StandardScaler
+    >>> 
+    >>> # Create preprocessing pipeline
+    >>> preprocessing_pipeline = TransformerPipeline([
+    ...     ('impute_ffill', Imputer(method="ffill")),
+    ...     ('impute_bfill', Imputer(method="bfill")),
+    ...     ('scaler', TabularToSeriesAdaptor(StandardScaler()))
+    ... ])
+    >>> 
+    >>> # Data is raw (may have missing values, not standardized)
+    >>> dm = DFMDataModule(
+    ...     config=model.config,
+    ...     transformer=preprocessing_pipeline,  # Preprocessing happens in setup()
+    ...     data=df_raw  # Raw data with missing values
+    ... )
+    >>> dm.setup()  # Pipeline is applied here
     """
     
     def __init__(
@@ -267,13 +323,9 @@ class DFMDataModule(lightning_pl.LightningDataModule):
             )
         
         self.config = config
-        # If no transformer provided, create default internal transformer
-        if transformer is None:
-            from sktime.transformations.series.adapt import TabularToSeriesAdaptor
-            from sklearn.preprocessing import StandardScaler
-            self.transformer = TabularToSeriesAdaptor(StandardScaler())
-        else:
-            self.transformer = transformer
+        # Store transformer (can be None, passthrough, or TransformerPipeline)
+        # If None, will create default StandardScaler in setup() if needed
+        self.transformer = transformer
         self.data_path = Path(data_path) if data_path is not None else None
         self.data = data
         self.time_index = time_index
@@ -292,14 +344,18 @@ class DFMDataModule(lightning_pl.LightningDataModule):
         """Load and preprocess data.
         
         This method is called by Lightning to set up the data module.
-        It loads data, applies user-provided transformer, and creates train/val datasets.
+        It loads data, applies user-provided transformer (or TransformerPipeline), 
+        and creates train/val datasets.
+        
+        If a TransformerPipeline is provided, it will be applied to raw data in this method.
+        If data is already preprocessed, use a passthrough transformer to avoid double standardization.
         """
         # Load data if not already provided
         if self.data is None:
             if self.data_path is None:
                 raise ValueError(
                     "DataModule setup failed: either data_path or data must be provided. "
-                    "Please provide a path to a data file or a preprocessed data array/DataFrame."
+                    "Please provide a path to a data file or a data array/DataFrame."
                 )
             
             # Load data from file
@@ -324,45 +380,65 @@ class DFMDataModule(lightning_pl.LightningDataModule):
                 f"Please provide data as numpy.ndarray or polars.DataFrame."
             )
         
-        # Convert Polars to pandas for sktime transformers (sktime expects pandas)
-        import pandas as pd
-        if isinstance(X_df, pl.DataFrame):
-            try:
-                X_df_pandas = X_df.to_pandas()
-            except Exception:
-                # Fallback: convert via numpy
-                X_df_pandas = pd.DataFrame(X_df.to_numpy(), columns=X_df.columns)
+        # Ensure data is Polars DataFrame
+        if isinstance(X_df, np.ndarray):
+            series_ids = self.config.get_series_ids()
+            X_df = pl.DataFrame(X_df, schema=series_ids)
+        elif not isinstance(X_df, pl.DataFrame):
+            raise TypeError(
+                f"DataModule setup failed: unsupported data type {type(X_df)}. "
+                f"Please provide data as numpy.ndarray or polars.DataFrame."
+            )
+        
+        # Determine transformer to use
+        # If None, create default StandardScaler (assumes data is cleaned but needs scaling)
+        if self.transformer is None:
+            from sktime.transformations.series.adapt import TabularToSeriesAdaptor
+            from sklearn.preprocessing import StandardScaler
+            transformer_to_use = TabularToSeriesAdaptor(StandardScaler())
         else:
-            X_df_pandas = X_df
+            transformer_to_use = self.transformer
         
-        # Try to set Polars output if transformer supports it
+        # Set Polars output for sktime transformers (sktime 1.4+ supports Polars)
         try:
-            if hasattr(self.transformer, 'set_output'):
-                self.transformer.set_output(transform="pandas")  # sktime works with pandas
-        except (AttributeError, ValueError):
-            # Transformer doesn't support set_output
-            pass
+            if hasattr(transformer_to_use, 'set_output'):
+                transformer_to_use.set_output(transform="polars")  # Use Polars directly
+        except (AttributeError, ValueError) as e:
+            # Transformer doesn't support set_output or Polars output
+            # This is OK - sktime will handle it
+            _logger.debug(f"Could not set Polars output on transformer: {e}")
         
-        # Apply user-provided transformer (expects pandas DataFrame)
+        # Apply transformer (or TransformerPipeline) to data
+        # This handles both:
+        # 1. Preprocessed data with passthrough transformer (no-op)
+        # 2. Raw data with TransformerPipeline (full preprocessing)
+        # sktime transformers now support Polars DataFrames directly
         try:
-            X_transformed = self.transformer.fit_transform(X_df_pandas)
+            X_transformed = transformer_to_use.fit_transform(X_df)
         except Exception as e:
             raise ValueError(
                 f"DataModule setup failed: transformer fit_transform error: {e}. "
-                f"Ensure transformer is sktime-compatible and data format matches transformer expectations."
+                f"Ensure transformer is sktime-compatible (e.g., TransformerPipeline, TabularToSeriesAdaptor) "
+                f"and supports Polars DataFrames. If using preprocessed data, use a passthrough transformer "
+                f"to avoid double standardization."
             ) from e
         
-        # Convert to Polars DataFrame if not already
+        # Ensure output is Polars DataFrame
         if not isinstance(X_transformed, pl.DataFrame):
-            # Try to convert from pandas or numpy
+            # If transformer returned numpy array or pandas DataFrame, convert to Polars
             if hasattr(X_transformed, 'to_polars'):
                 X_transformed = X_transformed.to_polars()
             elif hasattr(X_transformed, 'values'):
-                # Pandas DataFrame or numpy array
-                X_transformed = pl.DataFrame(X_transformed.values)
+                # Pandas DataFrame - convert to Polars
+                X_transformed = pl.DataFrame(X_transformed.values, schema=X_df.columns)
+            elif isinstance(X_transformed, np.ndarray):
+                # Numpy array - convert to Polars with original column names
+                X_transformed = pl.DataFrame(X_transformed, schema=X_df.columns)
             else:
-                # Numpy array
-                X_transformed = pl.DataFrame(X_transformed)
+                raise TypeError(
+                    f"DataModule setup failed: transformer returned unsupported type {type(X_transformed)}. "
+                    f"Expected polars.DataFrame, pandas.DataFrame, or numpy.ndarray."
+                )
         
         # Convert transformed data to numpy (needed for both tensor conversion and Mx/Wx computation)
         X_processed_np = X_transformed.to_numpy()
@@ -371,8 +447,8 @@ class DFMDataModule(lightning_pl.LightningDataModule):
         # This is optional - some transformers may not have standardization
         # Mx and Wx are already initialized in __init__
         try:
-            # Extract StandardScaler from transformer
-            scaler = _extract_scaler_from_transformer(self.transformer)
+            # Extract StandardScaler from transformer (works with TransformerPipeline too)
+            scaler = _extract_scaler_from_transformer(transformer_to_use)
             
             if scaler is not None:
                 # Try to extract Mx and Wx from scaler
@@ -460,7 +536,8 @@ class DFMDataModule(lightning_pl.LightningDataModule):
         Returns
         -------
         transformer : Any
-            The sktime transformer provided by the user
+            The sktime transformer or TransformerPipeline provided by the user.
+            Returns None if default StandardScaler was used.
         """
         return self.transformer
     

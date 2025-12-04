@@ -5,7 +5,7 @@ This module provides standard logging setup and configuration utilities.
 
 import logging
 import sys
-from typing import Optional
+from typing import Optional, Dict
 
 
 def get_logger(name: str) -> logging.Logger:
@@ -66,19 +66,23 @@ def setup_logging(
 def configure_logging(
     level: int = logging.INFO,
     format_string: Optional[str] = None,
-    log_file: Optional[str] = None
+    log_file: Optional[str] = None,
+    module_levels: Optional[Dict[str, int]] = None
 ) -> None:
     """Configure package-wide logging.
     
     Parameters
     ----------
     level : int, default logging.INFO
-        Logging level
+        Logging level for the package
     format_string : str, optional
         Custom format string. If None, uses default format.
     log_file : str, optional
         Optional file path to write logs to. If provided, logs will be
         written to both console and file.
+    module_levels : dict, optional
+        Dictionary mapping module names to specific log levels.
+        Example: {'dfm_python.models': logging.DEBUG, 'dfm_python.trainer': logging.WARNING}
     """
     if format_string is None:
         format_string = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -107,4 +111,10 @@ def configure_logging(
         file_handler.setLevel(level)
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
+    
+    # Set module-specific log levels
+    if module_levels:
+        for module_name, module_level in module_levels.items():
+            module_logger = logging.getLogger(module_name)
+            module_logger.setLevel(module_level)
 

@@ -26,7 +26,6 @@ from ..utils.helpers import (
 )
 from ..config.utils import FREQUENCY_HIERARCHY, get_periods_per_year
 from ..utils.time import clock_to_datetime_freq
-# Note: transformations.utils removed - use DataModule with custom transformers instead
 from ..utils.data import sort_data, rem_nans_spline, calculate_release_date
 
 _logger = get_logger(__name__)
@@ -227,7 +226,6 @@ def para_const(X: np.ndarray, result: DFMResult, lag: int = 0) -> Dict[str, Any]
 # ============================================================================
 # Nowcasting helper functions (merged from nowcast_helpers.py)
 # ============================================================================
-# Note: These functions are re-exported from nowcast.utils for backward compatibility.
 # The canonical implementations are in nowcast.utils (without underscore prefix).
 
 from .utils import (
@@ -357,5 +355,4 @@ class BacktestResult:
 # transform_data and _transform_series removed - use DataModule with custom transformers instead
 
 
-# Note: _extract_news_summary_impl removed - use extract_news_summary from nowcast.utils instead
 

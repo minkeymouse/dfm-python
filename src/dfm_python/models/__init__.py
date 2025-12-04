@@ -7,19 +7,16 @@ This package contains implementations of different factor models:
 
 from .base import BaseFactorModel
 from .dfm import DFMLinear, DFM
-# Note: Legacy module-level functions removed - use instance methods and trainer.fit() pattern
-# Note: load_data removed - use DFMDataModule instead
-from ..config.results import BaseResult, DFMResult, DDFMResult, FitParams, DFMParams
+from ..config.results import BaseResult, DFMResult, DDFMResult, FitParams
 
 __all__ = [
     'BaseFactorModel', 'DFMLinear', 'DFM',
     # Results
-    'BaseResult', 'DFMResult', 'DDFMResult', 'DFMParams',
+    'BaseResult', 'DFMResult', 'DDFMResult', 'FitParams',
 ]
 
 # DDFM (PyTorch is mandatory)
 from .ddfm import DDFM, DDFMModel
-# Note: load_data_ddfm removed - use DFMDataModule instead
 __all__.extend([
     'DDFM',  # High-level API
     'DDFMModel',  # Low-level implementation

@@ -9,7 +9,7 @@ from .schema import (
     BaseModelConfig, DFMConfig, DDFMConfig, SeriesConfig,
     DEFAULT_BLOCK_NAME,
 )
-from .results import BaseResult, DFMResult, DDFMResult, FitParams, DFMParams
+from .results import BaseResult, DFMResult, DDFMResult, FitParams
 from .utils import validate_frequency, validate_transformation
 from .adapter import (
     ConfigSource,
@@ -40,7 +40,7 @@ __all__ = [
     'BaseModelConfig', 'DFMConfig', 'DDFMConfig', 'SeriesConfig',
     'DEFAULT_BLOCK_NAME',
     # Parameter overrides
-    'FitParams', 'DFMParams',  # DFMParams is alias for FitParams (backward compatibility)
+    'FitParams',
     # Results
     'BaseResult', 'DFMResult', 'DDFMResult',
     # Utilities

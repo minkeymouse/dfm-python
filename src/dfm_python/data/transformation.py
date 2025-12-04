@@ -1,7 +1,6 @@
 """Custom transformation functions for DFM.
 
-This module provides transformation functions that match the logic
-from the legacy _transform_series() function, implemented as
+This module provides transformation functions implemented as
 pickleable functions for use with sktime's FunctionTransformer.
 """
 

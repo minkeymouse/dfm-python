@@ -1,7 +1,6 @@
 """PyTorch Lightning modules for Dynamic Factor Models.
 
-This package provides PyTorch Lightning implementations of DFM and DDFM,
-replacing the legacy NumPy-based implementations.
+This package provides PyTorch Lightning implementations of DFM and DDFM.
 """
 
 from ..ssm.kalman import (
@@ -19,15 +18,16 @@ from .data_module import (
     DFMDataset,
 )
 
-# Note: DFMLightningModule and DDFMLightningModule consolidated into DFM and DDFM classes.
-# These imports are kept for backward compatibility but are deprecated.
+# DFMLightningModule is an internal implementation used by DFMLinear and estimation.py.
+# DDFMLightningModule is defined but not currently used - DDFM class uses DDFMModel directly.
+# These are not part of the public API.
 from .dfm_module import (
-    DFMLightningModule,  # Deprecated: use DFM from models.dfm instead
+    DFMLightningModule,  # Internal: used by DFMLinear._train_with_lightning()
     DFMTrainingState,
 )
 
 from .ddfm_module import (
-    DDFMLightningModule,  # Deprecated: use DDFM from models.ddfm instead
+    DDFMLightningModule,  # Internal: defined but not currently used (DDFM uses DDFMModel)
     DDFMTrainingState,
 )
 
@@ -41,10 +41,10 @@ __all__ = [
     # Data handling
     'DFMDataModule',
     'DFMDataset',
-    # Lightning modules (deprecated - use DFM and DDFM from models instead)
-    'DFMLightningModule',  # Deprecated
+    # Lightning modules (internal implementations)
+    'DFMLightningModule',  # Internal: used by DFMLinear._train_with_lightning()
     'DFMTrainingState',
-    'DDFMLightningModule',  # Deprecated
+    'DDFMLightningModule',  # Internal: defined but not currently used
     'DDFMTrainingState',
 ]
 

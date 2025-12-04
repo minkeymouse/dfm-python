@@ -67,7 +67,7 @@ Note: DFMConfig and SeriesConfig are internal implementation details.
 For detailed documentation, see the README.md file and the tutorial notebooks/scripts.
 """
 
-__version__ = "0.4.1"
+__version__ = "0.4.2"
 
 # ============================================================================
 # PUBLIC API DEFINITION
@@ -86,7 +86,6 @@ __version__ = "0.4.1"
 # ============================================================================
 
 # Configuration (from config/ subpackage)
-# Note: DFMConfig and SeriesConfig are internal - use Hydra YAML configuration instead
 from .config import (
     DEFAULT_BLOCK_NAME,
     ConfigSource, YamlSource, DictSource, HydraSource,
@@ -96,7 +95,6 @@ from .config import (
 from .config import DFMConfig, SeriesConfig  # Internal use only
 
 # Data utilities
-# Note: transform_data and DFMScaler have been removed - users must provide their own sktime transformers to DFMDataModule
 
 # Results
 from .config.results import DFMResult, DDFMResult, BaseResult
@@ -108,8 +106,6 @@ from .utils.time import calculate_rmse
 # PyTorch Lightning modules (mandatory dependency)
 # Users can import these directly from dfm_python
 from .lightning import (
-    DFMLightningModule,
-    DDFMLightningModule,
     DFMDataModule,
     DFMDataset,  # Dataset class (usually not needed directly)
     KalmanFilter,  # Module class
@@ -130,8 +126,6 @@ from .nowcast.helpers import (
 # Model implementations
 from .models.base import BaseFactorModel
 from .models.dfm import DFMLinear, DFM
-# Note: Legacy module-level functions removed - use instance methods and trainer.fit() pattern
-# Note: load_data removed - use DFMDataModule instead
 
 # DDFM high-level API and low-level model (PyTorch is mandatory)
 from .models.ddfm import DDFM, DDFMModel
@@ -148,7 +142,6 @@ __all__ = [
     # Config sources
     'ConfigSource', 'YamlSource', 'DictSource', 'HydraSource',
     'MergedConfigSource', 'make_config_source',
-    # Note: Legacy module-level functions removed - use instance methods and trainer.fit() pattern
     # Low-level API (functional interface - advanced usage)
     'BaseResult', 'DFMResult', 'DDFMResult', 'calculate_rmse', 'diagnose_series', 'print_series_diagnosis',
     'para_const',  # Internal utility for nowcasting
@@ -157,13 +150,10 @@ __all__ = [
 # DDFM high-level API (PyTorch is mandatory)
 __all__.extend([
     'DDFM',  # High-level API class
-    'DDFMModel',  # Low-level implementation
-    # Note: Legacy module-level functions removed - use DDFM() instance methods directly
+    'DDFMModel',  # Low-level implementation (used internally)
 ])
 
 # Lightning modules (mandatory dependency)
-# Note: DFM and DDFM are Lightning modules (inherit from BaseFactorModel)
-# DFMLightningModule and DDFMLightningModule are deprecated - use DFM and DDFM directly
 __all__.extend([
     'DFMDataModule',
     'DFMDataset',  # Dataset class (usually not needed directly)

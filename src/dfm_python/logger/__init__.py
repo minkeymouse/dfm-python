@@ -18,6 +18,7 @@ from .train_logger import (
     log_training_step,
     log_training_end,
     log_em_iteration,
+    log_training_epoch,
     log_convergence,
 )
 
@@ -40,6 +41,7 @@ __all__ = [
     'log_training_step',
     'log_training_end',
     'log_em_iteration',
+    'log_training_epoch',
     'log_convergence',
     # Inference tracking
     'InferenceLogger',

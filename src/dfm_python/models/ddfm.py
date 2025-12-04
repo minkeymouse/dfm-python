@@ -71,13 +71,9 @@ class DDFMModel:
     final smoothing is performed using Kalman filter.
     
     .. note::
-        This is the low-level implementation. For high-level API with
-        Lightning training, use the ``DDFM`` class (defined below) which is a
-        PyTorch Lightning module.
-    
-    .. deprecated:: 0.4.0
-        ``DDFMModel.fit()`` is deprecated and will raise a ``RuntimeError``.
-        Use the high-level ``DDFM`` class with ``trainer.fit(model, dm)`` pattern instead.
+        This is the low-level implementation used internally by the ``DDFM`` class.
+        For high-level API with Lightning training, use the ``DDFM`` class (defined below)
+        which is a PyTorch Lightning module.
         
         Example:
         
@@ -178,72 +174,6 @@ class DDFMModel:
         # Random number generator for MC sampling
         self.rng = np.random.RandomState(seed if seed is not None else 3)
     
-    def fit(self, data_module: 'DFMDataModule', config: DFMConfig, **kwargs) -> DDFMResult:
-        """Fit the DDFM model.
-        
-        .. deprecated:: 0.4.0
-            ``DDFMModel.fit()`` is deprecated and will raise an error.
-            Use the high-level ``DDFM`` class with ``trainer.fit(model, dm)`` pattern instead.
-        
-        This method is deprecated. For training DDFM models, use the high-level ``DDFM`` class
-        (PyTorch Lightning module) with the standard Lightning training pattern:
-        
-        .. code-block:: python
-        
-            from dfm_python import DDFM, DFMDataModule, DDFMTrainer
-            
-            # Create model and load config
-            model = DDFM()
-            model.load_config('config/ddfm.yaml')
-            
-            # Setup data module
-            dm = DFMDataModule(config=model.config, data=df_processed)
-            dm.setup()
-            
-            # Train using standard Lightning pattern
-            trainer = DDFMTrainer(max_epochs=100)
-            trainer.fit(model, dm)
-        
-        Parameters
-        ----------
-        data_module : DFMDataModule
-            DataModule containing preprocessed data. Must have setup() called.
-        config : DFMConfig
-            Configuration object. Used to determine number of factors if not specified.
-        **kwargs
-            Additional parameters (not used, method is deprecated).
-            
-        Returns
-        -------
-        DDFMResult
-            Estimation results (method raises error, never returns).
-            
-        Raises
-        ------
-        RuntimeError
-            Always raised, as this method is deprecated.
-        """
-        # Raise clear error immediately - this method is deprecated
-        _logger.warning(
-            "DDFMModel.fit() is deprecated. Use DDFM class with trainer.fit(model, dm) pattern instead."
-        )
-        
-        raise RuntimeError(
-            "DDFMModel.fit() is deprecated and no longer supported.\n\n"
-            "Please use the high-level DDFM class with the standard PyTorch Lightning training pattern:\n\n"
-            "    from dfm_python import DDFM, DFMDataModule, DDFMTrainer\n\n"
-            "    # Create model and load config\n"
-            "    model = DDFM()\n"
-            "    model.load_config('config/ddfm.yaml')\n\n"
-            "    # Setup data module\n"
-            "    dm = DFMDataModule(config=model.config, data=df_processed)\n"
-            "    dm.setup()\n\n"
-            "    # Train using standard Lightning pattern\n"
-            "    trainer = DDFMTrainer(max_epochs=100)\n"
-            "    trainer.fit(model, dm)\n\n"
-            "For more details, see the DDFM class documentation and examples."
-        )
-    
     def predict(
         self,
         horizon: Optional[int] = None,
@@ -271,7 +201,7 @@ class DDFMModel:
         if self._result is None:
             raise ValueError(
                 "DDFM prediction failed: model has not been fitted yet. "
-                "Please call fit() first or use trainer.fit() pattern."
+                "Please call trainer.fit(model, data_module) first."
             )
         
         # Default horizon
@@ -539,13 +469,9 @@ class DDFMModel:
             'factors_history': factors_history
         }
 
-# Note: PyTorch is now mandatory for DDFM - placeholder removed
-
-
 # ============================================================================
 # High-level API Classes
 # ============================================================================
-# Note: transformations.utils removed - use DFMDataModule for data loading
 from ..config.results import DFMResult
 from ..utils.helpers import (
     safe_get_method,
@@ -587,6 +513,22 @@ class DDFM(BaseFactorModel):
         >>> 
         >>> # Step 5: Predict
         >>> Xf, Zf = model.predict(horizon=6)
+    
+    Note on GPU Memory Usage:
+        DDFM typically uses less GPU memory than DFM because:
+        1. DDFM uses batch training (batch_size=32), processing data in small chunks
+        2. DFM uses EM algorithm with Kalman filtering, which stores large covariance
+           matrices on GPU: V (m x m x T+1), R (N x N), Q (m x m) for all time steps
+        3. DDFM's neural network (encoder/decoder) is relatively small compared to
+           the large covariance matrices in DFM's Kalman smoother
+        4. DDFM processes data incrementally, while DFM processes the full dataset
+           simultaneously during Kalman smoothing
+        
+        For example, with T=8000, N=22, m=2:
+        - DFM: V matrix alone is (2 x 2 x 8001) = ~128KB, plus R (22 x 22) = ~4KB,
+          plus all intermediate matrices during Kalman smoothing
+        - DDFM: Processes batches of 32 samples at a time, so only (32 x 22) = ~3KB
+          per batch on GPU, plus small encoder/decoder weights
     """
     
     def __init__(
@@ -648,11 +590,13 @@ class DDFM(BaseFactorModel):
         super().__init__(**kwargs)
         
         # If config not provided, create a placeholder that will be set via load_config
+        # Note: DDFM does not use block structure, but BaseModelConfig requires blocks
+        # We create a minimal default block that will be ignored by DDFM
         if config is None:
-            from ..config.schema import DFMConfig, SeriesConfig
+            from ..config.schema import DFMConfig, SeriesConfig, DEFAULT_BLOCK_NAME
             config = DFMConfig(
                 series=[SeriesConfig(series_id='placeholder', frequency='m', transformation='lin', blocks=[1])],
-                blocks={'Block_0': {'factors': 1, 'ar_lag': 1, 'clock': 'm'}}
+                blocks={DEFAULT_BLOCK_NAME: {'factors': 1, 'ar_lag': 1, 'clock': 'm'}}
             )
         
         self._config = config
@@ -670,15 +614,14 @@ class DDFM(BaseFactorModel):
         self.disp = disp
         
         # Determine number of factors
+        # Note: DDFM does not use block structure - num_factors is specified directly
         if num_factors is None:
-            if hasattr(config, 'factors_per_block') and config.factors_per_block:
-                self.num_factors = int(np.sum(config.factors_per_block))
+            # Try to get from config num_factors (DDFM-specific parameter)
+            if hasattr(config, 'num_factors') and config.num_factors is not None:
+                self.num_factors = config.num_factors
             else:
-                blocks = config.get_blocks_array()
-                if blocks.shape[1] > 0:
-                    self.num_factors = int(np.sum(blocks[:, 0]))
-                else:
-                    self.num_factors = 1
+                # Default to 1 if not specified
+                self.num_factors = 1
             # Track that num_factors was computed from config, not explicitly set
             self._num_factors_explicit = False
         else:
@@ -770,6 +713,7 @@ class DDFM(BaseFactorModel):
             use_batch_norm=self.use_batch_norm,
         )
         
+        # Use standard decoder (block structure removed for simplicity)
         self.decoder = Decoder(
             input_dim=self.num_factors,
             output_dim=input_dim,
@@ -863,6 +807,7 @@ class DDFM(BaseFactorModel):
         self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True)
         
         return loss
+    
     
     def _validate_factors_shape(self, factors: np.ndarray, operation: str = "operation") -> np.ndarray:
         """Validate and normalize factors shape.
@@ -1207,7 +1152,6 @@ class DDFM(BaseFactorModel):
                     loss = torch.sum(squared_diff) / (torch.sum(mask) + 1e-8)
                     loss.backward()
                     optimizer.step()
-                
                 # Extract factors from this sample
                 x_sample_tensor = torch.tensor(x_sim_den[i, :, :], device=device, dtype=dtype)
                 self.encoder.eval()
@@ -1378,7 +1322,7 @@ class DDFM(BaseFactorModel):
             num_iter=self.training_state.num_iter,
             loglik=None,  # DDFM doesn't compute loglik in same way
             series_ids=self.config.get_series_ids() if hasattr(self.config, 'get_series_ids') else None,
-            block_names=getattr(self.config, 'block_names', None),
+            block_names=None,  # DDFM does not use block structure
             training_loss=self.training_state.training_loss,
             encoder_layers=self.encoder_layers,
             use_idiosyncratic=self.use_idiosyncratic,

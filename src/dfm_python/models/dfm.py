@@ -475,7 +475,6 @@ from ..config import (
     ConfigSource,
     MergedConfigSource,
 )
-# Note: transformations.utils removed - use DFMDataModule for data loading
 from ..nowcast.dataview import DataView
 from ..utils.helpers import (
     safe_get_method,
@@ -1029,9 +1028,6 @@ class DFM(BaseFactorModel):
         return self
     
     
-    # Legacy fit() method removed - use trainer.fit(model, dm) pattern instead
-    # This was from BaseFactorModel but doesn't match the new Lightning pattern
-    
     def on_train_start(self) -> None:
         """Called when training starts. Run EM algorithm."""
         # Store data_module reference for later use (nowcast, predict, etc.)
@@ -1144,13 +1140,6 @@ class DFM(BaseFactorModel):
         return self
 
 
-# ============================================================================
-# Legacy API Migration Notes
-# ============================================================================
-# Legacy module-level functions and class methods have been removed in favor
-# of the PyTorch Lightning-based API pattern. Use instance methods and
-# trainer.fit(model, dm) pattern instead. See package documentation for details.
-# ============================================================================
 
 
 def _dump_yaml_to_file(path: Path, payload: Dict[str, Any]) -> None:

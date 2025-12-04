@@ -451,6 +451,4 @@ class ParameterResolver:
 
 
 
-# Note: Nowcasting helpers are in nowcast/ package
-# Note: Data loading helpers are in data/ package
 

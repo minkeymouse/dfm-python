@@ -281,7 +281,7 @@ class FitParams:
     All parameters are optional. If None, the corresponding value
     from DFMConfig will be used during parameter resolution.
     
-    This class replaces both the old FitParams and DFMParams classes
+    This class provides parameter overrides for DFM estimation
     for consistency across the codebase.
     """
     # Convergence parameters
@@ -340,6 +340,4 @@ class FitParams:
         return cls(**filtered)
 
 
-# Backward compatibility alias (deprecated - use FitParams instead)
-DFMParams = FitParams
 
