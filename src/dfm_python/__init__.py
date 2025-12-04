@@ -19,7 +19,7 @@ has a frequency faster than the clock, a ValueError will be raised.
 
 Key Features:
     - Hydra-based configuration (YAML files) - primary configuration method
-    - Expects preprocessed data from users - package applies internal transformations automatically
+    - Expects preprocessed data from users - users handle all preprocessing, package extracts statistics from pipeline
     - Flexible block structure for factor modeling
     - Robust handling of missing data (internal spline interpolation)
     - Automatic standardization and data clipping
@@ -27,11 +27,11 @@ Key Features:
 
 Example (Standard Lightning Pattern):
     >>> from dfm_python import DFM, DFMDataModule, DFMTrainer
-    >>> import polars as pl
+    >>> import pandas as pd
     >>> 
     >>> # Step 1: Load and preprocess data
-    >>> df = pl.read_csv('data/sample_data.csv')
-    >>> df_processed = df.select([col for col in df.columns if col != 'date'])
+    >>> df = pd.read_csv('data/sample_data.csv')
+    >>> df_processed = df[[col for col in df.columns if col != 'date']]
     >>> 
     >>> # Step 2: Create DataModule
     >>> dm = DFMDataModule(config_path='config/default.yaml', data=df_processed)
@@ -67,7 +67,7 @@ Note: DFMConfig and SeriesConfig are internal implementation details.
 For detailed documentation, see the README.md file and the tutorial notebooks/scripts.
 """
 
-__version__ = "0.4.2"
+__version__ = "0.5.11"
 
 # ============================================================================
 # PUBLIC API DEFINITION
@@ -79,8 +79,8 @@ __version__ = "0.4.2"
 # Public API categories:
 # 1. Configuration: DFMConfig, SeriesConfig, config sources
 # 2. High-level API: DFM, DDFM, module-level convenience functions
-# 3. Core utilities: DFMLinear, TimeIndex, diagnostics
-# 4. Models: BaseFactorModel, DFMLinear, DDFM (low-level)
+# 3. Core utilities: TimeIndex, diagnostics
+# 4. Models: BaseFactorModel, DDFM (low-level)
 # 5. Nowcasting: Nowcast, result classes, para_const
 # 6. Data & Results: DFMResult
 # ============================================================================
@@ -93,8 +93,6 @@ from .config import (
 )
 # Internal imports (for backward compatibility, but not recommended)
 from .config import DFMConfig, SeriesConfig  # Internal use only
-
-# Data utilities
 
 # Results
 from .config.results import DFMResult, DDFMResult, BaseResult
@@ -125,14 +123,14 @@ from .nowcast.helpers import (
 
 # Model implementations
 from .models.base import BaseFactorModel
-from .models.dfm import DFMLinear, DFM
+from .models.dfm import DFM
 
 # DDFM high-level API and low-level model (PyTorch is mandatory)
 from .models.ddfm import DDFM, DDFMModel
 
 __all__ = [
     # Core classes
-    'DFM', 'DFMLinear', 'Nowcast',
+    'DFM', 'Nowcast',
     # Model base and implementations
     'BaseFactorModel',
     # Nowcast result classes
