@@ -263,7 +263,7 @@ def _dfm_core(
     --------
     >>> from dfm_python import DFM
     >>> from dfm_python.config.adapter import YamlSource
-    >>> from dfm_python.lightning import DFMDataModule
+    >>> from dfm_python import DFMDataModule
     >>> from dfm_python.data.utils import load_data
     >>> from datetime import datetime
     >>> # Load configuration from YAML or create DFMConfig directly
@@ -349,8 +349,9 @@ def _dfm_core(
     # Convert to torch tensor
     X_torch = torch.tensor(X, dtype=torch.float32)
     
-    # Create Lightning module
-    lightning_module = DFMLightningModule(
+    # Create DFM model (Lightning module)
+    from ..models.dfm import DFM
+    model = DFM(
         config=config,
         num_factors=int(np.sum(r)),
         threshold=threshold,
@@ -360,10 +361,10 @@ def _dfm_core(
     )
     
     # Run EM algorithm
-    lightning_module.fit_em(X_torch, Mx=Mx, Wx=Wx)
+    model.fit_em(X_torch, Mx=Mx, Wx=Wx)
     
     # Extract results
-    Res = lightning_module.get_result()
+    Res = model.get_result()
     
     # Display diagnostic tables if debug logging is enabled
     if _logger.isEnabledFor(logging.DEBUG):

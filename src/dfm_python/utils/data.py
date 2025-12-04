@@ -109,6 +109,26 @@ def rem_nans_spline(X: np.ndarray, method: int = 2, k: int = 3) -> Tuple[np.ndar
     from scipy.interpolate import CubicSpline
     from scipy.signal import lfilter
     
+    # Ensure X is a numeric numpy array
+    X = np.asarray(X)
+    if not np.issubdtype(X.dtype, np.number):
+        # Convert non-numeric types to numeric, handling errors
+        try:
+            X = X.astype(np.float64)
+        except (ValueError, TypeError):
+            # If conversion fails, try using pandas for better type handling
+            try:
+                import pandas as pd
+                X_df = pd.DataFrame(X)
+                X = X_df.select_dtypes(include=[np.number]).values
+                if X.size == 0:
+                    raise ValueError("Input data contains no numeric columns")
+                # If shape changed, we need to handle it
+                if X.shape != X_df.shape:
+                    _logger.warning(f"Non-numeric columns removed. Shape changed from {X_df.shape} to {X.shape}")
+            except ImportError:
+                raise TypeError(f"Cannot convert input data to numeric. dtype: {X.dtype}")
+    
     T, N = X.shape
     indNaN = np.isnan(X)
     

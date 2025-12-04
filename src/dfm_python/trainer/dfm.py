@@ -7,8 +7,15 @@ with sensible defaults for EM algorithm training.
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from pytorch_lightning.loggers import CSVLogger
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Union
 from ..logger import get_logger
+from ..config import DFMConfig, DDFMConfig
+from . import (
+    _create_trainer_base,
+    _extract_training_params,
+    _validate_config_for_trainer,
+    DFM_TRAINER_DEFAULTS
+)
 
 _logger = get_logger(__name__)
 
@@ -20,6 +27,18 @@ class DFMTrainer(pl.Trainer):
     the EM algorithm. DFM training typically doesn't use standard gradient-based
     optimization, but this trainer can be used for consistency with Lightning
     workflows or for any gradient-based components.
+    
+    Default Values:
+        - max_epochs: 100 (EM iterations)
+        - enable_progress_bar: True
+        - enable_model_summary: False (DFM modules are simple, usually not needed)
+        - logger: False (no logging by default)
+        - accelerator: 'auto'
+        - devices: 'auto'
+        - precision: 32
+    
+    These defaults are optimized for DFM training with EM algorithm. The trainer
+    automatically sets up early stopping callback monitoring 'loglik' metric.
     
     Parameters
     ----------
@@ -45,10 +64,12 @@ class DFMTrainer(pl.Trainer):
     Examples
     --------
     >>> from dfm_python.trainer import DFMTrainer
-    >>> from dfm_python.lightning import DFMLightningModule
+    >>> from dfm_python import DFM, DFMDataModule
     >>> 
+    >>> model = DFM()
+    >>> dm = DFMDataModule(config_path='config.yaml', data=df)
     >>> trainer = DFMTrainer(max_epochs=50, enable_progress_bar=True)
-    >>> trainer.fit(module, dataloader)
+    >>> trainer.fit(model, dm)
     """
     
     def __init__(
@@ -63,71 +84,72 @@ class DFMTrainer(pl.Trainer):
             precision: Any = 32,
             **kwargs
     ):
-        # Build callbacks list
-        trainer_callbacks = callbacks if callbacks is not None else []
-        
-        # Add early stopping if max_epochs is set and not already in callbacks
-        if max_epochs > 0 and not any(isinstance(cb, EarlyStopping) for cb in trainer_callbacks):
-            early_stopping = EarlyStopping(
-                monitor='train_loss',
-                patience=10,
-                mode='min',
-                verbose=True
-            )
-            trainer_callbacks.append(early_stopping)
-        
-        # Setup logger
-        if logger is True:
-            # Use CSVLogger as default
-            logger = CSVLogger(save_dir='lightning_logs', name='dfm')
-        elif logger is False:
-            logger = None
-        
-        # Call parent constructor with DFM-specific defaults
-        super().__init__(
+        # Use common trainer base setup with DFM-specific parameters
+        # DFM logs 'loglik' metric, uses CSV logger, and has patience=10
+        trainer_config = _create_trainer_base(
             max_epochs=max_epochs,
             enable_progress_bar=enable_progress_bar,
             enable_model_summary=enable_model_summary,
             logger=logger,
-            callbacks=trainer_callbacks,
+            callbacks=callbacks,
             accelerator=accelerator,
             devices=devices,
             precision=precision,
+            early_stopping_patience=10,
+            early_stopping_min_delta=None,
+            early_stopping_monitor='loglik',  # DFM uses 'loglik' metric
+            logger_type='csv',  # DFM uses CSV logger
+            logger_name='dfm',
             **kwargs
         )
+        
+        # Store attributes for testing/verification
+        # Note: These are stored as instance attributes to allow tests to verify
+        # default values. The parent Trainer class also stores these, but storing
+        # them here ensures they're accessible even if parent implementation changes.
+        self.enable_progress_bar = enable_progress_bar
+        self.enable_model_summary = enable_model_summary
+        
+        # Call parent constructor with configured parameters
+        super().__init__(**trainer_config)
     
     @classmethod
     def from_config(
         cls,
-        config: Any,  # DFMConfig
+        config: Union[DFMConfig, DDFMConfig],
         **kwargs
     ) -> 'DFMTrainer':
-        """Create DFMTrainer from DFMConfig.
+        """Create DFMTrainer from DFMConfig or DDFMConfig.
         
         Extracts training parameters from config and creates trainer with
-        appropriate settings.
+        appropriate settings. Parameters can be overridden via kwargs.
         
         Parameters
         ----------
-        config : DFMConfig
-            DFM configuration object
+        config : Union[DFMConfig, DDFMConfig]
+            DFM or DDFM configuration object
         **kwargs
-            Additional arguments to override config values
+            Additional arguments to override config values.
+            Supported parameters: max_epochs, enable_progress_bar, enable_model_summary.
+            For additional Trainer parameters, use __init__() directly.
             
         Returns
         -------
         DFMTrainer
             Configured trainer instance
         """
-        # Extract training parameters from config
-        max_epochs = kwargs.pop('max_epochs', getattr(config, 'max_iter', 100))
-        enable_progress_bar = kwargs.pop('enable_progress_bar', True)
-        enable_model_summary = kwargs.pop('enable_model_summary', False)
+        # Validate config before processing
+        _validate_config_for_trainer(config, trainer_name="DFMTrainer")
         
-        return cls(
-            max_epochs=max_epochs,
-            enable_progress_bar=enable_progress_bar,
-            enable_model_summary=enable_model_summary,
-            **kwargs
-        )
+        # Extract training parameters from config and kwargs
+        # Use constants from trainer/__init__.py to ensure single source of truth
+        # These defaults match __init__() defaults for consistency
+        # Note: _extract_training_params() modifies kwargs by popping extracted keys
+        # After extraction, only extracted parameters are used (kwargs are consumed)
+        params = _extract_training_params(config, kwargs, DFM_TRAINER_DEFAULTS, use_max_iter=True)
+        
+        # Create trainer with extracted parameters
+        # All relevant parameters are extracted, so kwargs are not passed through
+        # If additional Trainer parameters are needed, use __init__() directly
+        return cls(**params)
 

@@ -19,13 +19,15 @@ from .data_module import (
     DFMDataset,
 )
 
+# Note: DFMLightningModule and DDFMLightningModule consolidated into DFM and DDFM classes.
+# These imports are kept for backward compatibility but are deprecated.
 from .dfm_module import (
-    DFMLightningModule,
+    DFMLightningModule,  # Deprecated: use DFM from models.dfm instead
     DFMTrainingState,
 )
 
 from .ddfm_module import (
-    DDFMLightningModule,
+    DDFMLightningModule,  # Deprecated: use DDFM from models.ddfm instead
     DDFMTrainingState,
 )
 
@@ -39,10 +41,10 @@ __all__ = [
     # Data handling
     'DFMDataModule',
     'DFMDataset',
-    # Lightning modules
-    'DFMLightningModule',
+    # Lightning modules (deprecated - use DFM and DDFM from models instead)
+    'DFMLightningModule',  # Deprecated
     'DFMTrainingState',
-    'DDFMLightningModule',
+    'DDFMLightningModule',  # Deprecated
     'DDFMTrainingState',
 ]
 

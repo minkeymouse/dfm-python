@@ -104,8 +104,7 @@ class TestTrainLogger:
     
     def test_log_convergence(self):
         """Test convergence logging."""
-        logger = TrainLogger()
-        log_convergence(logger=logger, converged=True, num_iter=50)
+        log_convergence(converged=True, num_iter=50)
         # Function should execute without error
 
 

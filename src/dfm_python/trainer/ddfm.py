@@ -7,8 +7,15 @@ with sensible defaults for neural network training.
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint, LearningRateMonitor
 from pytorch_lightning.loggers import CSVLogger, TensorBoardLogger
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Union
 from ..logger import get_logger
+from ..config import DFMConfig, DDFMConfig
+from . import (
+    _create_trainer_base,
+    _extract_training_params,
+    _validate_config_for_trainer,
+    DDFM_TRAINER_DEFAULTS
+)
 
 _logger = get_logger(__name__)
 
@@ -19,6 +26,21 @@ class DDFMTrainer(pl.Trainer):
     This trainer provides sensible defaults for training DDFM models using
     neural networks (autoencoders). It includes appropriate callbacks and
     logging for deep learning training.
+    
+    Default Values:
+        - max_epochs: 100 (training epochs)
+        - enable_progress_bar: True
+        - enable_model_summary: True (useful for debugging DDFM architecture)
+        - logger: True (uses TensorBoardLogger with CSVLogger fallback)
+        - accelerator: 'auto'
+        - devices: 'auto'
+        - precision: 32
+        - gradient_clip_val: None (no clipping by default)
+        - accumulate_grad_batches: 1
+    
+    These defaults are optimized for DDFM neural network training. The trainer
+    automatically sets up early stopping (patience=20), learning rate monitor,
+    and model checkpoint callbacks.
     
     Parameters
     ----------
@@ -48,10 +70,12 @@ class DDFMTrainer(pl.Trainer):
     Examples
     --------
     >>> from dfm_python.trainer import DDFMTrainer
-    >>> from dfm_python.lightning import DDFMLightningModule
+    >>> from dfm_python import DDFM, DFMDataModule
     >>> 
+    >>> model = DDFM(encoder_layers=[64, 32], num_factors=2)
+    >>> dm = DFMDataModule(config_path='config.yaml', data=df)
     >>> trainer = DDFMTrainer(max_epochs=100, enable_progress_bar=True)
-    >>> trainer.fit(module, dataloader)
+    >>> trainer.fit(model, dm)
     """
     
     def __init__(
@@ -68,107 +92,86 @@ class DDFMTrainer(pl.Trainer):
             accumulate_grad_batches: int = 1,
             **kwargs
     ):
-        # Build callbacks list
-        trainer_callbacks = callbacks if callbacks is not None else []
+        # Setup DDFM-specific callbacks (learning rate monitor and checkpoint)
+        lr_monitor = LearningRateMonitor(logging_interval='step')
+        checkpoint = ModelCheckpoint(
+            monitor='train_loss',
+            mode='min',
+            save_top_k=1,
+            filename='ddfm-{epoch:02d}-{train_loss:.4f}'
+        )
         
-        # Add early stopping if max_epochs is set and not already in callbacks
-        if max_epochs > 0 and not any(isinstance(cb, EarlyStopping) for cb in trainer_callbacks):
-            early_stopping = EarlyStopping(
-                monitor='train_loss',
-                patience=20,  # More patience for neural network training
-                mode='min',
-                verbose=True,
-                min_delta=1e-6
-            )
-            trainer_callbacks.append(early_stopping)
-        
-        # Add learning rate monitor for neural network training
-        if not any(isinstance(cb, LearningRateMonitor) for cb in trainer_callbacks):
-            lr_monitor = LearningRateMonitor(logging_interval='step')
-            trainer_callbacks.append(lr_monitor)
-        
-        # Add model checkpoint callback
-        if not any(isinstance(cb, ModelCheckpoint) for cb in trainer_callbacks):
-            checkpoint = ModelCheckpoint(
-                monitor='train_loss',
-                mode='min',
-                save_top_k=1,
-                filename='ddfm-{epoch:02d}-{train_loss:.4f}'
-            )
-            trainer_callbacks.append(checkpoint)
-        
-        # Setup logger
-        if logger is True:
-            # Use TensorBoardLogger as default for DDFM (better for neural networks)
-            try:
-                logger = TensorBoardLogger(save_dir='lightning_logs', name='ddfm')
-            except Exception:
-                # Fallback to CSVLogger if TensorBoard not available
-                _logger.warning("TensorBoard not available, using CSVLogger")
-                logger = CSVLogger(save_dir='lightning_logs', name='ddfm')
-        elif logger is False:
-            logger = None
-        
-        # Call parent constructor with DDFM-specific defaults
-        super().__init__(
+        # Use common trainer base setup with DDFM-specific parameters
+        # DDFM uses 'train_loss' metric, TensorBoard logger, patience=20, and additional callbacks
+        trainer_config = _create_trainer_base(
             max_epochs=max_epochs,
             enable_progress_bar=enable_progress_bar,
             enable_model_summary=enable_model_summary,
             logger=logger,
-            callbacks=trainer_callbacks,
+            callbacks=callbacks,
             accelerator=accelerator,
             devices=devices,
             precision=precision,
-            gradient_clip_val=gradient_clip_val,
-            accumulate_grad_batches=accumulate_grad_batches,
+            early_stopping_patience=20,  # More patience for neural network training
+            early_stopping_min_delta=1e-6,  # Minimum change for improvement
+            early_stopping_monitor='train_loss',  # DDFM uses 'train_loss' metric
+            logger_type='tensorboard',  # DDFM uses TensorBoard logger
+            logger_name='ddfm',
+            additional_callbacks=[lr_monitor, checkpoint],  # DDFM-specific callbacks
+            gradient_clip_val=gradient_clip_val,  # DDFM-specific parameter
+            accumulate_grad_batches=accumulate_grad_batches,  # DDFM-specific parameter
             **kwargs
         )
+        
+        # Store attributes for testing/verification
+        # Note: These are stored as instance attributes to allow tests to verify
+        # default values. The parent Trainer class also stores these, but storing
+        # them here ensures they're accessible even if parent implementation changes.
+        self.enable_progress_bar = enable_progress_bar
+        self.enable_model_summary = enable_model_summary
+        
+        # Call parent constructor with configured parameters
+        super().__init__(**trainer_config)
     
     @classmethod
     def from_config(
         cls,
-        config: Any,  # DDFMConfig or DFMConfig with DDFM params
+        config: Union[DFMConfig, DDFMConfig],
         **kwargs
     ) -> 'DDFMTrainer':
         """Create DDFMTrainer from DDFMConfig or DFMConfig.
         
         Extracts training parameters from config and creates trainer with
-        appropriate settings for neural network training.
+        appropriate settings for neural network training. Parameters can be overridden via kwargs.
         
         Parameters
         ----------
-        config : DDFMConfig or DFMConfig
-            Configuration object (can be DDFMConfig or DFMConfig with DDFM parameters)
+        config : Union[DFMConfig, DDFMConfig]
+            Configuration object (can be DDFMConfig or DDFMConfig with DDFM parameters)
         **kwargs
-            Additional arguments to override config values
+            Additional arguments to override config values.
+            Supported parameters: max_epochs, enable_progress_bar, enable_model_summary, gradient_clip_val.
+            For additional Trainer parameters, use __init__() directly.
             
         Returns
         -------
         DDFMTrainer
             Configured trainer instance
         """
-        # Extract training parameters from config
+        # Validate config before processing
+        _validate_config_for_trainer(config, trainer_name="DDFMTrainer")
+        
+        # Extract training parameters from config and kwargs
         # Handle both DDFMConfig and DFMConfig with ddfm_* parameters
-        if hasattr(config, 'epochs'):
-            max_epochs = kwargs.pop('max_epochs', config.epochs)
-        elif hasattr(config, 'ddfm_epochs'):
-            max_epochs = kwargs.pop('max_epochs', config.ddfm_epochs)
-        else:
-            max_epochs = kwargs.pop('max_epochs', 100)
+        # Note: Don't use max_iter for DDFM (only epochs/ddfm_epochs)
+        # Use constants from trainer/__init__.py to ensure single source of truth
+        # These defaults match __init__() defaults for consistency
+        # Note: _extract_training_params() modifies kwargs by popping extracted keys
+        # After extraction, only extracted parameters are used (kwargs are consumed)
+        params = _extract_training_params(config, kwargs, DDFM_TRAINER_DEFAULTS, use_max_iter=False)
         
-        enable_progress_bar = kwargs.pop('enable_progress_bar', True)
-        enable_model_summary = kwargs.pop('enable_model_summary', True)
-        
-        # Extract gradient clipping if available
-        gradient_clip_val = kwargs.pop('gradient_clip_val', None)
-        if gradient_clip_val is None and hasattr(config, 'gradient_clip_val'):
-            gradient_clip_val = config.gradient_clip_val
-        
-        return cls(
-            max_epochs=max_epochs,
-            enable_progress_bar=enable_progress_bar,
-            enable_model_summary=enable_model_summary,
-            gradient_clip_val=gradient_clip_val,
-            **kwargs
-        )
+        # Create trainer with extracted parameters
+        # All relevant parameters are extracted, so kwargs are not passed through
+        # If additional Trainer parameters are needed, use __init__() directly
+        return cls(**params)
 

@@ -11,12 +11,23 @@ All adapters implement the ConfigSource protocol and return DFMConfig objects.
 """
 
 import warnings
-from typing import Protocol, Optional, Dict, Any, Union, Tuple
+from typing import Protocol, Optional, Dict, Any, Union, Tuple, TYPE_CHECKING
 from pathlib import Path
 from dataclasses import is_dataclass, asdict
 
 from .schema import DFMConfig, SeriesConfig, DEFAULT_BLOCK_NAME
+from ..logger import get_logger
+
+try:
+    from .schema import DDFMConfig
+except ImportError:
+    DDFMConfig = None  # Fallback if not available
+
+if TYPE_CHECKING:
+    from .schema import DDFMConfig
 import polars as pl
+
+_logger = get_logger(__name__)
 
 
 def _load_config_from_defaults(cfg, root_config_dir, config_type: str) -> Optional[dict]:
@@ -94,8 +105,15 @@ class YamlSource:
         """
         self.yaml_path = Path(yaml_path)
     
-    def load(self) -> DFMConfig:
-        """Load configuration from YAML file."""
+    def load(self) -> Union[DFMConfig, 'DDFMConfig']:
+        """Load configuration from YAML file.
+        
+        Returns
+        -------
+        DFMConfig or DDFMConfig
+            Configuration object. Type is automatically detected based on config content.
+            Returns DDFMConfig if DDFM-specific parameters are present, otherwise DFMConfig.
+        """
         try:
             from omegaconf import OmegaConf
         except ImportError:
@@ -117,9 +135,63 @@ class YamlSource:
         cfg = OmegaConf.load(configfile)
         cfg_dict = OmegaConf.to_container(cfg, resolve=True)
         
+        # Check for model type from defaults and load model config if needed
+        model_type = None
+        model_config_dict = {}
+        
+        # Check defaults to find model config file
+        if 'defaults' in cfg:
+            defaults_list = cfg.defaults
+            for default_item in defaults_list:
+                default_dict = OmegaConf.to_container(default_item, resolve=False) if hasattr(default_item, 'keys') else default_item
+                if isinstance(default_dict, dict):
+                    # Check for 'override /model' or '/model' keys
+                    model_key = None
+                    if 'override /model' in default_dict:
+                        model_key = 'override /model'
+                        model_value = default_dict['override /model']
+                    elif '/model' in default_dict:
+                        model_key = '/model'
+                        model_value = default_dict['/model']
+                    
+                    if model_key and model_value:
+                        if model_value in ('ddfm', 'deep'):
+                            model_type = 'ddfm'
+                        # Load model config file
+                        model_config_path = root_config_dir / 'model' / f'{model_value}.yaml'
+                        if model_config_path.exists():
+                            model_cfg = OmegaConf.load(model_config_path)
+                            model_config_dict = OmegaConf.to_container(model_cfg, resolve=True)
+                        break
+        
+        # Also check if model key exists in resolved config
+        if not model_config_dict and 'model' in cfg_dict:
+            model_value = cfg_dict['model']
+            if isinstance(model_value, dict):
+                model_config_dict = model_value
+                # Check for DDFM-specific parameters
+                if any(key.startswith('ddfm_') or key in ['encoder_layers', 'epochs', 'learning_rate', 'batch_size'] 
+                       for key in model_value.keys()):
+                    model_type = 'ddfm'
+                elif 'model_type' in model_value:
+                    model_type = model_value['model_type'].lower()
+        
         # Extract main settings (estimation parameters)
-        excluded_keys = {'defaults', '_target_', '_recursive_', '_convert_'}
+        excluded_keys = {
+            'defaults', '_target_', '_recursive_', '_convert_', 
+            'series', 'blocks', 'data', 'output', 'description', 'name', 'target', 'model'
+        }
         main_settings = {k: v for k, v in cfg_dict.items() if k not in excluded_keys}
+        
+        # Merge model config parameters into main_settings (for DDFM detection)
+        if model_config_dict:
+            for key, value in model_config_dict.items():
+                if key not in excluded_keys:
+                    main_settings[key] = value
+        
+        # Add model_type to main_settings if detected
+        if model_type:
+            main_settings['model_type'] = model_type
         
         # Load series from config/series/default.yaml
         series_list = []
@@ -152,12 +224,19 @@ class YamlSource:
             series_data = cfg_dict['series']
             if isinstance(series_data, list):
                 for series_item in series_data:
-                    series_list.append(SeriesConfig(**series_item))
+                    if isinstance(series_item, str):
+                        # Series is just a string ID - create minimal config
+                        series_list.append(SeriesConfig(series_id=series_item, frequency='m', transformation='lin', blocks=[1]))
+                    elif isinstance(series_item, dict):
+                        series_list.append(SeriesConfig(**series_item))
             elif isinstance(series_data, dict):
                 for series_id, series_item in series_data.items():
                     if isinstance(series_item, dict):
                         series_item['series_id'] = series_id
                         series_list.append(SeriesConfig(**series_item))
+                    elif isinstance(series_item, str):
+                        # Series value is just a string - create minimal config
+                        series_list.append(SeriesConfig(series_id=series_id, frequency='m', transformation='lin', blocks=[1]))
         
         # Load block properties from model config (factors, ar_lag, clock)
         # Model config defines all blocks and their properties
@@ -229,11 +308,30 @@ class YamlSource:
                     'clock': default_clock
                 }
         
-        return DFMConfig(
-            series=series_list,
-            blocks=blocks_dict,
+        # Convert block names to list for from_dict() if series use integer block indices
+        # Check if series use integer indices instead of block names
+        block_names_list = None
+        if series_list:
+            first_series_blocks = series_list[0].blocks if hasattr(series_list[0], 'blocks') else []
+            if first_series_blocks and isinstance(first_series_blocks[0], int):
+                # Series use integer indices, need block_names for from_dict()
+                block_names_list = list(blocks_dict.keys())
+        
+        # Build dictionary for from_dict() which handles type detection
+        # Include all main_settings (which may contain DDFM parameters from model config)
+        config_dict = {
+            'series': series_list,
+            'blocks': blocks_dict,
             **main_settings
-        )
+        }
+        
+        # Add block_names if series use integer indices
+        if block_names_list is not None:
+            config_dict['block_names'] = block_names_list
+        
+        # Use from_dict() which now correctly detects DDFM configs
+        # The detection bug has been fixed in schema.py
+        return DFMConfig.from_dict(config_dict)
 
 
 class DictSource:
@@ -548,8 +646,8 @@ def make_config_source(
             except Exception:
                 pass
         raise TypeError(
-            f"Unsupported mapping type: {type(obj)}. "
-            f"Provide a dict, dataclass instance, or an object with attributes."
+            f"Config loading failed: unsupported mapping type {type(obj)}. "
+            f"Please provide a dict, dataclass instance, or an object with attributes."
         )
     
     # Handle explicit keyword arguments

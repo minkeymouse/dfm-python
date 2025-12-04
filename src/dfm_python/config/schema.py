@@ -39,6 +39,139 @@ DEFAULT_BLOCK_NAME = 'Block_0'
 from .utils import validate_frequency, validate_transformation
 
 
+# ============================================================================
+# Helper Functions for Series/Blocks Parsing (Consolidated)
+# ============================================================================
+
+def _parse_series_list(series_data: List[Any]) -> List['SeriesConfig']:
+    """Parse series from list format.
+    
+    Parameters
+    ----------
+    series_data : List[Union[Dict, SeriesConfig]]
+        List of series configurations (dicts or SeriesConfig instances)
+        
+    Returns
+    -------
+    List[SeriesConfig]
+        List of SeriesConfig instances
+    """
+    return [
+        SeriesConfig(**s) if isinstance(s, dict) else s
+        for s in series_data
+    ]
+
+
+def _parse_blocks_dict(blocks_data: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """Parse blocks from dict format.
+    
+    Parameters
+    ----------
+    blocks_data : Dict[str, Any]
+        Dictionary mapping block names to block configurations
+        
+    Returns
+    -------
+    Dict[str, Dict[str, Any]]
+        Dictionary mapping block names to block config dicts
+        
+    Raises
+    ------
+    ValueError
+        If block config is not a dict
+    """
+    blocks_dict = {}
+    for block_name, block_cfg in blocks_data.items():
+        if isinstance(block_cfg, dict):
+            blocks_dict[block_name] = block_cfg
+        else:
+            raise ValueError(f"Invalid block config for {block_name}: {block_cfg}. Must be a dict.")
+    return blocks_dict
+
+
+def _infer_blocks_from_series(
+    series_list: List['SeriesConfig'],
+    data: Dict[str, Any]
+) -> Dict[str, Dict[str, Any]]:
+    """Infer blocks from series when blocks not explicitly provided.
+    
+    Parameters
+    ----------
+    series_list : List[SeriesConfig]
+        List of series configurations
+    data : Dict[str, Any]
+        Configuration data (for clock default)
+        
+    Returns
+    -------
+    Dict[str, Dict[str, Any]]
+        Dictionary mapping block names to block config dicts
+    """
+    blocks_dict = {}
+    block_names_set = set()
+    
+    # Collect all unique block names from series
+    for s in series_list:
+        if isinstance(s, dict):
+            blocks = s.get('blocks', [])
+        else:
+            blocks = s.blocks
+        
+        if isinstance(blocks, list) and len(blocks) > 0:
+            if isinstance(blocks[0], str):
+                # Block names as strings
+                block_names_set.update(blocks)
+            else:
+                # Block indices - need block_names to map
+                if 'block_names' in data:
+                    block_names_list = data['block_names']
+                    for idx in blocks:
+                        if isinstance(idx, int) and idx < len(block_names_list):
+                            block_names_set.add(block_names_list[idx])
+    
+    # Create default blocks for each unique block name
+    clock = data.get('clock', 'm')
+    for block_name in sorted(block_names_set):
+        blocks_dict[block_name] = {'factors': 1, 'ar_lag': 1, 'clock': clock}
+    
+    return blocks_dict
+
+
+def _detect_config_type(data: Dict[str, Any]) -> str:
+    """Detect config type (DFM or DDFM) from data dictionary.
+    
+    This helper function provides a single source of truth for config type detection.
+    It checks for DDFM-specific parameters or explicit model_type specification.
+    
+    Parameters
+    ----------
+    data : Dict[str, Any]
+        Configuration data dictionary
+        
+    Returns
+    -------
+    str
+        'ddfm' if DDFM config detected, 'dfm' otherwise
+        
+    Detection Logic:
+    - Checks if model_type is 'ddfm' or 'deep'
+    - Checks for DDFM-specific parameters:
+      - Keys starting with 'ddfm_'
+      - Keys: 'encoder_layers', 'epochs', 'learning_rate', 'batch_size'
+    - Returns 'ddfm' if any condition is met (unless model_type is explicitly 'dfm')
+    """
+    model_type = data.get('model_type', '').lower()
+    has_ddfm_params = any(
+        key.startswith('ddfm_') or 
+        key in ['encoder_layers', 'epochs', 'learning_rate', 'batch_size']
+        for key in data.keys()
+    )
+    
+    if model_type in ('ddfm', 'deep') or (has_ddfm_params and model_type != 'dfm'):
+        return 'ddfm'
+    return 'dfm'
+
+
 @dataclass
 class SeriesConfig:
     """Configuration for a single time series.
@@ -100,14 +233,18 @@ class SeriesConfig:
             Block indices (0 or 1) for each block
         """
         if not self.blocks:
-            raise ValueError(f"Series {self.series_id} has no blocks specified")
+            raise ValueError(
+                f"Series '{self.series_id}' validation failed: no blocks specified. "
+                f"Please specify blocks for series '{self.series_id}'."
+            )
         
         # If already integers, validate and return
         if isinstance(self.blocks[0], int):
             if len(self.blocks) != len(block_names):
                 raise ValueError(
-                    f"Series {self.series_id} has {len(self.blocks)} block indices "
-                    f"but {len(block_names)} blocks defined"
+                    f"Series '{self.series_id}' validation failed: has {len(self.blocks)} block indices "
+                    f"but {len(block_names)} blocks defined. "
+                    f"Please ensure series '{self.series_id}' has exactly {len(block_names)} block indices."
                 )
             return list(self.blocks)
         
@@ -125,9 +262,10 @@ class SeriesConfig:
                     block_indices[block_names.index(block_name)] = 1
                 else:
                     raise ValueError(
-                        f"Series {self.series_id} references block '{block_name}' "
+                        f"Series '{self.series_id}' validation failed: references block '{block_name}' "
                         f"which is not in block_names: {block_names}. "
-                        f"Note: Block names are case-sensitive and must match exactly."
+                        f"Block names are case-sensitive and must match exactly. "
+                        f"Please use one of the defined block names: {block_names}."
                     )
             else:
                 # Use normalized name to find index
@@ -250,9 +388,15 @@ class BaseModelConfig:
             factors = block_cfg.get('factors', 1)
             ar_lag = block_cfg.get('ar_lag', 1)
             if factors < 1:
-                raise ValueError(f"Block '{block_name}' must have at least 1 factor, got {factors}")
+                raise ValueError(
+                    f"Block '{block_name}' validation failed: must have at least 1 factor, got {factors}. "
+                    f"Please set factors >= 1 for block '{block_name}'."
+                )
             if ar_lag < 1:
-                raise ValueError(f"Block '{block_name}' AR lag must be at least 1, got {ar_lag}")
+                raise ValueError(
+                    f"Block '{block_name}' validation failed: AR lag must be at least 1, got {ar_lag}. "
+                    f"Please set ar_lag >= 1 for block '{block_name}'."
+                )
         
         # Auto-generate series_id if not provided and convert blocks to indices
         n_blocks = len(self.block_names)
@@ -273,19 +417,21 @@ class BaseModelConfig:
         for i, s in enumerate(self.series):
             if len(s.blocks) != n_blocks:
                 raise ValueError(
-                    f"Series {i} ('{s.series_id}') has {len(s.blocks)} block loadings, "
+                    f"Series {i} ('{s.series_id}') validation failed: has {len(s.blocks)} block loadings, "
                     f"but expected {n_blocks} (from block_names: {self.block_names}). "
-                    f"Each series must specify a loading (0 or 1) for each block."
+                    f"Each series must specify a loading (0 or 1) for each block. "
+                    f"Please ensure series '{s.series_id}' has exactly {n_blocks} block loadings."
                 )
         
         # Check first column (global block) is all 1s
         for i, s in enumerate(self.series):
             if s.blocks[0] != 1:
                 raise ValueError(
-                    f"Series {i} ('{s.series_id}') must load on the global block "
+                    f"Series {i} ('{s.series_id}') validation failed: must load on the global block "
                     f"(first block '{self.block_names[0]}'). "
                     f"All series must have blocks[0] = 1. "
-                    f"Current value: {s.blocks[0]}"
+                    f"Current value: {s.blocks[0]}. "
+                    f"Please set blocks[0] = 1 for series '{s.series_id}'."
                 )
         
         # Validate block clock constraints: series frequency <= block clock
@@ -496,6 +642,51 @@ class DFMConfig(BaseModelConfig):
     augment_idio_slow: bool = True  # Enable tent-length chains for slower-frequency series (default: True)
     idio_rho0: float = 0.1  # Initial AR coefficient for idiosyncratic components (default: 0.1)
     idio_min_var: float = 1e-8  # Minimum variance for idiosyncratic innovation covariance (default: 1e-8)
+    
+    # ========================================================================
+    # Factory Methods
+    # ========================================================================
+    
+    @classmethod
+    def _extract_base_params(cls, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract shared base parameters from config dict."""
+        return {
+            'nan_method': data.get('nan_method', 2),
+            'nan_k': data.get('nan_k', 3),
+            'clock': data.get('clock', 'm'),
+        }
+    
+    @classmethod
+    def _extract_dfm_params(cls, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract DFM-specific parameters from config dict."""
+        base_params = cls._extract_base_params(data)
+        base_params.update({
+            'ar_lag': data.get('ar_lag', 1),
+            'threshold': data.get('threshold', 1e-5),
+            'max_iter': data.get('max_iter', 5000),
+            # Numerical stability parameters
+            'clip_ar_coefficients': data.get('clip_ar_coefficients', True),
+            'ar_clip_min': data.get('ar_clip_min', -0.99),
+            'ar_clip_max': data.get('ar_clip_max', 0.99),
+            'warn_on_ar_clip': data.get('warn_on_ar_clip', True),
+            'clip_data_values': data.get('clip_data_values', True),
+            'data_clip_threshold': data.get('data_clip_threshold', 100.0),
+            'warn_on_data_clip': data.get('warn_on_data_clip', True),
+            'use_regularization': data.get('use_regularization', True),
+            'regularization_scale': data.get('regularization_scale', 1e-5),
+            'min_eigenvalue': data.get('min_eigenvalue', 1e-8),
+            'max_eigenvalue': data.get('max_eigenvalue', 1e6),
+            'warn_on_regularization': data.get('warn_on_regularization', True),
+            'use_damped_updates': data.get('use_damped_updates', True),
+            'damping_factor': data.get('damping_factor', 0.8),
+            'warn_on_damped_update': data.get('warn_on_damped_update', True),
+            # Idiosyncratic component augmentation
+            'augment_idio': data.get('augment_idio', True),
+            'augment_idio_slow': data.get('augment_idio_slow', True),
+            'idio_rho0': data.get('idio_rho0', 0.1),
+            'idio_min_var': data.get('idio_min_var', 1e-8),
+        })
+        return base_params
 
 
 @dataclass
@@ -689,12 +880,10 @@ class DDFMConfig(BaseModelConfig):
             # Default: create default block if no blocks specified
             blocks_dict_final[DEFAULT_BLOCK_NAME] = {'factors': 1, 'ar_lag': 1, 'clock': 'm'}
         
-        # Determine config type based on model_type or presence of DDFM parameters
-        model_type = data.get('model_type', '').lower()
-        has_ddfm_params = any(key.startswith('ddfm_') or key in ['encoder_layers', 'epochs', 'learning_rate', 'batch_size'] 
-                              for key in data.keys())
+        # Determine config type using helper function
+        config_type = _detect_config_type(data)
         
-        if model_type in ('ddfm', 'deep') or (has_ddfm_params and model_type != 'dfm'):
+        if config_type == 'ddfm':
             return DDFMConfig(
                 series=series_list,
                 blocks=blocks_dict_final,
@@ -723,50 +912,24 @@ class DDFMConfig(BaseModelConfig):
         
         # New format with series list
         if 'series' in data and isinstance(data['series'], list):
-            series_list = [
-                SeriesConfig(**s) if isinstance(s, dict) else s
-                for s in data['series']
-            ]
+            # Parse series list using helper
+            series_list = _parse_series_list(data['series'])
+            
             # Handle blocks: dict of block properties
-            blocks_dict = {}
             if 'blocks' in data:
                 blocks_data = data['blocks']
                 if isinstance(blocks_data, dict):
-                    for block_name, block_cfg in blocks_data.items():
-                        if isinstance(block_cfg, dict):
-                            blocks_dict[block_name] = block_cfg
-                        else:
-                            raise ValueError(f"Invalid block config for {block_name}: {block_cfg}. Must be a dict.")
+                    blocks_dict = _parse_blocks_dict(blocks_data)
                 else:
                     raise ValueError(f"blocks must be a dict, got {type(blocks_data)}")
             else:
-                # If no blocks provided, infer from series
-                # Find all unique block names/indices from series
-                block_names_set = set()
-                for s in series_list:
-                    if isinstance(s, dict):
-                        blocks = s.get('blocks', [])
-                    else:
-                        blocks = s.blocks
-                    if isinstance(blocks[0], str):
-                        block_names_set.update(blocks)
-                    else:
-                        # If indices, we need block_names to map
-                        if 'block_names' in data:
-                            block_names_list = data['block_names']
-                            for idx in blocks:
-                                if idx < len(block_names_list):
-                                    block_names_set.add(block_names_list[idx])
-                # Create default blocks
-                for block_name in sorted(block_names_set):
-                    blocks_dict[block_name] = {'factors': 1, 'ar_lag': 1, 'clock': data.get('clock', 'm')}
+                # If no blocks provided, infer from series using helper
+                blocks_dict = _infer_blocks_from_series(series_list, data)
             
-            # Determine config type
-            model_type = data.get('model_type', '').lower()
-            has_ddfm_params = any(key.startswith('ddfm_') or key in ['encoder_layers', 'epochs', 'learning_rate', 'batch_size'] 
-                                  for key in data.keys())
+            # Determine config type using helper function
+            config_type = _detect_config_type(data)
             
-            if model_type in ('ddfm', 'deep') or (has_ddfm_params and model_type != 'dfm'):
+            if config_type == 'ddfm':
                 return DDFMConfig(
                     series=series_list,
                     blocks=blocks_dict,
@@ -817,60 +980,52 @@ class DDFMConfig(BaseModelConfig):
 
 
 # Add factory methods to DFMConfig class
-def _dfm_from_dict(cls, data: Dict[str, Any]) -> 'DFMConfig':
-    """Create DFMConfig from dictionary."""
+def _dfm_from_dict(cls, data: Dict[str, Any]) -> Union['DFMConfig', 'DDFMConfig']:
+    """Create DFMConfig or DDFMConfig from dictionary (auto-detects type)."""
     # Handle Hydra format (series as dict)
     if 'series' in data and isinstance(data['series'], dict):
-        # _from_hydra_dict is defined on DDFMConfig but shared logic
-        result = DDFMConfig._from_hydra_dict(data)
-        # If auto-detection created DDFMConfig, extract DFM params and create DFMConfig
-        if isinstance(result, DDFMConfig):
-            return DFMConfig(
-                series=result.series,
-                blocks=result.blocks,
-                **DFMConfig._extract_dfm_params(data)
-            )
-        return result
+        # Use shared _from_hydra_dict which has detection logic
+        return DDFMConfig._from_hydra_dict(data)
     
-    # Handle list format - use the logic from DFMConfig.from_dict but ensure DFMConfig type
+    # Handle list format - use detection logic to determine config type
     if 'series' in data and isinstance(data['series'], list):
-        series_list = [
-            SeriesConfig(**s) if isinstance(s, dict) else s
-            for s in data['series']
-        ]
-        blocks_dict = {}
+        # Parse series list using helper
+        series_list = _parse_series_list(data['series'])
+        
+        # Handle blocks using helpers
         if 'blocks' in data:
             blocks_data = data['blocks']
             if isinstance(blocks_data, dict):
-                for block_name, block_cfg in blocks_data.items():
-                    if isinstance(block_cfg, dict):
-                        blocks_dict[block_name] = block_cfg
-                    else:
-                        raise ValueError(f"Invalid block config for {block_name}: {block_cfg}. Must be a dict.")
+                blocks_dict = _parse_blocks_dict(blocks_data)
             else:
                 raise ValueError(f"blocks must be a dict, got {type(blocks_data)}")
         else:
-            # Infer blocks from series
-            block_names_set = set()
-            for s in series_list:
-                if isinstance(s, dict):
-                    blocks = s.get('blocks', [])
-                else:
-                    blocks = s.blocks
-                if isinstance(blocks, list) and len(blocks) > 0:
-                    if isinstance(blocks[0], str):
-                        block_names_set.update(blocks)
-            for block_name in sorted(block_names_set):
-                blocks_dict[block_name] = {'factors': 1, 'ar_lag': 1, 'clock': data.get('clock', 'm')}
+            # Infer blocks from series using helper
+            blocks_dict = _infer_blocks_from_series(series_list, data)
         
-        return DFMConfig(
-            series=series_list,
-            blocks=blocks_dict,
-            **DFMConfig._extract_dfm_params(data)
-        )
+        # Determine config type using helper function
+        config_type = _detect_config_type(data)
+        
+        if config_type == 'ddfm':
+            return DDFMConfig(
+                series=series_list,
+                blocks=blocks_dict,
+                **DDFMConfig._extract_ddfm_params(data)
+            )
+        else:
+            return DFMConfig(
+                series=series_list,
+                blocks=blocks_dict,
+                **DFMConfig._extract_dfm_params(data)
+            )
     
-    # Direct instantiation
-    return DFMConfig(**data)
+    # Direct instantiation - try to detect type using helper function
+    config_type = _detect_config_type(data)
+    
+    if config_type == 'ddfm':
+        return DDFMConfig(**data)
+    else:
+        return DFMConfig(**data)
 
 def _dfm_from_hydra(cls, cfg: Any) -> 'DFMConfig':
     """Create DFMConfig from Hydra config."""
@@ -888,59 +1043,52 @@ DFMConfig.from_dict = classmethod(_dfm_from_dict)
 DFMConfig.from_hydra = classmethod(_dfm_from_hydra)
 
 # Add factory methods to DDFMConfig class
-def _ddfm_from_dict(cls, data: Dict[str, Any]) -> 'DDFMConfig':
-    """Create DDFMConfig from dictionary."""
+def _ddfm_from_dict(cls, data: Dict[str, Any]) -> Union['DFMConfig', 'DDFMConfig']:
+    """Create DDFMConfig or DFMConfig from dictionary (auto-detects type)."""
     # Handle Hydra format (series as dict)
     if 'series' in data and isinstance(data['series'], dict):
-        result = DFMConfig._from_hydra_dict(data)  # Use DFMConfig since it's shared
-        # If auto-detection created DFMConfig, extract DDFM params and create DDFMConfig
-        if isinstance(result, DFMConfig):
-            return DDFMConfig(
-                series=result.series,
-                blocks=result.blocks,
-                **DDFMConfig._extract_ddfm_params(data)
-            )
-        return result
+        # Use shared _from_hydra_dict which has detection logic
+        return DDFMConfig._from_hydra_dict(data)
     
-    # Handle list format - use the logic from DFMConfig.from_dict but ensure DDFMConfig type
+    # Handle list format - use detection logic to determine config type
     if 'series' in data and isinstance(data['series'], list):
-        series_list = [
-            SeriesConfig(**s) if isinstance(s, dict) else s
-            for s in data['series']
-        ]
-        blocks_dict = {}
+        # Parse series list using helper
+        series_list = _parse_series_list(data['series'])
+        
+        # Handle blocks using helpers
         if 'blocks' in data:
             blocks_data = data['blocks']
             if isinstance(blocks_data, dict):
-                for block_name, block_cfg in blocks_data.items():
-                    if isinstance(block_cfg, dict):
-                        blocks_dict[block_name] = block_cfg
-                    else:
-                        raise ValueError(f"Invalid block config for {block_name}: {block_cfg}. Must be a dict.")
+                blocks_dict = _parse_blocks_dict(blocks_data)
             else:
                 raise ValueError(f"blocks must be a dict, got {type(blocks_data)}")
         else:
-            # Infer blocks from series
-            block_names_set = set()
-            for s in series_list:
-                if isinstance(s, dict):
-                    blocks = s.get('blocks', [])
-                else:
-                    blocks = s.blocks
-                if isinstance(blocks, list) and len(blocks) > 0:
-                    if isinstance(blocks[0], str):
-                        block_names_set.update(blocks)
-            for block_name in sorted(block_names_set):
-                blocks_dict[block_name] = {'factors': 1, 'ar_lag': 1, 'clock': data.get('clock', 'm')}
+            # Infer blocks from series using helper
+            blocks_dict = _infer_blocks_from_series(series_list, data)
         
-        return DDFMConfig(
-            series=series_list,
-            blocks=blocks_dict,
-            **DDFMConfig._extract_ddfm_params(data)
-        )
+        # Determine config type using helper function
+        config_type = _detect_config_type(data)
+        
+        if config_type == 'ddfm':
+            return DDFMConfig(
+                series=series_list,
+                blocks=blocks_dict,
+                **DDFMConfig._extract_ddfm_params(data)
+            )
+        else:
+            return DFMConfig(
+                series=series_list,
+                blocks=blocks_dict,
+                **DFMConfig._extract_dfm_params(data)
+            )
     
-    # Direct instantiation
-    return DDFMConfig(**data)
+    # Direct instantiation - try to detect type using helper function
+    config_type = _detect_config_type(data)
+    
+    if config_type == 'ddfm':
+        return DDFMConfig(**data)
+    else:
+        return DFMConfig(**data)
 
 def _ddfm_from_hydra(cls, cfg: Any) -> 'DDFMConfig':
     """Create DDFMConfig from Hydra config."""

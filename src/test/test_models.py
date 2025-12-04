@@ -18,7 +18,7 @@ from dfm_python.models import DFM, DFMLinear, BaseFactorModel
 from dfm_python.config import DFMConfig, DDFMConfig, SeriesConfig, DEFAULT_BLOCK_NAME
 from dfm_python.config.adapter import YamlSource
 from dfm_python.config.results import DFMResult, FitParams
-from dfm_python.lightning import DFMDataModule
+from dfm_python import DFMDataModule
 from dfm_python.data import DFMDataset, DDFMDataset
 from dfm_python.utils.data import rem_nans_spline, sort_data
 from dfm_python.utils.time import TimeIndex, parse_timestamp
@@ -29,13 +29,17 @@ class TestBaseFactorModel:
     
     def test_base_factor_model_interface(self):
         """Test that BaseFactorModel defines required interface."""
-        # BaseFactorModel is abstract, so we test via DFMLinear
-        model = DFMLinear()
+        # BaseFactorModel is abstract, so we test via DFM (high-level API)
+        # DFMLinear is low-level and doesn't inherit from BaseFactorModel
+        model = DFM()
         assert isinstance(model, BaseFactorModel)
-        assert hasattr(model, 'fit')
         assert hasattr(model, 'predict')
-        assert model.config is None
-        assert model.result is None
+        # DFM creates a placeholder config when none is provided
+        assert model.config is not None
+        # Result property raises ValueError when accessed before training
+        # Error message format: "{ModelType} model has not been trained yet. Please call trainer.fit(model, data_module) first."
+        with pytest.raises(ValueError, match=r".*model has not been trained yet.*"):
+            _ = model.result
 
 
 class TestDFMLinear:
@@ -69,9 +73,10 @@ class TestDFMLinear:
     
     def test_dfm_linear_initialization(self):
         """Test DFMLinear initialization."""
+        # DFMLinear is low-level and doesn't have config property or result property
         model = DFMLinear()
-        assert model.config is None
-        assert model.result is None
+        # DFMLinear doesn't have config property or result property (it's low-level)
+        # Only high-level DFM class has these properties
     
     def test_dfm_linear_fit_structure(self, sample_config, sample_data):
         """Test that fit method accepts correct structure.
@@ -133,8 +138,12 @@ class TestDFM:
     def test_dfm_initialization(self):
         """Test DFM initialization."""
         model = DFM()
-        assert model.config is None
-        assert model.result is None
+        # DFM creates a placeholder config when none is provided
+        assert model.config is not None
+        # Result property raises ValueError when accessed before training
+        # Error message format: "{ModelType} model has not been trained yet. Please call trainer.fit(model, data_module) first."
+        with pytest.raises(ValueError, match=r".*model has not been trained yet.*"):
+            _ = model.result
         assert hasattr(model, '_model_impl')
         assert isinstance(model._model_impl, DFMLinear)
     

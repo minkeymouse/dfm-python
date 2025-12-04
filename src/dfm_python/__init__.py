@@ -18,73 +18,56 @@ Note: Higher frequencies (daily, weekly) than the clock are not supported. If an
 has a frequency faster than the clock, a ValueError will be raised.
 
 Key Features:
-    - Unified configuration system (YAML with Hydra/OmegaConf, or direct DFMConfig objects)
+    - Hydra-based configuration (YAML files) - primary configuration method
+    - Expects preprocessed data from users - package applies internal transformations automatically
     - Flexible block structure for factor modeling
-    - Robust handling of missing data
-    - Comprehensive transformation support
+    - Robust handling of missing data (internal spline interpolation)
+    - Automatic standardization and data clipping
     - News decomposition for forecast updates
 
-Example (High-level API - Recommended):
-    >>> import dfm_python as dfm
-    >>> from dfm_python.lightning import DFMDataModule
-    >>> from sktime.transformations.compose import ColumnTransformer
+Example (Standard Lightning Pattern):
+    >>> from dfm_python import DFM, DFMDataModule, DFMTrainer
+    >>> import polars as pl
     >>> 
-    >>> # Linear DFM
-    >>> model = dfm.DFM()
+    >>> # Step 1: Load and preprocess data
+    >>> df = pl.read_csv('data/sample_data.csv')
+    >>> df_processed = df.select([col for col in df.columns if col != 'date'])
+    >>> 
+    >>> # Step 2: Create DataModule
+    >>> dm = DFMDataModule(config_path='config/default.yaml', data=df_processed)
+    >>> dm.setup()
+    >>> 
+    >>> # Step 3: Create model and load config
+    >>> model = DFM()
     >>> model.load_config('config/default.yaml')
     >>> 
-    >>> # Create transformer (user must provide)
-    >>> transformer = ColumnTransformer([...])  # User-defined sktime transformer
+    >>> # Step 4: Create trainer and fit (standard Lightning pattern)
+    >>> trainer = DFMTrainer(max_epochs=100)
+    >>> trainer.fit(model, dm)
     >>> 
-    >>> # Create DataModule
-    >>> data_module = DFMDataModule(config=model.config, transformer=transformer, data_path='data/sample_data.csv')
-    >>> data_module.setup()
-    >>> 
-    >>> # Train
-    >>> model.train(data_module, max_iter=100)
+    >>> # Step 5: Predict
     >>> Xf, Zf = model.predict(horizon=6)
     >>> 
-    >>> # Or use DDFM (separate class)
-    >>> ddfm_model = dfm.DDFM(encoder_layers=[64, 32], num_factors=2)
+    >>> # Or use DDFM (same pattern)
+    >>> from dfm_python import DDFM, DDFMTrainer
+    >>> 
+    >>> dm_ddfm = DFMDataModule(config_path='config/default.yaml', data=df_processed)
+    >>> dm_ddfm.setup()
+    >>> 
+    >>> ddfm_model = DDFM(encoder_layers=[64, 32], num_factors=2)
     >>> ddfm_model.load_config('config/default.yaml')
     >>> 
-    >>> # Create DataModule for DDFM
-    >>> data_module_ddfm = DFMDataModule(config=ddfm_model.config, transformer=transformer, data_path='data/sample_data.csv')
-    >>> data_module_ddfm.setup()
-    >>> 
-    >>> # Train
-    >>> ddfm_model.train(data_module_ddfm, epochs=100)
+    >>> trainer_ddfm = DDFMTrainer(max_epochs=100)
+    >>> trainer_ddfm.fit(ddfm_model, dm_ddfm)
     >>> Xf, Zf = ddfm_model.predict(horizon=6)
     
-Example (Low-level API - For advanced usage):
-    >>> from dfm_python import DFM, DFMConfig, SeriesConfig
-    >>> from dfm_python.config.adapter import YamlSource
-    >>> # Option 1: Load from YAML
-    >>> config = YamlSource('config.yaml').load()
-    >>> # Option 2: Create directly
-    >>> config = DFMConfig(
-    ...     series=[SeriesConfig(frequency='m', transformation='lin', blocks=[1], series_id='series1')],
-    ...     block_names=['Global']
-    ... )
-    >>> from dfm_python.lightning import DFMDataModule
-    >>> from sktime.transformations.compose import ColumnTransformer
-    >>> 
-    >>> # Create transformer (user must provide)
-    >>> transformer = ColumnTransformer([...])  # User-defined
-    >>> 
-    >>> # Create DataModule
-    >>> data_module = DFMDataModule(config=config, transformer=transformer, data_path='data.csv')
-    >>> data_module.setup()
-    >>> 
-    >>> # Fit model
-    >>> model = DFM()
-    >>> result = model.fit(data_module, config)
-    >>> factors = result.Z  # Extract estimated factors
+Note: DFMConfig and SeriesConfig are internal implementation details.
+    Users should use Hydra YAML configuration files instead.
 
 For detailed documentation, see the README.md file and the tutorial notebooks/scripts.
 """
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 
 # ============================================================================
 # PUBLIC API DEFINITION
@@ -103,11 +86,14 @@ __version__ = "0.4.0"
 # ============================================================================
 
 # Configuration (from config/ subpackage)
+# Note: DFMConfig and SeriesConfig are internal - use Hydra YAML configuration instead
 from .config import (
-    DFMConfig, SeriesConfig, DEFAULT_BLOCK_NAME,
+    DEFAULT_BLOCK_NAME,
     ConfigSource, YamlSource, DictSource, HydraSource,
     MergedConfigSource, make_config_source,
 )
+# Internal imports (for backward compatibility, but not recommended)
+from .config import DFMConfig, SeriesConfig  # Internal use only
 
 # Data utilities
 # Note: transform_data and DFMScaler have been removed - users must provide their own sktime transformers to DFMDataModule
@@ -120,12 +106,14 @@ from .utils.diagnostics import diagnose_series, print_series_diagnosis
 from .utils.time import calculate_rmse
 
 # PyTorch Lightning modules (mandatory dependency)
+# Users can import these directly from dfm_python
 from .lightning import (
     DFMLightningModule,
     DDFMLightningModule,
     DFMDataModule,
-    KalmanFilter,  # New module class
-    EMAlgorithm,  # New module class
+    DFMDataset,  # Dataset class (usually not needed directly)
+    KalmanFilter,  # Module class
+    EMAlgorithm,  # Module class
 )
 
 # Nowcasting (from nowcast/ subpackage)
@@ -142,18 +130,15 @@ from .nowcast.helpers import (
 # Model implementations
 from .models.base import BaseFactorModel
 from .models.dfm import DFMLinear, DFM
-from .models.dfm import (
-    from_yaml, from_spec, from_spec_df, from_dict,
-    load_config, load_pickle, train, predict, plot, reset, create_model
-)
-# Note: load_data has been removed - use DFMDataModule instead
+# Note: Legacy module-level functions removed - use instance methods and trainer.fit() pattern
+# Note: load_data removed - use DFMDataModule instead
 
 # DDFM high-level API and low-level model (PyTorch is mandatory)
 from .models.ddfm import DDFM, DDFMModel
 
 __all__ = [
     # Core classes
-    'DFMConfig', 'SeriesConfig', 'DFM', 'DFMLinear', 'Nowcast',
+    'DFM', 'DFMLinear', 'Nowcast',
     # Model base and implementations
     'BaseFactorModel',
     # Nowcast result classes
@@ -163,11 +148,7 @@ __all__ = [
     # Config sources
     'ConfigSource', 'YamlSource', 'DictSource', 'HydraSource',
     'MergedConfigSource', 'make_config_source',
-    # High-level API (module-level - recommended)
-    'load_config',
-    'load_pickle', 'train', 'predict', 'plot', 'reset', 'create_model',
-    # Convenience constructors (cleaner API)
-    'from_yaml', 'from_spec', 'from_spec_df', 'from_dict',
+    # Note: Legacy module-level functions removed - use instance methods and trainer.fit() pattern
     # Low-level API (functional interface - advanced usage)
     'BaseResult', 'DFMResult', 'DDFMResult', 'calculate_rmse', 'diagnose_series', 'print_series_diagnosis',
     'para_const',  # Internal utility for nowcasting
@@ -177,17 +158,17 @@ __all__ = [
 __all__.extend([
     'DDFM',  # High-level API class
     'DDFMModel',  # Low-level implementation
-    # Note: Module-level convenience functions have been removed - 
-    # use DDFM() instance methods directly (train, predict, etc.)
+    # Note: Legacy module-level functions removed - use DDFM() instance methods directly
 ])
 
 # Lightning modules (mandatory dependency)
+# Note: DFM and DDFM are Lightning modules (inherit from BaseFactorModel)
+# DFMLightningModule and DDFMLightningModule are deprecated - use DFM and DDFM directly
 __all__.extend([
-    'DFMLightningModule',
-    'DDFMLightningModule',
     'DFMDataModule',
-    'KalmanFilter',  # New module class
-    'EMAlgorithm',  # New module class
+    'DFMDataset',  # Dataset class (usually not needed directly)
+    'KalmanFilter',  # Module class
+    'EMAlgorithm',  # Module class
 ])
 
 # Trainer classes (mandatory dependency)
@@ -197,4 +178,5 @@ __all__.extend([
     'DFMTrainer',
     'DDFMTrainer',
 ])
+
 

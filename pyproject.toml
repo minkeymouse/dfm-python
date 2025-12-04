@@ -1,6 +1,6 @@
 [project]
 name = "dfm-python"
-version = "0.4.0"
+version = "0.4.1"
 description = "Dynamic Factor Model (DFM) estimation and nowcasting in Python"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -24,8 +24,11 @@ dependencies = [
     "matplotlib>=3.5.0",
     "numpy>=1.24.0",
     "polars>=0.20.0",
+    "pyarrow>=22.0.0",
     "pytorch-lightning>=2.0.0",
+    "scikit-learn>=1.7.2",
     "scipy>=1.10.0",
+    "sktime>=0.40.1",
     "torch>=2.0.0",
     "twine>=6.2.0",
 ]

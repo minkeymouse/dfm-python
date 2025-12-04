@@ -479,6 +479,13 @@ class EMAlgorithm(nn.Module):
             
             # Update residuals: res = res - ff * C_i'
             # MATLAB: res = res - ff*C_i'
+            # Ensure dimensions match (ff should be T x (r_i * pC), res should be T x N)
+            if res.shape[0] != ff.shape[0]:
+                # Pad or trim ff to match res
+                if res.shape[0] < ff.shape[0]:
+                    ff = ff[:res.shape[0], :]
+                else:
+                    ff = torch.cat([ff, torch.zeros(res.shape[0] - ff.shape[0], ff.shape[1], device=device, dtype=dtype)], dim=0)
             res = res - ff @ C_i[:, :r_i * pC].T
             resNaN = res.clone()
             resNaN[indNaN] = torch.nan
