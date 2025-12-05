@@ -24,7 +24,7 @@ A Dynamic Factor Model is a powerful statistical framework that:
 - ✅ **Clock-based framework**: All factors evolve at a common clock frequency (configurable: daily, weekly, monthly, quarterly, semi-annual, annual)
 - ✅ **Block structure**: Flexible factor organization (global common factor + sector-specific factors)
 - ✅ **Idiosyncratic components**: Per-series state augmentation for better fit (AR(1) for clock-frequency, tent-length chains for slower frequencies)
-- ✅ **Robust missing data**: Spline interpolation preprocessing + Kalman filter handling during estimation
+- ✅ **Preprocessed data**: Package expects preprocessed data from users - users handle all preprocessing (imputation, scaling, feature engineering) using sktime or other tools
 - ✅ **News decomposition**: Attribute forecast changes to specific data releases
 - ✅ **Nowcasting & Forecasting**: Generate predictions for any horizon
 - ✅ **Deep Dynamic Factor Models (DDFM)**: Nonlinear encoder with PyTorch for capturing complex factor structures (optional, requires `dfm-python[deep]`)
@@ -49,7 +49,7 @@ pip install dfm-python
 **Requirements**: 
 - Python >= 3.10
 - numpy >= 1.24.0
-- polars >= 0.20.0
+- pandas >= 2.0.0
 - scipy >= 1.10.0
 
 Optional dependencies:
@@ -65,7 +65,7 @@ Optional dependencies:
 import dfm_python as dfm
 import numpy as np
 from datetime import datetime
-import polars as pl
+import pandas as pd
 
 # Generate or load your data (T × N: time periods × series)
 # Data should be standardized or will be standardized automatically
@@ -161,36 +161,25 @@ dfm.train(max_iter=5000, threshold=1e-5)
 X_forecast, Z_forecast = dfm.predict(horizon=None)  # Or specify: horizon=12
 ```
 
-### Example 3: Using Spec CSV (Recommended for CSV Workflows)
+### Example 3: Using YAML Configuration (Recommended)
 
 ```python
 import dfm_python as dfm
-from dfm_python.config import Params
-import polars as pl
 
-# 1. Create spec CSV (see Data Format section)
-# 2. Load configuration
-params = Params(
-    max_iter=5000,
-    threshold=1e-5,
-    clock='m',
-    augment_idio=True,  # Enable idio components
-    idio_rho0=0.1       # Initial AR coefficient for idio
-)
-spec_df = pl.read_csv('data/spec.csv')
-dfm.from_spec_df(spec_df, params=params)
+# 1. Load configuration from YAML file
+dfm.from_yaml('config/default.yaml')
 
-# 3. Load data
+# 2. Load data
 dfm.load_data('data/data.csv', sample_start='2020-01-01', sample_end='2023-12-31')
 
-# 4. Train
+# 3. Train
 dfm.train()
 
-# 5. Forecast and visualize (horizon=None defaults to 1 year of periods)
+# 4. Forecast and visualize (horizon=None defaults to 1 year of periods)
 X_forecast, Z_forecast = dfm.predict(horizon=None)  # Or specify: horizon=12
 dfm.plot(kind='factor', factor_index=0, forecast_horizon=None, save_path='factor_forecast.png')
 
-# 6. Access results
+# 5. Access results
 result = dfm.get_result()
 print(f"Converged: {result.converged}, Iterations: {result.num_iter}")
 print(f"Log-likelihood: {result.loglik:.2f}")
@@ -243,28 +232,7 @@ decomposition abilities (which require the data view).
 
 The package supports multiple ways to configure your model:
 
-#### 1. Spec CSV + Params (Recommended for CSV workflows)
-
-**Best for**: Users with existing CSV files and Excel-based workflows
-
-```python
-from dfm_python.config import Params
-import polars as pl
-
-params = Params(
-    max_iter=5000,
-    threshold=1e-5,
-    clock='m',
-    augment_idio=True,
-    augment_idio_slow=True,
-    idio_rho0=0.1,
-    idio_min_var=1e-8
-)
-spec_df = pl.read_csv('data/spec.csv')
-dfm.from_spec_df(spec_df, params=params)
-```
-
-#### 2. YAML Configuration
+#### 1. YAML Configuration
 
 **Best for**: Users who prefer declarative configuration files
 
@@ -277,7 +245,7 @@ dfm.load_data('data/sample_data.csv')
 dfm.train()
 ```
 
-#### 3. Hydra Decorator (Advanced)
+#### 2. Hydra Decorator (Advanced)
 
 **Best for**: Users already using Hydra for configuration management
 
@@ -302,7 +270,7 @@ if __name__ == "__main__":
 
 **CLI Overrides**: `python script.py max_iter=10 threshold=1e-4 blocks.Block_Global.factors=2`
 
-#### 4. Direct Python Objects
+#### 3. Direct Python Objects
 
 **Best for**: Programmatic configuration and integration with other Python code
 
@@ -405,7 +373,7 @@ Date,gdp_real,consumption,investment,employment,retail_sales
 **Notes**:
 - Quarterly series (e.g., `gdp_real`) only have values at quarter-end months
 - Monthly series (e.g., `employment`, `retail_sales`) have values every month
-- Missing values are handled automatically via spline interpolation and Kalman filtering
+- **Data must be preprocessed**: Users must handle missing values, scaling, and feature engineering before passing data to the package. Use sktime or other tools for preprocessing.
 
 ### Supported Frequencies
 
@@ -802,11 +770,9 @@ config = DFMConfig(series=series, blocks=blocks)
 
 ```python
 import dfm_python as dfm
-import polars as pl
+import pandas as pd
 
 # Configuration
-spec_df = pl.read_csv(spec_path)
-dfm.from_spec_df(spec_df, params=None)     # Convert spec DataFrame to YAML + load
 dfm.from_yaml(yaml_path)                    # Load from YAML file
 dfm.from_dict(config_dict)                  # Load from dictionary
 dfm.load_config(hydra=cfg)                  # Load from Hydra DictConfig
@@ -1087,13 +1053,6 @@ python tutorial/basic_tutorial.py \
   --config-name default \
   data_path=data/sample_data.csv
 
-# Convert spec CSV to YAML first, then use
-python -c "import dfm_python as dfm; dfm.from_spec('data/sample_spec.csv')"
-python tutorial/basic_tutorial.py \
-  --config-path config \
-  --config-name sample_spec \
-  data_path=data/sample_data.csv
-
 # With CLI overrides
 python tutorial/basic_tutorial.py \
   --config-path config \
@@ -1106,7 +1065,6 @@ python tutorial/basic_tutorial.py \
 
 Comprehensive tutorial covering:
 - **Hydra-based configuration**: All configs managed through YAML files
-- **Spec CSV conversion**: Convert CSV to YAML using `dfm.from_spec()`, then load via Hydra
 - **CLI parameter overrides**: Override any parameter via command line
 - **Data preparation and transformation**
 - **Model training and convergence**
@@ -1169,14 +1127,14 @@ DATA_VIEW_SOURCE=file  # or database
 
 ### Recent Improvements (v0.3.1)
 
-- ✅ **Polars-backed Data Views + Kalman Cache**  
-  `create_data_view()` now applies release-date masks via Polars, avoiding per-view NumPy copies. `Nowcast.backtest()` reuses cached Kalman filter/smoother states across successive data views, giving large speed-ups for 12-step pseudo real-time tests.
+- ✅ **Pandas-backed Data Views + Kalman Cache**  
+  `create_data_view()` now applies release-date masks via pandas, avoiding per-view NumPy copies. `Nowcast.backtest()` reuses cached Kalman filter/smoother states across successive data views, giving large speed-ups for 12-step pseudo real-time tests.
 - ✅ **Backtest Trajectory Plot**  
   `BacktestResult.plot_trajectory()` draws 이전 vs. 업데이트 nowcast curves plus monthly actuals along a relative week axis (`-12주 … 현재`). The tutorial simply calls this helper—no more hand-built plotting code.
 - ✅ **Higher-Frequency Backsteps**  
   `Nowcast.backtest(..., backward_steps=12, higher_freq=True)` now emits weekly snapshots even when the model clock is monthly, so you can inspect 12주 worth of “pseudo releases” immediately.
 - ✅ **Reload & Reuse**  
-  `DFM.load_pickle()` restores config, time index, and cached Polars data views so you can call `predict()`/`nowcast()` right after loading without re-reading CSVs.
+  `DFM.load_pickle()` restores config, time index, and cached pandas data views so you can call `predict()`/`nowcast()` right after loading without re-reading CSVs.
 - ✅ **API + Docs Refresh**  
   README/tutorial sections now highlight the faster backtests, new trajectory plots, and guidelines for interpreting flattened Q-matrix values or “strange” news decomposition outputs.
 
@@ -1190,7 +1148,7 @@ DATA_VIEW_SOURCE=file  # or database
 - ✅ **Model Result Storage**: File-based and SQLite adapters for saving/loading model results
 - ✅ **Data View Management**: Time-point specific data views for pseudo real-time evaluation
 - ✅ **Helper Function Consolidation**: Reduced code duplication with consolidated helper functions
-  - `to_python_datetime()`: Generic datetime conversion (handles polars datetime, strings, etc.)
+  - `to_python_datetime()`: Generic datetime conversion (handles pandas Timestamp, strings, etc.)
   - `extract_last_date()`: Generic time index extraction
   - `clock_to_datetime_freq()`: Shared clock-to-datetime frequency mapping
   - `get_periods_per_year()`: Generic periods-per-year calculation

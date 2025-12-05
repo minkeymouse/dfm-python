@@ -19,7 +19,7 @@ from ..config import DFMConfig
 from ..utils.time import TimeIndex
 from ..utils.helpers import (
     get_series_ids,
-    get_frequencies_from_config,
+    get_frequencies,
     safe_get_attr,
 )
 from ..config.utils import FREQUENCY_HIERARCHY, get_periods_per_year
@@ -65,7 +65,7 @@ def get_higher_frequency(clock: str) -> Optional[str]:
     return None  # No higher frequency found
 
 
-def calculate_backward_date(
+def calc_backward_date(
     target_date: datetime,
     step: int,
     freq: str
@@ -89,9 +89,9 @@ def calculate_backward_date(
     Examples
     --------
     >>> from datetime import datetime
-    >>> calculate_backward_date(datetime(2024, 3, 15), 1, 'm')
+    >>> calc_backward_date(datetime(2024, 3, 15), 1, 'm')
     datetime(2024, 2, 15)
-    >>> calculate_backward_date(datetime(2024, 3, 15), 2, 'q')
+    >>> calc_backward_date(datetime(2024, 3, 15), 2, 'q')
     datetime(2023, 9, 15)
     """
     try:
@@ -136,7 +136,7 @@ def calculate_backward_date(
         return target_date - timedelta(days=step * 30)
 
 
-def get_forecast_horizon_config(clock: str, horizon: Optional[int] = None) -> Tuple[int, str]:
+def get_forecast_horizon(clock: str, horizon: Optional[int] = None) -> Tuple[int, str]:
     """Get forecast horizon configuration based on clock frequency.
     
     Parameters
@@ -155,9 +155,9 @@ def get_forecast_horizon_config(clock: str, horizon: Optional[int] = None) -> Tu
         
     Examples
     --------
-    >>> get_forecast_horizon_config('m', 3)
+    >>> get_forecast_horizon('m', 3)
     (3, 'ME')
-    >>> get_forecast_horizon_config('q')
+    >>> get_forecast_horizon('q')
     (1, 'QE')
     """
     if horizon is None:
@@ -173,7 +173,7 @@ def get_forecast_horizon_config(clock: str, horizon: Optional[int] = None) -> Tu
     return horizon, datetime_freq
 
 
-def check_config_consistency(saved_config: Any, current_config: DFMConfig) -> None:
+def check_config(saved_config: Any, current_config: DFMConfig) -> None:
     """Check if saved config is consistent with current config.
     
     Parameters
@@ -190,7 +190,7 @@ def check_config_consistency(saved_config: Any, current_config: DFMConfig) -> No
     
     Examples
     --------
-    >>> check_config_consistency(saved_config, current_config)
+    >>> check_config(saved_config, current_config)
     # May issue warnings if configs differ
     """
     try:
@@ -213,11 +213,7 @@ def check_config_consistency(saved_config: Any, current_config: DFMConfig) -> No
         # If comparison fails, continue anyway
 
 
-# transform_data and _transform_series removed - use DataModule with custom transformers instead
-# transform_series alias removed
-
-
-def extract_news_summary(
+def extract_news(
     singlenews: np.ndarray,
     weight: np.ndarray,
     series_ids: List[str],
@@ -243,7 +239,7 @@ def extract_news_summary(
         
     Examples
     --------
-    >>> summary = extract_news_summary(singlenews, weight, series_ids, top_n=10)
+    >>> summary = extract_news(singlenews, weight, series_ids, top_n=10)
     >>> print(summary['top_contributors'])
     """
     # Handle both 1D and 2D arrays

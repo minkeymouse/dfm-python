@@ -19,7 +19,7 @@ Blocks are defined as Dict[str, Dict[str, Any]] where each block is a dict with:
 - ar_lag: int (AR lag order)
 - clock: str (block clock frequency)
 
-For loading configurations from files (YAML, Spec CSV) or other sources,
+For loading configurations from files (YAML) or other sources,
 see the config.adapter module which provides source adapters.
 """
 
@@ -89,7 +89,7 @@ def _parse_blocks_dict(blocks_data: Dict[str, Any]) -> Dict[str, Dict[str, Any]]
     return blocks_dict
 
 
-def _infer_blocks_from_series(
+def _infer_blocks(
     series_list: List['SeriesConfig'],
     data: Dict[str, Any]
 ) -> Dict[str, Dict[str, Any]]:
@@ -200,6 +200,11 @@ class SeriesConfig:
         - Positive value (1-31): Day of month when data is released
         - Negative value: Days before end of previous month when data is released
         Example: 25 = released on 25th of each month, -5 = released 5 days before end of previous month
+    scaler : str, optional
+        Scaler type for this series: 'standard', 'robust', 'minmax', 'maxabs', 
+        'quantile', or None/null (no scaling). Used by create_scaling_transformer_from_config()
+        to automatically create per-series scaling transformers. If None, uses default
+        scaling strategy (typically 'standard').
     """
     # Required fields (no defaults)
     frequency: str
@@ -210,6 +215,7 @@ class SeriesConfig:
     series_name: Optional[str] = None  # Optional metadata for display
     units: Optional[str] = None  # Optional metadata for display only (used in news.py output)
     release_date: Optional[int] = None  # Release date for pseudo real-time nowcasting
+    scaler: Optional[str] = None  # Scaler type: 'standard', 'robust', 'minmax', 'maxabs', 'quantile', or None
     
     def __post_init__(self):
         """Validate fields after initialization."""
@@ -648,7 +654,7 @@ class DFMConfig(BaseModelConfig):
     # ========================================================================
     
     @classmethod
-    def _extract_base_params(cls, data: Dict[str, Any]) -> Dict[str, Any]:
+    def _extract_base(cls, data: Dict[str, Any]) -> Dict[str, Any]:
         """Extract shared base parameters from config dict."""
         return {
             'nan_method': data.get('nan_method', 2),
@@ -659,7 +665,7 @@ class DFMConfig(BaseModelConfig):
     @classmethod
     def _extract_dfm_params(cls, data: Dict[str, Any]) -> Dict[str, Any]:
         """Extract DFM-specific parameters from config dict."""
-        base_params = cls._extract_base_params(data)
+        base_params = cls._extract_base(data)
         base_params.update({
             'ar_lag': data.get('ar_lag', 1),
             'threshold': data.get('threshold', 1e-5),
@@ -731,50 +737,19 @@ class DDFMConfig(BaseModelConfig):
     # ========================================================================
     
     @classmethod
-    def _extract_base_params(cls, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Extract shared base parameters from config dict."""
-        return {
-            'nan_method': data.get('nan_method', 2),
-            'nan_k': data.get('nan_k', 3),
-            'clock': data.get('clock', 'm'),
-        }
+    def _extract_base(cls, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract shared base parameters from config dict (delegates to DFMConfig)."""
+        return DFMConfig._extract_base(data)
     
     @classmethod
     def _extract_dfm_params(cls, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Extract DFM-specific parameters from config dict."""
-        base_params = cls._extract_base_params(data)
-        base_params.update({
-            'ar_lag': data.get('ar_lag', 1),
-            'threshold': data.get('threshold', 1e-5),
-            'max_iter': data.get('max_iter', 5000),
-            # Numerical stability parameters
-            'clip_ar_coefficients': data.get('clip_ar_coefficients', True),
-            'ar_clip_min': data.get('ar_clip_min', -0.99),
-            'ar_clip_max': data.get('ar_clip_max', 0.99),
-            'warn_on_ar_clip': data.get('warn_on_ar_clip', True),
-            'clip_data_values': data.get('clip_data_values', True),
-            'data_clip_threshold': data.get('data_clip_threshold', 100.0),
-            'warn_on_data_clip': data.get('warn_on_data_clip', True),
-            'use_regularization': data.get('use_regularization', True),
-            'regularization_scale': data.get('regularization_scale', 1e-5),
-            'min_eigenvalue': data.get('min_eigenvalue', 1e-8),
-            'max_eigenvalue': data.get('max_eigenvalue', 1e6),
-            'warn_on_regularization': data.get('warn_on_regularization', True),
-            'use_damped_updates': data.get('use_damped_updates', True),
-            'damping_factor': data.get('damping_factor', 0.8),
-            'warn_on_damped_update': data.get('warn_on_damped_update', True),
-            # Idiosyncratic component augmentation
-            'augment_idio': data.get('augment_idio', True),
-            'augment_idio_slow': data.get('augment_idio_slow', True),
-            'idio_rho0': data.get('idio_rho0', 0.1),
-            'idio_min_var': data.get('idio_min_var', 1e-8),
-        })
-        return base_params
+        """Extract DFM-specific parameters from config dict (delegates to DFMConfig)."""
+        return DFMConfig._extract_dfm_params(data)
     
     @classmethod
-    def _extract_ddfm_params(cls, data: Dict[str, Any]) -> Dict[str, Any]:
+    def _extract_ddfm(cls, data: Dict[str, Any]) -> Dict[str, Any]:
         """Extract DDFM-specific parameters from config dict."""
-        base_params = cls._extract_base_params(data)
+        base_params = cls._extract_base(data)
         # Handle both direct keys and ddfm_ prefix format (for backward compatibility)
         base_params.update({
             'encoder_layers': data.get('encoder_layers') or data.get('ddfm_encoder_layers', None),
@@ -810,7 +785,7 @@ class DDFMConfig(BaseModelConfig):
             factors_per_block = data.get('factors_per_block', None)
         
         # If block_names is still empty, try to infer from series blocks
-        if not block_names and 'series' in data:
+        if not block_names and 'series' in data and isinstance(data['series'], dict):
             # Collect all unique block names from series
             all_blocks = set()
             for series_cfg in data['series'].values():
@@ -856,7 +831,9 @@ class DDFMConfig(BaseModelConfig):
                     frequency=series_cfg.get('frequency', 'm'),
                     transformation=series_cfg.get('transformation', 'lin'),
                     blocks=series_blocks,
-                    units=series_cfg.get('units', None)  # Optional, for display only
+                    units=series_cfg.get('units', None),  # Optional, for display only
+                    release_date=series_cfg.get('release_date', None),  # Optional, for nowcasting
+                    scaler=series_cfg.get('scaler', None)  # Optional, for per-series scaling
                 ))
         
         # Convert blocks_dict to dict of block properties
@@ -893,7 +870,7 @@ class DDFMConfig(BaseModelConfig):
             return DDFMConfig(
                 series=series_list,
                 blocks=blocks_dict_final,
-                **DDFMConfig._extract_ddfm_params(data)
+                **DDFMConfig._extract_ddfm(data)
             )
         else:
             return DFMConfig(
@@ -930,7 +907,7 @@ class DDFMConfig(BaseModelConfig):
                     raise ValueError(f"blocks must be a dict, got {type(blocks_data)}")
             else:
                 # If no blocks provided, infer from series using helper
-                blocks_dict = _infer_blocks_from_series(series_list, data)
+                blocks_dict = _infer_blocks(series_list, data)
             
             # Determine config type using helper function
             config_type = _detect_config_type(data)
@@ -939,7 +916,7 @@ class DDFMConfig(BaseModelConfig):
                 return DDFMConfig(
                     series=series_list,
                     blocks=blocks_dict,
-                    **DDFMConfig._extract_ddfm_params(data)
+                    **DDFMConfig._extract_ddfm(data)
                 )
             else:
                 return DFMConfig(
@@ -1016,7 +993,7 @@ def _dfm_from_dict(cls, data: Dict[str, Any]) -> Union['DFMConfig', 'DDFMConfig'
             return DDFMConfig(
                 series=series_list,
                 blocks=blocks_dict,
-                **DDFMConfig._extract_ddfm_params(data)
+                **DDFMConfig._extract_ddfm(data)
             )
         else:
             return DFMConfig(
@@ -1033,8 +1010,8 @@ def _dfm_from_dict(cls, data: Dict[str, Any]) -> Union['DFMConfig', 'DDFMConfig'
     else:
         return DFMConfig(**data)
 
-def _dfm_from_hydra(cls, cfg: Any) -> 'DFMConfig':
-    """Create DFMConfig from Hydra config."""
+def _from_hydra(cls, cfg: Any) -> Union['DFMConfig', 'DDFMConfig']:
+    """Create config from Hydra DictConfig (auto-detects DFM/DDFM)."""
     try:
         from omegaconf import DictConfig, OmegaConf
         if isinstance(cfg, DictConfig):
@@ -1043,10 +1020,10 @@ def _dfm_from_hydra(cls, cfg: Any) -> 'DFMConfig':
         pass
     if not isinstance(cfg, dict):
         raise TypeError("from_hydra expects a DictConfig or dict.")
-    return DFMConfig.from_dict(cfg)
+    return cls.from_dict(cfg)
 
 DFMConfig.from_dict = classmethod(_dfm_from_dict)
-DFMConfig.from_hydra = classmethod(_dfm_from_hydra)
+DFMConfig.from_hydra = classmethod(_from_hydra)
 
 # Add factory methods to DDFMConfig class
 def _ddfm_from_dict(cls, data: Dict[str, Any]) -> Union['DFMConfig', 'DDFMConfig']:
@@ -1083,7 +1060,7 @@ def _ddfm_from_dict(cls, data: Dict[str, Any]) -> Union['DFMConfig', 'DDFMConfig
             return DDFMConfig(
                 series=series_list,
                 blocks=blocks_dict,
-                **DDFMConfig._extract_ddfm_params(data)
+                **DDFMConfig._extract_ddfm(data)
             )
         else:
             return DFMConfig(
@@ -1105,19 +1082,7 @@ def _ddfm_from_dict(cls, data: Dict[str, Any]) -> Union['DFMConfig', 'DDFMConfig
     else:
         return DFMConfig(**data)
 
-def _ddfm_from_hydra(cls, cfg: Any) -> 'DDFMConfig':
-    """Create DDFMConfig from Hydra config."""
-    try:
-        from omegaconf import DictConfig, OmegaConf
-        if isinstance(cfg, DictConfig):
-            cfg = OmegaConf.to_container(cfg, resolve=True)
-    except Exception:
-        pass
-    if not isinstance(cfg, dict):
-        raise TypeError("from_hydra expects a DictConfig or dict.")
-    return DDFMConfig.from_dict(cfg)
-
 DDFMConfig.from_dict = classmethod(_ddfm_from_dict)
-DDFMConfig.from_hydra = classmethod(_ddfm_from_hydra)
+DDFMConfig.from_hydra = classmethod(_from_hydra)
 
 

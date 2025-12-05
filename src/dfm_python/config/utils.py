@@ -3,8 +3,8 @@
 This module provides:
 1. Validation functions: validate_frequency, validate_transformation
 2. Frequency hierarchy and period calculations: FREQUENCY_HIERARCHY, PERIODS_PER_YEAR, get_periods_per_year, get_annual_factor
-3. Tent kernel utilities: generate_tent_weights, generate_R_mat, get_tent_weights_for_pair
-4. Aggregation structure: get_aggregation_structure, group_series_by_frequency, compute_idio_chain_lengths
+3. Tent kernel utilities: generate_tent_weights, generate_R_mat, get_tent_weights
+4. Aggregation structure: get_agg_structure, group_by_freq, compute_idio_lengths
 5. Transformation mappings: TRANSFORM_UNITS_MAP
 """
 
@@ -299,7 +299,7 @@ def generate_R_mat(tent_weights: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     return R_mat, q
 
 
-def get_tent_weights_for_pair(slower_freq: str, faster_freq: str) -> Optional[np.ndarray]:
+def get_tent_weights(slower_freq: str, faster_freq: str) -> Optional[np.ndarray]:
     """Get deterministic tent weights for a frequency pair.
     
     Parameters:
@@ -316,16 +316,16 @@ def get_tent_weights_for_pair(slower_freq: str, faster_freq: str) -> Optional[np
         
     Examples:
     --------
-    >>> get_tent_weights_for_pair('q', 'm')
+    >>> get_tent_weights('q', 'm')
     array([1, 2, 3, 2, 1])  # Quarterly -> monthly
     
-    >>> get_tent_weights_for_pair('m', 'd')
+    >>> get_tent_weights('m', 'd')
     None  # Not supported (too large gap)
     """
     return TENT_WEIGHTS_LOOKUP.get((slower_freq, faster_freq))
 
 
-def get_aggregation_structure(
+def get_agg_structure(
     config: 'DFMConfig', 
     clock: str = 'm'
 ) -> Dict[str, Any]:
@@ -366,7 +366,7 @@ def get_aggregation_structure(
     --------
     >>> from dfm_python import load_config
     >>> config = load_config('config.yaml')
-    >>> agg_info = get_aggregation_structure(config, clock='m')
+    >>> agg_info = get_agg_structure(config, clock='m')
     >>> # Check which frequencies need tent kernels
     >>> print(agg_info['tent_weights'])
     {'q': array([1, 2, 3, 2, 1]), 'sa': array([1, 2, 3, 4, 3, 2, 1])}
@@ -382,7 +382,7 @@ def get_aggregation_structure(
     for freq in frequencies:
         if FREQUENCY_HIERARCHY.get(freq, 999) > FREQUENCY_HIERARCHY.get(clock, 0):
             # This frequency is slower than clock, check if tent kernel is available
-            tent_w = get_tent_weights_for_pair(freq, clock)
+            tent_w = get_tent_weights(freq, clock)
             if tent_w is not None and len(tent_w) <= MAX_TENT_SIZE:
                 # Tent kernel available and within size limit
                 tent_weights[freq] = tent_w
@@ -400,7 +400,7 @@ def get_aggregation_structure(
     }
 
 
-def group_series_by_frequency(
+def group_by_freq(
     idx_i: np.ndarray,
     frequencies: np.ndarray,
     clock: str
@@ -477,7 +477,7 @@ def group_series_by_frequency(
     return {freq: np.array(indices, dtype=int) for freq, indices in freq_groups.items()}
 
 
-def compute_idio_chain_lengths(
+def compute_idio_lengths(
     config: 'DFMConfig',
     clock: str,
     tent_weights_dict: Optional[Dict[str, np.ndarray]] = None
@@ -496,7 +496,7 @@ def compute_idio_chain_lengths(
         Clock frequency ('d', 'w', 'm', 'q', 'sa', 'a')
     tent_weights_dict : Dict[str, np.ndarray], optional
         Dictionary mapping frequency strings to tent weight arrays.
-        If None, will be computed from config using get_aggregation_structure.
+        If None, will be computed from config using get_agg_structure.
         
     Returns
     -------
@@ -510,7 +510,7 @@ def compute_idio_chain_lengths(
     --------
     >>> from dfm_python import load_config
     >>> config = load_config('config.yaml')
-    >>> lengths = compute_idio_chain_lengths(config, clock='m')
+    >>> lengths = compute_idio_lengths(config, clock='m')
     >>> # Returns array with 1 for monthly series, 5 for quarterly, etc.
     """
     if not config.augment_idio:
@@ -523,7 +523,7 @@ def compute_idio_chain_lengths(
     
     # Get tent weights if not provided
     if tent_weights_dict is None:
-        agg_structure = get_aggregation_structure(config, clock=clock)
+        agg_structure = get_agg_structure(config, clock=clock)
         tent_weights_dict = agg_structure.get('tent_weights', {})
     
     lengths = np.zeros(len(config.series), dtype=int)

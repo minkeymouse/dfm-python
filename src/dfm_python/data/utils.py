@@ -11,14 +11,14 @@ from typing import List, Optional, Tuple, Union
 from datetime import datetime
 
 import numpy as np
-import polars as pl
+import pandas as pd
 
 from ..config import DFMConfig
 from ..config.utils import FREQUENCY_HIERARCHY
 from ..utils.time import TimeIndex, parse_timestamp
 from ..utils.helpers import (
     safe_get_attr,
-    get_frequencies_from_config,
+    get_frequencies,
     get_series_ids,
 )
 from ..config.utils import get_periods_per_year
@@ -63,9 +63,8 @@ def read_data(datafile: Union[str, Path]) -> Tuple[np.ndarray, TimeIndex, List[s
     
     # Read data file
     try:
-        # Use infer_schema_length=None to infer all rows, and try_parse_dates=False
-        # to avoid parsing issues with mixed numeric/string columns
-        df = pl.read_csv(datafile, infer_schema_length=None, try_parse_dates=False)
+        # Use pandas read_csv with low_memory=False to infer all columns properly
+        df = pd.read_csv(datafile, low_memory=False)
     except Exception as e:
         raise ValueError(f"Failed to read data file {datafile}: {e}")
     
@@ -87,7 +86,7 @@ def read_data(datafile: Union[str, Path]) -> Tuple[np.ndarray, TimeIndex, List[s
     # Skip this check if first column is integer (likely date_id) - treat as standard format
     if not is_date_first:
         first_col_type = df[first_col].dtype
-        is_integer_id = first_col_type in [pl.Int64, pl.Int32, pl.Int16, pl.Int8, pl.UInt64, pl.UInt32, pl.UInt16, pl.UInt8]
+        is_integer_id = pd.api.types.is_integer_dtype(first_col_type)
         
         # Only check for long format if first column is not an integer ID
         if not is_integer_id:
@@ -95,16 +94,16 @@ def read_data(datafile: Union[str, Path]) -> Tuple[np.ndarray, TimeIndex, List[s
             date_cols = []
             for col in df.columns:
                 try:
-                    parse_timestamp(str(df[col][0]))
+                    parse_timestamp(str(df[col].iloc[0]))
                     date_cols.append(col)
-                except (ValueError, TypeError):
+                except (ValueError, TypeError, IndexError):
                     pass
             
             if len(date_cols) > 0:
                 # Long format: transpose and use first date column as index
                 first_date_col = date_cols[0]
-                date_col_idx = df.columns.index(first_date_col)
-                date_cols_all = df.columns[date_col_idx:]
+                date_col_idx = df.columns.get_loc(first_date_col)
+                date_cols_all = df.columns[date_col_idx:].tolist()
                 
                 # Extract dates from column names (they are dates in long format)
                 dates = []
@@ -117,10 +116,10 @@ def read_data(datafile: Union[str, Path]) -> Tuple[np.ndarray, TimeIndex, List[s
                 
                 # Transpose: rows become series, columns become time
                 # Select date columns and transpose
-                date_data = df.select(date_cols_all)
+                date_data = df[date_cols_all]
                 Z = date_data.to_numpy().T.astype(float)
                 Time = TimeIndex(dates)
-                mnemonics = df[first_col].to_list() if first_col in df.columns else [f"series_{i}" for i in range(len(df))]
+                mnemonics = df[first_col].tolist() if first_col in df.columns else [f"series_{i}" for i in range(len(df))]
                 
                 return Z, Time, mnemonics
     
@@ -129,31 +128,30 @@ def read_data(datafile: Union[str, Path]) -> Tuple[np.ndarray, TimeIndex, List[s
     try:
         # Check if first column is integer (date_id format)
         first_col_type = df[first_col].dtype
-        if first_col_type in [pl.Int64, pl.Int32, pl.Int16, pl.Int8, pl.UInt64, pl.UInt32, pl.UInt16, pl.UInt8]:
+        if pd.api.types.is_integer_dtype(first_col_type):
             # Integer date_id: use as sequential index, generate synthetic dates
             n_periods = len(df)
             from datetime import timedelta
             # Start from a default date and increment by day
             start_date = datetime(2000, 1, 1)
-            dates = [start_date + timedelta(days=int(df[first_col][i])) for i in range(n_periods)]
+            dates = [start_date + timedelta(days=int(df[first_col].iloc[i])) for i in range(n_periods)]
             Time = TimeIndex(dates)
         else:
-            # Try to parse as date
-            time_series = df[first_col].cast(pl.Utf8).str.strptime(pl.Datetime, "%Y-%m-%d", strict=False)
-            # If that fails, try other formats
-            if time_series.null_count() > 0:
-                # Try parsing as string first
-                time_series = df[first_col].str.strptime(pl.Datetime, strict=False)
+            # Try to parse as date using pandas
+            time_series = pd.to_datetime(df[first_col], errors='coerce', format='%Y-%m-%d')
+            # If that fails, try without format
+            if time_series.isna().any():
+                time_series = pd.to_datetime(df[first_col], errors='coerce')
             Time = TimeIndex(time_series)
     except (ValueError, TypeError) as e:
         # If date parsing fails, treat first column as integer date_id
         try:
             first_col_type = df[first_col].dtype
-            if first_col_type in [pl.Int64, pl.Int32, pl.Int16, pl.Int8, pl.UInt64, pl.UInt32, pl.UInt16, pl.UInt8]:
+            if pd.api.types.is_integer_dtype(first_col_type):
                 n_periods = len(df)
                 from datetime import timedelta
                 start_date = datetime(2000, 1, 1)
-                dates = [start_date + timedelta(days=int(df[first_col][i])) for i in range(n_periods)]
+                dates = [start_date + timedelta(days=int(df[first_col].iloc[i])) for i in range(n_periods)]
                 Time = TimeIndex(dates)
             else:
                 raise ValueError(f"Failed to parse date column '{first_col}': {e}")
@@ -162,7 +160,7 @@ def read_data(datafile: Union[str, Path]) -> Tuple[np.ndarray, TimeIndex, List[s
     
     # Extract series data (all columns except first)
     series_cols = [col for col in df.columns if col != first_col]
-    series_data = df.select(series_cols)
+    series_data = df[series_cols]
     Z = series_data.to_numpy().astype(float)
     mnemonics = series_cols
     
@@ -240,8 +238,8 @@ def load_data(
         if isinstance(sample_start, str):
             sample_start = parse_timestamp(sample_start)
         mask = Time >= sample_start
-        if isinstance(mask, pl.Series):
-            mask = mask.to_numpy()
+        if isinstance(mask, pd.Series):
+            mask = mask.values
         elif not isinstance(mask, np.ndarray):
             # Convert to numpy array if needed
             mask = np.asarray(mask)
@@ -254,8 +252,8 @@ def load_data(
         if isinstance(sample_end, str):
             sample_end = parse_timestamp(sample_end)
         mask = Time <= sample_end
-        if isinstance(mask, pl.Series):
-            mask = mask.to_numpy()
+        if isinstance(mask, pd.Series):
+            mask = mask.values
         elif not isinstance(mask, np.ndarray):
             # Convert to numpy array if needed
             mask = np.asarray(mask)
@@ -272,7 +270,7 @@ def load_data(
     clock = safe_get_attr(config, 'clock', 'm')
     clock_hierarchy = FREQUENCY_HIERARCHY.get(clock, 3)
     
-    frequencies = get_frequencies_from_config(config)
+    frequencies = get_frequencies(config)
     series_ids = get_series_ids(config)
     warnings_list = []
     
@@ -314,8 +312,8 @@ def load_data(
     extreme_missing_series = []
     for i, ratio in enumerate(missing_ratios):
         if ratio > 0.9:
-            from ..utils.helpers import get_series_id_by_index
-            series_id = get_series_id_by_index(config, i)
+            from ..utils.helpers import get_series_id
+            series_id = get_series_id(config, i)
             extreme_missing_series.append((series_id, ratio))
     
     if len(extreme_missing_series) > 0:

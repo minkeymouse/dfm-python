@@ -4,6 +4,7 @@ This module contains dataclasses for storing DFM estimation results and paramete
 """
 
 import numpy as np
+import warnings
 from dataclasses import dataclass
 from typing import Optional, List, Dict, Any
 from abc import ABC
@@ -118,8 +119,8 @@ class BaseResult(ABC):
         except Exception:
             return self.num_state()
 
-    def to_polars_factors(self, time_index: Optional[object] = None, factor_names: Optional[List[str]] = None):
-        """Return factors as polars DataFrame.
+    def to_pandas_factors(self, time_index: Optional[object] = None, factor_names: Optional[List[str]] = None):
+        """Return factors as pandas DataFrame.
         
         Parameters
         ----------
@@ -129,7 +130,7 @@ class BaseResult(ABC):
             Column names. Defaults to F1..Fm.
         """
         try:
-            import polars as pl
+            import pandas as pd
             from ..utils.time import TimeIndex
             
             cols = factor_names if factor_names is not None else [f"F{i+1}" for i in range(self.num_state())]
@@ -152,17 +153,24 @@ class BaseResult(ABC):
                 if time_list:
                     df_dict['time'] = time_list
             
-            return pl.DataFrame(df_dict)
+            return pd.DataFrame(df_dict)
         except (ImportError, ValueError, TypeError):
             return self.Z
 
-    def to_polars_smoothed(self, time_index: Optional[object] = None, series_ids: Optional[List[str]] = None):
-        """Return smoothed data (original scale) as polars DataFrame."""
+
+    def to_pandas_smoothed(self, time_index: Optional[object] = None, series_ids: Optional[List[str]] = None):
+        """Return smoothed data (original scale) as pandas DataFrame."""
         try:
-            import polars as pl
+            import pandas as pd
             from ..utils.time import TimeIndex
             
-            cols = series_ids if series_ids is not None else (self.series_ids if self.series_ids is not None else [f"S{i+1}" for i in range(self.num_series())])
+            # Get column names: use provided series_ids, fallback to stored IDs, or generate defaults
+            if series_ids is not None:
+                cols = series_ids
+            elif self.series_ids is not None:
+                cols = self.series_ids
+            else:
+                cols = [f"S{i+1}" for i in range(self.num_series())]
             
             # Create DataFrame with series as columns
             df_dict = {col: self.X_sm[:, i] for i, col in enumerate(cols)}
@@ -182,10 +190,10 @@ class BaseResult(ABC):
                 if time_list:
                     df_dict['time'] = time_list
             
-            return pl.DataFrame(df_dict)
+            return pd.DataFrame(df_dict)
         except (ImportError, ValueError, TypeError):
             return self.X_sm
-    
+
 
     def save(self, path: str) -> None:
         """Save result to a pickle file."""

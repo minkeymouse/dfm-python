@@ -18,21 +18,18 @@ from .adapter import (
     HydraSource,
     MergedConfigSource,
     make_config_source,
-    # Note: from_spec is in models/dfm.py, not in adapter
-    # Note: Private functions (_load_config_from_dataframe, _write_series_blocks_yaml)
-    # are available from adapter module but not exported as public API
 )
 from .utils import (
     FREQUENCY_HIERARCHY,
     PERIODS_PER_YEAR,
     get_periods_per_year,
     get_annual_factor,
-    compute_idio_chain_lengths,
-    get_tent_weights_for_pair,
+    compute_idio_lengths,
+    get_tent_weights,
     generate_tent_weights,
     generate_R_mat,
-    get_aggregation_structure,
-    group_series_by_frequency,
+    get_agg_structure,
+    group_by_freq,
 )
 
 __all__ = [
@@ -53,13 +50,11 @@ __all__ = [
     'PERIODS_PER_YEAR',
     'get_periods_per_year',
     'get_annual_factor',
-    'compute_idio_chain_lengths',
-    'get_tent_weights_for_pair',
+    'compute_idio_lengths',
+    'get_tent_weights',
     'generate_tent_weights',
     'generate_R_mat',
-    'get_aggregation_structure',
-    'group_series_by_frequency',
-    # Note: Private functions (_load_config_from_dataframe, _write_series_blocks_yaml)
-    # are available from adapter module but not exported as public API
+    'get_agg_structure',
+    'group_by_freq',
 ]
 

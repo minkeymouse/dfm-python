@@ -29,6 +29,7 @@ from typing import Tuple, Optional, Dict, Any
 from dataclasses import dataclass
 from ..logger import get_logger
 from .kalman import KalmanFilter
+from .utils import ensure_positive_definite, ensure_symmetric
 
 _logger = get_logger(__name__)
 
@@ -173,18 +174,32 @@ class EMAlgorithm(nn.Module):
                 max_eigenval = torch.max(torch.abs(eigenvals_A))
                 if max_eigenval >= 0.99:
                     A_new = A_new * (0.99 / max_eigenval)
+                
+                # Additional stabilization: ensure A is real and finite (like numpy version)
+                A_new = torch.nan_to_num(A_new, nan=0.0, posinf=0.99, neginf=-0.99)
+                A_new = torch.clamp(A_new, min=-0.99, max=0.99)  # Clip to prevent instability
             except (RuntimeError, ValueError):
                 A_new = params.A.clone()
+                # Still apply clipping even if eigvals failed
+                A_new = torch.nan_to_num(A_new, nan=0.0, posinf=0.99, neginf=-0.99)
+                A_new = torch.clamp(A_new, min=-0.99, max=0.99)
         else:
             A_new = params.A.clone()
         
         # Update C (observation matrix): regression of y_t on Z_t
+        # CRITICAL: Match MATLAB behavior - set NaN to 0 for M-step calculations
+        # MATLAB: nanY = isnan(y); y(nanY) = 0;
+        y_for_mstep = params.y.clone()  # Work on copy
+        nanY = torch.isnan(y_for_mstep)
+        y_for_mstep[nanY] = 0.0  # Set NaN to 0 (MATLAB behavior)
+        
         # C = (sum_t y_t E[Z_t^T]) (sum_t E[Z_t Z_t^T])^{-1}
         try:
             # Compute sum_yEZ = sum_t y_t E[Z_t^T] (vectorized: batch outer products)
             # params.y is (N, T), EZ is (T, m)
             # Transpose y to (T, N) for batch operations
-            sum_yEZ = torch.sum(params.y.T[:, :, None] * EZ[:, None, :], dim=0)  # (N, m)
+            # Use y_for_mstep (NaN replaced with 0) for M-step
+            sum_yEZ = torch.sum(y_for_mstep.T[:, :, None] * EZ[:, None, :], dim=0)  # (N, m)
             # Compute sum_EZZ = sum_t E[Z_t Z_t^T]
             sum_EZZ = torch.sum(EZZ, dim=0)
             # Regularization prevents singular matrix errors (critical for GPU stability)
@@ -204,40 +219,105 @@ class EMAlgorithm(nn.Module):
         if T > 1:
             # Vectorized: residuals_Q = EZ[1:] - (A_new @ EZ[:-1].T).T
             residuals_Q = EZ[1:, :] - (A_new @ EZ[:-1, :].T).T
-            Q_new = torch.cov(residuals_Q.T)
-            Q_new = (Q_new + Q_new.T) / 2
-            # Ensure positive definite
-            eigenvals_Q = torch.linalg.eigvalsh(Q_new)
-            min_eigenval = torch.min(eigenvals_Q)
-            if min_eigenval < 1e-8:
-                Q_new = Q_new + torch.eye(m, device=device, dtype=dtype) * (1e-8 - min_eigenval)
-            # Floor for Q
+            # Handle single factor case (torch.cov returns 0-D tensor for single variable)
+            if residuals_Q.shape[1] == 1:
+                var_val = torch.var(residuals_Q, dim=0, unbiased=False)
+                Q_new = var_val.unsqueeze(0).unsqueeze(0)  # (1, 1)
+            else:
+                Q_new = torch.cov(residuals_Q.T)
+                Q_new = (Q_new + Q_new.T) / 2
+            # Ensure positive definite with robust eigenvalue computation
+            try:
+                eigenvals_Q = torch.linalg.eigvalsh(Q_new)
+                min_eigenval = torch.min(eigenvals_Q)
+                if min_eigenval < 1e-8:
+                    Q_new = Q_new + torch.eye(m, device=device, dtype=dtype) * (1e-8 - min_eigenval)
+            except (RuntimeError, ValueError) as e:
+                # eigvalsh failed due to ill-conditioning - apply stronger regularization
+                _logger.warning(f"eigvalsh failed for Q matrix: {e}. Applying stronger regularization.")
+                # Apply stronger regularization to ensure positive definiteness
+                Q_new = Q_new + torch.eye(m, device=device, dtype=dtype) * 1e-6
+                # Recompute eigenvalues with regularized matrix
+                try:
+                    eigenvals_Q = torch.linalg.eigvalsh(Q_new)
+                    min_eigenval = torch.min(eigenvals_Q)
+                    if min_eigenval < 1e-8:
+                        Q_new = Q_new + torch.eye(m, device=device, dtype=dtype) * (1e-8 - min_eigenval)
+                except (RuntimeError, ValueError):
+                    # Still failing - use diagonal matrix with variance estimates
+                    diag_Q = torch.diag(Q_new)
+                    diag_Q = torch.maximum(diag_Q, torch.ones_like(diag_Q) * 1e-6)
+                    Q_new = torch.diag(diag_Q)
+            # Floor for Q - ensure minimum variance (like numpy version)
             Q_new = torch.maximum(Q_new, torch.eye(m, device=device, dtype=dtype) * 0.01)
+            # Additional stabilization: ensure symmetric and clean NaN/Inf (like numpy version)
+            Q_new = ensure_symmetric(Q_new)  # Force symmetric
+            Q_new = torch.nan_to_num(Q_new, nan=0.01, posinf=1e6, neginf=0.01)  # Clean NaN/Inf
+            # Final check: ensure positive definite with stronger regularization
+            Q_new = ensure_positive_definite(Q_new, min_eigenval=1e-6, warn=False)
         else:
             Q_new = params.Q.clone()
         
         # Update R (observation covariance): residual covariance from observation
         # Vectorized: residuals_R = params.y.T - (C_new @ EZ.T).T
         # params.y is (N, T), EZ is (T, m), C_new is (N, m)
-        residuals_R = params.y.T - (C_new @ EZ.T).T  # (T, N)
-        R_new = torch.cov(residuals_R.T)
-        R_new = (R_new + R_new.T) / 2
+        # Use y_for_mstep (NaN replaced with 0) for M-step (MATLAB behavior)
+        residuals_R = y_for_mstep.T - (C_new @ EZ.T).T  # (T, N)
+        # Handle single series case (torch.cov returns 0-D tensor for single variable)
+        if residuals_R.shape[1] == 1:
+            var_val = torch.var(residuals_R, dim=0, unbiased=False)
+            R_new = var_val.unsqueeze(0).unsqueeze(0)  # (1, 1)
+        else:
+            R_new = torch.cov(residuals_R.T)
+            R_new = (R_new + R_new.T) / 2
         
         # Ensure R is diagonal (idiosyncratic variances only)
-        R_new = torch.diag(torch.diag(R_new))
+        # Handle case where R_new might be 3D or have unexpected shape
+        if R_new.ndim > 2:
+            _logger.warning(f"R_new has unexpected shape: {R_new.shape}, reshaping...")
+            # Take the last 2 dimensions if 3D
+            R_new = R_new.reshape(-1, R_new.shape[-1])[-R_new.shape[-1]:, :]
+        elif R_new.ndim == 1:
+            R_new = R_new.unsqueeze(0)
         
-        # Ensure positive definite
-        R_new = torch.maximum(R_new, torch.eye(N, device=device, dtype=dtype) * 1e-8)
+        # Extract diagonal and create diagonal matrix
+        diag_R = torch.diag(R_new) if R_new.ndim == 2 else R_new
+        if diag_R.ndim > 1:
+            diag_R = diag_R.flatten()
+        
+        # Clean and clamp diagonal (like numpy version: clipping and epsilon)
+        diag_R = torch.nan_to_num(diag_R, nan=1e-6, posinf=1e4, neginf=1e-6)  # Clean NaN/Inf
+        diag_R = torch.clamp(diag_R, min=1e-6, max=1e4)  # Clip to reasonable range (like numpy version)
+        R_new = torch.diag(diag_R)
+        
+        # Ensure positive definite (minimum variance floor)
+        R_new = torch.maximum(R_new, torch.eye(N, device=device, dtype=dtype) * 1e-6)
         
         # Update Z_0 and V_0 (use first smoothed state)
         Z_0_new = Zsmooth[0, :]  # Initial state
         V_0_new = Vsmooth[:, :, 0]  # Initial covariance
         
         # Ensure V_0 is positive definite
-        eigenvals_V0 = torch.linalg.eigvalsh(V_0_new)
-        min_eigenval = torch.min(eigenvals_V0)
-        if min_eigenval < 1e-8:
-            V_0_new = V_0_new + torch.eye(m, device=device, dtype=dtype) * (1e-8 - min_eigenval)
+        # Ensure V_0 is positive definite with robust eigenvalue computation
+        try:
+            eigenvals_V0 = torch.linalg.eigvalsh(V_0_new)
+            min_eigenval = torch.min(eigenvals_V0)
+            if min_eigenval < 1e-8:
+                V_0_new = V_0_new + torch.eye(m, device=device, dtype=dtype) * (1e-8 - min_eigenval)
+        except (RuntimeError, ValueError) as e:
+            # eigvalsh failed due to ill-conditioning - apply stronger regularization
+            _logger.warning(f"eigvalsh failed for V_0_new matrix: {e}. Applying stronger regularization.")
+            V_0_new = V_0_new + torch.eye(m, device=device, dtype=dtype) * 1e-6
+            try:
+                eigenvals_V0 = torch.linalg.eigvalsh(V_0_new)
+                min_eigenval = torch.min(eigenvals_V0)
+                if min_eigenval < 1e-8:
+                    V_0_new = V_0_new + torch.eye(m, device=device, dtype=dtype) * (1e-8 - min_eigenval)
+            except (RuntimeError, ValueError):
+                # Still failing - use diagonal matrix with variance estimates
+                diag_V0 = torch.diag(V_0_new)
+                diag_V0 = torch.maximum(diag_V0, torch.ones_like(diag_V0) * 1e-6)
+                V_0_new = torch.diag(diag_V0)
         
         return C_new, R_new, A_new, Q_new, Z_0_new, V_0_new, loglik
     
@@ -351,8 +431,10 @@ class EMAlgorithm(nn.Module):
         V_0_list = []  # Will build block-diagonal initial covariance
         
         # Process each block sequentially (residual-based approach)
+        _logger.info(f"Processing {n_blocks} blocks. r tensor: {r}, shape: {r.shape}")
         for i in range(n_blocks):
             r_i = int(r[i].item())  # Number of factors for this block
+            _logger.info(f"Block {i}: r_i={r_i}, ppC={ppC}, expected size={r_i * ppC}")
             
             # Find series indices loading on this block
             idx_i = torch.where(blocks[:, i] > 0)[0]  # Series loading block i
@@ -369,11 +451,18 @@ class EMAlgorithm(nn.Module):
                 # Center the data
                 res_M_centered = res_M - res_M.mean(dim=0, keepdim=True)
                 # Compute covariance
-                if res_M_centered.shape[0] > 1:
+                n_iM = len(idx_iM)
+                if res_M_centered.shape[0] > 1 and n_iM > 1:
+                    # Multiple series: use torch.cov
                     cov_res = torch.cov(res_M_centered.T)  # n_iM x n_iM
                     cov_res = (cov_res + cov_res.T) / 2  # Symmetrize
+                elif res_M_centered.shape[0] > 1 and n_iM == 1:
+                    # Single series: use torch.var and convert to 2D matrix
+                    var_val = torch.var(res_M_centered, dim=0, unbiased=False)
+                    cov_res = var_val.unsqueeze(0).unsqueeze(0)  # (1, 1)
                 else:
-                    cov_res = torch.eye(len(idx_iM), device=device, dtype=dtype)
+                    # Not enough data: use identity
+                    cov_res = torch.eye(n_iM, device=device, dtype=dtype)
                 
                 # Compute PCA: extract r_i principal components
                 from ..encoder.pca import compute_principal_components_torch
@@ -401,6 +490,7 @@ class EMAlgorithm(nn.Module):
             # MATLAB: for kk = 0:max(p+1,pC)-1, F = [F f(pC-kk:end-kk,:)]
             F = torch.zeros(T, 0, device=device, dtype=dtype)
             max_lag = max(p + 1, pC)
+            _logger.debug(f"Block {i}: Building F matrix with max_lag={max_lag}, f shape={f.shape}, r_i={r_i}")
             for kk in range(max_lag):
                 start_idx = pC - kk
                 end_idx = T - kk
@@ -410,12 +500,26 @@ class EMAlgorithm(nn.Module):
                     end_idx = T
                 if start_idx < end_idx:
                     f_lag = f[start_idx:end_idx, :]
+                    # Ensure f_lag has correct number of columns (r_i)
+                    if f_lag.shape[1] != r_i:
+                        _logger.warning(f"Block {i}, kk={kk}: f_lag shape mismatch: {f_lag.shape}, expected (?, {r_i}). Adjusting...")
+                        if f_lag.shape[1] < r_i:
+                            # Pad columns
+                            f_lag = torch.cat([f_lag, torch.zeros(f_lag.shape[0], r_i - f_lag.shape[1], device=device, dtype=dtype)], dim=1)
+                        else:
+                            # Trim columns
+                            f_lag = f_lag[:, :r_i]
                     # Pad to match T
                     if start_idx > 0:
                         f_lag = torch.cat([torch.zeros(start_idx, r_i, device=device, dtype=dtype), f_lag], dim=0)
                     if len(f_lag) < T:
                         f_lag = torch.cat([f_lag, torch.zeros(T - len(f_lag), r_i, device=device, dtype=dtype)], dim=0)
+                    # Verify f_lag shape before concatenation
+                    if f_lag.shape[1] != r_i:
+                        _logger.error(f"Block {i}, kk={kk}: f_lag still has wrong shape: {f_lag.shape}, expected (T, {r_i})")
+                        f_lag = f_lag[:, :r_i] if f_lag.shape[1] > r_i else torch.cat([f_lag, torch.zeros(f_lag.shape[0], r_i - f_lag.shape[1], device=device, dtype=dtype)], dim=1)
                     F = torch.cat([F, f_lag], dim=1)  # T x (r_i * (kk+1))
+                    _logger.debug(f"Block {i}, kk={kk}: f_lag shape={f_lag.shape}, F shape after cat={F.shape}")
             
             # Extract ff for quarterly series: ff = F(:, 1:r_i*pC)
             ff = F[:, :r_i * pC] if F.shape[1] >= r_i * pC else F
@@ -507,7 +611,18 @@ class EMAlgorithm(nn.Module):
                     ZTZ = Z.T @ Z
                     reg_scale = self.regularization_scale.item()
                     ZTZ_reg = ZTZ + torch.eye(ZTZ.shape[0], device=device, dtype=dtype) * reg_scale
-                    A_temp = torch.linalg.solve(ZTZ_reg, Z.T @ z).T  # r_i x (r_i*p)
+                    z_T = z.T if z.ndim > 1 else z.unsqueeze(0)  # Ensure z is 2D: (r_i, T)
+                    ZTz = Z.T @ z  # (r_i*p, r_i) or (r_i*p, T) depending on z shape
+                    A_temp = torch.linalg.solve(ZTZ_reg, ZTz).T  # r_i x (r_i*p)
+                    
+                    # Ensure A_temp has correct shape
+                    if A_temp.shape != (r_i, r_i * p):
+                        _logger.warning(f"Block {i}: A_temp shape mismatch: {A_temp.shape}, expected ({r_i}, {r_i * p}). Adjusting...")
+                        A_temp_new = torch.zeros(r_i, r_i * p, device=device, dtype=dtype)
+                        min_rows = min(A_temp.shape[0], r_i)
+                        min_cols = min(A_temp.shape[1], r_i * p)
+                        A_temp_new[:min_rows, :min_cols] = A_temp[:min_rows, :min_cols]
+                        A_temp = A_temp_new
                     
                     # Set transition matrix: A_i(1:r_i,1:r_i*p) = A_temp'
                     A_i[:r_i, :r_i * p] = A_temp
@@ -533,8 +648,13 @@ class EMAlgorithm(nn.Module):
                     try:
                         e = z[p:, :] - (Z[p:, :] @ A_i[:r_i, :r_i * p].T)
                         if e.shape[0] > 1:
-                            Q_i[:r_i, :r_i] = torch.cov(e.T)
-                            Q_i[:r_i, :r_i] = (Q_i[:r_i, :r_i] + Q_i[:r_i, :r_i].T) / 2
+                            # Handle single factor case (torch.cov returns 0-D tensor for single variable)
+                            if e.shape[1] == 1:
+                                var_val = torch.var(e, dim=0, unbiased=False)
+                                Q_i[:r_i, :r_i] = var_val.unsqueeze(0).unsqueeze(0)  # (1, 1)
+                            else:
+                                Q_i[:r_i, :r_i] = torch.cov(e.T)
+                                Q_i[:r_i, :r_i] = (Q_i[:r_i, :r_i] + Q_i[:r_i, :r_i].T) / 2
                         else:
                             Q_i[:r_i, :r_i] = torch.eye(r_i, device=device, dtype=dtype) * 0.1
                     except (RuntimeError, ValueError):
@@ -545,10 +665,42 @@ class EMAlgorithm(nn.Module):
                 Q_i[:r_i, :r_i] = torch.eye(r_i, device=device, dtype=dtype) * 0.1
             
             # Ensure Q_i is positive definite
-            eigenvals_Qi = torch.linalg.eigvalsh(Q_i[:r_i, :r_i])
-            min_eigenval = torch.min(eigenvals_Qi)
-            if min_eigenval < 1e-8:
-                Q_i[:r_i, :r_i] = Q_i[:r_i, :r_i] + torch.eye(r_i, device=device, dtype=dtype) * (1e-8 - min_eigenval)
+            # Ensure Q_i is positive definite with robust eigenvalue computation
+            try:
+                # Ensure Q_i is positive definite with robust eigenvalue computation
+                try:
+                    eigenvals_Qi = torch.linalg.eigvalsh(Q_i[:r_i, :r_i])
+                    min_eigenval = torch.min(eigenvals_Qi)
+                    if min_eigenval < 1e-8:
+                        Q_i[:r_i, :r_i] = Q_i[:r_i, :r_i] + torch.eye(r_i, device=device, dtype=dtype) * (1e-8 - min_eigenval)
+                except (RuntimeError, ValueError) as e:
+                    # eigvalsh failed - apply stronger regularization
+                    _logger.warning(f"eigvalsh failed for Q_i block in initialization: {e}. Applying stronger regularization.")
+                    Q_i[:r_i, :r_i] = Q_i[:r_i, :r_i] + torch.eye(r_i, device=device, dtype=dtype) * 1e-6
+                    try:
+                        eigenvals_Qi = torch.linalg.eigvalsh(Q_i[:r_i, :r_i])
+                        min_eigenval = torch.min(eigenvals_Qi)
+                        if min_eigenval < 1e-8:
+                            Q_i[:r_i, :r_i] = Q_i[:r_i, :r_i] + torch.eye(r_i, device=device, dtype=dtype) * (1e-8 - min_eigenval)
+                    except (RuntimeError, ValueError):
+                        # Still failing - use diagonal matrix
+                        diag_Qi = torch.diag(Q_i[:r_i, :r_i])
+                        diag_Qi = torch.maximum(diag_Qi, torch.ones_like(diag_Qi) * 1e-6)
+                        Q_i[:r_i, :r_i] = torch.diag(diag_Qi)
+            except (RuntimeError, ValueError) as e:
+                # eigvalsh failed - apply stronger regularization
+                _logger.warning(f"eigvalsh failed for Q_i block: {e}. Applying stronger regularization.")
+                Q_i[:r_i, :r_i] = Q_i[:r_i, :r_i] + torch.eye(r_i, device=device, dtype=dtype) * 1e-6
+                try:
+                    eigenvals_Qi = torch.linalg.eigvalsh(Q_i[:r_i, :r_i])
+                    min_eigenval = torch.min(eigenvals_Qi)
+                    if min_eigenval < 1e-8:
+                        Q_i[:r_i, :r_i] = Q_i[:r_i, :r_i] + torch.eye(r_i, device=device, dtype=dtype) * (1e-8 - min_eigenval)
+                except (RuntimeError, ValueError):
+                    # Still failing - use diagonal matrix
+                    diag_Qi = torch.diag(Q_i[:r_i, :r_i])
+                    diag_Qi = torch.maximum(diag_Qi, torch.ones_like(diag_Qi) * 1e-6)
+                    Q_i[:r_i, :r_i] = torch.diag(diag_Qi)
             
             # Initial covariance for this block: initV_i = inv(eye - kron(A_i, A_i)) * Q_i(:)
             try:
@@ -564,18 +716,79 @@ class EMAlgorithm(nn.Module):
                 initV_i = Q_i[:r_i * ppC, :r_i * ppC].clone()
             
             # Accumulate block matrices
-            A_list.append(A_i)
-            Q_list.append(Q_i[:r_i * ppC, :r_i * ppC])
-            V_0_list.append(initV_i)
+            # Each block can have different sizes (r_i * ppC), which is fine for block_diag
+            # Just ensure each matrix is square within its block
+            block_size = r_i * ppC
+            _logger.info(f"Block {i}: Creating matrices of size {block_size}x{block_size}. A_i shape={A_i.shape}, Q_i shape={Q_i.shape}, initV_i shape={initV_i.shape}")
+            
+            # Extract or create square matrices of correct size
+            if A_i.shape[0] >= block_size and A_i.shape[1] >= block_size:
+                A_i_final = A_i[:block_size, :block_size]
+            else:
+                _logger.warning(f"Block {i}: A_i too small: {A_i.shape}, creating {block_size}x{block_size} matrix")
+                A_i_final = torch.zeros(block_size, block_size, device=device, dtype=dtype)
+                min_rows = min(A_i.shape[0], block_size)
+                min_cols = min(A_i.shape[1], block_size)
+                A_i_final[:min_rows, :min_cols] = A_i[:min_rows, :min_cols]
+            
+            if Q_i.shape[0] >= block_size and Q_i.shape[1] >= block_size:
+                Q_i_final = Q_i[:block_size, :block_size]
+            else:
+                _logger.warning(f"Block {i}: Q_i too small: {Q_i.shape}, creating {block_size}x{block_size} matrix")
+                Q_i_final = torch.zeros(block_size, block_size, device=device, dtype=dtype)
+                min_rows = min(Q_i.shape[0], block_size)
+                min_cols = min(Q_i.shape[1], block_size)
+                Q_i_final[:min_rows, :min_cols] = Q_i[:min_rows, :min_cols]
+            
+            if initV_i.shape[0] >= block_size and initV_i.shape[1] >= block_size:
+                V_0_i_final = initV_i[:block_size, :block_size]
+            else:
+                _logger.warning(f"Block {i}: initV_i too small: {initV_i.shape}, creating {block_size}x{block_size} matrix")
+                V_0_i_final = torch.zeros(block_size, block_size, device=device, dtype=dtype)
+                min_rows = min(initV_i.shape[0], block_size)
+                min_cols = min(initV_i.shape[1], block_size)
+                V_0_i_final[:min_rows, :min_cols] = initV_i[:min_rows, :min_cols]
+            
+            # Verify all matrices are square and correct size
+            assert A_i_final.shape == (block_size, block_size), f"Block {i}: A_i_final shape {A_i_final.shape} != ({block_size}, {block_size})"
+            assert Q_i_final.shape == (block_size, block_size), f"Block {i}: Q_i_final shape {Q_i_final.shape} != ({block_size}, {block_size})"
+            assert V_0_i_final.shape == (block_size, block_size), f"Block {i}: V_0_i_final shape {V_0_i_final.shape} != ({block_size}, {block_size})"
+            
+            # Log dimensions for debugging
+            _logger.info(f"Block {i}: Final matrices - A={A_i_final.shape}, Q={Q_i_final.shape}, V_0={V_0_i_final.shape}")
+            
+            A_list.append(A_i_final)
+            Q_list.append(Q_i_final)
+            V_0_list.append(V_0_i_final)
         
         # Concatenate C matrices
         C = torch.cat(C_list, dim=1) if C_list else torch.zeros(N, 0, device=device, dtype=dtype)
         
         # Build block-diagonal A, Q, V_0
         if A_list:
-            A_factors = torch.block_diag(*A_list)
-            Q_factors = torch.block_diag(*Q_list)
-            V_0_factors = torch.block_diag(*V_0_list)
+            # Log dimensions before block_diag for debugging
+            _logger.info(f"Building block-diagonal matrices from {len(A_list)} blocks")
+            for i, (a, q, v) in enumerate(zip(A_list, Q_list, V_0_list)):
+                _logger.info(f"  Block {i}: A={a.shape}, Q={q.shape}, V_0={v.shape}")
+                # Ensure all matrices are square
+                if a.shape[0] != a.shape[1]:
+                    _logger.error(f"Block {i}: A is not square: {a.shape}")
+                if q.shape[0] != q.shape[1]:
+                    _logger.error(f"Block {i}: Q is not square: {q.shape}")
+                if v.shape[0] != v.shape[1]:
+                    _logger.error(f"Block {i}: V_0 is not square: {v.shape}")
+            
+            try:
+                A_factors = torch.block_diag(*A_list)
+                Q_factors = torch.block_diag(*Q_list)
+                V_0_factors = torch.block_diag(*V_0_list)
+                _logger.info(f"Successfully created block-diagonal matrices: A_factors={A_factors.shape}, Q_factors={Q_factors.shape}, V_0_factors={V_0_factors.shape}")
+            except RuntimeError as e:
+                # Log dimension information for debugging
+                _logger.error(f"block_diag failed for A_list/Q_list/V_0_list: {e}")
+                for i, (a, q, v) in enumerate(zip(A_list, Q_list, V_0_list)):
+                    _logger.error(f"Block {i}: A shape={a.shape}, Q shape={q.shape}, V_0 shape={v.shape}")
+                raise
         else:
             A_factors = torch.zeros(0, 0, device=device, dtype=dtype)
             Q_factors = torch.zeros(0, 0, device=device, dtype=dtype)
@@ -604,7 +817,28 @@ class EMAlgorithm(nn.Module):
             C = torch.cat([C, C_quarterly], dim=1)
         
         # Initialize R (observation noise covariance) from final residuals
-        R = torch.diag(torch.var(resNaN, dim=0, unbiased=False))  # MATLAB: R = diag(var(resNaN,'omitnan'))
+        # Ensure resNaN is 2D: (T, N)
+        if resNaN.ndim > 2:
+            _logger.warning(f"resNaN has unexpected shape: {resNaN.shape}, reshaping to 2D...")
+            resNaN = resNaN.reshape(-1, resNaN.shape[-1])
+        elif resNaN.ndim == 1:
+            _logger.warning(f"resNaN is 1D: {resNaN.shape}, reshaping to 2D...")
+            resNaN = resNaN.unsqueeze(0)
+        
+        # torch.var returns (N,) for (T, N) input
+        var_res = torch.var(resNaN, dim=0, unbiased=False)  # Should be (N,)
+        # Handle NaN values in variance calculation
+        var_res = torch.where(torch.isfinite(var_res), var_res, torch.tensor(1e-4, device=device, dtype=dtype))
+        
+        # Ensure var_res is 1D
+        if var_res.ndim > 1:
+            _logger.warning(f"var_res has unexpected shape: {var_res.shape}, flattening...")
+            var_res = var_res.flatten()
+        elif var_res.ndim == 0:
+            # Single value, expand to (N,)
+            var_res = var_res.unsqueeze(0)
+        
+        R = torch.diag(var_res)  # (N, N)
         R = torch.where(torch.isfinite(R), R, torch.tensor(1e-4, device=device, dtype=dtype))
         
         # Set monthly idiosyncratic variances to 1e-4 (MATLAB: R(ii_idio(i),ii_idio(i)) = 1e-04)
@@ -713,19 +947,83 @@ class EMAlgorithm(nn.Module):
             initViM = SM.clone()
         
         # Combine all transition matrices: A = blkdiag(A_factors, BM, BQ)
-        A = torch.block_diag(A_factors, BM, BQ)
-        Q = torch.block_diag(Q_factors, SM, SQ)
-        V_0 = torch.block_diag(V_0_factors, initViM, initViQ)
+        # Log dimensions before block_diag for debugging
+        _logger.debug(f"Before final block_diag:")
+        _logger.debug(f"  A_factors shape: {A_factors.shape if A_factors.numel() > 0 else 'empty'}")
+        _logger.debug(f"  BM shape: {BM.shape if BM.numel() > 0 else 'empty'}, n_idio_M={n_idio_M}")
+        _logger.debug(f"  BQ shape: {BQ.shape if BQ.numel() > 0 else 'empty'}, nQ={nQ}")
+        _logger.debug(f"  Q_factors shape: {Q_factors.shape if Q_factors.numel() > 0 else 'empty'}")
+        _logger.debug(f"  SM shape: {SM.shape if SM.numel() > 0 else 'empty'}")
+        _logger.debug(f"  SQ shape: {SQ.shape if SQ.numel() > 0 else 'empty'}")
+        _logger.debug(f"  V_0_factors shape: {V_0_factors.shape if V_0_factors.numel() > 0 else 'empty'}")
+        _logger.debug(f"  initViM shape: {initViM.shape if initViM.numel() > 0 else 'empty'}")
+        _logger.debug(f"  initViQ shape: {initViQ.shape if initViQ.numel() > 0 else 'empty'}")
+        
+        # Check if BM and SM have correct dimensions
+        if BM.shape[0] != n_idio_M or BM.shape[1] != n_idio_M:
+            _logger.warning(f"BM shape mismatch: expected ({n_idio_M}, {n_idio_M}), got {BM.shape}. Resizing...")
+            BM_new = torch.zeros(n_idio_M, n_idio_M, device=device, dtype=dtype)
+            min_dim = min(BM.shape[0], n_idio_M, BM.shape[1], n_idio_M)
+            BM_new[:min_dim, :min_dim] = BM[:min_dim, :min_dim]
+            BM = BM_new
+        if SM.shape[0] != n_idio_M or SM.shape[1] != n_idio_M:
+            _logger.warning(f"SM shape mismatch: expected ({n_idio_M}, {n_idio_M}), got {SM.shape}. Resizing...")
+            SM_new = torch.zeros(n_idio_M, n_idio_M, device=device, dtype=dtype)
+            min_dim = min(SM.shape[0], n_idio_M, SM.shape[1], n_idio_M)
+            SM_new[:min_dim, :min_dim] = SM[:min_dim, :min_dim]
+            SM = SM_new
+        if initViM.shape[0] != n_idio_M or initViM.shape[1] != n_idio_M:
+            _logger.warning(f"initViM shape mismatch: expected ({n_idio_M}, {n_idio_M}), got {initViM.shape}. Resizing...")
+            initViM_new = torch.zeros(n_idio_M, n_idio_M, device=device, dtype=dtype)
+            min_dim = min(initViM.shape[0], n_idio_M, initViM.shape[1], n_idio_M)
+            initViM_new[:min_dim, :min_dim] = initViM[:min_dim, :min_dim]
+            initViM = initViM_new
+        
+        # Check dimensions before block_diag to debug size mismatches
+        try:
+            A = torch.block_diag(A_factors, BM, BQ)
+            Q = torch.block_diag(Q_factors, SM, SQ)
+            V_0 = torch.block_diag(V_0_factors, initViM, initViQ)
+            _logger.debug(f"Successfully created final block-diagonal matrices: A={A.shape}, Q={Q.shape}, V_0={V_0.shape}")
+        except RuntimeError as e:
+            # Log dimension information for debugging
+            _logger.error(f"block_diag failed: {e}")
+            _logger.error(f"A_factors shape: {A_factors.shape if A_factors.numel() > 0 else 'empty'}")
+            _logger.error(f"BM shape: {BM.shape if BM.numel() > 0 else 'empty'}")
+            _logger.error(f"BQ shape: {BQ.shape if BQ.numel() > 0 else 'empty'}")
+            _logger.error(f"Q_factors shape: {Q_factors.shape if Q_factors.numel() > 0 else 'empty'}")
+            _logger.error(f"SM shape: {SM.shape if SM.numel() > 0 else 'empty'}")
+            _logger.error(f"SQ shape: {SQ.shape if SQ.numel() > 0 else 'empty'}")
+            _logger.error(f"V_0_factors shape: {V_0_factors.shape if V_0_factors.numel() > 0 else 'empty'}")
+            _logger.error(f"initViM shape: {initViM.shape if initViM.numel() > 0 else 'empty'}")
+            _logger.error(f"initViQ shape: {initViQ.shape if initViQ.numel() > 0 else 'empty'}")
+            raise
         
         # Initial state: Z_0 = zeros
         m = A.shape[0]
         Z_0 = torch.zeros(m, device=device, dtype=dtype)
         
         # Ensure all matrices are positive definite
-        eigenvals_V0 = torch.linalg.eigvalsh(V_0)
-        min_eigenval = torch.min(eigenvals_V0)
-        if min_eigenval < 1e-8:
-            V_0 = V_0 + torch.eye(m, device=device, dtype=dtype) * (1e-8 - min_eigenval)
+        # Ensure V_0 is positive definite with robust eigenvalue computation
+        try:
+            eigenvals_V0 = torch.linalg.eigvalsh(V_0)
+            min_eigenval = torch.min(eigenvals_V0)
+            if min_eigenval < 1e-8:
+                V_0 = V_0 + torch.eye(m, device=device, dtype=dtype) * (1e-8 - min_eigenval)
+        except (RuntimeError, ValueError) as e:
+            # eigvalsh failed - apply stronger regularization
+            _logger.warning(f"eigvalsh failed for V_0 in initialization: {e}. Applying stronger regularization.")
+            V_0 = V_0 + torch.eye(m, device=device, dtype=dtype) * 1e-6
+            try:
+                eigenvals_V0 = torch.linalg.eigvalsh(V_0)
+                min_eigenval = torch.min(eigenvals_V0)
+                if min_eigenval < 1e-8:
+                    V_0 = V_0 + torch.eye(m, device=device, dtype=dtype) * (1e-8 - min_eigenval)
+            except (RuntimeError, ValueError):
+                # Still failing - use diagonal matrix
+                diag_V0 = torch.diag(V_0)
+                diag_V0 = torch.maximum(diag_V0, torch.ones_like(diag_V0) * 1e-6)
+                V_0 = torch.diag(diag_V0)
         
         return A, C, Q, R, Z_0, V_0
     

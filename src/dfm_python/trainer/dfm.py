@@ -11,9 +11,9 @@ from typing import Optional, Dict, Any, List, Union
 from ..logger import get_logger
 from ..config import DFMConfig, DDFMConfig
 from . import (
-    _create_trainer_base,
-    _extract_training_params,
-    _validate_config_for_trainer,
+    _create_base,
+    _extract_train_params,
+    _validate_config,
     DFM_TRAINER_DEFAULTS
 )
 
@@ -86,7 +86,7 @@ class DFMTrainer(pl.Trainer):
     ):
         # Use common trainer base setup with DFM-specific parameters
         # DFM logs 'loglik' metric, uses CSV logger, and has patience=10
-        trainer_config = _create_trainer_base(
+        trainer_config = _create_base(
             max_epochs=max_epochs,
             enable_progress_bar=enable_progress_bar,
             enable_model_summary=enable_model_summary,
@@ -139,14 +139,14 @@ class DFMTrainer(pl.Trainer):
             Configured trainer instance
         """
         # Validate config before processing
-        _validate_config_for_trainer(config, trainer_name="DFMTrainer")
+        _validate_config(config, trainer_name="DFMTrainer")
         
         # Extract training parameters from config and kwargs
         # Use constants from trainer/__init__.py to ensure single source of truth
         # These defaults match __init__() defaults for consistency
-        # Note: _extract_training_params() modifies kwargs by popping extracted keys
+        # Note: _extract_train_params() modifies kwargs by popping extracted keys
         # After extraction, only extracted parameters are used (kwargs are consumed)
-        params = _extract_training_params(config, kwargs, DFM_TRAINER_DEFAULTS, use_max_iter=True)
+        params = _extract_train_params(config, kwargs, DFM_TRAINER_DEFAULTS, use_max_iter=True)
         
         # Create trainer with extracted parameters
         # All relevant parameters are extracted, so kwargs are not passed through

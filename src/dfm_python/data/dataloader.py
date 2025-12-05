@@ -7,11 +7,54 @@ DDFM uses a standard DataLoader with batching for neural network training.
 
 import torch
 from torch.utils.data import DataLoader
-from typing import Optional
+from typing import Optional, Union
 from .dataset import DFMDataset, DDFMDataset
 from ..logger import get_logger
 
 _logger = get_logger(__name__)
+
+
+def _create_dataloader(
+    dataset: Union[DFMDataset, DDFMDataset],
+    batch_size: int,
+    shuffle: bool,
+    num_workers: int,
+    pin_memory: bool,
+    auto_pin_memory: bool = False
+) -> DataLoader:
+    """Create DataLoader (shared helper).
+    
+    Parameters
+    ----------
+    dataset : DFMDataset or DDFMDataset
+        Dataset instance
+    batch_size : int
+        Batch size
+    shuffle : bool
+        Whether to shuffle data
+    num_workers : int
+        Number of worker processes
+    pin_memory : bool
+        Whether to pin memory for faster GPU transfer
+    auto_pin_memory : bool, default False
+        If True, automatically disable pin_memory if CUDA is not available
+        
+    Returns
+    -------
+    DataLoader
+        PyTorch DataLoader
+    """
+    if auto_pin_memory and not torch.cuda.is_available():
+        pin_memory = False
+    
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        drop_last=False
+    )
 
 
 def create_dfm_dataloader(
@@ -44,15 +87,15 @@ def create_dfm_dataloader(
         Configured DataLoader for DFM
     """
     if batch_size is None:
-        batch_size = len(dataset)  # Typically 1 for full sequence
+        batch_size = len(dataset)
     
-    return DataLoader(
+    return _create_dataloader(
         dataset,
         batch_size=batch_size,
-        shuffle=False,  # No shuffle for full sequence
+        shuffle=False,
         num_workers=num_workers,
         pin_memory=pin_memory,
-        drop_last=False
+        auto_pin_memory=False
     )
 
 
@@ -86,12 +129,12 @@ def create_ddfm_dataloader(
     DataLoader
         Configured DataLoader for DDFM
     """
-    return DataLoader(
+    return _create_dataloader(
         dataset,
         batch_size=batch_size,
         shuffle=shuffle,
         num_workers=num_workers,
-        pin_memory=pin_memory if torch.cuda.is_available() else False,
-        drop_last=False
+        pin_memory=pin_memory,
+        auto_pin_memory=True
     )
 

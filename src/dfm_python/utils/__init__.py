@@ -13,7 +13,7 @@ Nowcasting utilities are in the nowcast/ package.
 from .statespace import (
     estimate_var1,
     estimate_var2,
-    estimate_idiosyncratic_dynamics,
+    estimate_idio_dynamics,
     build_observation_matrix,
     build_state_space,
     estimate_state_space_params,
@@ -49,15 +49,15 @@ from ..nowcast.helpers import (
 )
 from ..nowcast.utils import (
     get_higher_frequency,
-    calculate_backward_date,
-    get_forecast_horizon_config,
-    check_config_consistency,
-    extract_news_summary,
+    calc_backward_date,
+    get_forecast_horizon,
+    check_config,
+    extract_news,
 )
 
 from ..nowcast.dataview import DataView
 
-# Data loading utilities (from core.loader)
+# Data loading utilities (from utils.data)
 from .data import (
     sort_data,
     rem_nans_spline,
@@ -73,9 +73,9 @@ from .helpers import (
     get_clock_frequency,
     get_series_ids,
     get_series_names,
-    get_frequencies_from_config,
+    get_frequencies,
     find_series_index,
-    get_series_id_by_index,
+    get_series_id,
     ParameterResolver,
     DFMError,
     DFMConfigError,
@@ -106,7 +106,7 @@ __all__ = [
     # State-space utilities (includes DDFM utilities)
     'estimate_var1',
     'estimate_var2',
-    'estimate_idiosyncratic_dynamics',
+    'estimate_idio_dynamics',
     'build_observation_matrix',
     'build_state_space',
     'estimate_state_space_params',
@@ -134,10 +134,10 @@ __all__ = [
     'BacktestResult',
     'para_const',
     'get_higher_frequency',
-    'calculate_backward_date',
-    'get_forecast_horizon_config',
-    'check_config_consistency',
-    'extract_news_summary',
+    'calc_backward_date',
+    'get_forecast_horizon',
+    'check_config',
+    'extract_news',
     # DataView
     'DataView',
     # Data loading utilities (from core.loader)
@@ -152,9 +152,9 @@ __all__ = [
     'get_clock_frequency',
     'get_series_ids',
     'get_series_names',
-    'get_frequencies_from_config',
+    'get_frequencies',
     'find_series_index',
-    'get_series_id_by_index',
+    'get_series_id',
     'ParameterResolver',
     # Note: Private validation functions (_validate_*) are internal and not exported
     'DFMError',

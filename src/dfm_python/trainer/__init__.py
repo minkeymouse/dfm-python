@@ -36,7 +36,7 @@ DDFM_TRAINER_DEFAULTS = {
 # Helper Functions for Shared Trainer Logic
 # ============================================================================
 
-def _setup_early_stopping_callback(
+def _setup_early_stopping(
     max_epochs: int,
     patience: int = 10,
     min_delta: Optional[float] = None,
@@ -117,7 +117,7 @@ def _setup_logger(
         return logger
 
 
-def _build_trainer_callbacks(
+def _build_callbacks(
     callbacks: Optional[List[Any]],
     early_stopping: Optional[EarlyStopping] = None,
     lr_monitor: Optional[LearningRateMonitor] = None,
@@ -167,7 +167,7 @@ def _build_trainer_callbacks(
 # Device/Precision Normalization Helper Functions
 # ============================================================================
 
-def _normalize_accelerator(accelerator: Any) -> str:
+def _normalize_accel(accelerator: Any) -> str:
     """Normalize accelerator value for consistent handling.
     
     PyTorch Lightning may normalize accelerator values (e.g., 'cpu' to 'CPU').
@@ -193,7 +193,7 @@ def _normalize_accelerator(accelerator: Any) -> str:
         
     Examples
     --------
-    >>> _normalize_accelerator('cpu')
+    >>> _normalize_accel('cpu')
     'cpu'
     >>> _normalize_accelerator('CPU')
     'cpu'
@@ -239,7 +239,7 @@ def _normalize_accelerator(accelerator: Any) -> str:
     return accelerator_str
 
 
-def _normalize_precision(precision: Any) -> Union[str, int]:
+def _normalize_prec(precision: Any) -> Union[str, int]:
     """Normalize precision value for consistent handling.
     
     PyTorch Lightning may normalize precision values (e.g., 32 to '32' or '32-true').
@@ -264,7 +264,7 @@ def _normalize_precision(precision: Any) -> Union[str, int]:
         
     Examples
     --------
-    >>> _normalize_precision(32)
+    >>> _normalize_prec(32)
     32
     >>> _normalize_precision('32')
     32
@@ -320,7 +320,7 @@ def _normalize_precision(precision: Any) -> Union[str, int]:
     return str(precision)
 
 
-def _validate_device_config(
+def _validate_device(
     accelerator: str,
     devices: Any
 ) -> Tuple[str, Any]:
@@ -348,7 +348,7 @@ def _validate_device_config(
         
     Examples
     --------
-    >>> _validate_device_config('cpu', 1)
+    >>> _validate_device('cpu', 1)
     ('cpu', 1)
     >>> _validate_device_config('gpu', [0, 1])
     ('gpu', [0, 1])
@@ -356,7 +356,7 @@ def _validate_device_config(
     ('auto', 'auto')
     """
     # Normalize accelerator
-    accelerator = _normalize_accelerator(accelerator)
+    accelerator = _normalize_accel(accelerator)
     
     # Validate accelerator-device compatibility
     if accelerator == 'cpu':
@@ -387,7 +387,7 @@ def _validate_device_config(
 # Config Validation Helper Functions
 # ============================================================================
 
-def _validate_config_for_trainer(
+def _validate_config(
     config: Any,
     trainer_name: str = "trainer"
 ) -> None:
@@ -474,7 +474,7 @@ def _extract_max_epochs(
         return defaults.get('max_epochs', 100)
 
 
-def _extract_boolean_param(
+def _extract_bool(
     param_name: str,
     config: Any,
     kwargs: Dict[str, Any],
@@ -511,7 +511,7 @@ def _extract_boolean_param(
         return defaults.get(param_name, False)
 
 
-def _extract_optional_param(
+def _extract_opt(
     param_name: str,
     config: Any,
     kwargs: Dict[str, Any],
@@ -551,7 +551,7 @@ def _extract_optional_param(
         return None
 
 
-def _extract_training_params(
+def _extract_train_params(
     config: Any,
     kwargs: Dict[str, Any],
     defaults: Dict[str, Any],
@@ -586,15 +586,15 @@ def _extract_training_params(
     params['max_epochs'] = _extract_max_epochs(config, kwargs, defaults, use_max_iter)
     
     # Extract boolean parameters using helper function
-    params['enable_progress_bar'] = _extract_boolean_param(
+    params['enable_progress_bar'] = _extract_bool(
         'enable_progress_bar', config, kwargs, defaults
     )
-    params['enable_model_summary'] = _extract_boolean_param(
+    params['enable_model_summary'] = _extract_bool(
         'enable_model_summary', config, kwargs, defaults
     )
     
     # Extract optional parameters using helper function
-    gradient_clip_val = _extract_optional_param('gradient_clip_val', config, kwargs, defaults)
+    gradient_clip_val = _extract_opt('gradient_clip_val', config, kwargs, defaults)
     if gradient_clip_val is not None:
         params['gradient_clip_val'] = gradient_clip_val
     
@@ -605,7 +605,7 @@ def _extract_training_params(
 # Common Trainer Initialization Helper
 # ============================================================================
 
-def _create_trainer_base(
+def _create_base(
     max_epochs: int,
     enable_progress_bar: bool,
     enable_model_summary: bool,
@@ -680,7 +680,7 @@ def _create_trainer_base(
         - 'kwargs': Additional kwargs for Trainer
     """
     # Setup early stopping callback
-    early_stopping = _setup_early_stopping_callback(
+    early_stopping = _setup_early_stopping(
         max_epochs=max_epochs,
         patience=early_stopping_patience,
         min_delta=early_stopping_min_delta,
@@ -688,7 +688,7 @@ def _create_trainer_base(
     )
     
     # Build callbacks list with early stopping and any additional callbacks
-    trainer_callbacks = _build_trainer_callbacks(
+    trainer_callbacks = _build_callbacks(
         callbacks=callbacks,
         early_stopping=early_stopping
     )
@@ -703,9 +703,9 @@ def _create_trainer_base(
     configured_logger = _setup_logger(logger, logger_type=logger_type, name=logger_name)
     
     # Normalize and validate device/precision configuration
-    normalized_accelerator = _normalize_accelerator(accelerator)
-    normalized_precision = _normalize_precision(precision)
-    validated_accelerator, validated_devices = _validate_device_config(
+    normalized_accelerator = _normalize_accel(accelerator)
+    normalized_precision = _normalize_prec(precision)
+    validated_accelerator, validated_devices = _validate_device(
         normalized_accelerator, devices
     )
     

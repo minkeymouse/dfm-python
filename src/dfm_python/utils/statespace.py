@@ -5,13 +5,35 @@ to keep the main file under 1000 lines.
 """
 
 import numpy as np
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Tuple, Dict, Any, TYPE_CHECKING
 import warnings
 from ..logger import get_logger
 
 _logger = get_logger(__name__)
 
-# Numerical stability constants (matching state_space.py)
+# PyTorch imports (optional, for DDFM utilities)
+if TYPE_CHECKING:
+    import torch
+    import torch.nn as nn
+else:
+    torch = None
+    nn = None
+
+try:
+    import torch
+    import torch.nn as nn
+    import torch.nn.functional as F
+    _has_torch = True
+except ImportError:
+    _has_torch = False
+    if not TYPE_CHECKING:
+        torch = None
+        nn = None
+    F = None
+
+# Numerical stability constants for NumPy operations
+# Note: Similar constants exist in ssm/utils.py (DEFAULT_MIN_EIGENVAL, DEFAULT_MIN_DIAGONAL_VARIANCE)
+# for PyTorch operations. They have the same values but are kept separate for context clarity.
 MIN_EIGENVAL_CLEAN = 1e-8
 MIN_DIAGONAL_VARIANCE = 1e-6
 DEFAULT_VARIANCE_FALLBACK = 1.0
@@ -161,7 +183,7 @@ def _safe_determinant(M: np.ndarray, use_logdet: bool = True) -> float:
 
 
 
-def _compute_covariance_safe(data: np.ndarray, rowvar: bool = True, 
+def _compute_cov_safe(data: np.ndarray, rowvar: bool = True, 
                               pairwise_complete: bool = False,
                               min_eigenval: float = 1e-8,
                               fallback_to_identity: bool = True) -> np.ndarray:
@@ -173,7 +195,7 @@ def _compute_covariance_safe(data: np.ndarray, rowvar: bool = True,
     
     # Handle 1D case
     if data.ndim == 1:
-        var_val = _compute_variance_safe(data, ddof=0, min_variance=MIN_VARIANCE_COVARIANCE, 
+        var_val = _compute_var_safe(data, ddof=0, min_variance=MIN_VARIANCE_COVARIANCE, 
                                          default_variance=DEFAULT_VARIANCE_FALLBACK)
         return np.array([[var_val]])
     
@@ -183,7 +205,7 @@ def _compute_covariance_safe(data: np.ndarray, rowvar: bool = True,
     # Handle single variable case
     if n_vars == 1:
         series_data = data.flatten()
-        var_val = _compute_variance_safe(series_data, ddof=0, min_variance=MIN_VARIANCE_COVARIANCE,
+        var_val = _compute_var_safe(series_data, ddof=0, min_variance=MIN_VARIANCE_COVARIANCE,
                                          default_variance=DEFAULT_VARIANCE_FALLBACK)
         return np.array([[var_val]])
     
@@ -275,7 +297,7 @@ def _compute_covariance_safe(data: np.ndarray, rowvar: bool = True,
         raise
 
 
-def _compute_variance_safe(data: np.ndarray, ddof: int = 0, 
+def _compute_var_safe(data: np.ndarray, ddof: int = 0, 
                            min_variance: float = MIN_VARIANCE_COVARIANCE,
                            default_variance: float = DEFAULT_VARIANCE_FALLBACK) -> float:
     """Compute variance safely with robust error handling."""
@@ -298,7 +320,7 @@ def _compute_variance_safe(data: np.ndarray, ddof: int = 0,
     return float(var_val)
 
 
-def _estimate_ar_coefficient(EZZ_FB: np.ndarray, EZZ_BB: np.ndarray, 
+def _estimate_ar(EZZ_FB: np.ndarray, EZZ_BB: np.ndarray, 
                              vsmooth_sum: Optional[np.ndarray] = None,
                              T: Optional[int] = None) -> Tuple[np.ndarray, np.ndarray]:
     """Estimate AR coefficients and innovation variances from expectations."""
@@ -333,7 +355,7 @@ def _estimate_ar_coefficient(EZZ_FB: np.ndarray, EZZ_BB: np.ndarray,
     return A_diag, Q_diag
 
 
-def _clip_ar_coefficients(A: np.ndarray, min_val: float = -0.99, max_val: float = 0.99, 
+def _clip_ar(A: np.ndarray, min_val: float = -0.99, max_val: float = 0.99, 
                          warn: bool = True) -> Tuple[np.ndarray, Dict[str, Any]]:
     """Clip AR coefficients to stability bounds."""
     A_flat = A.flatten()
@@ -362,7 +384,7 @@ def _clip_ar_coefficients(A: np.ndarray, min_val: float = -0.99, max_val: float 
 def _apply_ar_clipping(A: np.ndarray, config: Optional[Any] = None) -> Tuple[np.ndarray, Dict[str, Any]]:
     """Apply AR coefficient clipping based on configuration."""
     if config is None:
-        return _clip_ar_coefficients(A, -0.99, 0.99, True)
+        return _clip_ar(A, -0.99, 0.99, True)
     
     from ..utils.helpers import safe_get_attr
     
@@ -373,10 +395,10 @@ def _apply_ar_clipping(A: np.ndarray, config: Optional[Any] = None) -> Tuple[np.
     min_val = safe_get_attr(config, 'ar_clip_min', -0.99)
     max_val = safe_get_attr(config, 'ar_clip_max', 0.99)
     warn = safe_get_attr(config, 'warn_on_ar_clip', True)
-    return _clip_ar_coefficients(A, min_val, max_val, warn)
+    return _clip_ar(A, min_val, max_val, warn)
 
 
-def _compute_regularization_param(
+def _compute_reg_param(
     matrix: np.ndarray,
     scale_factor: float = 1e-5,
     warn: bool = True
@@ -427,7 +449,7 @@ def _compute_regularization_param(
     
     return reg_param, stats
 
-def _cap_max_eigenvalue(M: np.ndarray, max_eigenval: float = 1e6) -> np.ndarray:
+def _cap_eigenval(M: np.ndarray, max_eigenval: float = 1e6) -> np.ndarray:
     """Cap maximum eigenvalue of matrix to prevent numerical explosion.
     
     Parameters
@@ -463,7 +485,7 @@ def _cap_max_eigenvalue(M: np.ndarray, max_eigenval: float = 1e6) -> np.ndarray:
     return M
 
 
-def _ensure_innovation_variance_minimum(Q: np.ndarray, min_variance: float = 1e-8) -> np.ndarray:
+def _ensure_variance_min(Q: np.ndarray, min_variance: float = 1e-8) -> np.ndarray:
     """Ensure minimum variance on diagonal of innovation covariance matrix.
     
     Parameters
@@ -507,44 +529,6 @@ def _safe_divide(numerator: np.ndarray, denominator: np.ndarray, default: float 
     with np.errstate(divide='ignore', invalid='ignore'):
         result = np.divide(numerator, denominator, out=np.full_like(numerator, default), where=denominator!=0)
     return result
-"""DDFM utility functions (training, state-space, conversion, loss).
-
-This module contains utility functions for DDFM extracted from ddfm.py
-to keep the main file under 1000 lines.
-"""
-
-import numpy as np
-from typing import Tuple, Optional, Any, TYPE_CHECKING
-import logging
-
-if TYPE_CHECKING:
-    import torch
-    import torch.nn as nn
-else:
-    torch = None
-    nn = None
-
-try:
-    import torch
-    import torch.nn as nn
-    import torch.optim as optim
-    _has_torch = True
-except ImportError:
-    _has_torch = False
-    if not TYPE_CHECKING:
-        torch = None
-        nn = None
-    optim = None
-
-from ..logger import get_logger
-
-_logger = get_logger(__name__)
-
-
-
-
-# State-space model building utilities
-
 
 
 
@@ -677,7 +661,7 @@ def estimate_var2(factors: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     return A, Q
 
 
-def estimate_idiosyncratic_dynamics(
+def estimate_idio_dynamics(
     residuals: np.ndarray,
     missing_mask: np.ndarray,
     min_obs: int = 5,
@@ -892,16 +876,6 @@ def build_state_space(
     return A, Q, Z_0, V_0
 
 
-# extract_decoder_params is in ..core.vae
-from ..encoder.vae import extract_decoder_params
-
-
-
-
-# convert_decoder_to_numpy is in ..core.vae
-from ..encoder.vae import convert_decoder_to_numpy
-
-
 def estimate_state_space_params(
     f_t: np.ndarray,
     eps_t: np.ndarray,
@@ -921,7 +895,8 @@ def estimate_state_space_params(
     eps_t : np.ndarray
         Idiosyncratic terms (T x N)
     factor_order : int
-        Lag order for common factors (1 for VAR(1), 2 for VAR(2))
+        Lag order for common factors. Only VAR(1) and VAR(2) are supported.
+        Higher orders will raise NotImplementedError.
     bool_no_miss : np.ndarray, optional
         Boolean array (T x N) indicating non-missing values.
         If None, assumes no missing values.
@@ -987,7 +962,7 @@ def estimate_state_space_params(
         )
     
     # Estimate idiosyncratic AR(1) dynamics
-    A_eps, _, _ = estimate_idiosyncratic_params(eps_t, bool_no_miss, min_obs=5)
+    A_eps, _, _ = estimate_idio_params(eps_t, bool_no_miss, min_obs=5)
     
     # Construct companion form state vector and transition matrix
     if factor_order == 2:
@@ -1047,7 +1022,7 @@ def estimate_state_space_params(
     return A, W, mu_0, Σ_0, x_t
 
 
-def estimate_idiosyncratic_params(
+def estimate_idio_params(
     eps: np.ndarray,
     idx_no_missings: Optional[np.ndarray] = None,
     min_obs: int = 5,
@@ -1117,11 +1092,6 @@ def estimate_idiosyncratic_params(
     return phi, mu_eps, std_eps
 
 
-# Backward compatibility aliases
-get_transition_params = estimate_state_space_params
-get_idio = estimate_idiosyncratic_params
-
-
 def mse_missing(
     y_actual: Any,  # torch.Tensor or np.ndarray
     y_predicted: Any,  # torch.Tensor or np.ndarray
@@ -1167,7 +1137,7 @@ def mse_missing(
         y_predicted_masked = y_predicted * mask
         
         # Compute MSE (automatically ignores masked values)
-        loss = nn.functional.mse_loss(y_actual_clean, y_predicted_masked, reduction='mean')
+        loss = F.mse_loss(y_actual_clean, y_predicted_masked, reduction='mean')
         return loss
     else:
         # NumPy path (fallback)

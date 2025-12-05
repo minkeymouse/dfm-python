@@ -9,12 +9,12 @@ Tests align with theoretical foundations from:
 import pytest
 import numpy as np
 import torch
-import polars as pl
+import pandas as pd
 from pathlib import Path
 from typing import Optional, Tuple
 from datetime import datetime
 
-from dfm_python.models import DFM, DFMLinear, BaseFactorModel
+from dfm_python.models import DFM, BaseFactorModel
 from dfm_python.config import DFMConfig, DDFMConfig, SeriesConfig, DEFAULT_BLOCK_NAME
 from dfm_python.config.adapter import YamlSource
 from dfm_python.config.results import DFMResult, FitParams
@@ -30,7 +30,7 @@ class TestBaseFactorModel:
     def test_base_factor_model_interface(self):
         """Test that BaseFactorModel defines required interface."""
         # BaseFactorModel is abstract, so we test via DFM (high-level API)
-        # DFMLinear is low-level and doesn't inherit from BaseFactorModel
+        # DFM is the high-level API that inherits from BaseFactorModel
         model = DFM()
         assert isinstance(model, BaseFactorModel)
         assert hasattr(model, 'predict')
@@ -42,62 +42,8 @@ class TestBaseFactorModel:
             _ = model.result
 
 
-class TestDFMLinear:
-    """Test DFMLinear implementation (low-level DFM)."""
-    
-    @pytest.fixture
-    def sample_config(self):
-        """Create sample DFMConfig for testing."""
-        series_list = [
-            SeriesConfig(series_id=f"S{i}", frequency="m", transformation="chg", blocks=[DEFAULT_BLOCK_NAME])
-            for i in range(5)
-        ]
-        blocks = {DEFAULT_BLOCK_NAME: {"factors": 2, "ar_lag": 1, "clock": "m"}}
-        return DFMConfig(
-            series=series_list,
-            blocks=blocks,
-            max_iter=10,  # Small for testing
-            threshold=1e-5
-        )
-    
-    @pytest.fixture
-    def sample_data(self):
-        """Create sample time series data."""
-        T, N = 100, 5
-        # Generate synthetic data with factor structure
-        np.random.seed(42)
-        factors = np.random.randn(T, 2)
-        loadings = np.random.randn(N, 2)
-        data = factors @ loadings.T + 0.1 * np.random.randn(T, N)
-        return torch.tensor(data, dtype=torch.float32)
-    
-    def test_dfm_linear_initialization(self):
-        """Test DFMLinear initialization."""
-        # DFMLinear is low-level and doesn't have config property or result property
-        model = DFMLinear()
-        # DFMLinear doesn't have config property or result property (it's low-level)
-        # Only high-level DFM class has these properties
-    
-    def test_dfm_linear_fit_structure(self, sample_config, sample_data):
-        """Test that fit method accepts correct structure.
-        
-        According to papers:
-        - DFM uses state-space representation: y_t = C Z_t + e_t
-        - Factor dynamics: Z_t = A Z_{t-1} + v_t
-        - EM algorithm estimates parameters
-        """
-        model = DFMLinear()
-        # Note: Actual fit requires DataModule, which is tested separately
-        # This test verifies the interface
-        assert hasattr(model, 'fit')
-        assert callable(model.fit)
-    
-    def test_dfm_linear_predict_interface(self):
-        """Test predict method interface."""
-        model = DFMLinear()
-        assert hasattr(model, 'predict')
-        # Predict should accept horizon parameter
-        assert callable(model.predict)
+# TestDFMLinear removed: DFMLinear is now internal (_DFMLinear) and not part of public API.
+# Use DFM class (high-level API) instead.
 
 
 class TestDFM:
@@ -106,34 +52,20 @@ class TestDFM:
     @pytest.fixture
     def test_data_path(self):
         """Path to test data file."""
-        return Path(__file__).parent.parent.parent / "data" / "sample_data.csv"
+        from test_helpers import get_test_data_path
+        return get_test_data_path()
     
     @pytest.fixture
     def test_config_path(self):
         """Path to test DFM config."""
-        return Path(__file__).parent.parent.parent / "config" / "experiment" / "test_dfm.yaml"
+        from test_helpers import get_test_config_path
+        return get_test_config_path("dfm")
     
     @pytest.fixture
     def sample_data_from_file(self, test_data_path):
-        """Load sample data from CSV using polars."""
-        if not test_data_path.exists():
-            pytest.skip(f"Test data file not found: {test_data_path}")
-        
-        # Read CSV with polars
-        df = pl.read_csv(test_data_path)
-        
-        # Extract date column
-        date_col = df.select("date").to_series().to_list()
-        time_index = TimeIndex([parse_timestamp(d) for d in date_col])
-        
-        # Extract data columns (exclude date)
-        data_cols = [col for col in df.columns if col != "date"]
-        data_array = df.select(data_cols).to_numpy()
-        
-        # Preprocess: handle NaNs
-        data_clean, _ = rem_nans_spline(data_array, method=2, k=3)
-        
-        return data_clean, time_index, data_cols
+        """Load sample data from CSV using pandas."""
+        from test_helpers import load_sample_data_from_csv
+        return load_sample_data_from_csv(test_data_path)
     
     def test_dfm_initialization(self):
         """Test DFM initialization."""
@@ -144,8 +76,6 @@ class TestDFM:
         # Error message format: "{ModelType} model has not been trained yet. Please call trainer.fit(model, data_module) first."
         with pytest.raises(ValueError, match=r".*model has not been trained yet.*"):
             _ = model.result
-        assert hasattr(model, '_model_impl')
-        assert isinstance(model._model_impl, DFMLinear)
     
     def test_dfm_load_config(self, test_config_path):
         """Test loading configuration from YAML."""
@@ -183,7 +113,7 @@ class TestDFM:
             pytest.skip(f"Config format not fully supported (series as strings): {e}")
         
         # Load data
-        df = pl.read_csv(test_data_path)
+        df = pd.read_csv(test_data_path)
         date_col = df.select("date").to_series().to_list()
         time_index = TimeIndex([parse_timestamp(d) for d in date_col])
         
@@ -332,7 +262,7 @@ class TestPredictionConsistency:
     
     def test_forecast_horizon(self):
         """Test forecast horizon parameter."""
-        model = DFMLinear()
+        model = DFM()
         # Predict should accept horizon parameter
         assert hasattr(model, 'predict')
     

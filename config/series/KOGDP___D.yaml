@@ -1,12 +1,15 @@
+# Series Configuration (Legacy/Reference Format)
+# NOTE: In the new unified structure, series configs are embedded in experiment configs under preprocess.series.
+# This file is kept for reference and migration purposes.
+
 series_id: KOGDP...D
 series_name: GDP, Constant Prices
 frequency: q
 transformation: cha
-# blocks: optional - if not specified, defaults to first block in model config
-# blocks:
-#   - Block_Global
-nan_method: 2
-standardization: true
 units: Chained W, Billions
 category: Macro
 release: 25
+scaler: standard
+impute: null
+block:
+- Block_Global

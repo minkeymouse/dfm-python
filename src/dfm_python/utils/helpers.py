@@ -3,8 +3,8 @@
 This module provides utility functions for:
 - Safe configuration access (safe_get_attr, safe_get_method)
 - Parameter resolution (resolve_param)
-- Config access helpers (get_clock_frequency, get_series_ids, get_frequencies_from_config, etc.)
-- Validation helpers (_validate_config_loaded, _validate_data_module, _validate_result_loaded)
+- Config access helpers (get_clock_frequency, get_series_ids, get_frequencies, etc.)
+- Validation helpers (_validate_config, _validate_data, _validate_result)
 """
 
 import numpy as np
@@ -154,7 +154,7 @@ def get_series_names(config: DFMConfig) -> List[str]:
     return config.get_series_names()
 
 
-def get_frequencies_from_config(config: DFMConfig) -> List[str]:
+def get_frequencies(config: DFMConfig) -> List[str]:
     """Get list of frequencies from config.
     
     This is a convenience wrapper around config.get_frequencies().
@@ -174,7 +174,7 @@ def get_frequencies_from_config(config: DFMConfig) -> List[str]:
     return config.get_frequencies()
 
 
-def get_series_id_by_index(config: DFMConfig, index: int) -> Optional[str]:
+def get_series_id(config: DFMConfig, index: int) -> Optional[str]:
     """Get series ID by index.
     
     Parameters
@@ -217,7 +217,7 @@ def find_series_index(config: DFMConfig, series_id: str) -> Optional[int]:
         return None
 
 
-def _validate_config_loaded(config: Optional[DFMConfig]) -> None:
+def _validate_config(config: Optional[DFMConfig]) -> None:
     """Validate that config is loaded.
     
     Parameters
@@ -238,7 +238,7 @@ def _validate_config_loaded(config: Optional[DFMConfig]) -> None:
         raise DFMConfigError(f"Invalid config type: {type(config)}. Expected DFMConfig.")
 
 
-def _validate_data_module(data_module: Optional[Any]) -> None:
+def _validate_data(data_module: Optional[Any]) -> None:
     """Validate that DataModule is provided and set up.
     
     Parameters
@@ -261,7 +261,7 @@ def _validate_data_module(data_module: Optional[Any]) -> None:
         raise DFMDataError("DataModule not set up. Call data_module.setup() first.")
 
 
-def _validate_result_loaded(result: Optional[Any]) -> None:
+def _validate_result(result: Optional[Any]) -> None:
     """Validate that result is available.
     
     Parameters

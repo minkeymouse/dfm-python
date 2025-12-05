@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Optional, Tuple, Union, Any
 from datetime import datetime
 import numpy as np
-import polars as pl
+import pandas as pd
 
 from ..config import DFMConfig
 from ..utils.time import TimeIndex
@@ -37,8 +37,8 @@ class DataView:
         Date for which to create the view. If None, uses latest available date.
     description : str, optional
         Optional description of this data view
-    X_frame : pl.DataFrame, optional
-        Polars DataFrame representation of X (for efficient masking)
+    X_frame : pd.DataFrame, optional
+        Pandas DataFrame representation of X (for efficient masking)
     """
     X: np.ndarray
     Time: Union[TimeIndex, Any]
@@ -46,7 +46,7 @@ class DataView:
     config: Optional[DFMConfig]
     view_date: Optional[Union[datetime, str]] = None
     description: Optional[str] = None
-    X_frame: Optional[pl.DataFrame] = None
+    X_frame: Optional[pd.DataFrame] = None
     
     def materialize(self) -> Tuple[np.ndarray, Union[TimeIndex, Any], Optional[np.ndarray]]:
         """Return the masked arrays for this data view.
@@ -82,7 +82,7 @@ class DataView:
         config: Optional[DFMConfig],
         view_date: Optional[Union[datetime, str]] = None,
         description: Optional[str] = None,
-        X_frame: Optional[pl.DataFrame] = None
+        X_frame: Optional[pd.DataFrame] = None
     ) -> 'DataView':
         """Create DataView from arrays.
         
@@ -100,8 +100,8 @@ class DataView:
             View date
         description : str, optional
             Description of this view
-        X_frame : pl.DataFrame, optional
-            Polars DataFrame representation
+        X_frame : pd.DataFrame, optional
+            Pandas DataFrame representation
         
         Returns
         -------

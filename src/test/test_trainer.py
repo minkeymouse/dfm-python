@@ -5,108 +5,31 @@ Tests align with PyTorch Lightning best practices and DFM/DDFM training.
 
 import pytest
 import torch
-import polars as pl
+import pandas as pd
 from pathlib import Path
 from typing import Optional, List, Any
 
 from dfm_python.trainer import (
     DFMTrainer,
     DDFMTrainer,
-    _normalize_accelerator,
-    _normalize_precision
 )
+# Import private functions directly (not exported in __all__)
+# These are internal functions used for testing
+import dfm_python.trainer as trainer_module
+_normalize_accelerator = trainer_module._normalize_accel
+_normalize_precision = trainer_module._normalize_prec
 from dfm_python.config import DFMConfig, DDFMConfig, SeriesConfig, DEFAULT_BLOCK_NAME
 from dfm_python.config.adapter import YamlSource
 from dfm_python.utils.data import rem_nans_spline, sort_data
 from dfm_python.utils.time import TimeIndex, parse_timestamp
 from pytorch_lightning.callbacks import EarlyStopping, LearningRateMonitor, ModelCheckpoint
 
-
-# ============================================================================
-# Test Helper Functions
-# ============================================================================
-
-def assert_trainer_defaults(
-    trainer,
-    expected_max_epochs: int,
-    expected_progress_bar: bool,
-    expected_model_summary: bool
-) -> None:
-    """Assert trainer default values match expected.
-    
-    Parameters
-    ----------
-    trainer : DFMTrainer or DDFMTrainer
-        Trainer instance to check
-    expected_max_epochs : int
-        Expected max_epochs value
-    expected_progress_bar : bool
-        Expected enable_progress_bar value
-    expected_model_summary : bool
-        Expected enable_model_summary value
-    """
-    assert trainer.max_epochs == expected_max_epochs, (
-        f"Expected max_epochs={expected_max_epochs}, got {trainer.max_epochs}"
-    )
-    assert trainer.enable_progress_bar == expected_progress_bar, (
-        f"Expected enable_progress_bar={expected_progress_bar}, got {trainer.enable_progress_bar}"
-    )
-    assert trainer.enable_model_summary == expected_model_summary, (
-        f"Expected enable_model_summary={expected_model_summary}, got {trainer.enable_model_summary}"
-    )
-
-
-def assert_trainer_callbacks(
-    trainer,
-    expected_callback_types: List[str]
-) -> None:
-    """Assert trainer has expected callback types.
-    
-    Parameters
-    ----------
-    trainer : DFMTrainer or DDFMTrainer
-        Trainer instance to check
-    expected_callback_types : List[str]
-        List of expected callback class names (e.g., ['EarlyStopping'])
-    """
-    assert hasattr(trainer, 'callbacks'), "Trainer should have callbacks attribute"
-    assert trainer.callbacks is not None, "Trainer callbacks should not be None"
-    assert isinstance(trainer.callbacks, list), "Trainer callbacks should be a list"
-    
-    # Get actual callback types
-    callback_types = [type(cb).__name__ for cb in trainer.callbacks]
-    
-    # Check that all expected callback types are present
-    for expected_type in expected_callback_types:
-        assert expected_type in callback_types, (
-            f"Expected callback type '{expected_type}' not found in callbacks. "
-            f"Found: {callback_types}"
-        )
-
-
-def assert_trainer_attribute_value(
-    trainer,
-    attribute_name: str,
-    expected_value: Any
-) -> None:
-    """Assert trainer attribute has expected value.
-    
-    Parameters
-    ----------
-    trainer : DFMTrainer or DDFMTrainer
-        Trainer instance to check
-    attribute_name : str
-        Name of attribute to check
-    expected_value : any
-        Expected value for the attribute
-    """
-    assert hasattr(trainer, attribute_name), (
-        f"Trainer should have '{attribute_name}' attribute"
-    )
-    actual_value = getattr(trainer, attribute_name)
-    assert actual_value == expected_value, (
-        f"Expected {attribute_name}={expected_value}, got {actual_value}"
-    )
+# Import shared test helper functions
+from test_helpers import (
+    assert_trainer_defaults,
+    assert_trainer_callbacks,
+    assert_trainer_attribute_value
+)
 
 
 class TestDFMTrainer:

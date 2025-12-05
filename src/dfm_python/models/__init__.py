@@ -6,16 +6,16 @@ This package contains implementations of different factor models:
 """
 
 from .base import BaseFactorModel
-from .dfm import DFMLinear, DFM
+from .dfm import DFM
 from ..config.results import BaseResult, DFMResult, DDFMResult, FitParams
 
 __all__ = [
-    'BaseFactorModel', 'DFMLinear', 'DFM',
+    'BaseFactorModel', 'DFM',
     # Results
     'BaseResult', 'DFMResult', 'DDFMResult', 'FitParams',
 ]
 
-# DDFM (PyTorch is mandatory)
+# DDFM implementation
 from .ddfm import DDFM, DDFMModel
 __all__.extend([
     'DDFM',  # High-level API

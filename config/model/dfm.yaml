@@ -3,33 +3,31 @@ ar_clip_min: -0.99
 ar_lag: 1
 augment_idio: true
 augment_idio_slow: true
-# Block configurations: define all blocks and their properties
-# Series configs specify which blocks they belong to (optional - defaults to first block)
 blocks:
   Block_Global:
+    ar_lag: 1
+    clock: m
     factors: 3
-    ar_lag: 1
-    clock: m
   Block_Consumption:
-    factors: 1
     ar_lag: 1
     clock: m
+    factors: 1
   Block_Investment:
-    factors: 1
     ar_lag: 1
     clock: m
+    factors: 1
   Block_Export:
-    factors: 1
     ar_lag: 1
     clock: m
+    factors: 1
   Block_Nominal:
-    factors: 1
     ar_lag: 1
     clock: m
+    factors: 1
   Block_Labor:
-    factors: 1
     ar_lag: 1
     clock: m
+    factors: 1
 clip_ar_coefficients: true
 clock: m
 idio_min_var: 1.0e-08

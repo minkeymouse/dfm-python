@@ -173,7 +173,7 @@ if _has_torch:
             
             Note: VAE encoders are typically trained via autoencoder training
             (encoder + decoder) before being used for factor extraction.
-            This method is a placeholder for the BaseEncoder interface.
+            This method satisfies the BaseEncoder interface but does nothing.
             
             Parameters
             ----------
@@ -476,7 +476,8 @@ def convert_decoder_to_numpy(
     has_bias : bool
         Whether the decoder has a bias term
     factor_order : int
-        Lag order for common factors (1 for VAR(1), 2 for VAR(2))
+        Lag order for common factors. Only VAR(1) and VAR(2) are supported.
+        Higher orders will raise NotImplementedError.
         
     Returns
     -------

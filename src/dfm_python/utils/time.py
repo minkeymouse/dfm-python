@@ -1,7 +1,7 @@
 """Time index and timestamp utilities for DFM operations.
 
 This module provides:
-- TimeIndex class: Polars-based time index abstraction
+- TimeIndex class: Pandas-based time index abstraction
 - Timestamp utilities: datetime parsing, conversion, and range generation
 - Time helpers: time index operations and period parsing
 
@@ -11,7 +11,7 @@ from helpers.py for better organization and reduced file count.
 
 from typing import Union, Optional, Any, List, Dict
 import numpy as np
-import polars as pl
+import pandas as pd
 from datetime import datetime, timedelta
 import calendar
 
@@ -21,75 +21,75 @@ import calendar
 # ============================================================================
 
 class TimeIndex:
-    """Time index abstraction wrapping polars Series with datetime dtype.
+    """Time index abstraction wrapping pandas Series with datetime dtype.
     
     This class provides a datetime index interface while using
-    polars Series internally for better performance.
+    pandas Series internally for compatibility with sktime and PyTorch Forecasting.
     
     Parameters
     ----------
-    data : pl.Series, list, np.ndarray, or datetime-like
-        Time index data. If pl.Series, must have datetime dtype.
+    data : pd.Series, list, np.ndarray, or datetime-like
+        Time index data. If pd.Series, must have datetime dtype.
         If list/array, will be converted to datetime.
     """
     
-    def __init__(self, data: Union[pl.Series, List, np.ndarray, Any]):
+    def __init__(self, data: Union[pd.Series, List, np.ndarray, Any]):
         """Initialize TimeIndex from various input types."""
-        if isinstance(data, pl.Series):
-            if data.dtype != pl.Datetime:
+        if isinstance(data, pd.Series):
+            if not pd.api.types.is_datetime64_any_dtype(data):
                 # Try to convert to datetime
                 try:
-                    data = data.cast(pl.Datetime)
-                except (pl.exceptions.ComputeError, TypeError, ValueError) as e:
+                    data = pd.to_datetime(data)
+                except (TypeError, ValueError) as e:
                     raise ValueError(f"Cannot convert Series with dtype {data.dtype} to datetime: {e}")
             self._series = data
         elif isinstance(data, TimeIndex):
-            self._series = data._series.clone()
+            self._series = data._series.copy()
         else:
-            # Convert list/array to polars Series
+            # Convert list/array to pandas Series
             try:
-                self._series = pl.Series("time", data, dtype=pl.Datetime)
-            except (pl.exceptions.ComputeError, TypeError, ValueError):
-                # Try parsing as strings
-                try:
-                    self._series = pl.Series("time", data).str.strptime(pl.Datetime)
-                except Exception as e:
-                    raise ValueError(f"Cannot create TimeIndex from {type(data)}: {e}")
+                self._series = pd.Series(pd.to_datetime(data), name="time")
+            except (TypeError, ValueError) as e:
+                raise ValueError(f"Cannot create TimeIndex from {type(data)}: {e}")
     
     @property
-    def series(self) -> pl.Series:
-        """Get underlying polars Series."""
+    def series(self) -> pd.Series:
+        """Get underlying pandas Series."""
         return self._series
     
     def __len__(self) -> int:
         """Return length of time index."""
         return len(self._series)
     
-    def __getitem__(self, key: Union[int, slice, np.ndarray, pl.Series]) -> Union[datetime, 'TimeIndex']:
+    def __getitem__(self, key: Union[int, slice, np.ndarray, pd.Series]) -> Union[datetime, 'TimeIndex']:
         """Get item or slice from time index."""
         if isinstance(key, (int, np.integer)):
             # Return single datetime
-            val = self._series[key]
+            val = self._series.iloc[key]
             if isinstance(val, datetime):
                 return val
-            # Convert polars datetime to Python datetime
-            return val.to_python() if hasattr(val, 'to_python') else datetime.fromisoformat(str(val))
+            # Convert pandas Timestamp to Python datetime
+            if isinstance(val, pd.Timestamp):
+                return val.to_pydatetime()
+            return datetime.fromisoformat(str(val)) if isinstance(str(val), str) else val
         elif isinstance(key, slice):
             # Return TimeIndex slice
-            return TimeIndex(self._series[key])
-        elif isinstance(key, (np.ndarray, pl.Series)):
+            return TimeIndex(self._series.iloc[key])
+        elif isinstance(key, (np.ndarray, pd.Series)):
             # Boolean indexing
             if isinstance(key, np.ndarray):
-                key = pl.Series(key)
-            return TimeIndex(self._series.filter(key))
+                key = pd.Series(key, index=self._series.index)
+            return TimeIndex(self._series[key])
         else:
             raise TypeError(f"Unsupported index type: {type(key)}")
     
     def __iter__(self):
         """Iterate over time index."""
         for val in self._series:
-            if hasattr(val, 'to_python'):
-                yield val.to_python()
+            if isinstance(val, pd.Timestamp):
+                yield val.to_pydatetime()
+            elif isinstance(val, datetime):
+                yield val
             else:
                 yield datetime.fromisoformat(str(val)) if isinstance(str(val), str) else val
     
@@ -103,23 +103,21 @@ class TimeIndex:
     
     def to_numpy(self) -> np.ndarray:
         """Convert to numpy array of datetime objects."""
-        return np.array([dt.to_python() if hasattr(dt, 'to_python') else dt 
+        return np.array([dt.to_pydatetime() if isinstance(dt, pd.Timestamp) else dt 
                         for dt in self._series], dtype=object)
     
     def to_list(self) -> List[datetime]:
         """Convert to list of datetime objects."""
-        return [dt.to_python() if hasattr(dt, 'to_python') else dt 
+        return [dt.to_pydatetime() if isinstance(dt, pd.Timestamp) else dt 
                 for dt in self._series]
     
-    def filter(self, mask: Union[np.ndarray, pl.Series, List[bool]]) -> 'TimeIndex':
+    def filter(self, mask: Union[np.ndarray, pd.Series, List[bool]]) -> 'TimeIndex':
         """Filter time index using boolean mask."""
-        if isinstance(mask, np.ndarray):
-            mask = pl.Series(mask)
-        elif isinstance(mask, list):
-            mask = pl.Series(mask)
-        return TimeIndex(self._series.filter(mask))
+        if isinstance(mask, (np.ndarray, list)):
+            mask = pd.Series(mask, index=self._series.index)
+        return TimeIndex(self._series[mask])
     
-    def __ge__(self, other: Union[datetime, 'TimeIndex']) -> pl.Series:
+    def __ge__(self, other: Union[datetime, 'TimeIndex']) -> pd.Series:
         """Greater than or equal comparison."""
         if isinstance(other, datetime):
             return self._series >= other
@@ -128,7 +126,7 @@ class TimeIndex:
         else:
             raise TypeError(f"Cannot compare TimeIndex with {type(other)}")
     
-    def __le__(self, other: Union[datetime, 'TimeIndex']) -> pl.Series:
+    def __le__(self, other: Union[datetime, 'TimeIndex']) -> pd.Series:
         """Less than or equal comparison."""
         if isinstance(other, datetime):
             return self._series <= other
@@ -137,7 +135,7 @@ class TimeIndex:
         else:
             raise TypeError(f"Cannot compare TimeIndex with {type(other)}")
     
-    def __gt__(self, other: Union[datetime, 'TimeIndex']) -> pl.Series:
+    def __gt__(self, other: Union[datetime, 'TimeIndex']) -> pd.Series:
         """Greater than comparison."""
         if isinstance(other, datetime):
             return self._series > other
@@ -146,7 +144,7 @@ class TimeIndex:
         else:
             raise TypeError(f"Cannot compare TimeIndex with {type(other)}")
     
-    def __lt__(self, other: Union[datetime, 'TimeIndex']) -> pl.Series:
+    def __lt__(self, other: Union[datetime, 'TimeIndex']) -> pd.Series:
         """Less than comparison."""
         if isinstance(other, datetime):
             return self._series < other
@@ -155,7 +153,7 @@ class TimeIndex:
         else:
             raise TypeError(f"Cannot compare TimeIndex with {type(other)}")
     
-    def __eq__(self, other: Any) -> Union[pl.Series, bool]:
+    def __eq__(self, other: Any) -> Union[pd.Series, bool]:
         """Equality comparison."""
         if isinstance(other, datetime):
             return self._series == other
@@ -168,36 +166,6 @@ class TimeIndex:
 # ============================================================================
 # Timestamp Utilities
 # ============================================================================
-
-# Type alias for Timestamp (replaces pd.Timestamp)
-Timestamp = datetime
-
-
-def create_timestamp(year: int, month: int, day: int = 1, 
-                    hour: int = 0, minute: int = 0, second: int = 0) -> datetime:
-    """Create a datetime object (replaces pd.Timestamp).
-    
-    Parameters
-    ----------
-    year : int
-        Year
-    month : int
-        Month (1-12)
-    day : int, default 1
-        Day of month
-    hour : int, default 0
-        Hour
-    minute : int, default 0
-        Minute
-    second : int, default 0
-        Second
-        
-    Returns
-    -------
-    datetime
-        Datetime object
-    """
-    return datetime(year, month, day, hour, minute, second)
 
 
 def days_in_month(year: int, month: int) -> int:
@@ -257,14 +225,9 @@ def parse_timestamp(value: Union[str, datetime, int, float]) -> datetime:
         raise ValueError(f"Cannot parse {type(value)} to datetime")
 
 
-def to_timestamp(value: Union[str, datetime, int, float]) -> datetime:
-    """Convert value to datetime (alias for parse_timestamp)."""
-    return parse_timestamp(value)
-
-
 def datetime_range(start: datetime, end: Optional[datetime] = None, 
                   periods: Optional[int] = None, freq: str = 'D') -> list:
-    """Generate datetime range (replaces pd.date_range).
+    """Generate datetime range (uses pd.date_range).
     
     Parameters
     ----------
@@ -290,65 +253,16 @@ def datetime_range(start: datetime, end: Optional[datetime] = None,
     list
         List of datetime objects
     """
-    # Map frequency to polars duration
-    freq_map = {
-        'D': '1d',
-        'W': '1w',
-        'ME': '1mo',
-        'MS': '1mo',  # Polars doesn't distinguish start/end, use month
-        'QE': '3mo',
-        'QS': '3mo',
-        'YE': '1y',
-        'YS': '1y',
-    }
-    
-    if freq not in freq_map:
-        raise ValueError(f"Unsupported frequency: {freq}")
-    
-    polars_freq = freq_map[freq]
-    
+    # Use pandas date_range directly
     if end is not None:
-        # Generate range from start to end
-        result = pl.datetime_range(start, end, polars_freq, eager=True)
+        result = pd.date_range(start=start, end=end, freq=freq)
     elif periods is not None:
-        # Generate range with specified number of periods
-        # Calculate end date based on frequency
-        if freq in ['ME', 'MS']:
-            # For monthly, add months manually
-            end = start
-            for _ in range(periods):
-                # Get next month
-                if end.month == 12:
-                    end = datetime(end.year + 1, 1, 1)
-                else:
-                    end = datetime(end.year, end.month + 1, 1)
-                # For ME, go to end of month
-                if freq == 'ME':
-                    end = datetime(end.year, end.month, days_in_month(end.year, end.month))
-        else:
-            # For other frequencies, use timedelta
-            delta_map = {
-                'D': timedelta(days=periods),
-                'W': timedelta(weeks=periods),
-                'QE': timedelta(days=periods * 90),  # Approximate
-                'QS': timedelta(days=periods * 90),
-                'YE': timedelta(days=periods * 365),
-                'YS': timedelta(days=periods * 365),
-            }
-            if freq in delta_map:
-                end = start + delta_map[freq]
-            else:
-                end = start + timedelta(days=periods)
-        
-        result = pl.datetime_range(start, end, polars_freq, eager=True)
-        # Trim to exact number of periods
-        if len(result) > periods:
-            result = result[:periods]
+        result = pd.date_range(start=start, periods=periods, freq=freq)
     else:
         raise ValueError("Either 'end' or 'periods' must be specified")
     
     # Convert to list of datetime objects
-    return [to_python_datetime(dt) for dt in result]
+    return [dt.to_pydatetime() if isinstance(dt, pd.Timestamp) else dt for dt in result]
 
 
 # Clock frequency to datetime frequency mapping (used across modules)
@@ -451,35 +365,17 @@ def get_next_period_end(last_date: datetime, frequency: str) -> datetime:
         return datetime(next_year, next_month, days_in_month(next_year, next_month))
 
 
-def format_timestamp(dt: datetime, fmt: str = '%Y-%m-%d') -> str:
-    """Format datetime as string.
-    
-    Parameters
-    ----------
-    dt : datetime
-        Datetime to format
-    fmt : str, default '%Y-%m-%d'
-        Format string
-        
-    Returns
-    -------
-    str
-        Formatted string
-    """
-    return dt.strftime(fmt)
-
-
 # ============================================================================
 # Time Helper Functions (from helpers.py)
 # ============================================================================
 
 def to_python_datetime(value: Any) -> datetime:
-    """Convert value to Python datetime (handles polars datetime, strings, etc.).
+    """Convert value to Python datetime (handles pandas Timestamp, strings, etc.).
     
     Parameters
     ----------
     value : Any
-        Value to convert (polars datetime, string, datetime, etc.)
+        Value to convert (pandas Timestamp, string, datetime, etc.)
         
     Returns
     -------
@@ -494,59 +390,12 @@ def to_python_datetime(value: Any) -> datetime:
     if isinstance(value, datetime):
         return value
     
-    # Handle polars datetime
-    if hasattr(value, 'to_python'):
-        try:
-            return value.to_python()
-        except (AttributeError, TypeError):
-            pass
+    # Handle pandas Timestamp
+    if isinstance(value, pd.Timestamp):
+        return value.to_pydatetime()
     
     # Try parsing as string
     return parse_timestamp(value)
-
-
-def extract_last_date(time_index: Any) -> datetime:
-    """Extract last date from time index (handles TimeIndex, list, array, etc.).
-    
-    Parameters
-    ----------
-    time_index : Any
-        Time index (TimeIndex, list, array, etc.)
-        
-    Returns
-    -------
-    datetime
-        Last date in the time index
-        
-    Raises
-    ------
-    ValueError
-        If time_index is empty or cannot be indexed
-    IndexError
-        If time_index has no elements
-    """
-    # Handle TimeIndex
-    if hasattr(time_index, '__getitem__'):
-        try:
-            last_val = time_index[-1]
-            return to_python_datetime(last_val)
-        except (IndexError, KeyError):
-            pass
-    
-    # Handle list
-    if isinstance(time_index, (list, tuple)):
-        if len(time_index) == 0:
-            raise IndexError("Time index is empty")
-        return to_python_datetime(time_index[-1])
-    
-    # Try to convert to list and get last element
-    try:
-        time_list = list(time_index)
-        if len(time_list) == 0:
-            raise IndexError("Time index is empty")
-        return to_python_datetime(time_list[-1])
-    except (TypeError, ValueError):
-        raise ValueError(f"Cannot extract last date from {type(time_index)}")
 
 
 def find_time_index(
@@ -570,8 +419,12 @@ def find_time_index(
     for i, t in enumerate(time_index):
         if not isinstance(t, datetime):
             try:
-                if hasattr(t, 'to_python'):
-                    t = t.to_python()
+                if isinstance(t, pd.Timestamp):
+                    t = t.to_pydatetime()
+                elif hasattr(t, 'to_pydatetime'):
+                    t = t.to_pydatetime()
+                elif hasattr(t, 'to_python'):
+                    t = t.to_python()  # Backward compatibility for other types
                 else:
                     t = parse_timestamp(t)
             except (ValueError, TypeError, AttributeError):
@@ -628,8 +481,12 @@ def convert_to_timestamp(
             elif isinstance(result, TimeIndex):
                 # If it's a TimeIndex, get the first element
                 return to_python_datetime(result[0])
+            elif isinstance(result, pd.Timestamp):
+                return result.to_pydatetime()
+            elif hasattr(result, 'to_pydatetime'):
+                return result.to_pydatetime()
             elif hasattr(result, 'to_python'):
-                return result.to_python()
+                return result.to_python()  # Backward compatibility
             else:
                 return to_python_datetime(result)
         else:
@@ -679,8 +536,12 @@ def get_latest_time(
             elif isinstance(latest, TimeIndex):
                 # If it's a TimeIndex, get the first element
                 return to_python_datetime(latest[0])
+            elif isinstance(latest, pd.Timestamp):
+                return latest.to_pydatetime()
+            elif hasattr(latest, 'to_pydatetime'):
+                return latest.to_pydatetime()
             elif hasattr(latest, 'to_python'):
-                return latest.to_python()
+                return latest.to_python()  # Backward compatibility
             else:
                 return to_python_datetime(latest)
         except (IndexError, KeyError, TypeError):
@@ -797,16 +658,10 @@ except ImportError:
     mean_absolute_percentage_error = None
     r2_score = None
 
-try:
-    from sktime.performance_metrics.forecasting import (
-        mean_squared_error as sktime_mse,
-        mean_absolute_error as sktime_mae,
-    )
-    HAS_SKTIME_METRICS = True
-except ImportError:
-    HAS_SKTIME_METRICS = False
-    sktime_mse = None
-    sktime_mae = None
+from sktime.performance_metrics.forecasting import (
+    MeanSquaredError,
+    MeanAbsoluteError,
+)
 
 
 def calculate_rmse(
@@ -816,7 +671,7 @@ def calculate_rmse(
 ) -> Tuple[float, np.ndarray]:
     """Calculate Root Mean Squared Error (RMSE) between actual and predicted values.
     
-    Uses sklearn.metrics.mean_squared_error with squared=False for RMSE calculation.
+    Uses sktime.performance_metrics.forecasting.MeanSquaredError with square_root=True.
     Supports masking and per-series calculation for multivariate time series.
     
     Parameters
@@ -842,14 +697,8 @@ def calculate_rmse(
     - Returns NaN for individual series if that series has no valid observations
     - Mask parameter allows selective calculation (e.g., exclude certain time periods)
     - Automatically handles missing data by excluding NaN values
-    - Uses sklearn.metrics.mean_squared_error internally
+    - Requires sktime to be installed
     """
-    if not HAS_SKLEARN:
-        raise ImportError(
-            "sklearn is required for calculate_rmse. "
-            "Please install: pip install scikit-learn"
-        )
-    
     # Ensure arrays are the same shape
     if actual.shape != predicted.shape:
         raise ValueError(
@@ -870,35 +719,58 @@ def calculate_rmse(
         if np.sum(mask) == 0:
             return np.nan, np.array([np.nan])
         
-        # Use sklearn for 1D case
+        # Convert to pandas Series for sktime
         actual_masked = actual[mask]
         predicted_masked = predicted[mask]
-        rmse_series = mean_squared_error(actual_masked, predicted_masked, squared=False)
+        y_true = pd.Series(actual_masked)
+        y_pred = pd.Series(predicted_masked)
+        
+        # Use sktime metric
+        mse_metric = MeanSquaredError(square_root=True)
+        rmse_result = mse_metric(y_true, y_pred)
+        # Handle both scalar and Series returns
+        if hasattr(rmse_result, 'iloc'):
+            rmse_series = float(rmse_result.iloc[0] if len(rmse_result) > 0 else rmse_result)
+        else:
+            rmse_series = float(rmse_result)
         return rmse_series, np.array([rmse_series])
     
     # Handle 2D case (multiple series)
     T, N = actual.shape
-    
-    # Calculate RMSE per series using sklearn
     rmse_per_series = np.zeros(N)
+    
     for i in range(N):
         series_mask = mask[:, i]
         if np.sum(series_mask) > 0:
             actual_series = actual[series_mask, i]
             predicted_series = predicted[series_mask, i]
-            rmse_per_series[i] = mean_squared_error(
-                actual_series, predicted_series, squared=False
-            )
+            y_true = pd.Series(actual_series)
+            y_pred = pd.Series(predicted_series)
+            
+            mse_metric = MeanSquaredError(square_root=True)
+            rmse_result = mse_metric(y_true, y_pred)
+            # Handle both scalar and Series returns
+            if hasattr(rmse_result, 'iloc'):
+                rmse_per_series[i] = float(rmse_result.iloc[0] if len(rmse_result) > 0 else rmse_result)
+            else:
+                rmse_per_series[i] = float(rmse_result)
         else:
             rmse_per_series[i] = np.nan
     
-    # Calculate overall RMSE (average across all valid observations)
+    # Calculate overall RMSE
     if np.any(mask):
         actual_masked = actual[mask]
         predicted_masked = predicted[mask]
-        rmse_overall = mean_squared_error(
-            actual_masked, predicted_masked, squared=False
-        )
+        y_true = pd.Series(actual_masked)
+        y_pred = pd.Series(predicted_masked)
+        
+        mse_metric = MeanSquaredError(square_root=True)
+        rmse_result = mse_metric(y_true, y_pred)
+        # Handle both scalar and Series returns
+        if hasattr(rmse_result, 'iloc'):
+            rmse_overall = float(rmse_result.iloc[0] if len(rmse_result) > 0 else rmse_result)
+        else:
+            rmse_overall = float(rmse_result)
     else:
         rmse_overall = np.nan
     
@@ -912,7 +784,7 @@ def calculate_mae(
 ) -> Tuple[float, np.ndarray]:
     """Calculate Mean Absolute Error (MAE) between actual and predicted values.
     
-    Uses sklearn.metrics.mean_absolute_error for MAE calculation.
+    Uses sktime.performance_metrics.forecasting.MeanAbsoluteError.
     Supports masking and per-series calculation for multivariate time series.
     
     Parameters
@@ -931,13 +803,11 @@ def calculate_mae(
         Overall MAE averaged across all series and time periods
     mae_per_series : np.ndarray
         MAE for each series (N,) or scalar if 1D input
+        
+    Notes
+    -----
+    - Requires sktime to be installed
     """
-    if not HAS_SKLEARN:
-        raise ImportError(
-            "sklearn is required for calculate_mae. "
-            "Please install: pip install scikit-learn"
-        )
-    
     # Ensure arrays are the same shape
     if actual.shape != predicted.shape:
         raise ValueError(
@@ -956,21 +826,41 @@ def calculate_mae(
         if np.sum(mask) == 0:
             return np.nan, np.array([np.nan])
         
+        # Convert to pandas Series for sktime
         actual_masked = actual[mask]
         predicted_masked = predicted[mask]
-        mae_series = mean_absolute_error(actual_masked, predicted_masked)
+        y_true = pd.Series(actual_masked)
+        y_pred = pd.Series(predicted_masked)
+        
+        # Use sktime metric
+        mae_metric = MeanAbsoluteError()
+        mae_result = mae_metric(y_true, y_pred)
+        # Handle both scalar and Series returns
+        if hasattr(mae_result, 'iloc'):
+            mae_series = float(mae_result.iloc[0] if len(mae_result) > 0 else mae_result)
+        else:
+            mae_series = float(mae_result)
         return mae_series, np.array([mae_series])
     
-    # Handle 2D case
+    # Handle 2D case (multiple series)
     T, N = actual.shape
-    
     mae_per_series = np.zeros(N)
+    
     for i in range(N):
         series_mask = mask[:, i]
         if np.sum(series_mask) > 0:
             actual_series = actual[series_mask, i]
             predicted_series = predicted[series_mask, i]
-            mae_per_series[i] = mean_absolute_error(actual_series, predicted_series)
+            y_true = pd.Series(actual_series)
+            y_pred = pd.Series(predicted_series)
+            
+            mae_metric = MeanAbsoluteError()
+            mae_result = mae_metric(y_true, y_pred)
+            # Handle both scalar and Series returns
+            if hasattr(mae_result, 'iloc'):
+                mae_per_series[i] = float(mae_result.iloc[0] if len(mae_result) > 0 else mae_result)
+            else:
+                mae_per_series[i] = float(mae_result)
         else:
             mae_per_series[i] = np.nan
     
@@ -978,7 +868,16 @@ def calculate_mae(
     if np.any(mask):
         actual_masked = actual[mask]
         predicted_masked = predicted[mask]
-        mae_overall = mean_absolute_error(actual_masked, predicted_masked)
+        y_true = pd.Series(actual_masked)
+        y_pred = pd.Series(predicted_masked)
+        
+        mae_metric = MeanAbsoluteError()
+        mae_result = mae_metric(y_true, y_pred)
+        # Handle both scalar and Series returns
+        if hasattr(mae_result, 'iloc'):
+            mae_overall = float(mae_result.iloc[0] if len(mae_result) > 0 else mae_result)
+        else:
+            mae_overall = float(mae_result)
     else:
         mae_overall = np.nan
     

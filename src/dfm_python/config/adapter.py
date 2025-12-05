@@ -3,7 +3,6 @@
 This module provides adapters for loading DFMConfig from various sources:
 - YAML files (with Hydra/OmegaConf support)
 - Dictionary configurations
-- Spec CSV files (series definitions)
 - Hydra DictConfig objects
 - Merged configurations from multiple sources
 
@@ -25,12 +24,11 @@ except ImportError:
 
 if TYPE_CHECKING:
     from .schema import DDFMConfig
-import polars as pl
 
 _logger = get_logger(__name__)
 
 
-def _load_config_from_defaults(cfg, root_config_dir, config_type: str) -> Optional[dict]:
+def _load_config_defaults(cfg, root_config_dir, config_type: str) -> Optional[dict]:
     """Load config from defaults or direct path (helper for series/blocks loading).
     
     Parameters
@@ -195,7 +193,7 @@ class YamlSource:
         
         # Load series from config/series/default.yaml
         series_list = []
-        series_dict = _load_config_from_defaults(cfg, root_config_dir, 'series')
+        series_dict = _load_config_defaults(cfg, root_config_dir, 'series')
         series_loaded = series_dict is not None
         
         # Convert series dict to SeriesConfig objects
@@ -216,7 +214,8 @@ class YamlSource:
                         frequency=series_data.get('frequency', 'm'),
                         transformation=series_data.get('transformation', 'lin'),
                         blocks=series_data.get('blocks', []),
-                        release_date=release_date
+                        release_date=release_date,
+                        scaler=series_data.get('scaler', None)  # Optional, for per-series scaling
                     ))
         
         # If no series loaded from separate files, try to get from main config
@@ -248,7 +247,7 @@ class YamlSource:
                 blocks_properties_from_config = blocks_data
         
         # Also try loading from config/blocks/default.yaml
-        blocks_dict_raw = _load_config_from_defaults(cfg, root_config_dir, 'blocks')
+        blocks_dict_raw = _load_config_defaults(cfg, root_config_dir, 'blocks')
         if blocks_dict_raw is not None:
             blocks_properties_from_config.update(blocks_dict_raw)
         
@@ -403,7 +402,7 @@ class MergedConfigSource:
     """Merge multiple configuration sources.
     
     This allows combining configurations from different sources,
-    e.g., base YAML config + series from Spec CSV.
+    e.g., base YAML config + series from another YAML or dict.
     
     The merge strategy:
     - Base config provides main settings (threshold, max_iter, clock, blocks)
@@ -493,86 +492,6 @@ class MergedConfigSource:
         )
 
 
-def _write_series_blocks_yaml(
-    config: DFMConfig,
-    output_dir: Path,
-    series_filename: str,
-    blocks_filename: str
-) -> Tuple[Path, Path]:
-    """Write series and block YAML files for a given configuration."""
-    series_dir = output_dir / 'series'
-    series_dir.mkdir(parents=True, exist_ok=True)
-    series_path = series_dir / f'{series_filename}.yaml'
-    
-    blocks_dir = output_dir / 'blocks'
-    blocks_dir.mkdir(parents=True, exist_ok=True)
-    blocks_path = blocks_dir / f'{blocks_filename}.yaml'
-    
-    series_dict = {}
-    block_names = config.block_names
-    
-    for series in config.series:
-        if isinstance(series.blocks, list) and len(series.blocks) > 0:
-            if isinstance(series.blocks[0], int):
-                blocks_names = [block_names[i] for i, val in enumerate(series.blocks) if val != 0]
-            else:
-                blocks_names = list(series.blocks)
-        else:
-            blocks_names = [DEFAULT_BLOCK_NAME]
-        
-        series_entry = {
-            'series_name': series.series_name,
-            'frequency': series.frequency,
-            'transformation': series.transformation,
-            'blocks': blocks_names
-        }
-        if series.release_date is not None:
-            series_entry['release'] = series.release_date
-        series_dict[series.series_id] = series_entry
-    
-    blocks_dict = {}
-    for block_name, block_config in config.blocks.items():
-        block_entry = {
-            'factors': block_config.get('factors', 1),
-            'ar_lag': block_config.get('ar_lag', 1),
-            'clock': block_config.get('clock', 'm')
-        }
-        if block_config.get('notes'):
-            block_entry['notes'] = block_config['notes']
-        blocks_dict[block_name] = block_entry
-    
-    def _write_yaml(path: Path, payload: Dict[str, Any]) -> None:
-        try:
-            import yaml  # type: ignore
-            yaml_kwargs = {'default_flow_style': False, 'sort_keys': False, 'allow_unicode': True}
-            import io
-            stream = io.StringIO()
-            yaml.dump(payload, stream, **yaml_kwargs)
-            yaml_content = stream.getvalue()
-            lines = yaml_content.split('\n')
-            formatted_lines = []
-            for i, line in enumerate(lines):
-                if line and not line.startswith(' ') and ':' in line and not line.strip().startswith('#'):
-                    if i > 0 and formatted_lines and formatted_lines[-1].strip():
-                        formatted_lines.append('')
-                formatted_lines.append(line)
-            with open(path, 'w', encoding='utf-8') as f:
-                f.write('\n'.join(formatted_lines))
-        except ImportError:
-            try:
-                from omegaconf import OmegaConf  # type: ignore
-            except ImportError as exc:  # pragma: no cover
-                raise ImportError(
-                    "Either PyYAML or omegaconf is required for YAML generation. "
-                    "Install with: pip install pyyaml or pip install omegaconf"
-                ) from exc
-            cfg = OmegaConf.create(payload)
-            OmegaConf.save(cfg, path)
-    
-    _write_yaml(series_path, series_dict)
-    _write_yaml(blocks_path, blocks_dict)
-    
-    return series_path, blocks_path
 
 
 def make_config_source(
@@ -580,7 +499,6 @@ def make_config_source(
     *,
     yaml: Optional[Union[str, Path]] = None,
     mapping: Optional[Union[Dict[str, Any], Any]] = None,
-    spec: Optional[Union[str, Path]] = None,
     hydra: Optional[Union[Dict[str, Any], 'DictConfig']] = None,
 ) -> ConfigSource:
     """Create a ConfigSource adapter from various input formats.
@@ -598,8 +516,6 @@ def make_config_source(
         Explicit YAML file path
     mapping : dict, optional
         Explicit dictionary config
-    spec : str or Path, optional
-        Explicit spec CSV file path
     hydra : DictConfig or dict, optional
         Explicit Hydra config
         
@@ -618,18 +534,17 @@ def make_config_source(
     >>> 
     >>> # Explicit keyword arguments
     >>> source = make_config_source(yaml='config/default.yaml')
-    >>> source = make_config_source(spec='data/spec.csv')
     >>> 
-    >>> # Merge YAML base + Spec CSV series
+    >>> # Merge YAML base + dict override
     >>> base = make_config_source(yaml='config/default.yaml')
-    >>> override = make_config_source(spec='data/spec.csv')
+    >>> override = make_config_source(mapping={'series': [...]})
     >>> merged = MergedConfigSource(base, override)
     """
     # Check for explicit keyword arguments (only one allowed)
-    explicit_kwargs = [k for k, v in [('yaml', yaml), ('mapping', mapping), ('spec', spec), ('hydra', hydra)] if v is not None]
+    explicit_kwargs = [k for k, v in [('yaml', yaml), ('mapping', mapping), ('hydra', hydra)] if v is not None]
     if len(explicit_kwargs) > 1:
         raise ValueError(
-            f"Only one of yaml, mapping, spec, or hydra can be specified. "
+            f"Only one of yaml, mapping, or hydra can be specified. "
             f"Got: {', '.join(explicit_kwargs)}. "
             f"For merging configs, use MergedConfigSource."
         )
@@ -655,12 +570,6 @@ def make_config_source(
         return YamlSource(yaml)
     if mapping is not None:
         return DictSource(_coerce_to_mapping(mapping))
-    if spec is not None:
-        raise ValueError(
-            "Direct spec CSV loading has been removed. "
-            "Use dfm_python.api.from_spec() or from_spec_df() to convert the CSV "
-            "to YAML files, then load via YAML/Hydra."
-        )
     if hydra is not None:
         return HydraSource(hydra)
     
@@ -668,7 +577,7 @@ def make_config_source(
     if source is None:
         raise ValueError(
             "No configuration source provided. "
-            "Specify source, yaml, mapping, spec, or hydra."
+            "Specify source, yaml, mapping, or hydra."
         )
     
     # If already a ConfigSource, return as-is
@@ -693,8 +602,7 @@ def make_config_source(
         elif suffix == '.csv':
             raise ValueError(
                 "Direct CSV configs are no longer supported. "
-                "Use dfm_python.api.from_spec() or from_spec_df() to convert the CSV "
-                "to YAML files, then load the YAML configuration."
+                "Please use YAML configuration files instead."
             )
         else:
             # Default to YAML if extension unclear
@@ -715,112 +623,6 @@ def make_config_source(
     )
 
 
-# ============================================================================
-# Internal helper: Load config from DataFrame
-# ============================================================================
-
-def _load_config_from_dataframe(df: pl.DataFrame) -> DFMConfig:
-    """Load configuration from DataFrame (internal helper).
-    
-    This function converts a DataFrame with series specifications into a DFMConfig.
-    
-    Parameters
-    ----------
-    df : pl.DataFrame
-        Polars DataFrame with columns: series_id, series_name, frequency, transformation, blocks
-        Optional columns: Release (release date)
-        Block_* columns: Binary indicators for block membership
-        
-    Returns
-    -------
-    DFMConfig
-        Model configuration object
-    """
-    series_list = []
-    block_names_set = set()
-    
-    # Convert polars DataFrame to dict of rows for easier access
-    df_dict = df.to_dict(as_series=False)
-    
-    # First, try to find Block_* columns (CSV format)
-    block_cols = [col for col in df.columns 
-                 if (col.startswith('Block_') or col.startswith('Block-')) 
-                 and col not in ['blocks']]
-    
-    # Iterate over rows
-    num_rows = len(df)
-    for i in range(num_rows):
-        # Parse blocks from Block_* columns or 'blocks' column
-        blocks = []
-        
-        if block_cols:
-            # CSV format: global block, block_1, etc. columns with 1/0 values
-            for block_col in block_cols:
-                if block_col in df_dict:
-                    block_value = df_dict[block_col][i]
-                    # Handle various types: int, float, numpy int/float, bool, string "1"/"0"
-                    # Check numpy types first (numpy.int64, numpy.float64, etc.)
-                    if hasattr(block_value, 'item'):
-                        # numpy scalar - convert to Python native type
-                        block_value = block_value.item()
-                    
-                    if isinstance(block_value, (int, float)) and block_value != 0:
-                        blocks.append(block_col)
-                    elif isinstance(block_value, bool) and block_value:
-                        blocks.append(block_col)
-                    elif isinstance(block_value, str) and block_value.strip() in ['1', 'True', 'true']:
-                        blocks.append(block_col)
-        else:
-            # Fallback: try 'blocks' column (comma-separated string or list)
-            if 'blocks' in df_dict:
-                blocks_str = df_dict['blocks'][i]
-                if isinstance(blocks_str, str):
-                    blocks = [b.strip() for b in blocks_str.split(',')]
-                elif isinstance(blocks_str, list):
-                    blocks = blocks_str
-                else:
-                    blocks = [DEFAULT_BLOCK_NAME]
-            else:
-                blocks = [DEFAULT_BLOCK_NAME]
-        
-        # Ensure at least one block
-        if not blocks:
-            blocks = [DEFAULT_BLOCK_NAME]
-        
-        # Track block names
-        for block in blocks:
-            block_names_set.add(block)
-        
-        # Parse release_date if available
-        release_date = None
-        if 'Release' in df_dict:
-            release_date = df_dict['Release'][i]
-            if release_date is not None:
-                try:
-                    release_date = int(release_date)
-                except (ValueError, TypeError):
-                    release_date = None
-        
-        series_id = df_dict.get('series_id', [f"series_{j}" for j in range(num_rows)])[i]
-        series_name = df_dict.get('series_name', df_dict.get('series_id', [f"Series {j}" for j in range(num_rows)]))[i]
-        
-        series_list.append(SeriesConfig(
-            series_id=series_id,
-            series_name=series_name,
-            frequency=df_dict.get('frequency', ['m'] * num_rows)[i],
-            transformation=df_dict.get('transformation', ['lin'] * num_rows)[i],
-            blocks=blocks,
-            release_date=release_date
-        ))
-    
-    # Create default blocks if none specified
-    block_names = sorted(block_names_set) if block_names_set else [DEFAULT_BLOCK_NAME]
-    blocks = {}
-    for block_name in block_names:
-        blocks[block_name] = {'factors': 1, 'ar_lag': 1, 'clock': 'm'}
-    
-    # block_names is derived automatically in DFMConfig.__post_init__ from blocks dict
-    return DFMConfig(series=series_list, blocks=blocks)
 
 
 # ============================================================================

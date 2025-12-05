@@ -11,14 +11,14 @@ from typing import List, Dict, Any
 
 from dfm_python.utils import (
     # State-space utilities
-    estimate_var1, estimate_var2, estimate_idiosyncratic_dynamics,
+    estimate_var1, estimate_var2, estimate_idio_dynamics,
     build_observation_matrix, build_state_space, estimate_state_space_params,
     # Time utilities
     calculate_rmse, calculate_mae, calculate_mape, calculate_r2,
     TimeIndex, parse_timestamp, datetime_range,
     # Helper utilities
     safe_get_attr, safe_get_method, get_clock_frequency,
-    get_series_ids, get_series_names, get_frequencies_from_config,
+    get_series_ids, get_series_names, get_frequencies,
     # Data utilities
     sort_data, rem_nans_spline, calculate_release_date, create_data_view,
     # Diagnostics
@@ -80,9 +80,9 @@ class TestStateSpaceUtilities:
         T, N = 100, 5
         idiosyncratic = np.random.randn(T, N) * 0.1
         
-        # estimate_idiosyncratic_dynamics requires missing_mask parameter
+        # estimate_idio_dynamics requires missing_mask parameter
         missing_mask = np.ones_like(idiosyncratic, dtype=bool)
-        A_eps, Q_eps = estimate_idiosyncratic_dynamics(idiosyncratic, missing_mask=missing_mask)
+        A_eps, Q_eps = estimate_idio_dynamics(idiosyncratic, missing_mask=missing_mask)
         
         assert A_eps.shape == (N, N)
         assert Q_eps.shape == (N, N)
@@ -271,7 +271,7 @@ class TestHelperUtilities:
         assert len(names) == 2
         assert "Series 1" in names
     
-    def test_get_frequencies_from_config(self):
+    def test_get_frequencies(self):
         """Test frequency extraction from config."""
         series_list = [
             SeriesConfig(series_id="S1", frequency="m", transformation="chg", blocks=[DEFAULT_BLOCK_NAME]),
@@ -280,7 +280,7 @@ class TestHelperUtilities:
         blocks = {DEFAULT_BLOCK_NAME: {"factors": 2}}
         config = DFMConfig(series=series_list, blocks=blocks)
         
-        frequencies = get_frequencies_from_config(config)
+        frequencies = get_frequencies(config)
         assert "m" in frequencies
         assert "q" in frequencies
 

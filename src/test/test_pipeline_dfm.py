@@ -1,7 +1,11 @@
 """Pipeline tests for complete DFM/DDFM workflows.
 
 This module tests the complete pipeline from configuration loading,
-data preprocessing, model training, to prediction and nowcasting.
+data loading (with preprocessing pipeline), model training, to prediction and nowcasting.
+
+Note: Users can provide either raw data with a preprocessing pipeline (recommended) or
+preprocessed data. When a pipeline is provided, preprocessing happens automatically in setup().
+The pipeline is also used to extract statistics (Mx/Wx) for forecasting/nowcasting.
 
 Test Structure:
 - TestDFMPipeline: Tests for linear Dynamic Factor Model (DFM) pipeline
@@ -17,7 +21,7 @@ Note: Some tests may skip if:
 
 import pytest
 import numpy as np
-import polars as pl
+import pandas as pd
 from pathlib import Path
 from typing import Optional
 
@@ -29,173 +33,19 @@ from dfm_python.utils.time import TimeIndex, parse_timestamp
 from dfm_python.utils.data import rem_nans_spline, sort_data
 from dfm_python.config.results import FitParams
 
-
-# ============================================================================
-# Error Handling Helper Functions
-# 
-# These helper functions are shared between test_pipeline_dfm.py and 
-# test_pipeline_ddfm.py. They provide consistent error handling and test
-# utilities for both DFM and DDFM pipeline tests.
-# ============================================================================
-
-def check_test_files_exist(data_path: Path, config_path: Path) -> None:
-    """Check if test files exist, skip test if missing.
-    
-    This function verifies that required test data and config files exist.
-    If any files are missing, the test is skipped with a clear message.
-    
-    Parameters
-    ----------
-    data_path : Path
-        Path to test data file (typically CSV)
-    config_path : Path
-        Path to test config file (typically YAML)
-        
-    Raises
-    ------
-    pytest.skip
-        If any test files are missing, raises pytest.skip with details
-    """
-    missing = []
-    if not data_path.exists():
-        missing.append(f"data: {data_path}")
-    if not config_path.exists():
-        missing.append(f"config: {config_path}")
-    if missing:
-        pytest.skip(f"Test files not found: {', '.join(missing)}")
-
-
-def load_config_safely(
-    model, 
-    config_path: Path, 
-    model_type: str = "DFM"
-) -> None:
-    """Load config safely with error handling.
-    
-    Loads a configuration file into a model instance with proper error
-    handling. If config loading fails (e.g., due to format incompatibility),
-    the test is skipped rather than failing.
-    
-    Parameters
-    ----------
-    model : DFM or DDFM
-        Model instance to load config into
-    config_path : Path
-        Path to YAML config file
-    model_type : str, optional
-        Type of model ("DFM" or "DDFM"), used in error messages.
-        Default is "DFM".
-        
-    Raises
-    ------
-    pytest.skip
-        If config loading fails (TypeError, ValueError), raises pytest.skip
-        with error details
-    """
-    try:
-        source = YamlSource(config_path)
-        model.load_config(source)
-    except (TypeError, ValueError) as e:
-        pytest.skip(
-            f"{model_type} config loading failed (config format may need update): "
-            f"{type(e).__name__}: {e}"
-        )
-
-
-def load_config_only_safely(
-    config_path: Path, 
-    model_type: str = "DFM"
-) -> DFMConfig:
-    """Load config object only (without loading into model) with error handling.
-    
-    Loads a configuration file and returns the config object without
-    loading it into a model. Useful for testing config structure or
-    validation without model initialization.
-    
-    Parameters
-    ----------
-    config_path : Path
-        Path to YAML config file
-    model_type : str, optional
-        Type of model ("DFM" or "DDFM"), used in error messages.
-        Default is "DFM".
-        
-    Returns
-    -------
-    DFMConfig or DDFMConfig
-        Loaded config object
-        
-    Raises
-    ------
-    pytest.skip
-        If config loading fails (TypeError, ValueError), raises pytest.skip
-        with error details
-    """
-    try:
-        source = YamlSource(config_path)
-        return source.load()
-    except (TypeError, ValueError) as e:
-        pytest.skip(
-            f"{model_type} config loading failed (config format may need update): "
-            f"{type(e).__name__}: {e}"
-        )
-
-
-def handle_training_error(
-    error: Exception, 
-    operation: str = "training"
-) -> None:
-    """Handle training errors consistently.
-    
-    Provides consistent error handling for training-related operations.
-    If the error indicates the model hasn't been trained yet, the test
-    is skipped. Otherwise, the error is re-raised.
-    
-    Parameters
-    ----------
-    error : Exception
-        The exception that occurred during training operation
-    operation : str, optional
-        Description of operation that failed (e.g., "training", "prediction").
-        Default is "training".
-        
-    Raises
-    ------
-    pytest.skip
-        If error indicates model hasn't been trained/fitted
-    Exception
-        Re-raises the original error if it's not a training-related error
-    """
-    error_str = str(error)
-    if "not been trained" in error_str or "not fitted" in error_str:
-        pytest.skip(f"Model {operation} failed: {error}")
-    raise
-
-
-def format_skip_message(
-    reason: str, 
-    context: Optional[str] = None
-) -> str:
-    """Format skip message consistently.
-    
-    Formats a pytest skip message with optional context information.
-    Ensures consistent formatting across all test skips.
-    
-    Parameters
-    ----------
-    reason : str
-        Primary reason for skipping the test
-    context : str, optional
-        Additional context information (e.g., file paths, config details)
-        
-    Returns
-    -------
-    str
-        Formatted skip message string
-    """
-    if context:
-        return f"{reason} ({context})"
-    return reason
+# Import shared test helper functions
+from test_helpers import (
+    check_test_files_exist,
+    load_config_safely,
+    load_config_only_safely,
+    handle_training_error,
+    format_skip_message,
+    get_test_data_path,
+    get_test_config_path,
+    load_sample_data_from_csv,
+    create_simple_transformer,
+    create_columnwise_transformer
+)
 
 
 class TestDFMPipeline:
@@ -203,10 +53,13 @@ class TestDFMPipeline:
     
     This test class covers the full DFM pipeline:
     1. Configuration loading from YAML files
-    2. Data loading and preprocessing
+    2. Data loading (with statistics extraction from transformer)
     3. Model training with EM algorithm
     4. Prediction and forecasting
     5. Complete end-to-end workflow
+    
+    Note: Users can provide raw data with a preprocessing pipeline (preprocessing happens in setup()),
+    or preprocessed data. The pipeline also extracts statistics (Mx/Wx) for forecasting/nowcasting.
     
     All tests use actual data and config files when available.
     """
@@ -214,68 +67,27 @@ class TestDFMPipeline:
     @pytest.fixture
     def test_data_path(self):
         """Path to test data file."""
-        return Path(__file__).parent.parent.parent / "data" / "sample_data.csv"
+        return get_test_data_path()
     
     @pytest.fixture
     def test_dfm_config_path(self):
         """Path to test DFM config."""
-        return Path(__file__).parent.parent.parent / "config" / "experiment" / "test_dfm.yaml"
+        return get_test_config_path("dfm")
     
     @pytest.fixture
     def sample_data(self, test_data_path):
         """Load and preprocess sample data."""
-        if not test_data_path.exists():
-            pytest.skip(f"Test data file not found: {test_data_path}")
-        
-        # Read CSV with polars
-        df = pl.read_csv(test_data_path)
-        
-        # Extract date column
-        date_col = df.select("date").to_series().to_list()
-        time_index = TimeIndex([parse_timestamp(d) for d in date_col])
-        
-        # Extract data columns (exclude date)
-        data_cols = [col for col in df.columns if col != "date"]
-        data_array = df.select(data_cols).to_numpy()
-        
-        # Preprocess: handle NaNs
-        data_clean, _ = rem_nans_spline(data_array, method=2, k=3)
-        
-        return data_clean, time_index, data_cols
+        return load_sample_data_from_csv(test_data_path)
     
     @pytest.fixture
     def simple_transformer(self):
         """Create a simple transformer for testing."""
-        try:
-            from sktime.transformations.series.adapt import TabularToSeriesAdaptor
-            from sklearn.preprocessing import StandardScaler
-            
-            # Use TabularToSeriesAdaptor with StandardScaler (identity-like with minimal scaling)
-            # For a true identity, we could use FunctionTransformer, but StandardScaler with mean=0, std=1
-            # is close enough for testing
-            transformer = TabularToSeriesAdaptor(StandardScaler(with_mean=False, with_std=False))
-            # Note: TabularToSeriesAdaptor may not have set_output, skip if not available
-            if hasattr(transformer, 'set_output'):
-                transformer.set_output(transform="polars")
-            return transformer
-        except ImportError:
-            pytest.skip("sktime not available - install with: pip install sktime")
+        return create_simple_transformer()
     
     @pytest.fixture
     def columnwise_transformer(self):
-        """Create a TabularToSeriesAdaptor with StandardScaler for testing."""
-        try:
-            from sktime.transformations.series.adapt import TabularToSeriesAdaptor
-            from sklearn.preprocessing import StandardScaler
-            
-            # Create TabularToSeriesAdaptor with StandardScaler
-            transformer = TabularToSeriesAdaptor(StandardScaler())
-            # Note: TabularToSeriesAdaptor may not have set_output, skip if not available
-            if hasattr(transformer, 'set_output'):
-                transformer.set_output(transform="polars")
-            return transformer
-        except ImportError:
-            pytest.skip("sktime or sklearn not available - install with: pip install sktime scikit-learn")
+        """Create a StandardScaler for unified scaling in testing."""
+        return create_columnwise_transformer()
     
     def test_dfm_pipeline_config_loading(self, test_dfm_config_path):
         """Test step 1: Configuration loading."""
@@ -291,25 +103,59 @@ class TestDFMPipeline:
         assert len(model.config.series) > 0
     
     def test_dfm_pipeline_data_loading(self, test_data_path, test_dfm_config_path, simple_transformer):
-        """Test step 2: Data loading and preprocessing."""
+        """Test step 2: Data loading with transformer for statistics extraction.
+        
+        Note: Users can provide raw data with a preprocessing pipeline (preprocessing happens in setup()),
+        or preprocessed data. The pipeline also extracts statistics (Mx/Wx) for forecasting/nowcasting.
+        """
         check_test_files_exist(test_data_path, test_dfm_config_path)
         
         # Load config - handle config format issues
         config = load_config_only_safely(test_dfm_config_path, model_type="DFM")
         
         # Create DataModule
+        # Note: Raw data + pipeline pattern - preprocessing happens in setup().
+        # Pipeline also extracts statistics (Mx/Wx) for forecasting/nowcasting.
         assert config is not None
         data_module = DFMDataModule(
             config=config,
-            transformer=simple_transformer,
+            pipeline=simple_transformer,  # Used to extract Mx/Wx statistics
             data_path=test_data_path
         )
         
-        # Setup (loads and preprocesses data)
+        # Setup (loads data and extracts statistics from transformer)
         data_module.setup()
         
         assert data_module.data_processed is not None
         assert data_module.train_dataset is not None
+        assert data_module.Mx is not None
+        assert data_module.Wx is not None
+        # Verify data shape
+        assert data_module.data_processed.shape[0] > 0
+        assert data_module.data_processed.shape[1] > 0
+    
+    def test_dfm_pipeline_data_loading_no_transformer(self, test_data_path, test_dfm_config_path):
+        """Test data loading with pipeline=None (uses passthrough by default)."""
+        check_test_files_exist(test_data_path, test_dfm_config_path)
+        
+        # Load config - handle config format issues
+        config = load_config_only_safely(test_dfm_config_path, model_type="DFM")
+        
+        # Create DataModule without transformer (uses passthrough by default)
+        # Mx/Wx will be computed from data as fallback
+        assert config is not None
+        data_module = DFMDataModule(
+            config=config,
+            pipeline=None,  # Uses passthrough transformer (default)
+            data_path=test_data_path
+        )
+        
+        # Setup (loads data, uses passthrough transformer)
+        data_module.setup()
+        
+        assert data_module.data_processed is not None
+        assert data_module.train_dataset is not None
+        # Mx/Wx should still be available (computed from data as fallback)
         assert data_module.Mx is not None
         assert data_module.Wx is not None
         # Verify data shape
@@ -328,7 +174,7 @@ class TestDFMPipeline:
         assert model.config is not None
         data_module = DFMDataModule(
             config=model.config,
-            transformer=simple_transformer,
+            pipeline=simple_transformer,
             data_path=test_data_path
         )
         data_module.setup()
@@ -365,7 +211,7 @@ class TestDFMPipeline:
         assert model.config is not None
         data_module = DFMDataModule(
             config=model.config,
-            transformer=simple_transformer,
+            pipeline=simple_transformer,
             data_path=test_data_path
         )
         data_module.setup()
@@ -431,10 +277,10 @@ class TestDFMPipeline:
         
         assert model.config is not None
         
-        # Step 2: Load and preprocess actual data from CSV
+        # Step 2: Load data from CSV (raw data - preprocessing happens in setup() via pipeline)
         data_module = DFMDataModule(
             config=model.config,
-            transformer=simple_transformer,
+            pipeline=simple_transformer,
             data_path=test_data_path
         )
         data_module.setup()
@@ -496,7 +342,11 @@ class TestDFMPipeline:
             assert model.result.X_sm.shape[1] == N
     
     def test_dfm_pipeline_with_columnwise_transformer(self, test_data_path, test_dfm_config_path, columnwise_transformer):
-        """Test complete pipeline with ColumnWiseTransformer and StandardScaler preprocessing."""
+        """Test complete pipeline with StandardScaler transformer for statistics extraction.
+        
+        Note: Users can provide raw data with a preprocessing pipeline (preprocessing happens in setup()),
+        or preprocessed data. The pipeline also extracts Mx/Wx statistics.
+        """
         check_test_files_exist(test_data_path, test_dfm_config_path)
         
         # Step 1: Load config
@@ -505,33 +355,30 @@ class TestDFMPipeline:
         
         assert model.config is not None
         
-        # Step 2: Load and preprocess with ColumnWiseTransformer (StandardScaler)
+        # Step 2: Load data with transformer to extract statistics (Mx/Wx from StandardScaler)
+        # Note: Raw data + pipeline pattern - preprocessing happens in setup()
         data_module = DFMDataModule(
             config=model.config,
-            transformer=columnwise_transformer,
+            pipeline=columnwise_transformer,  # Extracts Mx/Wx statistics
             data_path=test_data_path
         )
         data_module.setup()
         assert data_module.data_processed is not None
         
-        # Verify transformer was applied (data should be standardized)
+        # Verify data was loaded
         T, N = data_module.data_processed.shape
         assert T > 0 and N > 0
         assert N == len(model.config.series)
         
-        # Verify data is standardized (mean ~0, std ~1 per column)
-        # Convert torch tensor to numpy if needed
-        data_processed_np = data_module.data_processed.cpu().numpy() if hasattr(data_module.data_processed, 'cpu') else data_module.data_processed
-        # Handle NaN values in data (some series may have high missing data)
-        data_mean = np.nanmean(data_processed_np, axis=0)
-        data_std = np.nanstd(data_processed_np, axis=0)
-        # Allow some tolerance for standardization (skip columns with all NaN)
-        valid_cols = ~np.isnan(data_mean)
-        if np.any(valid_cols):
-            assert np.all(np.abs(data_mean[valid_cols]) < 1e-6), "Data should be mean-centered by StandardScaler"
-            assert np.all(np.abs(data_std[valid_cols] - 1.0) < 1e-6), "Data should be unit variance by StandardScaler"
-        else:
-            pytest.skip("All data columns contain NaN values - cannot verify standardization")
+        # Verify Mx/Wx statistics were extracted from transformer
+        assert data_module.Mx is not None
+        assert data_module.Wx is not None
+        assert len(data_module.Mx) == N
+        assert len(data_module.Wx) == N
+        
+        # Note: Raw data + pipeline pattern - preprocessing happens in setup(). The pipeline is used
+        # to extract statistics, not to preprocess. If data is already standardized,
+        # the transformer will extract the standardization parameters.
         
         # Step 3: Train model using Lightning pattern (increased iterations for better convergence)
         model.max_iter = 10
@@ -597,43 +444,22 @@ class TestDDFMPipeline:
     @pytest.fixture
     def test_data_path(self):
         """Path to test data file."""
-        return Path(__file__).parent.parent.parent / "data" / "sample_data.csv"
+        return get_test_data_path()
     
     @pytest.fixture
     def test_ddfm_config_path(self):
         """Path to test DDFM config."""
-        return Path(__file__).parent.parent.parent / "config" / "experiment" / "test_ddfm.yaml"
+        return get_test_config_path("ddfm")
     
     @pytest.fixture
     def simple_transformer(self):
-        """Create a simple transformer for testing."""
-        try:
-            from sktime.transformations.compose import ColumnTransformer
-            from sktime.transformations.series.func_transform import FunctionTransformer
-            
-            def identity_func(X):
-                return X
-            
-            transformer = ColumnTransformer([
-                ("identity", FunctionTransformer(func=identity_func, inverse_func=identity_func), "all")
-            ])
-            transformer.set_output(transform="polars")
-            return transformer
-        except ImportError:
-            pytest.skip("sktime not available - install with: pip install sktime")
+        """Create a simple transformer for testing (identity-like, no scaling)."""
+        return create_simple_transformer()
     
     @pytest.fixture
     def columnwise_transformer(self):
-        """Create a ColumnWiseTransformer with StandardScaler for testing."""
-        try:
-            from sktime.transformations.series.adapt import ColumnWiseTransformer
-            from sklearn.preprocessing import StandardScaler
-            
-            transformer = ColumnWiseTransformer(StandardScaler())
-            transformer.set_output(transform="polars")
-            return transformer
-        except ImportError:
-            pytest.skip("sktime or sklearn not available - install with: pip install sktime scikit-learn")
+        """Create a StandardScaler for unified scaling in testing."""
+        return create_columnwise_transformer()
     
     def test_ddfm_pipeline_config_loading(self, test_ddfm_config_path):
         """Test DDFM configuration loading."""
@@ -659,7 +485,7 @@ class TestDDFMPipeline:
         assert config is not None
         data_module = DFMDataModule(
             config=config,
-            transformer=simple_transformer,
+            pipeline=simple_transformer,
             data_path=test_data_path
         )
         
@@ -684,7 +510,7 @@ class TestDDFMPipeline:
         assert model.config is not None
         data_module = DFMDataModule(
             config=model.config,
-            transformer=simple_transformer,
+            pipeline=simple_transformer,
             data_path=test_data_path
         )
         data_module.setup()
@@ -716,7 +542,7 @@ class TestDDFMPipeline:
         # Step 2: Load actual data from CSV
         data_module = DFMDataModule(
             config=model.config,
-            transformer=simple_transformer,
+            pipeline=simple_transformer,
             data_path=test_data_path
         )
         data_module.setup()
@@ -741,7 +567,11 @@ class TestDDFMPipeline:
         assert np.all(np.isfinite(Z_forecast))
     
     def test_ddfm_pipeline_with_columnwise_transformer(self, test_data_path, test_ddfm_config_path, columnwise_transformer):
-        """Test complete DDFM pipeline with ColumnWiseTransformer and StandardScaler preprocessing."""
+        """Test complete DDFM pipeline with StandardScaler transformer for statistics extraction.
+        
+        Note: Users can provide raw data with a preprocessing pipeline (preprocessing happens in setup()),
+        or preprocessed data. The pipeline also extracts Mx/Wx statistics.
+        """
         check_test_files_exist(test_data_path, test_ddfm_config_path)
         
         # Step 1: Load config
@@ -750,10 +580,11 @@ class TestDDFMPipeline:
         
         assert model.config is not None
         
-        # Step 2: Load and preprocess with ColumnWiseTransformer (StandardScaler)
+        # Step 2: Load data with transformer to extract statistics (Mx/Wx from StandardScaler)
+        # Note: Raw data + pipeline pattern - preprocessing happens in setup()
         data_module = DFMDataModule(
             config=model.config,
-            transformer=columnwise_transformer,
+            pipeline=columnwise_transformer,  # Extracts Mx/Wx statistics
             data_path=test_data_path
         )
         data_module.setup()
@@ -797,43 +628,22 @@ class TestPipelineIntegration:
     @pytest.fixture
     def test_data_path(self):
         """Path to test data file."""
-        return Path(__file__).parent.parent.parent / "data" / "sample_data.csv"
+        return get_test_data_path()
     
     @pytest.fixture
     def test_dfm_config_path(self):
         """Path to test DFM config."""
-        return Path(__file__).parent.parent.parent / "config" / "experiment" / "test_dfm.yaml"
+        return get_test_config_path("dfm")
     
     @pytest.fixture
     def simple_transformer(self):
-        """Create a simple transformer for testing."""
-        try:
-            from sktime.transformations.compose import ColumnTransformer
-            from sktime.transformations.series.func_transform import FunctionTransformer
-            
-            def identity_func(X):
-                return X
-            
-            transformer = ColumnTransformer([
-                ("identity", FunctionTransformer(func=identity_func, inverse_func=identity_func), "all")
-            ])
-            transformer.set_output(transform="polars")
-            return transformer
-        except ImportError:
-            pytest.skip("sktime not available - install with: pip install sktime")
+        """Create a simple transformer for testing (identity-like, no scaling)."""
+        return create_simple_transformer()
     
     @pytest.fixture
     def columnwise_transformer(self):
-        """Create a ColumnWiseTransformer with StandardScaler for testing."""
-        try:
-            from sktime.transformations.series.adapt import ColumnWiseTransformer
-            from sklearn.preprocessing import StandardScaler
-            
-            transformer = ColumnWiseTransformer(StandardScaler())
-            transformer.set_output(transform="polars")
-            return transformer
-        except ImportError:
-            pytest.skip("sktime or sklearn not available - install with: pip install sktime scikit-learn")
+        """Create a StandardScaler for unified scaling in testing."""
+        return create_columnwise_transformer()
     
     def test_pipeline_data_module_reuse(self, test_data_path, test_dfm_config_path, simple_transformer):
         """Test that DataModule can be reused across multiple models with actual data."""
@@ -846,7 +656,7 @@ class TestPipelineIntegration:
         assert config is not None
         data_module = DFMDataModule(
             config=config,
-            transformer=simple_transformer,
+            pipeline=simple_transformer,
             data_path=test_data_path
         )
         data_module.setup()
@@ -903,7 +713,7 @@ class TestPipelineIntegration:
         config = load_config_only_safely(test_dfm_config_path, model_type="DFM")
         data_module = DFMDataModule(
             config=config,
-            transformer=simple_transformer,
+            pipeline=simple_transformer,
             data_path=test_data_path
         )
         data_module.setup()

@@ -1,12 +1,16 @@
+# Series Configuration (Legacy/Reference Format)
+# NOTE: In the new unified structure, series configs are embedded in experiment configs under preprocess.series.
+# This file is kept for reference and migration purposes.
+
 series_id: KOBFXSAAF
 series_name: FKI, Export, All Industries, Actual
 frequency: m
 transformation: chg
-blocks:
-- Block_Global
-- Block_Export
-nan_method: 2
-standardization: true
 units: Index
 category: Survey, Bsnss
 release: -5
+scaler: standard
+impute: null
+block:
+- Block_Global
+- Block_Export

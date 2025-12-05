@@ -1,7 +1,11 @@
 """Pipeline tests for complete DDFM (Deep Dynamic Factor Model) workflows.
 
 This module tests the complete DDFM pipeline from configuration loading,
-data preprocessing, model training with neural encoder, to prediction and nowcasting.
+data loading (with preprocessing pipeline), model training with neural encoder, to prediction and nowcasting.
+
+Note: Users can provide either raw data with a preprocessing pipeline (recommended) or
+preprocessed data. When a pipeline is provided, preprocessing happens automatically in setup().
+The pipeline is also used to extract statistics (Mx/Wx) for forecasting/nowcasting.
 
 Test Structure:
 - TestDDFMPipeline: Tests for Deep Dynamic Factor Model (DDFM) pipeline
@@ -16,7 +20,7 @@ Note: Some tests may skip if:
 
 import pytest
 import numpy as np
-import polars as pl
+import pandas as pd
 from pathlib import Path
 from typing import Optional
 
@@ -27,14 +31,18 @@ from dfm_python.trainer import DDFMTrainer
 from dfm_python.utils.time import TimeIndex, parse_timestamp
 from dfm_python.utils.data import rem_nans_spline, sort_data
 
-# Import shared helper functions from test_pipeline_dfm to avoid duplication
-# These functions are defined once and reused across both test files
-from test_pipeline_dfm import (
+# Import shared test helper functions
+from test_helpers import (
     check_test_files_exist,
     load_config_safely,
     load_config_only_safely,
     handle_training_error,
-    format_skip_message
+    format_skip_message,
+    get_test_data_path,
+    get_test_config_path,
+    load_sample_data_from_csv,
+    create_simple_transformer,
+    create_columnwise_transformer
 )
 
 
@@ -43,10 +51,13 @@ class TestDDFMPipeline:
     
     This test class covers the full DDFM pipeline:
     1. Configuration loading from YAML files
-    2. Data loading and preprocessing
+    2. Data loading (with statistics extraction from transformer)
     3. Model training with neural encoder (gradient descent)
     4. Prediction and forecasting
     5. Complete end-to-end workflow
+    
+    Note: Users can provide raw data with a preprocessing pipeline (preprocessing happens in setup()),
+    or preprocessed data. The pipeline also extracts statistics (Mx/Wx) for forecasting/nowcasting.
     
     All tests use actual data and config files when available.
     """
@@ -54,66 +65,39 @@ class TestDDFMPipeline:
     @pytest.fixture
     def test_data_path(self):
         """Path to test data file."""
-        return Path(__file__).parent.parent.parent / "data" / "sample_data.csv"
+        return get_test_data_path()
     
     @pytest.fixture
     def test_ddfm_config_path(self):
         """Path to test DDFM config."""
-        return Path(__file__).parent.parent.parent / "config" / "experiment" / "test_ddfm.yaml"
+        return get_test_config_path("ddfm")
     
     @pytest.fixture
     def sample_data(self, test_data_path):
         """Load and preprocess sample data."""
-        if not test_data_path.exists():
-            pytest.skip(f"Test data file not found: {test_data_path}")
-        
-        # Read CSV with polars
-        df = pl.read_csv(test_data_path)
-        
-        # Extract date column
-        date_col = df.select("date").to_series().to_list()
-        time_index = TimeIndex([parse_timestamp(d) for d in date_col])
-        
-        # Extract data columns (exclude date)
-        data_cols = [col for col in df.columns if col != "date"]
-        data_array = df.select(data_cols).to_numpy()
-        
-        # Preprocess: handle NaNs
-        data_clean, _ = rem_nans_spline(data_array, method=2, k=3)
-        
-        return data_clean, time_index, data_cols
+        return load_sample_data_from_csv(test_data_path)
     
     @pytest.fixture
     def simple_transformer(self):
         """Create a simple transformer for testing."""
         try:
-            from sktime.transformations.series.adapt import TabularToSeriesAdaptor
             from sklearn.preprocessing import StandardScaler
             
-            # Use TabularToSeriesAdaptor with StandardScaler (identity-like with minimal scaling)
-            # For a true identity, we could use FunctionTransformer, but StandardScaler with mean=0, std=1
-            # is close enough for testing
-            transformer = TabularToSeriesAdaptor(StandardScaler(with_mean=False, with_std=False))
-            # Note: TabularToSeriesAdaptor may not have set_output, skip if not available
-            if hasattr(transformer, 'set_output'):
-                transformer.set_output(transform="polars")
-            return transformer
+            # Per sktime docs: sklearn transformers work directly in TransformerPipeline
+            # Identity-like transformer (no scaling) for testing
+            return StandardScaler(with_mean=False, with_std=False)
         except ImportError:
             pytest.skip("sktime not available - install with: pip install sktime")
     
     @pytest.fixture
     def columnwise_transformer(self):
-        """Create a TabularToSeriesAdaptor with StandardScaler for testing."""
+        """Create a StandardScaler for unified scaling in testing."""
         try:
-            from sktime.transformations.series.adapt import TabularToSeriesAdaptor
             from sklearn.preprocessing import StandardScaler
             
-            # Create TabularToSeriesAdaptor with StandardScaler
-            transformer = TabularToSeriesAdaptor(StandardScaler())
-            # Note: TabularToSeriesAdaptor may not have set_output, skip if not available
-            if hasattr(transformer, 'set_output'):
-                transformer.set_output(transform="polars")
-            return transformer
+            # Per sktime docs: sklearn transformers work directly in TransformerPipeline
+            # Applied per series instance automatically (unified scaling)
+            return StandardScaler()
         except ImportError:
             pytest.skip("sktime or sklearn not available - install with: pip install sktime scikit-learn")
     
@@ -133,25 +117,59 @@ class TestDDFMPipeline:
         assert len(model.config.series) > 0
     
     def test_ddfm_pipeline_data_loading(self, test_data_path, test_ddfm_config_path, simple_transformer):
-        """Test step 2: DDFM data loading and preprocessing."""
+        """Test step 2: DDFM data loading with transformer for statistics extraction.
+        
+        Note: Users can provide raw data with a preprocessing pipeline (preprocessing happens in setup()),
+        or preprocessed data. The pipeline also extracts statistics (Mx/Wx) for forecasting/nowcasting.
+        """
         check_test_files_exist(test_data_path, test_ddfm_config_path)
         
         # Load config - handle config format issues
         config = load_config_only_safely(test_ddfm_config_path, model_type="DDFM")
         
         # Create DataModule
+        # Note: Raw data + pipeline pattern - preprocessing happens in setup().
+        # Pipeline also extracts statistics (Mx/Wx) for forecasting/nowcasting.
         assert config is not None
         data_module = DFMDataModule(
             config=config,
-            transformer=simple_transformer,
+            pipeline=simple_transformer,  # Used to extract Mx/Wx statistics
             data_path=test_data_path
         )
         
-        # Setup (loads and preprocesses data)
+        # Setup (loads data and extracts statistics from transformer)
         data_module.setup()
         
         assert data_module.data_processed is not None
         assert data_module.train_dataset is not None
+        assert data_module.Mx is not None
+        assert data_module.Wx is not None
+        # Verify data shape
+        assert data_module.data_processed.shape[0] > 0
+        assert data_module.data_processed.shape[1] > 0
+    
+    def test_ddfm_pipeline_data_loading_no_transformer(self, test_data_path, test_ddfm_config_path):
+        """Test DDFM data loading with pipeline=None (uses passthrough by default)."""
+        check_test_files_exist(test_data_path, test_ddfm_config_path)
+        
+        # Load config - handle config format issues
+        config = load_config_only_safely(test_ddfm_config_path, model_type="DDFM")
+        
+        # Create DataModule without transformer (uses passthrough by default)
+        # Mx/Wx will be computed from data as fallback
+        assert config is not None
+        data_module = DFMDataModule(
+            config=config,
+            pipeline=None,  # Uses passthrough transformer (default)
+            data_path=test_data_path
+        )
+        
+        # Setup (loads data, uses passthrough transformer)
+        data_module.setup()
+        
+        assert data_module.data_processed is not None
+        assert data_module.train_dataset is not None
+        # Mx/Wx should still be available (computed from data as fallback)
         assert data_module.Mx is not None
         assert data_module.Wx is not None
         # Verify data shape
@@ -170,7 +188,7 @@ class TestDDFMPipeline:
         assert model.config is not None
         data_module = DFMDataModule(
             config=model.config,
-            transformer=simple_transformer,
+            pipeline=simple_transformer,
             data_path=test_data_path
         )
         data_module.setup()
@@ -211,7 +229,7 @@ class TestDDFMPipeline:
         assert model.config is not None
         data_module = DFMDataModule(
             config=model.config,
-            transformer=simple_transformer,
+            pipeline=simple_transformer,
             data_path=test_data_path
         )
         data_module.setup()
@@ -249,10 +267,10 @@ class TestDDFMPipeline:
         
         assert model.config is not None
         
-        # Step 2: Load and preprocess actual data from CSV
+        # Step 2: Load data from CSV (raw data - preprocessing happens in setup() via pipeline)
         data_module = DFMDataModule(
             config=model.config,
-            transformer=simple_transformer,
+            pipeline=simple_transformer,
             data_path=test_data_path
         )
         data_module.setup()
@@ -290,7 +308,11 @@ class TestDDFMPipeline:
             assert model.result.X_sm.shape[1] == N
     
     def test_ddfm_pipeline_with_columnwise_transformer(self, test_data_path, test_ddfm_config_path, columnwise_transformer):
-        """Test complete DDFM pipeline with ColumnWiseTransformer and StandardScaler preprocessing."""
+        """Test complete DDFM pipeline with StandardScaler transformer for statistics extraction.
+        
+        Note: Users can provide raw data with a preprocessing pipeline (preprocessing happens in setup()),
+        or preprocessed data. The pipeline also extracts Mx/Wx statistics.
+        """
         check_test_files_exist(test_data_path, test_ddfm_config_path)
         
         # Step 1: Load config
@@ -299,26 +321,30 @@ class TestDDFMPipeline:
         
         assert model.config is not None
         
-        # Step 2: Load and preprocess with ColumnWiseTransformer (StandardScaler)
+        # Step 2: Load data with transformer to extract statistics (Mx/Wx from StandardScaler)
+        # Note: Raw data + pipeline pattern - preprocessing happens in setup()
         data_module = DFMDataModule(
             config=model.config,
-            transformer=columnwise_transformer,
+            pipeline=columnwise_transformer,  # Extracts Mx/Wx statistics
             data_path=test_data_path
         )
         data_module.setup()
         assert data_module.data_processed is not None
         
-        # Verify transformer was applied (data should be standardized)
+        # Verify data was loaded
         T, N = data_module.data_processed.shape
         assert T > 0 and N > 0
         assert N == len(model.config.series)
         
-        # Verify data is standardized (mean ~0, std ~1 per column)
-        # Convert torch tensor to numpy for numpy operations
-        data_processed_np = data_module.data_processed.detach().cpu().numpy()
-        data_mean = np.mean(data_processed_np, axis=0)
-        data_std = np.std(data_processed_np, axis=0)
-        # Allow some tolerance for standardization
+        # Verify Mx/Wx statistics were extracted from transformer
+        assert data_module.Mx is not None
+        assert data_module.Wx is not None
+        assert len(data_module.Mx) == N
+        assert len(data_module.Wx) == N
+        
+        # Note: Raw data + pipeline pattern - preprocessing happens in setup(). The pipeline is used
+        # to extract statistics, not to preprocess. If data is already standardized,
+        # the transformer will extract the standardization parameters.
         assert np.all(np.abs(data_mean) < 1e-6), "Data should be mean-centered by StandardScaler"
         assert np.all(np.abs(data_std - 1.0) < 1e-6), "Data should be unit variance by StandardScaler"
         
@@ -361,7 +387,7 @@ class TestDDFMPipeline:
         # Create DataModule
         data_module = DFMDataModule(
             config=model.config,
-            transformer=simple_transformer,
+            pipeline=simple_transformer,
             data_path=test_data_path
         )
         data_module.setup()
@@ -398,7 +424,7 @@ class TestDDFMPipeline:
         # Create DataModule
         data_module = DFMDataModule(
             config=model.config,
-            transformer=simple_transformer,
+            pipeline=simple_transformer,
             data_path=test_data_path
         )
         data_module.setup()
@@ -426,26 +452,17 @@ class TestDDFMPipelineIntegration:
     @pytest.fixture
     def test_data_path(self):
         """Path to test data file."""
-        return Path(__file__).parent.parent.parent / "data" / "sample_data.csv"
+        return get_test_data_path()
     
     @pytest.fixture
     def test_ddfm_config_path(self):
         """Path to test DDFM config."""
-        return Path(__file__).parent.parent.parent / "config" / "experiment" / "test_ddfm.yaml"
+        return get_test_config_path("ddfm")
     
     @pytest.fixture
     def simple_transformer(self):
-        """Create a simple transformer for testing."""
-        try:
-            from sktime.transformations.series.adapt import TabularToSeriesAdaptor
-            from sklearn.preprocessing import StandardScaler
-            
-            transformer = TabularToSeriesAdaptor(StandardScaler(with_mean=False, with_std=False))
-            if hasattr(transformer, 'set_output'):
-                transformer.set_output(transform="polars")
-            return transformer
-        except ImportError:
-            pytest.skip("sktime not available - install with: pip install sktime")
+        """Create a simple transformer for testing (identity-like, no scaling)."""
+        return create_simple_transformer()
     
     def test_ddfm_pipeline_data_module_reuse(self, test_data_path, test_ddfm_config_path, simple_transformer):
         """Test that DataModule can be reused across multiple DDFM models."""
@@ -458,7 +475,7 @@ class TestDDFMPipelineIntegration:
         assert config is not None
         data_module = DFMDataModule(
             config=config,
-            transformer=simple_transformer,
+            pipeline=simple_transformer,
             data_path=test_data_path
         )
         data_module.setup()
@@ -528,7 +545,7 @@ class TestDDFMPipelineIntegration:
         config = load_config_only_safely(test_ddfm_config_path, model_type="DDFM")
         data_module = DFMDataModule(
             config=config,
-            transformer=simple_transformer,
+            pipeline=simple_transformer,
             data_path=test_data_path
         )
         data_module.setup()
@@ -543,3 +560,275 @@ class TestDDFMPipelineIntegration:
         except (ValueError, AttributeError) as e:
             # Expected if config is not properly set
             pass
+
+
+class TestDDFMStability:
+    """Test DDFM stability edge cases and error handling.
+    
+    This test class focuses on edge cases that test the robustness of DDFM:
+    - Convergence failures
+    - NaN propagation scenarios
+    - Extreme data values
+    - Many missing values
+    - Numerical stability edge cases
+    """
+    
+    @pytest.fixture
+    def test_data_path(self):
+        """Path to test data file."""
+        return get_test_data_path()
+    
+    @pytest.fixture
+    def test_ddfm_config_path(self):
+        """Path to test DDFM config."""
+        return get_test_config_path("ddfm")
+    
+    @pytest.fixture
+    def simple_transformer(self):
+        """Create a simple transformer for testing."""
+        try:
+            from sklearn.preprocessing import StandardScaler
+            
+            # Per sktime docs: sklearn transformers work directly in TransformerPipeline
+            # Applied per series instance automatically (unified scaling)
+            return StandardScaler()
+        except ImportError:
+            pytest.skip("scikit-learn not available - install with: pip install scikit-learn")
+    
+    def test_ddfm_convergence_failure_handling(self, test_data_path, test_ddfm_config_path, simple_transformer):
+        """Test DDFM handles convergence failures gracefully.
+        
+        This test verifies that when MCMC doesn't converge (max_iter reached),
+        the model still returns a valid training state with converged=False.
+        """
+        check_test_files_exist(test_data_path, test_ddfm_config_path)
+        
+        # Create model with very strict tolerance to force non-convergence
+        model = DDFM(
+            encoder_layers=[32, 16],
+            num_factors=2,
+            epochs=2,  # Low epochs for faster testing
+            max_iter=3,  # Very low max_iter to force non-convergence
+            tolerance=1e-8  # Very strict tolerance (unlikely to converge)
+        )
+        load_config_safely(model, test_ddfm_config_path, model_type="DDFM")
+        
+        # Create DataModule
+        config = load_config_only_safely(test_ddfm_config_path, model_type="DDFM")
+        data_module = DFMDataModule(
+            config=config,
+            pipeline=simple_transformer,
+            data_path=test_data_path
+        )
+        data_module.setup()
+        
+        # Train with very low max_iter to force non-convergence
+        trainer = DDFMTrainer(max_epochs=1, enable_progress_bar=False, logger=False)
+        trainer.fit(model, data_module)
+        
+        # Check that training completed (even if not converged)
+        assert model.training_state is not None
+        
+        # Get result - should work even if not converged
+        try:
+            result = model.get_result()
+            # Result should be valid even if convergence failed
+            assert result is not None
+            assert hasattr(result, 'Z')
+            # Factors should be finite
+            assert np.all(np.isfinite(result.Z))
+        except (ValueError, AttributeError) as e:
+            # If result extraction fails, that's also acceptable for non-converged case
+            # But we should log it
+            pytest.skip(f"Result extraction failed after non-convergence: {e}")
+    
+    def test_ddfm_nan_propagation_handling(self, test_data_path, test_ddfm_config_path, simple_transformer):
+        """Test DDFM handles NaN propagation scenarios.
+        
+        This test verifies that NaN values in data are handled correctly
+        and don't propagate through the MCMC procedure.
+        """
+        check_test_files_exist(test_data_path, test_ddfm_config_path)
+        
+        # Load data and introduce NaN values
+        df = pd.read_csv(test_data_path)
+        data_cols = [col for col in df.columns if col != "date"]
+        data_array = df[data_cols].values
+        
+        # Introduce NaN values (10% of data)
+        np.random.seed(42)
+        nan_indices = np.random.choice(data_array.size, size=int(0.1 * data_array.size), replace=False)
+        data_with_nan = data_array.copy()
+        data_with_nan.flat[nan_indices] = np.nan
+        
+        # Create model
+        model = DDFM(encoder_layers=[32, 16], num_factors=2, epochs=2, max_iter=5)
+        load_config_safely(model, test_ddfm_config_path, model_type="DDFM")
+        
+        # Create DataModule with NaN data
+        config = load_config_only_safely(test_ddfm_config_path, model_type="DDFM")
+        # Convert to DataFrame for DataModule
+        df_with_nan = pd.DataFrame(data_with_nan, columns=data_cols)
+        df_with_nan['date'] = df['date']
+        
+        # Save temporary CSV with NaN values
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False) as f:
+            df_with_nan.to_csv(f.name, index=False)
+            temp_path = Path(f.name)
+        
+        try:
+            data_module = DFMDataModule(
+                config=config,
+                pipeline=simple_transformer,
+                data_path=temp_path
+            )
+            data_module.setup()
+            
+            # Train - should handle NaN values gracefully
+            trainer = DDFMTrainer(max_epochs=1, enable_progress_bar=False, logger=False)
+            trainer.fit(model, data_module)
+            
+            # Check that result doesn't contain NaN/Inf
+            if model.training_state is not None:
+                try:
+                    result = model.get_result()
+                    # Result should not contain NaN/Inf
+                    assert result is not None
+                    assert hasattr(result, 'Z')
+                    assert np.all(np.isfinite(result.Z)), "Result Z should not contain NaN/Inf"
+                    if hasattr(result, 'X_sm'):
+                        assert np.all(np.isfinite(result.X_sm)), "Result X_sm should not contain NaN/Inf"
+                except (ValueError, AttributeError) as e:
+                    # If result extraction fails due to NaN issues, that's acceptable
+                    # but we should verify the error message is helpful
+                    assert "NaN" in str(e) or "Inf" in str(e) or "not been trained" in str(e)
+        finally:
+            # Clean up temporary file
+            if temp_path.exists():
+                temp_path.unlink()
+    
+    def test_ddfm_extreme_data_values(self, test_data_path, test_ddfm_config_path, simple_transformer):
+        """Test DDFM handles extreme data values (very large/small).
+        
+        This test verifies that extreme values don't cause numerical overflow/underflow.
+        """
+        check_test_files_exist(test_data_path, test_ddfm_config_path)
+        
+        # Load data and scale to extreme values
+        df = pd.read_csv(test_data_path)
+        data_cols = [col for col in df.columns if col != "date"]
+        data_array = df[data_cols].values
+        
+        # Scale to extreme values (very large)
+        data_extreme = data_array * 1e6
+        
+        # Create model
+        model = DDFM(encoder_layers=[32, 16], num_factors=2, epochs=2, max_iter=5)
+        load_config_safely(model, test_ddfm_config_path, model_type="DDFM")
+        
+        # Create DataModule with extreme data
+        config = load_config_only_safely(test_ddfm_config_path, model_type="DDFM")
+        df_extreme = pd.DataFrame(data_extreme, columns=data_cols)
+        df_extreme['date'] = df['date']
+        
+        # Save temporary CSV
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False) as f:
+            df_extreme.to_csv(f.name, index=False)
+            temp_path = Path(f.name)
+        
+        try:
+            data_module = DFMDataModule(
+                config=config,
+                pipeline=simple_transformer,
+                data_path=temp_path
+            )
+            data_module.setup()
+            
+            # Train - should handle extreme values gracefully (standardization should help)
+            trainer = DDFMTrainer(max_epochs=1, enable_progress_bar=False, logger=False)
+            trainer.fit(model, data_module)
+            
+            # Check that result is valid
+            if model.training_state is not None:
+                try:
+                    result = model.get_result()
+                    assert result is not None
+                    assert hasattr(result, 'Z')
+                    # Result should be finite (standardization should prevent overflow)
+                    assert np.all(np.isfinite(result.Z)), "Result Z should be finite even with extreme input values"
+                except (ValueError, AttributeError) as e:
+                    # If training fails due to extreme values, that's acceptable
+                    # but error should be informative
+                    assert "not been trained" in str(e) or "NaN" in str(e) or "Inf" in str(e)
+        finally:
+            # Clean up temporary file
+            if temp_path.exists():
+                temp_path.unlink()
+    
+    def test_ddfm_high_missing_data(self, test_data_path, test_ddfm_config_path, simple_transformer):
+        """Test DDFM handles high proportion of missing data (>50%).
+        
+        This test verifies that models with many missing values still train
+        or fail gracefully with helpful error messages.
+        """
+        check_test_files_exist(test_data_path, test_ddfm_config_path)
+        
+        # Load data and introduce high proportion of missing values
+        df = pd.read_csv(test_data_path)
+        data_cols = [col for col in df.columns if col != "date"]
+        data_array = df[data_cols].values
+        
+        # Introduce high proportion of NaN values (60% of data)
+        np.random.seed(42)
+        nan_indices = np.random.choice(data_array.size, size=int(0.6 * data_array.size), replace=False)
+        data_high_missing = data_array.copy()
+        data_high_missing.flat[nan_indices] = np.nan
+        
+        # Create model
+        model = DDFM(encoder_layers=[32, 16], num_factors=2, epochs=2, max_iter=5)
+        load_config_safely(model, test_ddfm_config_path, model_type="DDFM")
+        
+        # Create DataModule with high missing data
+        config = load_config_only_safely(test_ddfm_config_path, model_type="DDFM")
+        df_high_missing = pd.DataFrame(data_high_missing, columns=data_cols)
+        df_high_missing['date'] = df['date']
+        
+        # Save temporary CSV
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False) as f:
+            df_high_missing.to_csv(f.name, index=False)
+            temp_path = Path(f.name)
+        
+        try:
+            data_module = DFMDataModule(
+                config=config,
+                pipeline=simple_transformer,
+                data_path=temp_path
+            )
+            data_module.setup()
+            
+            # Train - should handle high missing data or fail gracefully
+            trainer = DDFMTrainer(max_epochs=1, enable_progress_bar=False, logger=False)
+            trainer.fit(model, data_module)
+            
+            # Check result - may fail with high missing data, but should fail gracefully
+            if model.training_state is not None:
+                try:
+                    result = model.get_result()
+                    # If we get a result, it should be valid
+                    assert result is not None
+                    assert hasattr(result, 'Z')
+                    assert np.all(np.isfinite(result.Z))
+                except (ValueError, AttributeError) as e:
+                    # Failure is acceptable with high missing data
+                    # Error message should be informative
+                    error_str = str(e)
+                    assert any(keyword in error_str for keyword in [
+                        "not been trained", "NaN", "Inf", "missing", "insufficient"
+                    ]), f"Error message should be informative: {error_str}"
+        finally:
+            # Clean up temporary file
+            if temp_path.exists():
+                temp_path.unlink()

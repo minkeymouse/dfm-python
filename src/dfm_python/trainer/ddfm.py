@@ -11,9 +11,9 @@ from typing import Optional, Dict, Any, List, Union
 from ..logger import get_logger
 from ..config import DFMConfig, DDFMConfig
 from . import (
-    _create_trainer_base,
-    _extract_training_params,
-    _validate_config_for_trainer,
+    _create_base,
+    _extract_train_params,
+    _validate_config,
     DDFM_TRAINER_DEFAULTS
 )
 
@@ -103,7 +103,7 @@ class DDFMTrainer(pl.Trainer):
         
         # Use common trainer base setup with DDFM-specific parameters
         # DDFM uses 'train_loss' metric, TensorBoard logger, patience=20, and additional callbacks
-        trainer_config = _create_trainer_base(
+        trainer_config = _create_base(
             max_epochs=max_epochs,
             enable_progress_bar=enable_progress_bar,
             enable_model_summary=enable_model_summary,
@@ -159,16 +159,16 @@ class DDFMTrainer(pl.Trainer):
             Configured trainer instance
         """
         # Validate config before processing
-        _validate_config_for_trainer(config, trainer_name="DDFMTrainer")
+        _validate_config(config, trainer_name="DDFMTrainer")
         
         # Extract training parameters from config and kwargs
         # Handle both DDFMConfig and DFMConfig with ddfm_* parameters
         # Note: Don't use max_iter for DDFM (only epochs/ddfm_epochs)
         # Use constants from trainer/__init__.py to ensure single source of truth
         # These defaults match __init__() defaults for consistency
-        # Note: _extract_training_params() modifies kwargs by popping extracted keys
+        # Note: _extract_train_params() modifies kwargs by popping extracted keys
         # After extraction, only extracted parameters are used (kwargs are consumed)
-        params = _extract_training_params(config, kwargs, DDFM_TRAINER_DEFAULTS, use_max_iter=False)
+        params = _extract_train_params(config, kwargs, DDFM_TRAINER_DEFAULTS, use_max_iter=False)
         
         # Create trainer with extracted parameters
         # All relevant parameters are extracted, so kwargs are not passed through

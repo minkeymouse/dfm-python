@@ -14,9 +14,9 @@ from dfm_python.config import (
     DFMConfig, DDFMConfig, SeriesConfig, DEFAULT_BLOCK_NAME,
     validate_frequency, validate_transformation,
     YamlSource, DictSource, make_config_source,
-    get_aggregation_structure, group_series_by_frequency,
     FREQUENCY_HIERARCHY, PERIODS_PER_YEAR,
 )
+from dfm_python.config.utils import get_agg_structure, group_by_freq
 from dfm_python.config.results import FitParams
 
 
@@ -333,7 +333,7 @@ class TestConfigUtilities:
         # Note: get_aggregation_structure may require additional parameters
         # This test verifies the function exists and can be called
         try:
-            agg_structure = get_aggregation_structure(config)
+            agg_structure = get_agg_structure(config, clock='m')
             assert agg_structure is not None
         except TypeError:
             # Function may require additional parameters
@@ -350,7 +350,7 @@ class TestConfigUtilities:
         idx_i = np.array([0, 1, 2])  # Series indices
         frequencies = np.array([s.frequency for s in series_list])  # Extract frequencies
         clock = "m"  # Clock frequency
-        grouped = group_series_by_frequency(idx_i, frequencies, clock)
+        grouped = group_by_freq(idx_i, frequencies, clock)
         assert "m" in grouped
         assert "q" in grouped
         assert len(grouped["m"]) == 2

@@ -218,6 +218,38 @@ class KalmanFilter(nn.Module):
         device = Y.device
         dtype = Y.dtype
         
+        # CRITICAL: Pre-stabilize input matrices before Kalman filter (like numpy version)
+        # This prevents NaN propagation from the start
+        # Q: process noise covariance - must be positive definite
+        Q = self._ensure_cov_stable(Q, min_eigenval=self.min_eigenval.item(), ensure_real=True)
+        Q = self._clean_matrix(Q, 'covariance', default_nan=1e-6, default_inf=1e6)
+        
+        # R: observation noise covariance - must be positive definite (diagonal)
+        # R is typically diagonal, but ensure it's stable
+        if R.ndim == 2:
+            # Ensure R is diagonal and positive
+            diag_R = torch.diag(R)
+            diag_R = torch.clamp(diag_R, min=self.min_diagonal_variance.item())
+            diag_R = torch.nan_to_num(diag_R, nan=self.min_diagonal_variance.item(), posinf=1e4, neginf=self.min_diagonal_variance.item())
+            R = torch.diag(diag_R)
+        else:
+            R = self._clean_matrix(R, 'diagonal', default_nan=self.min_diagonal_variance.item(), default_inf=1e4)
+        
+        # A: transition matrix - ensure it's real and finite
+        A = self._clean_matrix(A, 'general', default_nan=0.0, default_inf=1.0)
+        # Clip A to prevent instability (like numpy version)
+        A = torch.clamp(A, min=-0.99, max=0.99)
+        
+        # C: observation matrix - ensure it's real and finite
+        C = self._clean_matrix(C, 'loading', default_nan=0.0, default_inf=1.0)
+        
+        # V_0: initial covariance - must be positive definite
+        V_0 = self._ensure_cov_stable(V_0, min_eigenval=self.min_eigenval.item(), ensure_real=True)
+        V_0 = self._clean_matrix(V_0, 'covariance', default_nan=1e-6, default_inf=1e6)
+        
+        # Z_0: initial state - ensure finite
+        Z_0 = torch.nan_to_num(Z_0, nan=0.0, posinf=1.0, neginf=-1.0)
+        
         # Initialize output
         Zm = torch.full((m, nobs), float('nan'), device=device, dtype=dtype)  # Z_t | t-1 (prior)
         Vm = torch.full((m, m, nobs), float('nan'), device=device, dtype=dtype)  # V_t | t-1 (prior)
@@ -270,6 +302,9 @@ class KalmanFilter(nn.Module):
             
             # Prior covariance matrix of Z (i.e. V = V_t|t-1)
             # Var(Z) = Var(A*Z + u_t) = Var(A*Z) + Var(u) = A*Vu*A' + Q
+            # Ensure Vu is stable before matrix multiplication (prevent NaN propagation)
+            if not self._check_finite(Vu, f"Vu before V calculation at t={t}"):
+                Vu = self._ensure_cov_stable(Vu, min_eigenval=self.min_eigenval.item(), ensure_real=True)
             V = A @ Vu @ A.T + Q
             
             # Check for NaN/Inf before stabilization
@@ -278,7 +313,7 @@ class KalmanFilter(nn.Module):
                 V = Vu + torch.eye(V.shape[0], device=device, dtype=dtype) * 1e-6
             
             # Ensure V is real, symmetric, and positive semi-definite
-            V = self._ensure_covariance_stable(V, min_eigenval=self.min_eigenval.item(), ensure_real=True)
+            V = self._ensure_cov_stable(V, min_eigenval=self.min_eigenval.item(), ensure_real=True)
             
             # Calculate posterior distribution
             # Remove missing series: These are removed from Y, C, and R
@@ -297,7 +332,7 @@ class KalmanFilter(nn.Module):
                 F = C_t @ VC + R_t
                 
                 # Ensure F is real, symmetric, and positive semi-definite
-                F = self._ensure_covariance_stable(F, min_eigenval=self.min_eigenval.item(), ensure_real=True)
+                F = self._ensure_cov_stable(F, min_eigenval=self.min_eigenval.item(), ensure_real=True)
                 
                 # Check for NaN/Inf before inversion
                 if not self._check_finite(F, f"F at t={t}"):
@@ -307,7 +342,7 @@ class KalmanFilter(nn.Module):
                 
                 # Use safe inverse with progressive fallback
                 # This handles GPU numerical stability issues (singular matrix errors)
-                iF = self._safe_inverse(F, regularization=self.inv_regularization.item(), use_pinv_fallback=True)
+                iF = self._safe_inv(F, regularization=self.inv_regularization.item(), use_pinv_fallback=True)
                 
                 # Matrix of population regression coefficients (Kalman gain)
                 VCF = VC @ iF
@@ -341,11 +376,11 @@ class KalmanFilter(nn.Module):
                         Vu = V.clone()
                     
                     # Ensure Vu is real, symmetric, and positive semi-definite
-                    Vu = self._ensure_covariance_stable(Vu, min_eigenval=self.min_eigenval.item(), ensure_real=True)
+                    Vu = self._ensure_cov_stable(Vu, min_eigenval=self.min_eigenval.item(), ensure_real=True)
                     
                     # Update log-likelihood (with safeguards)
                     try:
-                        det_iF = self._safe_determinant(iF, use_logdet=True)
+                        det_iF = self._safe_det(iF, use_logdet=True)
                         if det_iF > 0 and torch.isfinite(torch.tensor(det_iF)):
                             log_det = torch.log(torch.tensor(det_iF, device=device, dtype=dtype))
                             innov_term = innov.T @ iF @ innov
@@ -362,14 +397,14 @@ class KalmanFilter(nn.Module):
             # Store covariance and observation values for t (priors)
             # Ensure Z and V are real before storing
             Z = self._ensure_real(Z)
-            V = self._ensure_real_and_symmetric(V)
+            V = ensure_real_and_symmetric(V)
             Zm[:, t] = Z
             Vm[:, :, t] = V
             
             # Store covariance and state values for t (posteriors)
             # i.e. Zu = Z_t|t   & Vu = V_t|t
             Zu = self._ensure_real(Zu)
-            Vu = self._ensure_real_and_symmetric(Vu)
+            Vu = ensure_real_and_symmetric(Vu)
             ZmU[:, t + 1] = Zu
             VmU[:, :, t + 1] = Vu
         
@@ -420,7 +455,7 @@ class KalmanFilter(nn.Module):
         # Initialize VmT_1 lag 1 covariance matrix for final period
         VmT_1 = torch.zeros((m, m, nobs), device=device, dtype=dtype)
         VmT_1_temp = (torch.eye(m, device=device, dtype=dtype) - S.k_t) @ A @ S.VmU[:, :, nobs - 1]
-        VmT_1[:, :, nobs - 1] = self._ensure_real_and_symmetric(VmT_1_temp)
+        VmT_1[:, :, nobs - 1] = ensure_real_and_symmetric(VmT_1_temp)
         
         # Used for recursion process
         try:
@@ -451,7 +486,7 @@ class KalmanFilter(nn.Module):
             
             # Update smoothed factor covariance matrix
             VmT_temp = VmU + J_1 @ (V_T - Vm1) @ J_1.T
-            VmT[:, :, t] = self._ensure_real_and_symmetric(VmT_temp)
+            VmT[:, :, t] = ensure_real_and_symmetric(VmT_temp)
             
             # Clean NaN/Inf and ensure PSD
             if not self._check_finite(VmT[:, :, t], f"VmT[:, :, t] at t={t}"):
@@ -466,7 +501,7 @@ class KalmanFilter(nn.Module):
                 
                 # Update lag 1 factor covariance matrix 
                 VmT_1_temp = VmU @ J_2.T + J_1 @ (V_T1 - A @ VmU) @ J_2.T
-                VmT_1[:, :, t - 1] = self._ensure_real_and_symmetric(VmT_1_temp)
+                VmT_1[:, :, t - 1] = ensure_real_and_symmetric(VmT_1_temp)
         
         # Add smoothed estimates as attributes
         S.ZmT = ZmT
@@ -544,11 +579,8 @@ class KalmanFilter(nn.Module):
         """Ensure matrix is symmetric by averaging with its transpose."""
         return ensure_symmetric(tensor)
     
-    def _ensure_real_and_symmetric(self, tensor: torch.Tensor) -> torch.Tensor:
-        """Ensure matrix is real and symmetric."""
-        return ensure_real_and_symmetric(tensor)
     
-    def _ensure_covariance_stable(
+    def _ensure_cov_stable(
         self,
         M: torch.Tensor, 
         min_eigenval: float = None,
@@ -558,17 +590,6 @@ class KalmanFilter(nn.Module):
         if min_eigenval is None:
             min_eigenval = self.min_eigenval.item()
         return ensure_covariance_stable(M, min_eigenval=min_eigenval, ensure_real=ensure_real)
-    
-    def _ensure_positive_definite(
-        self,
-        M: torch.Tensor, 
-        min_eigenval: float = None, 
-        warn: bool = True
-    ) -> torch.Tensor:
-        """Ensure matrix is positive semi-definite by adding regularization if needed."""
-        if min_eigenval is None:
-            min_eigenval = self.min_eigenval.item()
-        return ensure_positive_definite(M, min_eigenval=min_eigenval, warn=warn)
     
     def _clean_matrix(
         self,
@@ -587,7 +608,7 @@ class KalmanFilter(nn.Module):
             min_diagonal_variance=self.min_diagonal_variance.item()
         )
     
-    def _safe_inverse(
+    def _safe_inv(
         self,
         M: torch.Tensor,
         regularization: float = None,
@@ -598,7 +619,7 @@ class KalmanFilter(nn.Module):
             regularization = self.inv_regularization.item()
         return safe_inverse(M, regularization=regularization, use_pinv_fallback=use_pinv_fallback)
     
-    def _safe_determinant(self, M: torch.Tensor, use_logdet: bool = True) -> float:
+    def _safe_det(self, M: torch.Tensor, use_logdet: bool = True) -> float:
         """Compute determinant safely to avoid overflow warnings."""
         return safe_determinant(M, use_logdet=use_logdet)
 

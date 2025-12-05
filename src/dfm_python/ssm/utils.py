@@ -19,7 +19,9 @@ from ..logger import get_logger
 
 _logger = get_logger(__name__)
 
-# Default numerical stability constants
+# Default numerical stability constants for PyTorch operations
+# Note: Similar constants exist in utils/statespace.py (MIN_EIGENVAL_CLEAN, MIN_DIAGONAL_VARIANCE)
+# for NumPy operations. They have the same values but are kept separate for context clarity.
 DEFAULT_MIN_EIGENVAL = 1e-8
 DEFAULT_MIN_DIAGONAL_VARIANCE = 1e-6
 DEFAULT_INV_REGULARIZATION = 1e-6

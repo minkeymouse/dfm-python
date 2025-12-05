@@ -8,7 +8,7 @@ Tests align with nowcasting theory from:
 
 import pytest
 import numpy as np
-import polars as pl
+import pandas as pd
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, Any
@@ -16,8 +16,9 @@ from typing import Dict, Any
 from dfm_python.nowcast import (
     Nowcast, NowcastResult, NewsDecompResult, BacktestResult,
     DataView, para_const,
-    get_higher_frequency, calculate_backward_date,
+    get_higher_frequency,
 )
+from dfm_python.nowcast.utils import calc_backward_date
 from dfm_python.config import DFMConfig, SeriesConfig, DEFAULT_BLOCK_NAME
 from dfm_python.config.adapter import YamlSource
 from dfm_python.config.results import DFMResult
@@ -40,7 +41,7 @@ class TestNowcast:
     
     @pytest.fixture
     def sample_data_from_file(self, test_data_path, test_config_path):
-        """Load sample data from CSV using polars."""
+        """Load sample data from CSV using pandas."""
         if not test_data_path.exists() or not test_config_path.exists():
             pytest.skip("Test data or config files not found")
         
@@ -48,8 +49,8 @@ class TestNowcast:
         source = YamlSource(test_config_path)
         config = source.load()
         
-        # Read CSV with polars
-        df = pl.read_csv(test_data_path)
+        # Read CSV with pandas
+        df = pd.read_csv(test_data_path)
         
         # Extract date column
         date_col = df.select("date").to_series().to_list()
@@ -269,7 +270,7 @@ class TestNowcastUtilities:
         """Test backward date calculation for nowcasting."""
         target_date = datetime(2020, 3, 31)
         # calculate_backward_date has different signature
-        backward_date = calculate_backward_date(target_date, step=1, freq="m")
+        backward_date = calc_backward_date(target_date, step=1, freq="m")
         # Should be one period before target
         assert backward_date < target_date
     

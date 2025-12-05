@@ -18,18 +18,18 @@ from .data_module import (
     DFMDataset,
 )
 
-# DFMLightningModule is an internal implementation used by DFMLinear and estimation.py.
-# DDFMLightningModule is defined but not currently used - DDFM class uses DDFMModel directly.
-# These are not part of the public API.
-from .dfm_module import (
-    DFMLightningModule,  # Internal: used by DFMLinear._train_with_lightning()
-    DFMTrainingState,
+from .scaling import (
+    create_scaling_transformer_from_config,
+    create_uniform_scaling_transformer,
+    create_preprocessing_pipeline_with_scaling,
+    ScalingStrategy,
+    DefaultScalingStrategy,
+    NoScalingStrategy,
 )
 
-from .ddfm_module import (
-    DDFMLightningModule,  # Internal: defined but not currently used (DDFM uses DDFMModel)
-    DDFMTrainingState,
-)
+# DFMTrainingState is defined in models.dfm and exported here for convenience
+# Note: dfm_module.py has been removed - DFM class implements EM directly
+from ..models.dfm import DFMTrainingState
 
 __all__ = [
     # Kalman filter
@@ -41,10 +41,16 @@ __all__ = [
     # Data handling
     'DFMDataModule',
     'DFMDataset',
-    # Lightning modules (internal implementations)
-    'DFMLightningModule',  # Internal: used by DFMLinear._train_with_lightning()
+    # Scaling utilities
+    'create_scaling_transformer_from_config',
+    'create_uniform_scaling_transformer',
+    'create_preprocessing_pipeline_with_scaling',
+    'ScalingStrategy',
+    'DefaultScalingStrategy',
+    'NoScalingStrategy',
+    # Training state (defined in models.dfm)
     'DFMTrainingState',
-    'DDFMLightningModule',  # Internal: defined but not currently used
-    'DDFMTrainingState',
+    # DDFMLightningModule removed: deprecated and unused (DDFM uses DDFMModel directly)
+    # DDFMTrainingState removed: duplicate (also defined in models.ddfm)
 ]
 

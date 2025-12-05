@@ -1,14 +1,14 @@
 """Diagnostic functions for DFM estimation results."""
 
 from typing import Optional, Dict, Any, Tuple, TYPE_CHECKING
-import numpy as np
 import logging
+import numpy as np
 from ..logger import get_logger
 
-import polars as pl
+import pandas as pd
 from scipy.linalg import orthogonal_procrustes
 
-POLARS_AVAILABLE = True
+PANDAS_AVAILABLE = True
 
 from ..config import DFMConfig
 from .time import calculate_rmse
@@ -20,6 +20,15 @@ if TYPE_CHECKING:
 else:
     # Avoid circular import at runtime
     DFMResult = Any
+
+
+def _compute_correlation(x: np.ndarray, y: np.ndarray) -> float:
+    """Compute correlation between two arrays, handling NaN."""
+    try:
+        corr = np.corrcoef(x.flatten(), y.flatten())[0, 1]
+        return float(corr) if not np.isnan(corr) else 0.0
+    except Exception:
+        return 0.0
 
 
 def evaluate_factor_estimation(
@@ -92,8 +101,7 @@ def evaluate_factor_estimation(
     for j in range(k):
         mask_j = np.isfinite(F_true[:, j]) & np.isfinite(F_est[:, j])
         if np.sum(mask_j) > 1:
-            corr = np.corrcoef(F_true[mask_j, j], F_est[mask_j, j])[0, 1]
-            corr_per_factor[j] = float(corr)
+            corr_per_factor[j] = _compute_correlation(F_true[mask_j, j], F_est[mask_j, j])
     
     rotation_matrix = None
     aligned_factors = None
@@ -116,11 +124,9 @@ def evaluate_factor_estimation(
             
             mask_all = np.isfinite(F_true) & np.isfinite(aligned_factors)
             if np.any(mask_all):
-                overall_corr = float(
-                    np.corrcoef(
-                        F_true[mask_all].ravel(),
-                        aligned_factors[mask_all].ravel()
-                    )[0, 1]
+                overall_corr = _compute_correlation(
+                    F_true[mask_all].ravel(),
+                    aligned_factors[mask_all].ravel()
                 )
         except Exception as e:
             _logger.debug(f"Procrustes rotation failed in evaluate_factor_estimation: {e}")
@@ -205,8 +211,7 @@ def evaluate_loading_estimation(
     for j in range(k):
         mask_j = np.isfinite(L_true[:, j]) & np.isfinite(L_est_k[:, j])
         if np.sum(mask_j) > 1:
-            corr = np.corrcoef(L_true[mask_j, j], L_est_k[mask_j, j])[0, 1]
-            corr_per_factor[j] = float(corr)
+            corr_per_factor[j] = _compute_correlation(L_true[mask_j, j], L_est_k[mask_j, j])
     
     # RMSE per series (row-wise across factors)
     # Use calculate_rmse from utils.metrics
@@ -233,7 +238,7 @@ def _display_dfm_tables(Res: DFMResult, config: DFMConfig, nQ: int) -> None:
     """Display DFM estimation output tables.
     
     Displays formatted tables for factor loadings, AR coefficients, and
-    idiosyncratic components. Uses polars DataFrame formatting if available,
+    idiosyncratic components. Uses pandas DataFrame formatting if available,
     otherwise falls back to shape information.
     
     Parameters
@@ -250,7 +255,7 @@ def _display_dfm_tables(Res: DFMResult, config: DFMConfig, nQ: int) -> None:
     - Only displays if logging level is INFO or higher
     - Tables include: same-frequency loadings, slower-frequency loadings,
       factor AR coefficients, and idiosyncratic AR coefficients
-    - Automatically handles missing polars dependency
+    - Automatically handles missing pandas dependency
     """
     if not _logger.isEnabledFor(logging.INFO):
         return
@@ -268,13 +273,13 @@ def _display_dfm_tables(Res: DFMResult, config: DFMConfig, nQ: int) -> None:
         # Factor Loadings for Same-Frequency Series
         _logger.info('Factor Loadings for Same-Frequency Series')
         C_same_freq = Res.C[:n_same_freq, ::5][:, :nFactors]
-        if POLARS_AVAILABLE:
+        if PANDAS_AVAILABLE:
             try:
-                # Polars doesn't have index, so create DataFrame with series names as a column
+                # Create DataFrame with series names as a column
                 df_dict = {block_names[i] if i < len(block_names) else f'Block{i+1}': C_same_freq[:, i] 
                           for i in range(min(nFactors, C_same_freq.shape[1]))}
                 df_dict['series'] = [name.replace(' ', '_') for name in series_names[:n_same_freq]]
-                df = pl.DataFrame(df_dict)
+                df = pd.DataFrame(df_dict)
                 _logger.info(f'\n{df}')
             except Exception as e:
                 _logger.debug(f'Failed to format same-frequency loadings table: {e}')
@@ -286,13 +291,13 @@ def _display_dfm_tables(Res: DFMResult, config: DFMConfig, nQ: int) -> None:
         # Slower-Frequency Loadings Sample (First Factor)
         _logger.info('Slower-Frequency Loadings Sample (First Factor)')
         C_slower_freq = Res.C[-nQ:, :5]
-        if POLARS_AVAILABLE:
+        if PANDAS_AVAILABLE:
             try:
                 n_lags = min(5, C_slower_freq.shape[1])
                 lag_cols = [f'factor1_lag{i}' for i in range(n_lags)]
                 df_dict = {lag_cols[i]: C_slower_freq[:, i] for i in range(n_lags)}
                 df_dict['series'] = [name.replace(' ', '_') for name in series_names[-nQ:]]
-                df = pl.DataFrame(df_dict)
+                df = pd.DataFrame(df_dict)
                 _logger.info(f'\n{df}')
             except Exception as e:
                 _logger.debug(f'Failed to format slower-frequency loadings table: {e}')
@@ -307,14 +312,14 @@ def _display_dfm_tables(Res: DFMResult, config: DFMConfig, nQ: int) -> None:
         Q_terms = np.diag(Res.Q)
         A_terms_factors = A_terms[::5][:nFactors]
         Q_terms_factors = Q_terms[::5][:nFactors]
-        if POLARS_AVAILABLE:
+        if PANDAS_AVAILABLE:
             try:
                 df_dict = {
                     'block': [name.replace(' ', '_') for name in block_names[:nFactors]],
                     'AR_Coefficient': A_terms_factors.tolist(),
                     'Variance_Residual': Q_terms_factors.tolist()
                 }
-                df = pl.DataFrame(df_dict)
+                df = pd.DataFrame(df_dict)
                 _logger.info(f'\n{df}')
             except Exception as e:
                 _logger.debug(f'Failed to format AR coefficients table: {e}')
@@ -332,7 +337,7 @@ def _display_dfm_tables(Res: DFMResult, config: DFMConfig, nQ: int) -> None:
         combined_idx = combined_idx[combined_idx < len(A_terms)]
         A_idio = A_terms[combined_idx]
         Q_idio = Q_terms[combined_idx]
-        if POLARS_AVAILABLE:
+        if PANDAS_AVAILABLE:
             try:
                 series_names_list = []
                 for idx in combined_idx:
@@ -349,7 +354,7 @@ def _display_dfm_tables(Res: DFMResult, config: DFMConfig, nQ: int) -> None:
                     'AR_Coefficient': A_idio[:len(series_names_list)].tolist(),
                     'Variance_Residual': Q_idio[:len(series_names_list)].tolist()
                 }
-                df = pl.DataFrame(df_dict)
+                df = pd.DataFrame(df_dict)
                 _logger.info(f'\n{df}')
             except Exception as e:
                 _logger.debug(f'Failed to format idiosyncratic AR coefficients table: {e}')

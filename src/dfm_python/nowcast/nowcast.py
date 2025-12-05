@@ -22,7 +22,7 @@ from datetime import datetime, timedelta
 import warnings
 import logging
 from ..logger import get_logger
-import polars as pl
+import pandas as pd
 import time
 
 from ..config import DFMConfig
@@ -45,8 +45,8 @@ from ..utils.helpers import (
     get_series_ids,
     get_series_names,
     find_series_index,
-    get_series_id_by_index,
-    get_frequencies_from_config,
+    get_series_id,
+    get_frequencies,
     get_clock_frequency,
 )
 from ..utils.data import calculate_release_date, create_data_view
@@ -89,10 +89,10 @@ class NowcastResult:
 # ============================================================================
 from .utils import (
     get_higher_frequency,
-    calculate_backward_date,
-    get_forecast_horizon_config,
-    check_config_consistency,
-    extract_news_summary,
+    calc_backward_date,
+    get_forecast_horizon,
+    check_config,
+    extract_news,
 )
 # transform_data removed - use DataModule with custom transformers instead
 
@@ -173,7 +173,7 @@ class Nowcast:
             Z=X,  # Use same data for Z (original data)
             config=self.model.config,
             view_date=view_date,
-            X_frame=raw_data if isinstance(raw_data, pl.DataFrame) else None
+            X_frame=raw_data if isinstance(raw_data, pd.DataFrame) else None
         )
         if _logger.isEnabledFor(logging.DEBUG):
             _logger.debug(
@@ -223,7 +223,7 @@ class Nowcast:
         elif isinstance(target_date, str):
             clock = get_clock_frequency(self.model.config, 'm')
             if target_series is not None:
-                frequencies = get_frequencies_from_config(self.model.config)
+                frequencies = get_frequencies(self.model.config)
                 i_series = find_series_index(self.model.config, target_series)
                 freq = frequencies[i_series] if i_series < len(frequencies) else clock
             else:
@@ -232,7 +232,7 @@ class Nowcast:
         else:
             return parse_timestamp(target_date)
     
-    def _extract_float_value(self, value: Union[float, np.ndarray]) -> float:
+    def _extract_float(self, value: Union[float, np.ndarray]) -> float:
         """Extract float value from forecast core output (handles scalar and array returns).
         
         Parameters
@@ -253,7 +253,7 @@ class Nowcast:
         else:
             return float(value)
     
-    def _prepare_target_params(
+    def _prepare_target(
         self,
         target_series: str,
         target_period: Optional[Union[datetime, str]],
@@ -291,7 +291,7 @@ class Nowcast:
         
         return target_period, t_fcst
     
-    def _create_nowcast_result_with_metadata(
+    def _create_nowcast_result(
         self,
         target_series: str,
         target_period: datetime,
@@ -354,7 +354,7 @@ class Nowcast:
             data_availability=data_availability
         )
     
-    def _decomp_to_nowcast_result(
+    def _decomp_to_result(
         self,
         news_result: NewsDecompResult,
         target_series: str,
@@ -389,9 +389,9 @@ class Nowcast:
         
         # Use consolidated method to create NowcastResult
         # Extract nowcast value from news_result.y_new (already float, but use helper for consistency)
-        nowcast_value = self._extract_float_value(news_result.y_new)
+        nowcast_value = self._extract_float(news_result.y_new)
         
-        return self._create_nowcast_result_with_metadata(
+        return self._create_nowcast_result(
             target_series=target_series,
             target_period=target_period,
             view_date=view_date,
@@ -727,13 +727,13 @@ class Nowcast:
         freq = frequencies[i_series] if i_series < len(frequencies) else 'm'
         
         # Prepare target period and time index
-        target_period, t_nowcast = self._prepare_target_params(
+        target_period, t_nowcast = self._prepare_target(
             target_series, target_period, view_date, Time_view
         )
         
         # Get forecast horizon based on clock frequency
         clock = get_clock_frequency(self.model.config, 'm')
-        forecast_horizon, _ = get_forecast_horizon_config(clock, horizon=None)
+        forecast_horizon, _ = get_forecast_horizon(clock, horizon=None)
         
         # Extend data with forecast horizon if needed
         T, N = X_view.shape
@@ -758,7 +758,7 @@ class Nowcast:
             )[1]
             
             # Extract float value from forecast core output
-            nowcast_value = self._extract_float_value(y_new)
+            nowcast_value = self._extract_float(y_new)
             
             # Return simple float if not requested
             if not return_result:
@@ -766,7 +766,7 @@ class Nowcast:
             
             # Return full NowcastResult
             # Use helper method pattern for consistency
-            return self._create_nowcast_result_with_metadata(
+            return self._create_nowcast_result(
                 target_series=target_series,
                 target_period=target_period,
                 view_date=view_date,
@@ -794,7 +794,7 @@ class Nowcast:
         nowcast values (y_old and y_new) and decomposes the change into contributions
         
         Note: The result includes y_new, which is the nowcast value at view_date_new.
-        In backtest scenarios, this value can be reused via _decomp_to_nowcast_result()
+        In backtest scenarios, this value can be reused via _decomp_to_result()
         to avoid redundant Kalman filter calculations.
         
         Parameters
@@ -833,7 +833,7 @@ class Nowcast:
         
         # Prepare target period and time index
         i_series = find_series_index(self.model.config, target_series)
-        target_date, t_fcst = self._prepare_target_params(
+        target_date, t_fcst = self._prepare_target(
             target_series, target_period, view_date_new, Time_new
         )
         
@@ -862,12 +862,12 @@ class Nowcast:
                 )
             
             # Extract float values consistently
-            y_old_float = self._extract_float_value(y_old)
-            y_new_float = self._extract_float_value(y_new)
+            y_old_float = self._extract_float(y_old)
+            y_new_float = self._extract_float(y_new)
             
             # Extract summary
             series_ids = get_series_ids(self.model.config)
-            summary = self._extract_news_summary(singlenews, weight, series_ids, top_n=5)
+            summary = self._extract_news(singlenews, weight, series_ids, top_n=5)
             
             # Create NewsDecompResult
             news_result = NewsDecompResult(
@@ -978,7 +978,7 @@ class Nowcast:
         
         return news
     
-    def _extract_news_summary(
+    def _extract_news(
         self,
         singlenews: np.ndarray,
         weight: np.ndarray,
@@ -1012,4 +1012,252 @@ class Nowcast:
             news_contributions = singlenews[:, 0]
             weights = weight[:, 0] if weight.ndim > 1 else weight
         
-        return extract_news_summary(singlenews, weight, series_ids, top_n)
+        return extract_news(singlenews, weight, series_ids, top_n)
+    
+    def backtest_with_sktime(
+        self,
+        target_series: str,
+        target_periods: List[Union[datetime, str]],
+        backward_steps: int,
+        higher_freq: bool = False,
+        include_actual: bool = True,
+        n_jobs: int = 1
+    ) -> "BacktestResult":
+        """Perform backtesting using sktime's evaluation framework.
+        
+        This method uses sktime's evaluate() function with NowcastingSplitter
+        to perform parallel backtesting evaluation.
+        
+        Parameters
+        ----------
+        target_series : str
+            Target series ID to nowcast
+        target_periods : List[datetime or str]
+            List of target periods to nowcast
+        backward_steps : int
+            Number of backward steps to simulate (e.g., 20 means 20 data releases)
+        higher_freq : bool, default False
+            If True, use frequency one step faster than clock for snapshots
+        include_actual : bool, default True
+            If True, compare with actual values (requires actual values in data)
+        n_jobs : int, default 1
+            Number of parallel jobs for evaluation (-1 for all CPUs)
+            
+        Returns
+        -------
+        BacktestResult
+            Backtest results compatible with existing BacktestResult format
+            
+        Examples
+        --------
+        >>> from datetime import datetime
+        >>> 
+        >>> target_periods = [datetime(2024, 3, 31), datetime(2024, 6, 30)]
+        >>> result = nowcast.backtest_with_sktime(
+        ...     target_series='gdp',
+        ...     target_periods=target_periods,
+        ...     backward_steps=20,
+        ...     higher_freq=True,
+        ...     n_jobs=-1  # Use all CPUs
+        ... )
+        """
+        try:
+            from sktime.forecasting.model_evaluation import evaluate
+            from sktime.performance_metrics.forecasting import (
+                MeanSquaredError,
+                MeanAbsoluteError
+            )
+            from .splitters import NowcastingSplitter, NowcastForecaster
+        except ImportError as e:
+            raise ImportError(
+                f"sktime is required for backtest_with_sktime. "
+                f"Install with: pip install sktime[forecasting]. "
+                f"Error: {e}"
+            )
+        
+        # Convert target_periods to datetime list
+        target_dates = []
+        for period in target_periods:
+            if isinstance(period, str):
+                target_dates.append(self._parse_target_date(period, target_series))
+            else:
+                target_dates.append(period)
+        
+        # Get data from DataModule
+        raw_data = self.data_module.data
+        time_index = self.data_module.time_index
+        
+        # Convert to pandas DataFrame if needed
+        if not isinstance(raw_data, pd.DataFrame):
+            if hasattr(raw_data, 'to_pandas'):
+                y = raw_data.to_pandas()
+            else:
+                # Convert numpy to DataFrame
+                series_ids = get_series_ids(self.model.config)
+                if isinstance(time_index, TimeIndex):
+                    index = [to_python_datetime(t) for t in time_index]
+                else:
+                    index = list(time_index)
+                y = pd.DataFrame(raw_data, index=index, columns=series_ids[:raw_data.shape[1]])
+        else:
+            y = raw_data.copy()
+        
+        # Create splitter
+        splitter = NowcastingSplitter(
+            target_periods=target_dates,
+            backward_steps=backward_steps,
+            config=self.model.config,
+            time_index=time_index,
+            higher_freq=higher_freq
+        )
+        
+        # Create forecaster (target_period will be set per split via X metadata)
+        forecaster = NowcastForecaster(
+            nowcast_manager=self,
+            target_series=target_series,
+            target_period=target_dates[0]  # Default, will be overridden per split
+        )
+        
+        # Prepare scoring metrics
+        scoring = {
+            'RMSE': MeanSquaredError(square_root=True),
+            'MAE': MeanAbsoluteError()
+        }
+        
+        # Create a custom forecaster that updates target_period per split
+        # We need to track which split we're on to get the correct target_period
+        class PerSplitForecaster(NowcastForecaster):
+            """Forecaster that updates target_period per split."""
+            def __init__(self, base_forecaster, splitter):
+                super().__init__(
+                    nowcast_manager=base_forecaster.nowcast_manager,
+                    target_series=base_forecaster.target_series,
+                    target_period=base_forecaster.target_period
+                )
+                self._splitter = splitter
+                self._current_split_idx = 0
+            
+            def _fit(self, y, X=None, fh=None):
+                # Get split parameters to set target_period
+                if self._current_split_idx < splitter.get_n_splits():
+                    split_params = self._splitter.get_split_params(self._current_split_idx)
+                    self.target_period = split_params['target_date']
+                    self._current_split_idx += 1
+                return super()._fit(y, X, fh)
+        
+        # Create per-split forecaster wrapper
+        per_split_forecaster = PerSplitForecaster(forecaster, splitter)
+        
+        # Run evaluation
+        results = evaluate(
+            forecaster=per_split_forecaster,
+            y=y,
+            cv=splitter,
+            scoring=scoring,
+            return_data=True,
+            n_jobs=n_jobs
+        )
+        
+        # Convert sktime results to BacktestResult format
+        # This is a simplified conversion - full implementation would
+        # extract all the detailed information
+        from .helpers import BacktestResult, NowcastResult
+        
+        # Extract predictions and actuals
+        y_pred_list = results.get('y_pred', [])
+        y_test_list = results.get('y_test', [])
+        
+        # Build nowcast results
+        nowcast_results = []
+        actual_values = []
+        errors = []
+        
+        for i, (y_pred, y_test) in enumerate(zip(y_pred_list, y_test_list)):
+            split_params = splitter.get_split_params(i)
+            view_date = split_params['view_date']
+            target_date = split_params['target_date']
+            
+            # Get nowcast value
+            if len(y_pred) > 0:
+                nowcast_value = float(y_pred.iloc[0])
+            else:
+                nowcast_value = np.nan
+            
+            # Get actual value if available
+            if include_actual and len(y_test) > 0:
+                actual_value = float(y_test.iloc[0])
+                actual_values.append(actual_value)
+                errors.append(nowcast_value - actual_value)
+            else:
+                actual_values.append(np.nan)
+                errors.append(np.nan)
+            
+            # Create NowcastResult
+            nowcast_result = NowcastResult(
+                target_series=target_series,
+                target_period=target_date,
+                view_date=view_date,
+                nowcast_value=nowcast_value
+            )
+            nowcast_results.append(nowcast_result)
+        
+        # Calculate metrics
+        actual_array = np.array(actual_values)
+        errors_array = np.array(errors)
+        
+        # Calculate per-step metrics
+        from ..utils.time import calculate_rmse, calculate_mae
+        
+        valid_mask = np.isfinite(actual_array) & np.isfinite(errors_array)
+        if np.any(valid_mask):
+            actual_valid = actual_array[valid_mask]
+            predicted_valid = actual_valid + errors_array[valid_mask]  # Reconstruct predictions
+            
+            rmse_overall, _ = calculate_rmse(actual_valid, predicted_valid)
+            mae_overall, _ = calculate_mae(actual_valid, predicted_valid)
+            
+            # Per-step metrics
+            rmse_per_step = np.full(backward_steps + 1, np.nan)
+            mae_per_step = np.full(backward_steps + 1, np.nan)
+            mse_per_step = np.full(backward_steps + 1, np.nan)
+            
+            # Group by step (simplified - assumes one target per step)
+            for i, error in enumerate(errors_array):
+                if np.isfinite(error) and i < len(rmse_per_step):
+                    mse_per_step[i] = error ** 2
+                    mae_per_step[i] = abs(error)
+                    rmse_per_step[i] = abs(error)  # Simplified
+        else:
+            rmse_overall = np.nan
+            mae_overall = np.nan
+            rmse_per_step = np.full(backward_steps + 1, np.nan)
+            mae_per_step = np.full(backward_steps + 1, np.nan)
+            mse_per_step = np.full(backward_steps + 1, np.nan)
+        
+        # Create BacktestResult
+        clock = get_clock_frequency(self.model.config, 'm')
+        backward_freq = get_higher_frequency(clock) if higher_freq else clock
+        if backward_freq is None:
+            backward_freq = clock
+        
+        backtest_result = BacktestResult(
+            target_series=target_series,
+            target_date=target_dates[0],  # Primary target
+            backward_steps=backward_steps,
+            higher_freq=higher_freq,
+            backward_freq=backward_freq,
+            view_list=[],  # Not populated in sktime version
+            nowcast_results=nowcast_results,
+            news_results=[None] * len(nowcast_results),  # News not computed in sktime version
+            actual_values=actual_array,
+            errors=errors_array,
+            mae_per_step=mae_per_step,
+            mse_per_step=mse_per_step,
+            rmse_per_step=rmse_per_step,
+            overall_mae=mae_overall,
+            overall_rmse=rmse_overall,
+            overall_mse=rmse_overall ** 2 if not np.isnan(rmse_overall) else np.nan,
+            failed_steps=[]
+        )
+        
+        return backtest_result

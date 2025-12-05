@@ -4,11 +4,10 @@ This module provides functions for reading, sorting, transforming, and loading t
 for Dynamic Factor Model estimation.
 """
 
-from pathlib import Path
 from typing import List, Optional, Tuple, Union, Any, Dict
 
 import numpy as np
-import polars as pl
+import pandas as pd
 from datetime import datetime
 
 try:
@@ -120,7 +119,7 @@ def rem_nans_spline(X: np.ndarray, method: int = 2, k: int = 3) -> Tuple[np.ndar
             try:
                 import pandas as pd
                 X_df = pd.DataFrame(X)
-                X = X_df.select_dtypes(include=[np.number]).values
+                X = X_df.select_dtypes(include=[np.number]).to_numpy()
                 if X.size == 0:
                     raise ValueError("Input data contains no numeric columns")
                 # If shape changed, we need to handle it
@@ -462,7 +461,7 @@ def create_data_view(
     config: Optional[DFMConfig] = None,
     view_date: Union[datetime, str, None] = None,
     *,
-    X_frame: Optional[pl.DataFrame] = None
+    X_frame: Optional[pd.DataFrame] = None
 ) -> Tuple[np.ndarray, Union[TimeIndex, Any], Optional[np.ndarray]]:
     """Create data view at a specific view date."""
     from ..utils.time import get_latest_time
@@ -487,28 +486,32 @@ def create_data_view(
         for t in Time:
             if isinstance(t, datetime):
                 time_list.append(t)
+            elif isinstance(t, pd.Timestamp):
+                time_list.append(t.to_pydatetime())
+            elif hasattr(t, 'to_pydatetime'):
+                time_list.append(t.to_pydatetime())
             elif hasattr(t, 'to_python'):
-                time_list.append(t.to_python())
+                time_list.append(t.to_python())  # Backward compatibility
             else:
                 time_list.append(parse_timestamp(t))
     
-    # Build polars DataFrame reference
+    # Build pandas DataFrame reference
     try:
         series_ids = get_series_ids(config)
     except ValueError:
         series_ids = [f'series_{i}' for i in range(X.shape[1])]
     
     if X_frame is not None:
-        df = X_frame.clone()
+        df = X_frame.copy()
     else:
-        df = pl.DataFrame(X, schema=series_ids[:X.shape[1]])
-    df = df.with_columns(pl.Series('_view_time', time_list))
+        df = pd.DataFrame(X, columns=series_ids[:X.shape[1]])
+    df['_view_time'] = time_list
     
     # Track masks for applying to numpy fallbacks
     series_masks: Dict[int, np.ndarray] = {}
     
     for i, series_cfg in enumerate(config.series):
-        if i >= df.width - 1:  # exclude time column
+        if i >= len(df.columns) - 1:  # exclude time column
             continue
         release_offset = getattr(series_cfg, 'release_date', None)
         if release_offset is None:
@@ -518,16 +521,10 @@ def create_data_view(
         mask = np.array([view_date >= rd for rd in release_dates], dtype=bool)
         series_masks[i] = mask
         
-        mask_col = pl.Series('_mask', mask)
-        df = df.with_columns(mask_col)
-        df = df.with_columns(
-            pl.when(pl.col('_mask'))
-            .then(pl.col(series_ids[i]))
-            .otherwise(pl.lit(None))
-            .alias(series_ids[i])
-        ).drop('_mask')
+        # Apply mask using pandas where
+        df[series_ids[i]] = df[series_ids[i]].where(mask, None)
     
-    df_view = df.drop('_view_time')
+    df_view = df.drop(columns=['_view_time'])
     X_view = df_view.to_numpy()
     
     if Z is not None:

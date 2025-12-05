@@ -7,22 +7,22 @@ preprocessing data for Dynamic Factor Model training.
 import torch
 from torch.utils.data import DataLoader
 import numpy as np
-import polars as pl
+import pandas as pd
 from typing import Optional, Union, Tuple, Any
 from pathlib import Path
 import pytorch_lightning as lightning_pl
 
 from ..config import DFMConfig
 from ..data.utils import load_data as _load_data
-from ..data.dataset import DFMDataset, DDFMDataset
-from ..data.dataloader import create_dfm_dataloader, create_ddfm_dataloader
+from ..data.dataset import DFMDataset
+from ..data.dataloader import create_dfm_dataloader
 from ..utils.time import TimeIndex
 from ..logger import get_logger
 
 _logger = get_logger(__name__)
 
 
-def _check_sktime_available():
+def _check_sktime():
     """Check if sktime is available and raise ImportError if not."""
     try:
         import sktime
@@ -34,132 +34,155 @@ def _check_sktime_available():
         )
 
 
-def _extract_scaler_from_transformer(transformer: Any) -> Optional[Any]:
-    """Extract StandardScaler from transformer, handling wrappers.
+def _get_scaler(transformer: Any) -> Optional[Any]:
+    """Extract scaler from transformer, handling wrappers and pipelines.
     
-    This function recursively searches through transformer wrappers and pipelines
-    to find a StandardScaler instance.
+    Recursively searches through transformer wrappers and pipelines
+    to find any scaler instance (StandardScaler, MinMaxScaler, RobustScaler, etc.)
+    that has mean/center and scale attributes for unstandardization.
+    
+    This function depends on sktime's pipeline structure to traverse
+    TransformerPipeline and sklearn transformers (StandardScaler, etc.).
+    Note: TabularToSeriesAdaptor support is for backward compatibility only.
     
     Parameters
     ----------
     transformer : Any
-        Transformer to search (can be StandardScaler, TabularToSeriesAdaptor, Pipeline, etc.)
+        Transformer to search (can be any scaler, StandardScaler directly, or TabularToSeriesAdaptor for backward compatibility). 
+        TransformerPipeline, sklearn Pipeline, etc.)
         
     Returns
     -------
-    Optional[StandardScaler]
-        StandardScaler instance if found, None otherwise
+    Optional[Any]
+        Scaler instance if found (any scaler with mean/center and scale attributes), 
+        None otherwise
     """
-    from sklearn.preprocessing import StandardScaler
+    if transformer is None:
+        return None
     
-    # Check if transformer is TabularToSeriesAdaptor (sktime wrapper)
+    # Check if transformer is TabularToSeriesAdaptor (backward compatibility only)
+    # Note: New code should use StandardScaler() directly per sktime docs
+    # This check is kept for backward compatibility with old code that may still use TabularToSeriesAdaptor
     if hasattr(transformer, 'transformer'):
-        # TabularToSeriesAdaptor wraps the underlying transformer
-        return _extract_scaler_from_transformer(transformer.transformer)
-    # Check if transformer is a pipeline with StandardScaler
-    elif hasattr(transformer, 'steps'):
+        # Recursively search the wrapped transformer
+        wrapped = transformer.transformer
+        if hasattr(transformer, 'pipeline'):
+            wrapped = transformer.pipeline
+        return _get_scaler(wrapped)
+    
+    # Check if transformer is a pipeline (sktime TransformerPipeline or sklearn Pipeline)
+    # Both have 'steps' attribute: list of (name, transformer) tuples
+    if hasattr(transformer, 'steps'):
         for name, step in transformer.steps:
-            scaler = _extract_scaler_from_transformer(step)
+            scaler = _get_scaler(step)
             if scaler is not None:
                 return scaler
-    # Check if transformer is ColumnTransformer
-    elif hasattr(transformer, 'transformers'):
+    
+    # Check if transformer is ColumnEnsembleTransformer (or deprecated ColumnTransformer for backward compatibility)
+    # ColumnEnsembleTransformer is the recommended transformer in sktime 0.40+ (replaces ColumnTransformer)
+    # Unified scaling with StandardScaler is preferred per sktime docs
+    if hasattr(transformer, 'transformers'):
         for name, trans, cols in transformer.transformers:
-            scaler = _extract_scaler_from_transformer(trans)
+            scaler = _get_scaler(trans)
             if scaler is not None:
                 return scaler
-    # Check if transformer is StandardScaler itself
-    elif isinstance(transformer, StandardScaler):
+    
+    # Check if transformer is a scaler (has mean/center and scale attributes)
+    # Support common sklearn scalers: StandardScaler, MinMaxScaler, RobustScaler, etc.
+    # A scaler should have either 'mean_' or 'center_' (for mean) and 'scale_' (for scale)
+    has_mean_attr = hasattr(transformer, 'mean_') or hasattr(transformer, 'center_')
+    has_scale_attr = hasattr(transformer, 'scale_')
+    
+    if has_mean_attr and has_scale_attr:
+        # This looks like a scaler - return it
         return transformer
+    
     return None
 
 
-def _extract_mx_from_scaler(scaler: Any, data: np.ndarray) -> Optional[np.ndarray]:
-    """Extract mean (Mx) from StandardScaler with fallbacks.
+def _get_scaler_attr(scaler: Any, attr_name: str, data: np.ndarray, default_value: Optional[float] = None, normalize: bool = False) -> Optional[np.ndarray]:
+    """Extract attribute from any scaler with fallbacks.
+    
+    Supports multiple scaler types (StandardScaler, MinMaxScaler, RobustScaler, etc.)
+    by checking for common attribute names and enable flags.
     
     Parameters
     ----------
-    scaler : StandardScaler
-        StandardScaler instance
+    scaler : Any
+        Scaler instance (StandardScaler, MinMaxScaler, RobustScaler, or any scaler
+        with mean/center and scale attributes)
+    attr_name : str
+        Attribute name to extract ('mean_', 'center_', or 'scale_')
     data : np.ndarray
         Processed data array (T x N) for fallback computation
+    default_value : float, optional
+        Default value if attribute is disabled (0.0 for mean, 1.0 for scale)
+    normalize : bool, default False
+        Whether to normalize the result (for scale, replaces zeros with 1.0)
         
     Returns
     -------
     Optional[np.ndarray]
-        Mean values (N,) if extracted, None if fallback needed
+        Attribute values (N,) if extracted, None if fallback needed
     """
-    # Check if StandardScaler has with_mean attribute
-    if hasattr(scaler, 'with_mean') and hasattr(scaler, 'with_std'):
-        if scaler.with_mean:
-            # If with_mean=True, try to get mean_ from scaler
-            if hasattr(scaler, 'mean_') and scaler.mean_ is not None:
-                mean_val = scaler.mean_
-                if not isinstance(mean_val, np.ndarray):
-                    mean_val = np.asarray(mean_val)
-                return mean_val
-            else:
-                # If mean_ not available, return None to trigger fallback
-                return None
-        else:
-            # If with_mean=False, mean is zero
-            return np.zeros(data.shape[1])
-    elif hasattr(scaler, 'mean_'):
-        # Fallback: Try to get mean_ from StandardScaler
-        # (for older sklearn versions or custom scalers)
-        try:
-            mean_val = scaler.mean_
-            if mean_val is not None:
-                if not isinstance(mean_val, np.ndarray):
-                    mean_val = np.asarray(mean_val)
-                return mean_val
-        except (AttributeError, TypeError):
-            pass
-    return None
-
-
-def _extract_wx_from_scaler(scaler: Any, data: np.ndarray) -> Optional[np.ndarray]:
-    """Extract scale (Wx) from StandardScaler with fallbacks.
+    # Map attribute names to their enable flags (for StandardScaler)
+    # Other scalers may not have these flags, so we'll try direct access
+    enable_flag_map = {
+        'mean_': 'with_mean',
+        'center_': 'with_mean',  # Some scalers use 'center_' instead
+        'scale_': 'with_std'
+    }
+    enable_flag = enable_flag_map.get(attr_name)
     
-    Parameters
-    ----------
-    scaler : StandardScaler
-        StandardScaler instance
-    data : np.ndarray
-        Processed data array (T x N) for fallback computation
-        
-    Returns
-    -------
-    Optional[np.ndarray]
-        Scale values (N,) if extracted, None if fallback needed
-    """
-    # Check if StandardScaler has with_std attribute
-    if hasattr(scaler, 'with_mean') and hasattr(scaler, 'with_std'):
-        if scaler.with_std:
-            # If with_std=True, try to get scale_ from scaler
-            if hasattr(scaler, 'scale_') and scaler.scale_ is not None:
-                scale_val = scaler.scale_
-                if not isinstance(scale_val, np.ndarray):
-                    scale_val = np.asarray(scale_val)
-                return _normalize_wx(scale_val)
-            else:
-                # If scale_ not available, return None to trigger fallback
-                return None
-        else:
-            # If with_std=False, scale is one
-            return np.ones(data.shape[1])
-    elif hasattr(scaler, 'scale_'):
-        # Fallback: Try to get scale_ from StandardScaler
-        # (for older sklearn versions or custom scalers)
-        try:
-            scale_val = scaler.scale_
-            if scale_val is not None:
-                if not isinstance(scale_val, np.ndarray):
-                    scale_val = np.asarray(scale_val)
-                return _normalize_wx(scale_val)
-        except (AttributeError, TypeError):
-            pass
+    # Try to get attribute directly first (works for most scalers)
+    # Check for both 'mean_' and 'center_' for mean extraction
+    attr_names_to_try = [attr_name]
+    if attr_name == 'mean_':
+        attr_names_to_try = ['mean_', 'center_']  # Try both
+    
+    for try_attr_name in attr_names_to_try:
+        if hasattr(scaler, try_attr_name):
+            try:
+                attr_val = getattr(scaler, try_attr_name)
+                if attr_val is not None:
+                    if not isinstance(attr_val, np.ndarray):
+                        attr_val = np.asarray(attr_val)
+                    if normalize:
+                        attr_val = _normalize_wx(attr_val)
+                    return attr_val
+            except (AttributeError, TypeError):
+                continue
+    
+    # If direct access failed, check enable flags (for StandardScaler)
+    if enable_flag and hasattr(scaler, enable_flag):
+        enabled = getattr(scaler, enable_flag)
+        if not enabled:
+            # If disabled, return default value
+            if default_value is not None:
+                return np.full(data.shape[1], default_value, dtype=float)
+            return None
+    
+    # No attribute found
     return None
+
+
+def _get_mean(scaler: Any, data: np.ndarray) -> Optional[np.ndarray]:
+    """Extract mean (Mx) from any scaler with fallbacks.
+    
+    Supports StandardScaler (mean_), MinMaxScaler (center_), RobustScaler (center_),
+    and other scalers with mean or center attributes.
+    """
+    # Try 'mean_' first (StandardScaler), then 'center_' (MinMaxScaler, RobustScaler, etc.)
+    result = _get_scaler_attr(scaler, 'mean_', data, default_value=0.0)
+    if result is not None:
+        return result
+    # Fallback to 'center_' for scalers that use that attribute name
+    return _get_scaler_attr(scaler, 'center_', data, default_value=0.0)
+
+
+def _get_scale(scaler: Any, data: np.ndarray) -> Optional[np.ndarray]:
+    """Extract scale (Wx) from StandardScaler with fallbacks."""
+    return _get_scaler_attr(scaler, 'scale_', data, default_value=1.0, normalize=True)
 
 
 def _normalize_wx(wx: np.ndarray) -> np.ndarray:
@@ -178,7 +201,7 @@ def _normalize_wx(wx: np.ndarray) -> np.ndarray:
     return np.where(wx == 0, 1.0, wx)
 
 
-def _compute_mx_wx_from_data(data: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+def _compute_mx_wx(data: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """Compute Mx and Wx from data as fallback.
     
     Parameters
@@ -197,23 +220,57 @@ def _compute_mx_wx_from_data(data: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     return mx, wx
 
 
+def create_passthrough_transformer() -> Any:
+    """Create a passthrough transformer for preprocessed data.
+    
+    This is the default transformer used when `pipeline=None` in DFMDataModule.
+    It performs no transformation on the data (passthrough).
+    
+    **Purpose**: When data is already preprocessed by the user, this transformer
+    is used to avoid any additional transformations. It does not extract statistics
+    (Mx/Wx will be computed from data as fallback).
+    
+    Returns
+    -------
+    Any
+        Passthrough transformer that does nothing to the data
+        
+    Examples
+    --------
+    >>> from dfm_python.lightning.data_module import create_passthrough_transformer
+    >>> from dfm_python import DFMDataModule
+    >>> 
+    >>> # Data is already preprocessed by user
+    >>> passthrough = create_passthrough_transformer()
+    >>> dm = DFMDataModule(
+    ...     config=config,
+    ...     pipeline=passthrough,  # No transformation (same as pipeline=None)
+    ...     data=df_preprocessed  # Already preprocessed by user
+    ... )
+    """
+    _check_sktime()
+    
+    from sklearn.preprocessing import FunctionTransformer
+    
+    # Return FunctionTransformer directly (no TabularToSeriesAdaptor needed)
+    # Per sktime docs: sklearn transformers work directly in TransformerPipeline
+    return FunctionTransformer(func=None, inverse_func=None, validate=False)
+
+
 class DFMDataModule(lightning_pl.LightningDataModule):
     """PyTorch Lightning DataModule for DFM training.
     
-    This DataModule handles data loading and preprocessing for DFM/DDFM models.
-    It supports two usage patterns:
+    This DataModule handles data loading for DFM/DDFM models.
     
-    1. **Preprocessed Data**: Provide already-preprocessed data (standardized, no missing values).
-       Use a passthrough transformer to avoid double standardization.
+    **Important**: This package expects preprocessed data. All preprocessing (imputation, 
+    scaling, feature engineering, etc.) must be done by the user before passing data to 
+    this DataModule. Users are responsible for creating their own preprocessing pipelines 
+    using sktime or other tools.
     
-    2. **Raw Data with TransformerPipeline**: Provide raw data and a sktime TransformerPipeline
-       for preprocessing. The pipeline will be applied in setup().
-    
-    The preprocessing pipeline (if provided) should handle:
-    - Missing value imputation (forward fill, backward fill, etc.)
-    - Outlier treatment (clipping, winsorization, etc.)
-    - Standardization/scaling (mean=0, std=1)
-    - Any other transformations needed
+    **Usage Pattern**:
+    - Provide already-preprocessed data (standardized, no missing values, feature-engineered)
+    - If `pipeline=None`, a passthrough transformer is used by default (no-op)
+    - Users can optionally provide their preprocessing pipeline to extract statistics (Mx/Wx)
     
     For linear DFM, this uses DFMDataset which returns full sequences.
     For DDFM, use DDFMDataModule which uses DDFMDataset with windowing.
@@ -222,23 +279,43 @@ class DFMDataModule(lightning_pl.LightningDataModule):
     ----------
     config : DFMConfig
         DFM configuration object
-    transformer : Any, optional
-        sktime-compatible transformer or TransformerPipeline for preprocessing.
+    pipeline : Any, optional
+        sktime-compatible preprocessing pipeline (e.g., TransformerPipeline) used to extract statistics.
         
-        **If data is already preprocessed**: Use a passthrough transformer (e.g., from
-        `create_passthrough_transformer()`) to avoid double standardization.
+        **Purpose**: The pipeline is used to extract statistics (e.g., Mx/Wx from StandardScaler)
+        needed for forecasting and nowcasting operations. It is NOT used to preprocess data - data
+        must be preprocessed by the user before passing to this DataModule.
         
-        **If data is raw**: Provide a TransformerPipeline (from sktime.transformations.compose)
-        that handles imputation, scaling, and other preprocessing steps. The pipeline
-        will be applied in setup() using fit_transform().
+        **If None**: Uses passthrough transformer (no statistics extracted). Mx/Wx will be computed
+        from the data as fallback. This is the default.
         
-        **If None**: Uses default StandardScaler (assumes data is already cleaned but needs scaling).
+        **If provided**: The pipeline will be fitted on the data to extract statistics (e.g., 
+        standardization parameters from StandardScaler). These statistics are used for transforming
+        predictions back to original scale during forecasting/nowcasting.
+        
+        **Example**: Users can pass a full preprocessing pipeline:
+        ```python
+        from sklearn.preprocessing import StandardScaler
+        
+        preprocessing_pipeline = TransformerPipeline([
+            ("impute_ffill", Imputer(method="ffill")),
+            ("impute_bfill", Imputer(method="bfill")),
+            ("window_features", WindowSummarizer(...)),
+            ("standardize", StandardScaler())  # Unified scaling - no wrapper needed!
+        ])
+        dm = DFMDataModule(config=config, pipeline=preprocessing_pipeline, data=df_preprocessed)
+        ```
+        
+        **Note**: Users must preprocess their data (imputation, scaling, feature engineering) before
+        passing it to this DataModule. The pipeline parameter is for extracting statistics from
+        the preprocessing pipeline, not for performing preprocessing.
     data_path : str or Path, optional
         Path to data file (CSV). If None, data must be provided.
-    data : np.ndarray or pl.DataFrame, optional
-        Data array or DataFrame. Can be:
-        - Preprocessed data (standardized, no missing values) - use passthrough transformer
-        - Raw data (may have missing values, not standardized) - use TransformerPipeline
+    data : np.ndarray or pd.DataFrame, optional
+        Preprocessed data array or DataFrame. Data must be:
+        - Standardized/scaled (mean=0, std=1 recommended for DFM/DDFM)
+        - No missing values (NaN-free)
+        - Feature-engineered if needed
         If None, data_path must be provided.
     time_index : TimeIndex, optional
         Time index for the data
@@ -251,56 +328,51 @@ class DFMDataModule(lightning_pl.LightningDataModule):
     
     Examples
     --------
-    **Using preprocessed data with passthrough transformer**:
+    **Using preprocessed data (recommended - default behavior)**:
     
     >>> from dfm_python import DFMDataModule
-    >>> from sktime.transformations.series.adapt import TabularToSeriesAdaptor
-    >>> from sklearn.preprocessing import FunctionTransformer
+    >>> import pandas as pd
     >>> 
-    >>> # Create passthrough transformer
-    >>> passthrough = TabularToSeriesAdaptor(
-    ...     FunctionTransformer(func=None, inverse_func=None, validate=False)
-    ... )
-    >>> 
-    >>> # Data is already preprocessed
+    >>> # Data is already preprocessed (standardized, no missing values)
+    >>> # Users should preprocess their data using sktime or other tools before this step
     >>> dm = DFMDataModule(
-    ...     config=model.config,
-    ...     transformer=passthrough,  # Avoid double standardization
-    ...     data=df_preprocessed  # Already standardized, no missing values
+    ...     config=config,
+    ...     data=df_preprocessed  # Already preprocessed by user
     ... )
-    >>> dm.setup()
+    >>> dm.setup()  # Uses passthrough transformer by default
     
-    **Using raw data with TransformerPipeline**:
+    **Using preprocessed data with pipeline to extract statistics**:
     
     >>> from dfm_python import DFMDataModule
     >>> from sktime.transformations.compose import TransformerPipeline
     >>> from sktime.transformations.series.impute import Imputer
-    >>> from sktime.transformations.series.adapt import TabularToSeriesAdaptor
+    >>> from sktime.transformations.series.summarize import WindowSummarizer
     >>> from sklearn.preprocessing import StandardScaler
     >>> 
-    >>> # Create preprocessing pipeline
+    >>> # User created preprocessing pipeline (data already preprocessed)
+    >>> # Pass pipeline to extract Mx/Wx for forecasting/nowcasting
+    >>> # Per sktime docs: sklearn transformers work directly (unified scaling)
     >>> preprocessing_pipeline = TransformerPipeline([
-    ...     ('impute_ffill', Imputer(method="ffill")),
-    ...     ('impute_bfill', Imputer(method="bfill")),
-    ...     ('scaler', TabularToSeriesAdaptor(StandardScaler()))
+    ...     ("impute_ffill", Imputer(method="ffill")),
+    ...     ("impute_bfill", Imputer(method="bfill")),
+    ...     ("window_features", WindowSummarizer(...)),
+    ...     ("standardize", StandardScaler())  # Unified scaling - no wrapper needed!
     ... ])
-    >>> 
-    >>> # Data is raw (may have missing values, not standardized)
     >>> dm = DFMDataModule(
-    ...     config=model.config,
-    ...     transformer=preprocessing_pipeline,  # Preprocessing happens in setup()
-    ...     data=df_raw  # Raw data with missing values
+    ...     config=config,
+    ...     pipeline=preprocessing_pipeline,  # Extract Mx/Wx from StandardScaler in pipeline
+    ...     data=df_preprocessed  # Already preprocessed by user
     ... )
-    >>> dm.setup()  # Pipeline is applied here
+    >>> dm.setup()  # Fits pipeline to extract statistics, Mx/Wx available for predictions
     """
     
     def __init__(
         self,
         config: Optional[DFMConfig] = None,
         config_path: Optional[Union[str, Path]] = None,
-        transformer: Optional[Any] = None,
+        pipeline: Optional[Any] = None,
         data_path: Optional[Union[str, Path]] = None,
-        data: Optional[Union[np.ndarray, pl.DataFrame]] = None,
+        data: Optional[Union[np.ndarray, pd.DataFrame]] = None,
         time_index: Optional[TimeIndex] = None,
         batch_size: Optional[int] = None,
         num_workers: int = 0,
@@ -308,7 +380,7 @@ class DFMDataModule(lightning_pl.LightningDataModule):
         **kwargs
     ):
         super().__init__()
-        _check_sktime_available()
+        _check_sktime()
         
         # Load config if config_path provided
         if config is None and config_path is not None:
@@ -323,9 +395,9 @@ class DFMDataModule(lightning_pl.LightningDataModule):
             )
         
         self.config = config
-        # Store transformer (can be None, passthrough, or TransformerPipeline)
-        # If None, will create default StandardScaler in setup() if needed
-        self.transformer = transformer
+        # Store pipeline (can be None, passthrough, or user-provided preprocessing pipeline)
+        # If None, will use passthrough transformer in setup() (assumes preprocessed data)
+        self.pipeline = pipeline
         self.data_path = Path(data_path) if data_path is not None else None
         self.data = data
         self.time_index = time_index
@@ -341,14 +413,25 @@ class DFMDataModule(lightning_pl.LightningDataModule):
         self.data_processed: Optional[torch.Tensor] = None
     
     def setup(self, stage: Optional[str] = None) -> None:
-        """Load and preprocess data.
+        """Load and prepare data.
         
         This method is called by Lightning to set up the data module.
-        It loads data, applies user-provided transformer (or TransformerPipeline), 
-        and creates train/val datasets.
+        It loads preprocessed data and extracts statistics from the pipeline for forecasting/nowcasting.
         
-        If a TransformerPipeline is provided, it will be applied to raw data in this method.
-        If data is already preprocessed, use a passthrough transformer to avoid double standardization.
+        **Important**: Data must be fully preprocessed by the user before passing to this DataModule.
+        All preprocessing (imputation, scaling, feature engineering, etc.) is the user's responsibility.
+        
+        **Pipeline Purpose**:
+        - The pipeline is used to extract statistics (e.g., Mx/Wx from StandardScaler) needed for
+          forecasting and nowcasting operations, not to preprocess the data
+        - Data is already preprocessed - the pipeline is fitted to extract standardization parameters
+        - The pipeline is fitted on the **entire dataset** to extract statistics
+        - If `val_split` is provided, it's used for validation during training (e.g., DDFM neural network)
+        
+        **Usage**:
+        - Provide preprocessed data (standardized, no missing values)
+        - Optionally provide pipeline (e.g., TransformerPipeline with StandardScaler) to extract Mx/Wx for predictions
+        - If pipeline=None, uses passthrough (no statistics extracted, Mx/Wx computed from data)
         """
         # Load data if not already provided
         if self.data is None:
@@ -368,95 +451,180 @@ class DFMDataModule(lightning_pl.LightningDataModule):
             self.data = X
             self.time_index = Time
         
-        # Convert to Polars DataFrame if needed
+        # Convert to pandas DataFrame if needed
         if isinstance(self.data, np.ndarray):
             series_ids = self.config.get_series_ids()
-            X_df = pl.DataFrame(self.data, schema=series_ids)
-        elif isinstance(self.data, pl.DataFrame):
+            X_df = pd.DataFrame(self.data, columns=series_ids)
+        elif isinstance(self.data, pd.DataFrame):
             X_df = self.data
         else:
             raise TypeError(
                 f"DataModule setup failed: unsupported data type {type(self.data)}. "
-                f"Please provide data as numpy.ndarray or polars.DataFrame."
+                f"Please provide data as numpy.ndarray or pandas.DataFrame."
             )
         
-        # Ensure data is Polars DataFrame
-        if isinstance(X_df, np.ndarray):
-            series_ids = self.config.get_series_ids()
-            X_df = pl.DataFrame(X_df, schema=series_ids)
-        elif not isinstance(X_df, pl.DataFrame):
-            raise TypeError(
-                f"DataModule setup failed: unsupported data type {type(X_df)}. "
-                f"Please provide data as numpy.ndarray or polars.DataFrame."
-            )
-        
-        # Determine transformer to use
-        # If None, create default StandardScaler (assumes data is cleaned but needs scaling)
-        if self.transformer is None:
-            from sktime.transformations.series.adapt import TabularToSeriesAdaptor
-            from sklearn.preprocessing import StandardScaler
-            transformer_to_use = TabularToSeriesAdaptor(StandardScaler())
+        # Determine pipeline to use
+        # If None, use passthrough transformer (assumes data is already fully preprocessed)
+        if self.pipeline is None:
+            pipeline_to_use = create_passthrough_transformer()
         else:
-            transformer_to_use = self.transformer
+            pipeline_to_use = self.pipeline
         
-        # Set Polars output for sktime transformers (sktime 1.4+ supports Polars)
+        # Set pandas output for sktime pipelines (sktime supports pandas)
         try:
-            if hasattr(transformer_to_use, 'set_output'):
-                transformer_to_use.set_output(transform="polars")  # Use Polars directly
+            if hasattr(pipeline_to_use, 'set_output'):
+                pipeline_to_use.set_output(transform="pandas")  # Use pandas directly
         except (AttributeError, ValueError) as e:
-            # Transformer doesn't support set_output or Polars output
+            # Pipeline doesn't support set_output or pandas output
             # This is OK - sktime will handle it
-            _logger.debug(f"Could not set Polars output on transformer: {e}")
+            _logger.debug(f"Could not set pandas output on pipeline: {e}")
         
-        # Apply transformer (or TransformerPipeline) to data
-        # This handles both:
-        # 1. Preprocessed data with passthrough transformer (no-op)
-        # 2. Raw data with TransformerPipeline (full preprocessing)
-        # sktime transformers now support Polars DataFrames directly
+        # Check if pipeline is already fitted (warn user if so)
+        if hasattr(pipeline_to_use, 'fit') and hasattr(pipeline_to_use, 'transform'):
+            try:
+                # Try to check if pipeline is fitted by accessing a fitted attribute
+                if hasattr(pipeline_to_use, 'get_params'):
+                    # This is a basic check - some pipelines may not have this
+                    pass
+            except Exception:
+                pass
+        
+        # Apply pipeline to extract statistics (Mx/Wx) for forecasting/nowcasting
+        # Note: Data is already preprocessed by the user. The pipeline is used to extract
+        # standardization parameters (e.g., from StandardScaler) needed for predictions.
+        # For DFM/DDFM, we fit on the entire dataset since these models learn the full time series dynamics.
+        # If val_split is used, it's for validation during training (e.g., DDFM neural network training).
+        # sktime pipelines support pandas DataFrames directly
         try:
-            X_transformed = transformer_to_use.fit_transform(X_df)
+            X_transformed = pipeline_to_use.fit_transform(X_df)
         except Exception as e:
             raise ValueError(
-                f"DataModule setup failed: transformer fit_transform error: {e}. "
-                f"Ensure transformer is sktime-compatible (e.g., TransformerPipeline, TabularToSeriesAdaptor) "
-                f"and supports Polars DataFrames. If using preprocessed data, use a passthrough transformer "
-                f"to avoid double standardization."
+                f"DataModule setup failed: pipeline fit_transform error: {e}. "
+                f"Ensure pipeline is sktime-compatible (e.g., TransformerPipeline with StandardScaler) "
+                f"and supports pandas DataFrames. Data must be preprocessed before passing to this DataModule. "
+                f"If pipeline creates new columns (e.g., WindowSummarizer), column names will be "
+                f"automatically extracted from the pipeline."
             ) from e
         
-        # Ensure output is Polars DataFrame
-        if not isinstance(X_transformed, pl.DataFrame):
-            # If transformer returned numpy array or pandas DataFrame, convert to Polars
-            if hasattr(X_transformed, 'to_polars'):
-                X_transformed = X_transformed.to_polars()
+        # Ensure output is pandas DataFrame with compatible index
+        if not isinstance(X_transformed, pd.DataFrame):
+            # If transformer returned numpy array, convert to pandas
+            if isinstance(X_transformed, np.ndarray):
+                # Try to get feature names from pipeline (handles pipelines that create new columns)
+                if hasattr(pipeline_to_use, 'get_feature_names_out'):
+                    try:
+                        new_cols = pipeline_to_use.get_feature_names_out(X_df.columns)
+                        X_transformed = pd.DataFrame(X_transformed, columns=new_cols)
+                    except Exception:
+                        # Fallback: use input columns if shape matches
+                        n_cols = X_transformed.shape[1] if len(X_transformed.shape) > 1 else 1
+                        if n_cols == len(X_df.columns):
+                            X_transformed = pd.DataFrame(X_transformed, columns=X_df.columns)
+                        else:
+                            # Create generic column names for transformers that create new columns
+                            X_transformed = pd.DataFrame(X_transformed, 
+                                columns=[f'feature_{i}' for i in range(n_cols)])
+                else:
+                    # No feature name method - use input columns if shape matches
+                    n_cols = X_transformed.shape[1] if len(X_transformed.shape) > 1 else 1
+                    if n_cols == len(X_df.columns):
+                        X_transformed = pd.DataFrame(X_transformed, columns=X_df.columns)
+                    else:
+                        # Create generic column names
+                        X_transformed = pd.DataFrame(X_transformed, 
+                            columns=[f'feature_{i}' for i in range(n_cols)])
+                
+                # Ensure index is compatible (DatetimeIndex, PeriodIndex, or RangeIndex)
+                # Use input DataFrame index if length matches
+                if len(X_transformed) == len(X_df):
+                    if isinstance(X_df.index, (pd.DatetimeIndex, pd.PeriodIndex, pd.RangeIndex)):
+                        X_transformed.index = X_df.index
+                    else:
+                        # Try to convert to DatetimeIndex
+                        try:
+                            X_transformed.index = pd.to_datetime(X_df.index)
+                        except (ValueError, TypeError):
+                            # Fallback to RangeIndex
+                            X_transformed.index = pd.RangeIndex(start=0, stop=len(X_transformed))
+                else:
+                    # Length doesn't match - use RangeIndex
+                    X_transformed.index = pd.RangeIndex(start=0, stop=len(X_transformed))
+        
+        # Ensure DataFrame index is compatible (DatetimeIndex, PeriodIndex, or RangeIndex)
+        # This handles cases where pipeline output has incompatible index
+        if isinstance(X_transformed, pd.DataFrame):
+            if not isinstance(X_transformed.index, (pd.DatetimeIndex, pd.PeriodIndex, pd.RangeIndex)):
+                # Try to use input DataFrame index if length matches
+                if len(X_transformed) == len(X_df):
+                    if isinstance(X_df.index, (pd.DatetimeIndex, pd.PeriodIndex, pd.RangeIndex)):
+                        X_transformed.index = X_df.index
+                    else:
+                        # Try to convert to DatetimeIndex
+                        try:
+                            X_transformed.index = pd.to_datetime(X_df.index)
+                        except (ValueError, TypeError):
+                            # Fallback to RangeIndex
+                            X_transformed.index = pd.RangeIndex(start=0, stop=len(X_transformed))
+                else:
+                    # Try to convert existing index
+                    try:
+                        X_transformed.index = pd.to_datetime(X_transformed.index)
+                    except (ValueError, TypeError):
+                        # Fallback to RangeIndex
+                        X_transformed.index = pd.RangeIndex(start=0, stop=len(X_transformed))
+            elif hasattr(X_transformed, 'to_numpy'):
+                # Has to_numpy method (pandas DataFrame) - convert to numpy then back to DataFrame
+                # Try to preserve column names if available
+                if hasattr(X_transformed, 'columns'):
+                    X_transformed = pd.DataFrame(X_transformed.to_numpy(), columns=X_transformed.columns)
+                else:
+                    # Fallback to input columns if shape matches
+                    arr = np.asarray(X_transformed.to_numpy())
+                    n_cols = arr.shape[1] if len(arr.shape) > 1 else 1
+                    if n_cols == len(X_df.columns):
+                        X_transformed = pd.DataFrame(arr, columns=X_df.columns)
+                    else:
+                        X_transformed = pd.DataFrame(arr, 
+                            columns=[f'feature_{i}' for i in range(n_cols)])
             elif hasattr(X_transformed, 'values'):
-                # Pandas DataFrame - convert to Polars
-                X_transformed = pl.DataFrame(X_transformed.values, schema=X_df.columns)
-            elif isinstance(X_transformed, np.ndarray):
-                # Numpy array - convert to Polars with original column names
-                X_transformed = pl.DataFrame(X_transformed, schema=X_df.columns)
+                # Has values attribute - try to convert (fallback for other types)
+                if hasattr(X_transformed, 'columns'):
+                    X_transformed = pd.DataFrame(X_transformed.values, columns=X_transformed.columns)
+                else:
+                    # Fallback to input columns if shape matches
+                    arr = np.asarray(X_transformed.values)
+                    n_cols = arr.shape[1] if len(arr.shape) > 1 else 1
+                    if n_cols == len(X_df.columns):
+                        X_transformed = pd.DataFrame(arr, columns=X_df.columns)
+                    else:
+                        X_transformed = pd.DataFrame(arr, 
+                            columns=[f'feature_{i}' for i in range(n_cols)])
             else:
                 raise TypeError(
-                    f"DataModule setup failed: transformer returned unsupported type {type(X_transformed)}. "
-                    f"Expected polars.DataFrame, pandas.DataFrame, or numpy.ndarray."
+                    f"DataModule setup failed: pipeline returned unsupported type {type(X_transformed)}. "
+                    f"Expected pandas.DataFrame or numpy.ndarray."
                 )
         
         # Convert transformed data to numpy (needed for both tensor conversion and Mx/Wx computation)
         X_processed_np = X_transformed.to_numpy()
         
-        # Try to extract standardization parameters if transformer includes StandardScaler
-        # This is optional - some transformers may not have standardization
+        # Try to extract standardization parameters if pipeline includes a scaler
+        # This is optional - some pipelines may not have standardization
         # Mx and Wx are already initialized in __init__
         try:
-            # Extract StandardScaler from transformer (works with TransformerPipeline too)
-            scaler = _extract_scaler_from_transformer(transformer_to_use)
+            # Extract scaler from pipeline (works with TransformerPipeline, StandardScaler directly, or TabularToSeriesAdaptor for backward compatibility)
+            # Supports any scaler type: StandardScaler, MinMaxScaler, RobustScaler, etc.
+            # Note: New code should use StandardScaler() directly per sktime docs (unified scaling)
+            scaler = _get_scaler(pipeline_to_use)
             
             if scaler is not None:
-                # Try to extract Mx and Wx from scaler
-                self.Mx = _extract_mx_from_scaler(scaler, X_processed_np)
-                self.Wx = _extract_wx_from_scaler(scaler, X_processed_np)
+                # Try to extract Mx and Wx from scaler (supports multiple scaler types)
+                self.Mx = _get_mean(scaler, X_processed_np)
+                self.Wx = _get_scale(scaler, X_processed_np)
         except (AttributeError, ImportError, Exception) as e:
-            # StandardScaler not found or extraction failed
+            # Scaler not found or extraction failed
             # Will compute Mx and Wx from data below
+            _logger.debug(f"Could not extract scaler from pipeline: {e}")
             pass
         
         # Convert to torch tensor
@@ -464,7 +632,7 @@ class DFMDataModule(lightning_pl.LightningDataModule):
         
         # If Mx and Wx are still None, compute from processed data as fallback
         if self.Mx is None or self.Wx is None:
-            mx_fallback, wx_fallback = _compute_mx_wx_from_data(X_processed_np)
+            mx_fallback, wx_fallback = _compute_mx_wx(X_processed_np)
             if self.Mx is None:
                 self.Mx = mx_fallback
             if self.Wx is None:
@@ -513,7 +681,7 @@ class DFMDataModule(lightning_pl.LightningDataModule):
             pin_memory=torch.cuda.is_available()
         )
     
-    def get_standardization_params(self) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+    def get_std_params(self) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
         """Get standardization parameters (Mx, Wx) if available.
         
         Returns
@@ -525,21 +693,21 @@ class DFMDataModule(lightning_pl.LightningDataModule):
         """
         if self.data_processed is None:
             raise RuntimeError(
-                "DataModule get_standardization_params failed: setup() must be called before get_standardization_params(). "
+                "DataModule get_std_params failed: setup() must be called before get_std_params(). "
                 "Please call dm.setup() first to load and preprocess data."
             )
         return self.Mx, self.Wx
     
-    def get_transformer(self) -> Any:
-        """Get the transformer used for preprocessing.
+    def get_pipeline(self) -> Any:
+        """Get the preprocessing pipeline used for statistics extraction.
         
         Returns
         -------
-        transformer : Any
-            The sktime transformer or TransformerPipeline provided by the user.
-            Returns None if default StandardScaler was used.
+        pipeline : Any
+            The sktime preprocessing pipeline (e.g., TransformerPipeline) provided by the user.
+            Returns None if passthrough transformer was used (default).
         """
-        return self.transformer
+        return self.pipeline
     
     def get_processed_data(self) -> torch.Tensor:
         """Get processed data tensor.

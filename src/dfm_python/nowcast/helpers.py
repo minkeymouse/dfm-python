@@ -19,8 +19,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from ..nowcast.nowcast import NowcastResult
 from ..utils.helpers import (
-    get_series_id_by_index,
-    get_frequencies_from_config,
+    get_series_id,
+    get_frequencies,
     get_series_ids,
     safe_get_attr,
 )
@@ -230,13 +230,11 @@ def para_const(X: np.ndarray, result: DFMResult, lag: int = 0) -> Dict[str, Any]
 
 from .utils import (
     get_higher_frequency,
-    calculate_backward_date,
-    get_forecast_horizon_config,
-    check_config_consistency,
-    extract_news_summary,
+    calc_backward_date,
+    get_forecast_horizon,
+    check_config,
+    extract_news,
 )
-
-# Backward compatibility aliases removed - use direct imports from nowcast.utils
 
 # ============================================================================
 # Backtest result classes (merged from backtest.py)

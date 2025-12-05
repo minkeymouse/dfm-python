@@ -14,6 +14,11 @@ def get_logger(name: str) -> logging.Logger:
     This is the standard way to get a logger in the DFM package.
     All modules should use: _logger = get_logger(__name__)
     
+    The logger uses hierarchical configuration:
+    - Child loggers (e.g., 'dfm_python.models.dfm') inherit from parent logger ('dfm_python')
+    - Parent logger ('dfm_python') is configured once with handlers
+    - Child loggers propagate to parent (default behavior)
+    
     Parameters
     ----------
     name : str
@@ -26,21 +31,27 @@ def get_logger(name: str) -> logging.Logger:
     """
     logger = logging.getLogger(name)
     
-    # Only configure if not already configured
-    if not logger.handlers:
-        # Use package-level logger configuration
-        package_logger = logging.getLogger('dfm_python')
-        if not package_logger.handlers:
-            # Configure root logger for dfm_python package
-            handler = logging.StreamHandler(sys.stdout)
-            handler.setFormatter(
-                logging.Formatter(
-                    '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-                    datefmt='%Y-%m-%d %H:%M:%S'
-                )
+    # Ensure package-level logger is configured (only once)
+    package_logger = logging.getLogger('dfm_python')
+    
+    # Configure package logger if not already configured
+    # Use a flag to avoid re-configuring if already done
+    if not hasattr(package_logger, '_dfm_configured'):
+        # Configure root logger for dfm_python package
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setFormatter(
+            logging.Formatter(
+                '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+                datefmt='%Y-%m-%d %H:%M:%S'
             )
-            package_logger.addHandler(handler)
-            package_logger.setLevel(logging.INFO)
+        )
+        package_logger.addHandler(handler)
+        package_logger.setLevel(logging.INFO)
+        # Mark as configured to avoid duplicate handlers
+        package_logger._dfm_configured = True
+    
+    # Ensure child logger propagates to parent (default, but explicit for clarity)
+    logger.propagate = True
     
     return logger
 
@@ -93,8 +104,11 @@ def configure_logging(
     logger = logging.getLogger('dfm_python')
     logger.setLevel(level)
     
-    # Remove existing handlers
+    # Remove existing handlers to avoid duplicates
     logger.handlers.clear()
+    # Clear the configuration flag so it can be reconfigured
+    if hasattr(logger, '_dfm_configured'):
+        delattr(logger, '_dfm_configured')
     
     # Add console handler
     console_handler = logging.StreamHandler(sys.stdout)

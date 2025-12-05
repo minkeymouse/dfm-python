@@ -1,0 +1,82 @@
+# Default Experiment Configuration
+# Unified experiment config with embedded preprocessing and series configurations
+
+# Hydra defaults - specify which model config to use
+defaults:
+  - model: dfm  # Options: dfm, ddfm, arma, tft, xgboost
+  - _self_
+
+# ============================================================================
+# Experiment Metadata
+# ============================================================================
+name: default_experiment
+description: "Default experiment configuration template"
+model_type: dfm  # dfm, ddfm, arma, tft, xgboost
+
+# ============================================================================
+# Preprocess Configuration
+# ============================================================================
+preprocess:
+  # Metadata
+  metadata:
+    data_path: data/sample_data.csv  # Path to input data file
+    target_column: null  # Target series for nowcasting/forecasting (e.g., KOGDP...D)
+    # Window Summarizer features (add_feature)
+    add_feature:  # Features to add via Window Summarizer
+      - lag      # Lag features
+      - mean     # Rolling mean
+      - std      # Rolling standard deviation
+      - min      # Rolling minimum
+      - max      # Rolling maximum
+      - median   # Rolling median
+      - skew     # Rolling skewness
+      - kurt     # Rolling kurtosis
+    # Window Summarizer parameters
+    lags: [1, 2, 3, 5, 10]  # Lag values: t-1, t-2, t-3, t-5, t-10
+    windows: [5, 10, 20, 40]  # Rolling window sizes
+  
+  # Series Configuration
+  # All series with their individual configurations
+  series:
+    # If empty, uses all columns from data (except excluded columns)
+    # Example series configurations:
+    # - series_id: KO3YEARC
+    #   frequency: m  # Options: d, w, m, q, sa, a
+    #   transformation: chg  # Options: lin, pch, pca, chg, ch1, cha
+    #   block:  # Block names this series loads on (must include Block_Global)
+    #     - Block_Global
+    #     - Block_Investment
+    #   release: 1  # Day of month when data is released (1-31, or negative for days before month end)
+    #   scaler: null  # Per-series scaler (StandardScaler, RobustScaler, None/null)
+    #                # null = use default (ffill and bfill for non-DFM/DDFM, Kalman filter for DFM/DDFM)
+    #   impute: null  # Per-series imputation (bfill, ffill, forecaster, dfm, ddfm)
+    #                # bfill/ffill: Backward/forward fill
+    #                # forecaster: Forecaster-based imputation
+    #                # dfm/ddfm: Use model's built-in Kalman filter imputation (on the fly)
+    #                # null: Use default (ffill and bfill for non-DFM/DDFM, Kalman filter for DFM/DDFM)
+
+# ============================================================================
+# Model Training Parameters
+# ============================================================================
+# These override model config defaults if specified
+max_iter: 5000      # Maximum EM iterations (for DFM)
+threshold: 1.0e-05  # Convergence threshold (for DFM)
+
+# For DDFM models:
+# encoder_layers: [64, 32]
+# num_factors: 2
+# epochs: 100
+# learning_rate: 0.001
+# batch_size: 32
+
+# ============================================================================
+# Output Configuration
+# ============================================================================
+output:
+  path: outputs/${experiment.name}  # Output directory (uses experiment name)
+  save_model: true      # Save trained model
+  save_plots: true      # Save visualization plots
+  save_results: true    # Save training results
+
+# Forecast configuration (optional)
+forecast_horizon: null  # Number of periods ahead to forecast

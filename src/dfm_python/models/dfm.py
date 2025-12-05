@@ -4,22 +4,31 @@ This module contains the linear DFM implementation using EM algorithm.
 DFM is a PyTorch Lightning module that inherits from BaseFactorModel.
 """
 
+# Standard library imports
+from dataclasses import dataclass
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
+
+# Third-party imports
 import numpy as np
-import polars as pl
 import torch
 import torch.nn as nn
-from typing import Optional, Tuple, Union, Any, List, Dict, TYPE_CHECKING
-from datetime import datetime
-from dataclasses import dataclass
-from ..logger import get_logger
 
-from .base import BaseFactorModel
-from ..config import DFMConfig, SeriesConfig, validate_frequency
+# Local imports
+from ..config import (
+    DFMConfig,
+    make_config_source,
+    ConfigSource,
+    MergedConfigSource,
+)
 from ..config.results import DFMResult, FitParams
-from ..ssm.kalman import KalmanFilter
+from ..logger import get_logger
 from ..ssm.em import EMAlgorithm, EMStepParams
+from ..ssm.kalman import KalmanFilter
+from .base import BaseFactorModel
 
 if TYPE_CHECKING:
+    from omegaconf import DictConfig
     from ..lightning import DFMDataModule
 
 _logger = get_logger(__name__)
@@ -39,453 +48,6 @@ class DFMTrainingState:
     converged: bool
 
 
-class DFMLinear:
-    """Linear Dynamic Factor Model using EM algorithm (low-level implementation).
-    
-    This class implements the standard linear DFM with EM estimation.
-    It provides low-level functionality for DFM estimation.
-    
-    The model assumes:
-    - Linear observation equation: y_t = C Z_t + e_t
-    - Linear factor dynamics: Z_t = A Z_{t-1} + v_t
-    - Gaussian innovations
-    
-    Parameters are estimated via Expectation-Maximization (EM) algorithm.
-    
-    Note: This class provides the low-level implementation of the linear DFM.
-    The high-level DFM class (PyTorch Lightning module) should be used for training.
-    
-    Note: DFMLinear.fit() is deprecated. Use DFM class with trainer.fit(model, dm) instead.
-    """
-    
-    def fit(
-        self,
-        data_module: 'DFMDataModule',
-        config: Optional[DFMConfig] = None,
-        *,
-        fit_params: Optional[FitParams] = None,
-        **kwargs
-    ) -> DFMResult:
-        """Fit the linear DFM model using EM algorithm.
-        
-        This method performs the complete EM workflow:
-        1. Initialization via PCA and OLS
-        2. EM iterations until convergence
-        3. Final Kalman smoothing
-        
-        Parameters
-        ----------
-        data_module : DFMDataModule
-            DataModule containing preprocessed data. Must have setup() called.
-        config : DFMConfig, optional
-            Unified DFM configuration object. If None, uses config from data_module.
-        fit_params : FitParams, optional
-            Fit parameters object. If None, parameters are extracted from kwargs or config.
-        **kwargs
-            Additional parameters that override config values. Merged into fit_params if provided.
-            
-        Returns
-        -------
-        DFMResult
-            Estimation results including parameters, factors, and diagnostics.
-        """
-        from ..lightning import DFMDataModule
-        
-        if not isinstance(data_module, DFMDataModule):
-            raise TypeError(
-                f"DFM fit failed: data_module must be DFMDataModule, got {type(data_module).__name__}. "
-                f"Please provide a valid DFMDataModule instance."
-            )
-        
-        # Ensure DataModule is set up
-        if data_module.data_processed is None:
-            data_module.setup()
-        
-        # Use config from data_module if not provided
-        if config is None:
-            config = data_module.config
-        
-        # Extract fit parameters from kwargs or use provided FitParams
-        fit_params = self._prepare_fit_params(fit_params, **kwargs)
-        
-        # Get processed data and standardization params from DataModule
-        X_torch = data_module.get_processed_data()
-        Mx, Wx = data_module.get_standardization_params()
-        
-        # Handle case where standardization params might be None
-        # (if transformer doesn't include StandardScaler)
-        if Mx is None or Wx is None:
-            # Use zeros/ones as defaults (no standardization)
-            N = X_torch.shape[1]
-            Mx = np.zeros(N, dtype=np.float32)
-            Wx = np.ones(N, dtype=np.float32)
-        
-        # Get training parameters
-        num_factors, training_params = self._extract_training_params(config, fit_params)
-        
-        # Train model using Lightning
-        result = self._train_with_lightning(X_torch, config, num_factors, training_params, Mx, Wx)
-        
-        # Store results
-        self._result = result
-        return result
-    
-    def _prepare_fit_params(self, fit_params: Optional[FitParams], **kwargs) -> FitParams:
-        """Prepare fit parameters from kwargs or provided FitParams."""
-        if fit_params is None:
-            return FitParams.from_kwargs(**kwargs)
-        # Merge kwargs into fit_params
-        fit_dict = fit_params.to_dict()
-        fit_dict.update({k: v for k, v in kwargs.items() if v is not None})
-        return FitParams.from_kwargs(**fit_dict)
-    
-    def _extract_training_params(
-        self, config: DFMConfig, fit_params: FitParams
-    ) -> Tuple[int, Dict[str, Any]]:
-        """Extract training parameters from config and fit_params."""
-        # Get parameters for Lightning module
-        threshold_val = fit_params.threshold if fit_params.threshold is not None else getattr(config, 'threshold', 1e-4)
-        max_iter_val = fit_params.max_iter if fit_params.max_iter is not None else getattr(config, 'max_iter', 100)
-        nan_method_val = fit_params.nan_method if fit_params.nan_method is not None else getattr(config, 'nan_method', 2)
-        nan_k_val = fit_params.nan_k if fit_params.nan_k is not None else getattr(config, 'nan_k', 3)
-        
-        # Determine number of factors
-        if hasattr(config, 'factors_per_block') and config.factors_per_block:
-            num_factors = int(np.sum(config.factors_per_block))
-        else:
-            blocks = config.get_blocks_array()
-            if blocks.shape[1] > 0:
-                num_factors = int(np.sum(blocks[:, 0]))
-            else:
-                num_factors = 1
-        
-        training_params = {
-            'threshold': threshold_val,
-            'max_iter': max_iter_val,
-            'nan_method': nan_method_val,
-            'nan_k': nan_k_val
-        }
-        
-        return num_factors, training_params
-    
-    def _train_with_lightning(
-        self,
-        X_torch: torch.Tensor,
-        config: DFMConfig,
-        num_factors: int,
-        training_params: Dict[str, Any],
-        Mx: np.ndarray,
-        Wx: np.ndarray
-    ) -> DFMResult:
-        """Train model using PyTorch Lightning."""
-        from ..lightning.dfm_module import DFMLightningModule
-        
-        lightning_module = DFMLightningModule(
-            config=config,
-            num_factors=num_factors,
-            **training_params
-        )
-        
-        # Run EM algorithm
-        lightning_module.fit_em(X_torch, Mx=Mx, Wx=Wx)
-        
-        # Extract results
-        return lightning_module.get_result()
-    
-    def _create_default_config(
-        self,
-        X: np.ndarray,
-        time_index: Optional[Union[List[datetime], np.ndarray, pl.Series]] = None,
-        series_ids: Optional[List[str]] = None,
-        num_factors: int = 1,
-        clock: Optional[str] = None,
-        transformation: str = 'lin'
-    ) -> DFMConfig:
-        """Create default configuration with smart defaults.
-        
-        Parameters
-        ----------
-        X : np.ndarray
-            Data matrix (T x N)
-        time_index : list of datetime, np.ndarray, or pl.Series, optional
-            Time index for frequency inference
-        series_ids : list of str, optional
-            Series identifiers (auto-generated if None)
-        num_factors : int, default 1
-            Number of factors in global block
-        clock : str, optional
-            Clock frequency (inferred from time_index if None)
-        transformation : str, default 'lin'
-            Transformation code for all series
-            
-        Returns
-        -------
-        DFMConfig
-            Configuration with smart defaults
-        """
-        T, N = X.shape
-        
-        # Auto-generate series_ids if not provided
-        if series_ids is None:
-            series_ids = [f"series_{i}" for i in range(N)]
-        
-        # Infer clock frequency if not provided
-        if clock is None:
-            clock = self._infer_frequency(time_index)
-        
-        # Validate clock
-        clock = validate_frequency(clock)
-        
-        # Create series configs (all series in global block)
-        series_configs = []
-        for i, series_id in enumerate(series_ids):
-            series_configs.append(
-                SeriesConfig(
-                    frequency=clock,  # All series use clock frequency
-                    transformation=transformation,
-                    blocks=['Block_Global'],  # All series load on global block
-                    series_id=series_id,
-                    series_name=series_id
-                )
-            )
-        
-        # Create block config (single global block)
-        block_configs = {
-            'Block_Global': {
-                'factors': num_factors,
-                'ar_lag': 1,
-                'clock': clock
-            }
-        }
-        
-        # Create DFMConfig with defaults
-        config = DFMConfig(
-            series=series_configs,
-            blocks=block_configs,
-            clock=clock,
-            ar_lag=1,
-            threshold=1e-5,
-            max_iter=5000,
-            nan_method=2,
-            nan_k=3
-        )
-        
-        return config
-    
-    def _infer_frequency(
-        self,
-        time_index: Optional[Union[List[datetime], np.ndarray, pl.Series]] = None
-    ) -> str:
-        """Infer frequency from time index.
-        
-        Parameters
-        ----------
-        time_index : list of datetime, np.ndarray, or pl.Series, optional
-            Time index to analyze
-            
-        Returns
-        -------
-        str
-            Inferred frequency code ('d', 'w', 'm', 'q', 'sa', 'a')
-            Defaults to 'm' if inference fails or time_index is None.
-        """
-        if time_index is None or len(time_index) < 2:
-            _logger.warning("Cannot infer frequency: time_index is None or too short. Defaulting to 'm' (monthly).")
-            return 'm'
-        
-        # Convert to list of datetime if needed
-        if isinstance(time_index, pl.Series):
-            time_list = time_index.to_list()
-        elif isinstance(time_index, np.ndarray):
-            time_list = time_index.tolist()
-        else:
-            time_list = list(time_index)
-        
-        # Ensure all elements are datetime
-        from ..utils.time import parse_timestamp
-        try:
-            time_list = [parse_timestamp(t) for t in time_list]
-        except (ValueError, TypeError):
-            _logger.warning("Cannot parse time_index. Defaulting to 'm' (monthly).")
-            return 'm'
-        
-        if len(time_list) < 2:
-            return 'm'
-        
-        # Calculate median time difference
-        diffs = []
-        for i in range(1, len(time_list)):
-            diff = (time_list[i] - time_list[i-1]).total_seconds()
-            diffs.append(diff)
-        
-        if not diffs:
-            return 'm'
-        
-        median_diff_seconds = np.median(diffs)
-        median_diff_days = median_diff_seconds / (24 * 3600)
-        
-        # Infer frequency based on median difference
-        if median_diff_days <= 1.5:
-            return 'd'  # Daily
-        elif median_diff_days <= 5:
-            return 'w'  # Weekly
-        elif median_diff_days <= 35:
-            return 'm'  # Monthly
-        elif median_diff_days <= 100:
-            return 'q'  # Quarterly
-        elif median_diff_days <= 200:
-            return 'sa'  # Semi-annual
-        else:
-            return 'a'  # Annual
-    
-    def predict(
-        self,
-        horizon: Optional[int] = None,
-        *,
-        return_series: bool = True,
-        return_factors: bool = True,
-        result: Optional[DFMResult] = None
-    ) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
-        """Forecast future values using the fitted model.
-        
-        Parameters
-        ----------
-        horizon : int, optional
-            Number of periods ahead to forecast. If None, defaults to 1 year
-            of periods based on clock frequency.
-        return_series : bool, optional
-            Whether to return forecasted series (default: True)
-        return_factors : bool, optional
-            Whether to return forecasted factors (default: True)
-        result : DFMResult, optional
-            Model result to use for prediction. If None, uses self._result.
-            This allows the high-level DFM class to pass its result.
-            
-        Returns
-        -------
-        np.ndarray or Tuple[np.ndarray, np.ndarray]
-            If both return_series and return_factors are True:
-                (X_forecast, Z_forecast) tuple
-            If only return_series is True:
-                X_forecast (horizon x N)
-            If only return_factors is True:
-                Z_forecast (horizon x m)
-        """
-        # Use provided result or fall back to self._result
-        if result is None:
-            if self._result is None:
-                raise ValueError(
-                    "DFM prediction failed: model has not been fitted yet. "
-                    "Please call fit() first or provide a result object."
-                )
-            result = self._result
-        else:
-            # Use provided result
-            pass
-        
-        # Default horizon: 1 year of periods based on clock frequency
-        if horizon is None:
-            from ..config.utils import get_periods_per_year
-            from ..utils.helpers import get_clock_frequency
-            if self._config is None:
-                clock = 'm'  # Default to monthly
-            else:
-                clock = get_clock_frequency(self._config, 'm')
-            horizon = get_periods_per_year(clock)
-        
-        if horizon <= 0:
-            raise ValueError(
-                f"DFM prediction failed: horizon must be a positive integer, got {horizon}. "
-                f"Please provide a positive integer value for the forecast horizon."
-            )
-        
-        # Extract model parameters
-        A = result.A
-        C = result.C
-        Wx = result.Wx
-        Mx = result.Mx
-        Z_last = result.Z[-1, :]
-        
-        # Validate that model is properly trained (Z_last should not contain NaN)
-        if np.any(np.isnan(Z_last)):
-            nan_count = np.sum(np.isnan(Z_last))
-            nan_ratio = nan_count / len(Z_last)
-            raise ValueError(
-                f"DFM prediction failed: {nan_count}/{len(Z_last)} factors contain NaN values ({nan_ratio:.1%}). "
-                f"This usually indicates the model did not converge during training. "
-                f"Try increasing max_iter, checking data quality, or removing series with high missing data."
-            )
-        
-        # Validate parameters are finite
-        if np.any(~np.isfinite(A)) or np.any(~np.isfinite(C)):
-            raise ValueError(
-                "DFM prediction failed: model parameters (A or C) contain NaN or Inf values. "
-                "This indicates the model did not train successfully. "
-                "Please check training convergence and data quality."
-            )
-        
-        # Deterministic forecast: iteratively apply transition matrix A
-        Z_forecast = np.zeros((horizon, Z_last.shape[0]))
-        Z_forecast[0, :] = A @ Z_last
-        for h in range(1, horizon):
-            Z_forecast[h, :] = A @ Z_forecast[h - 1, :]
-        
-        # Transform factors to observed series: X = Z @ C^T, then denormalize
-        X_forecast_std = Z_forecast @ C.T
-        X_forecast = X_forecast_std * Wx + Mx
-        
-        # Validate forecast results are finite
-        if np.any(~np.isfinite(X_forecast)):
-            nan_count = np.sum(~np.isfinite(X_forecast))
-            raise ValueError(
-                f"DFM prediction failed: produced {nan_count} NaN/Inf values in forecast. "
-                f"This may indicate numerical instability. "
-                f"Please check model parameters and data quality."
-            )
-        if return_factors and np.any(~np.isfinite(Z_forecast)):
-            nan_count = np.sum(~np.isfinite(Z_forecast))
-            raise ValueError(
-                f"DFM prediction failed: produced {nan_count} NaN/Inf values in factor forecast. "
-                f"This may indicate numerical instability in factor dynamics. "
-                f"Please check model parameters and training convergence."
-            )
-        
-        if return_series and return_factors:
-            return X_forecast, Z_forecast
-        if return_series:
-            return X_forecast
-        return Z_forecast
-
-
-
-
-# ============================================================================
-# High-level API Classes
-# ============================================================================
-
-import os
-import pickle
-from pathlib import Path
-from datetime import datetime, timedelta
-from typing import Dict, Any, TYPE_CHECKING
-
-from ..config import (
-    DFMConfig,
-    make_config_source,
-    ConfigSource,
-    MergedConfigSource,
-)
-from ..nowcast.dataview import DataView
-from ..utils.helpers import (
-    safe_get_method,
-    safe_get_attr,
-    get_clock_frequency,
-)
-from ..utils.time import TimeIndex
-
-if TYPE_CHECKING:
-    from omegaconf import DictConfig
-
 
 class DFM(BaseFactorModel):
     """High-level API for Linear Dynamic Factor Model (PyTorch Lightning module).
@@ -496,11 +58,11 @@ class DFM(BaseFactorModel):
     
     Example (Standard Lightning Pattern):
         >>> from dfm_python import DFM, DFMDataModule, DFMTrainer
-        >>> import polars as pl
+        >>> import pandas as pd
         >>> 
         >>> # Step 1: Load and preprocess data
-        >>> df = pl.read_csv('data/finance.csv')
-        >>> df_processed = df.select([col for col in df.columns if col != 'date'])
+        >>> df = pd.read_csv('data/finance.csv')
+        >>> df_processed = df[[col for col in df.columns if col != 'date']]
         >>> 
         >>> # Step 2: Create DataModule
         >>> dm = DFMDataModule(config_path='config/dfm_config.yaml', data=df_processed)
@@ -549,16 +111,9 @@ class DFM(BaseFactorModel):
         """
         super().__init__(**kwargs)
         
-        # If config not provided, create a placeholder that will be set via load_config
-        if config is None:
-            from ..config.schema import DFMConfig, SeriesConfig
-            config = DFMConfig(
-                series=[SeriesConfig(series_id='placeholder', frequency='m', transformation='lin', blocks=[1])],
-                blocks={'Block_0': {'factors': 1, 'ar_lag': 1, 'clock': 'm'}}
-            )
+        # Initialize config using consolidated helper method
+        config = self._initialize_config(config)
         
-        # Set internal config (config property is read-only, accessed via property getter)
-        self._config = config
         self.threshold = threshold
         self.max_iter = max_iter
         self.nan_method = nan_method
@@ -612,11 +167,6 @@ class DFM(BaseFactorModel):
         
         # Use manual optimization for EM algorithm
         self.automatic_optimization = False
-        
-        # Low-level implementation for utility methods
-        self._model_impl = DFMLinear()
-        self._data_module: Optional['DFMDataModule'] = None
-        self._nowcast: Optional['Nowcast'] = None
     
     def setup(self, stage: Optional[str] = None) -> None:
         """Initialize model parameters.
@@ -788,16 +338,28 @@ class DFM(BaseFactorModel):
         
         # Ensure data is on same device as model (Lightning handles this automatically)
         X = X.to(self.device)
-        self.data_processed = X
         
         device = X.device
         dtype = X.dtype
         
-        # Initialize parameters
+        # CRITICAL: Impute missing data BEFORE EM loop
+        # Initialize parameters (this performs imputation internally)
         self.initialize_from_data(X)
         
-        # Prepare data for EM
-        y = X.T  # (N x T)
+        # After initialization, get the imputed data for EM loop
+        # initialize_from_data uses rem_nans_spline_torch internally, but we need
+        # to apply the same imputation to the data used in EM loop
+        from dfm_python.utils.data import rem_nans_spline_torch
+        opt_nan = {'method': self.nan_method, 'k': self.nan_k}
+        X_imputed, _ = rem_nans_spline_torch(X, method=opt_nan.get('method', 2), k=opt_nan.get('k', 3))
+        # Remove any remaining NaN/inf
+        X_imputed = torch.where(torch.isfinite(X_imputed), X_imputed, torch.tensor(0.0, device=device, dtype=dtype))
+        
+        # Store imputed data
+        self.data_processed = X_imputed
+        
+        # Prepare data for EM (use imputed data, not raw data)
+        y = X_imputed.T  # (N x T)
         
         # Initialize state
         previous_loglik = float('-inf')
@@ -861,7 +423,9 @@ class DFM(BaseFactorModel):
             self.log('train/em_iteration', float(num_iter), on_step=False, on_epoch=True)
             self.log('train/loglik_change', change, on_step=False, on_epoch=True)
             
-            if num_iter % 10 == 0:
+            # Log progress more frequently for visibility
+            if num_iter % 5 == 0 or num_iter == 1:
+                print(f"[EM {num_iter:4d}/{self.max_iter:4d}] Log-likelihood: {loglik:12.6f} | Change: {change:10.6e} {'✓' if converged else ''}")
                 _logger.info(
                     f"EM iteration {num_iter}/{self.max_iter}: "
                     f"loglik={loglik:.4f}, change={change:.2e}"
@@ -879,6 +443,13 @@ class DFM(BaseFactorModel):
             num_iter=num_iter,
             converged=converged
         )
+        
+        # Final status message
+        if converged:
+            print(f"\n✓ EM algorithm converged after {num_iter} iterations (loglik: {loglik:.6f})")
+        else:
+            print(f"\n⚠ EM algorithm stopped after {num_iter} iterations (loglik: {loglik:.6f}, change: {change:.2e})")
+        _logger.info(f"EM training completed: converged={converged}, iterations={num_iter}, final_loglik={loglik:.6f}")
         
         return self.training_state
     
@@ -961,36 +532,19 @@ class DFM(BaseFactorModel):
         
         return result
     
-    def configure_optimizers(self):
+    def configure_optimizers(self) -> List[torch.optim.Optimizer]:
         """Configure optimizers.
         
         EM algorithm doesn't use standard optimizers, but Lightning requires
         this method. Return empty list.
+        
+        Returns
+        -------
+        List[torch.optim.Optimizer]
+            Empty list (EM algorithm doesn't use optimizers)
         """
         return []
     
-    @property
-    def nowcast(self) -> 'Nowcast':
-        """Get nowcasting manager instance."""
-        if self._nowcast is None:
-            if self._config is None:
-                raise ValueError(
-                    "DFM nowcast access failed: configuration has not been loaded yet. "
-                    "Please call load_config() first."
-                )
-            if self._data_module is None:
-                raise ValueError(
-                    "DFM nowcast access failed: DataModule has not been provided yet. "
-                    "Please provide DataModule via trainer.fit() before accessing nowcast."
-                )
-            if self.training_state is None:
-                raise ValueError(
-                    "DFM nowcast access failed: model has not been trained yet. "
-                    "Please call trainer.fit() first."
-                )
-            from ..nowcast import Nowcast
-            self._nowcast = Nowcast(model=self, data_module=self._data_module)
-        return self._nowcast
     
     def load_config(
         self,
@@ -1030,22 +584,11 @@ class DFM(BaseFactorModel):
     
     def on_train_start(self) -> None:
         """Called when training starts. Run EM algorithm."""
-        # Store data_module reference for later use (nowcast, predict, etc.)
-        if hasattr(self.trainer, 'datamodule'):
-            self._data_module = self.trainer.datamodule
-            
-            # Get processed data and standardization params from DataModule
-            X_torch = self._data_module.get_processed_data()
-            Mx, Wx = self._data_module.get_standardization_params()
-            
-            # Handle case where standardization params might be None
-            if Mx is None or Wx is None:
-                N = X_torch.shape[1]
-                Mx = np.zeros(N, dtype=np.float32)
-                Wx = np.ones(N, dtype=np.float32)
-            
-            # Run EM algorithm
-            self.fit_em(X_torch, Mx=Mx, Wx=Wx)
+        # Get processed data and standardization params from DataModule
+        X_torch, Mx, Wx = self._get_data_from_datamodule()
+        
+        # Run EM algorithm
+        self.fit_em(X_torch, Mx=Mx, Wx=Wx)
         
         super().on_train_start()
     
@@ -1060,6 +603,26 @@ class DFM(BaseFactorModel):
         
         This method can be called after training. It uses the training state
         from the Lightning module to generate forecasts.
+        
+        Parameters
+        ----------
+        horizon : int, optional
+            Number of periods ahead to forecast. If None, defaults to 1 year
+            of periods based on clock frequency.
+        return_series : bool, optional
+            Whether to return forecasted series (default: True)
+        return_factors : bool, optional
+            Whether to return forecasted factors (default: True)
+            
+        Returns
+        -------
+        np.ndarray or Tuple[np.ndarray, np.ndarray]
+            If both return_series and return_factors are True:
+                (X_forecast, Z_forecast) tuple
+            If only return_series is True:
+                X_forecast (horizon x N)
+            If only return_factors is True:
+                Z_forecast (horizon x m)
         """
         if self.training_state is None:
             error_msg = self._format_error_message(
@@ -1073,12 +636,77 @@ class DFM(BaseFactorModel):
         if not hasattr(self, '_result') or self._result is None:
             self._result = self.get_result()
         
-        return self._model_impl.predict(
-            horizon=horizon,
-            return_series=return_series,
-            return_factors=return_factors,
-            result=self._result
-        )
+        result = self._result
+        
+        # Default horizon: 1 year of periods based on clock frequency
+        if horizon is None:
+            from ..config.utils import get_periods_per_year
+            from ..utils.helpers import get_clock_frequency
+            clock = get_clock_frequency(self.config, 'm')
+            horizon = get_periods_per_year(clock)
+        
+        if horizon <= 0:
+            raise ValueError(
+                f"DFM prediction failed: horizon must be a positive integer, got {horizon}. "
+                f"Please provide a positive integer value for the forecast horizon."
+            )
+        
+        # Extract model parameters
+        A = result.A
+        C = result.C
+        Wx = result.Wx
+        Mx = result.Mx
+        Z_last = result.Z[-1, :]
+        
+        # Validate that model is properly trained (Z_last should not contain NaN)
+        if np.any(np.isnan(Z_last)):
+            nan_count = np.sum(np.isnan(Z_last))
+            nan_ratio = nan_count / len(Z_last)
+            raise ValueError(
+                f"DFM prediction failed: {nan_count}/{len(Z_last)} factors contain NaN values ({nan_ratio:.1%}). "
+                f"This usually indicates the model did not converge during training. "
+                f"Try increasing max_iter, checking data quality, or removing series with high missing data."
+            )
+        
+        # Validate parameters are finite
+        if np.any(~np.isfinite(A)) or np.any(~np.isfinite(C)):
+            raise ValueError(
+                "DFM prediction failed: model parameters (A or C) contain NaN or Inf values. "
+                "This indicates the model did not train successfully. "
+                "Please check training convergence and data quality."
+            )
+        
+        # Deterministic forecast: iteratively apply transition matrix A
+        Z_forecast = np.zeros((horizon, Z_last.shape[0]))
+        Z_forecast[0, :] = A @ Z_last
+        for h in range(1, horizon):
+            Z_forecast[h, :] = A @ Z_forecast[h - 1, :]
+        
+        # Transform factors to observed series: X = Z @ C^T, then denormalize
+        X_forecast_std = Z_forecast @ C.T
+        X_forecast = X_forecast_std * Wx + Mx
+        
+        # Validate forecast results are finite
+        if np.any(~np.isfinite(X_forecast)):
+            nan_count = np.sum(~np.isfinite(X_forecast))
+            raise ValueError(
+                f"DFM prediction failed: produced {nan_count} NaN/Inf values in forecast. "
+                f"This may indicate numerical instability. "
+                f"Please check model parameters and data quality."
+            )
+        if return_factors and np.any(~np.isfinite(Z_forecast)):
+            nan_count = np.sum(~np.isfinite(Z_forecast))
+            raise ValueError(
+                f"DFM prediction failed: produced {nan_count} NaN/Inf values in factor forecast. "
+                f"This may indicate numerical instability in factor dynamics. "
+                f"Please check model parameters and training convergence."
+            )
+        
+        if return_series and return_factors:
+            return X_forecast, Z_forecast
+        if return_series:
+            return X_forecast
+        return Z_forecast
     
     @property
     def result(self) -> DFMResult:
@@ -1093,80 +721,12 @@ class DFM(BaseFactorModel):
         self._check_trained()
         return self._result
     
-    @property
-    def config(self) -> DFMConfig:
-        """Get model configuration."""
-        if not hasattr(self, '_config') or self._config is None:
-            raise ValueError(
-                "DFM config access failed: model configuration has not been set. "
-                "Please call load_config() or pass config to __init__() first."
-            )
-        return self._config
     
-    def plot(self, **kwargs) -> 'DFM':
-        """Plot common visualizations."""
-        if self.training_state is None:
-            error_msg = self._format_error_message(
-                operation="plotting",
-                reason="model has not been trained yet",
-                guidance="Please call trainer.fit(model, data_module) first"
-            )
-            raise ValueError(error_msg)
-        _logger.info("Plot functionality not yet implemented")
-        return self
     
     def reset(self) -> 'DFM':
         """Reset model state."""
-        self._config = None
-        self._data_module = None
-        self._result = None
-        self._nowcast = None
-        if hasattr(self, 'training_state'):
-            self.training_state = None
+        super().reset()
         return self
     
-    def load_pickle(self, path: Union[str, Path], **kwargs) -> 'DFM':
-        """Load a saved model from pickle file.
-        
-        Note: DataModule is not saved in pickle. Users must create a new DataModule
-        and use trainer.fit() with it after loading the model.
-        """
-        import pickle
-        with open(path, 'rb') as f:
-            payload = pickle.load(f)
-        self._config = payload.get('config')
-        self._result = payload.get('result')
-        # Note: data_module is not loaded - users must provide it via trainer.fit()
-        return self
 
-
-
-
-def _dump_yaml_to_file(path: Path, payload: Dict[str, Any]) -> None:
-    """Helper function to dump YAML file."""
-    try:
-        import yaml  # type: ignore
-        with open(path, 'w', encoding='utf-8') as f:
-            yaml.dump(payload, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
-    except ImportError:
-        try:
-            from omegaconf import OmegaConf  # type: ignore
-        except ImportError as exc:  # pragma: no cover
-            raise ImportError(
-                "Either PyYAML or omegaconf is required for YAML generation. "
-                "Install with: pip install pyyaml or pip install omegaconf"
-            ) from exc
-        cfg = OmegaConf.create(payload)
-        OmegaConf.save(cfg, path)
-
-
-def from_spec(
-    csv_path: Union[str, Path],
-    output_dir: Optional[Union[str, Path]] = None,
-    series_filename: Optional[str] = None,
-    blocks_filename: Optional[str] = None
-) -> Tuple[Path, Path]:
-    """Convert spec CSV file to YAML configuration files."""
-    from ..config.adapter import from_spec as _from_spec
-    return _from_spec(csv_path, output_dir, series_filename, blocks_filename)
 
