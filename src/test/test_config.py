@@ -203,12 +203,12 @@ class TestDDFMConfig:
             blocks=blocks,
             encoder_layers=[64, 32],
             num_factors=2,
-            learning_rate=0.001,
+            learning_rate=0.005,  # Updated to match original DDFM default
             epochs=100
         )
         assert config.encoder_layers == [64, 32]
         assert config.num_factors == 2
-        assert config.learning_rate == 0.001
+        assert config.learning_rate == 0.005  # Updated to match original DDFM default
         assert config.epochs == 100
     
     def test_ddfm_config_autoencoder_structure(self):
@@ -221,12 +221,12 @@ class TestDDFMConfig:
             blocks=blocks,
             encoder_layers=[64, 32],  # Encoder hidden layers
             num_factors=2,  # Bottleneck dimension
-            activation="tanh"  # As in paper
+            activation="relu"  # Updated to match original DDFM default
         )
         if config.encoder_layers is not None:
             assert len(config.encoder_layers) == 2
         assert config.num_factors == 2
-        assert config.activation == "tanh"
+        assert config.activation == "relu"  # Updated to match original DDFM default
 
 
 class TestConfigAdapters:

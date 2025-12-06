@@ -43,13 +43,11 @@ def _get_scaler(transformer: Any) -> Optional[Any]:
     
     This function depends on sktime's pipeline structure to traverse
     TransformerPipeline and sklearn transformers (StandardScaler, etc.).
-    Note: TabularToSeriesAdaptor support is for backward compatibility only.
     
     Parameters
     ----------
     transformer : Any
-        Transformer to search (can be any scaler, StandardScaler directly, or TabularToSeriesAdaptor for backward compatibility). 
-        TransformerPipeline, sklearn Pipeline, etc.)
+        Transformer to search (StandardScaler, TransformerPipeline, sklearn Pipeline, etc.)
         
     Returns
     -------
@@ -60,9 +58,7 @@ def _get_scaler(transformer: Any) -> Optional[Any]:
     if transformer is None:
         return None
     
-    # Check if transformer is TabularToSeriesAdaptor (backward compatibility only)
-    # Note: New code should use StandardScaler() directly per sktime docs
-    # This check is kept for backward compatibility with old code that may still use TabularToSeriesAdaptor
+    # Check if transformer is wrapped (TabularToSeriesAdaptor or similar)
     if hasattr(transformer, 'transformer'):
         # Recursively search the wrapped transformer
         wrapped = transformer.transformer
@@ -78,9 +74,7 @@ def _get_scaler(transformer: Any) -> Optional[Any]:
             if scaler is not None:
                 return scaler
     
-    # Check if transformer is ColumnEnsembleTransformer (or deprecated ColumnTransformer for backward compatibility)
-    # ColumnEnsembleTransformer is the recommended transformer in sktime 0.40+ (replaces ColumnTransformer)
-    # Unified scaling with StandardScaler is preferred per sktime docs
+    # Check if transformer is ColumnEnsembleTransformer (or ColumnTransformer)
     if hasattr(transformer, 'transformers'):
         for name, trans, cols in transformer.transformers:
             scaler = _get_scaler(trans)
@@ -262,15 +256,17 @@ class DFMDataModule(lightning_pl.LightningDataModule):
     
     This DataModule handles data loading for DFM/DDFM models.
     
-    **Important**: This package expects preprocessed data. All preprocessing (imputation, 
-    scaling, feature engineering, etc.) must be done by the user before passing data to 
-    this DataModule. Users are responsible for creating their own preprocessing pipelines 
-    using sktime or other tools.
+    **Important**: DFM and DDFM can handle missing data (NaN values) implicitly:
+    - **DFM**: Uses Kalman filter's `handle_missing_data()` method to skip NaN observations
+    - **DDFM**: Uses state-space model and MCMC procedure to handle missing data through
+      idiosyncratic component estimation
     
     **Usage Pattern**:
-    - Provide already-preprocessed data (standardized, no missing values, feature-engineered)
+    - Data can contain NaN values - models will handle them implicitly
     - If `pipeline=None`, a passthrough transformer is used by default (no-op)
     - Users can optionally provide their preprocessing pipeline to extract statistics (Mx/Wx)
+    - For better performance, users can preprocess data (imputation, scaling) before passing,
+      but it's not required - models will handle missing data automatically
     
     For linear DFM, this uses DFMDataset which returns full sequences.
     For DDFM, use DDFMDataModule which uses DDFMDataset with windowing.
@@ -312,9 +308,10 @@ class DFMDataModule(lightning_pl.LightningDataModule):
     data_path : str or Path, optional
         Path to data file (CSV). If None, data must be provided.
     data : np.ndarray or pd.DataFrame, optional
-        Preprocessed data array or DataFrame. Data must be:
-        - Standardized/scaled (mean=0, std=1 recommended for DFM/DDFM)
-        - No missing values (NaN-free)
+        Data array or DataFrame. Can contain NaN values - DFM/DDFM will handle them:
+        - DFM: Uses Kalman filter to implicitly handle missing data
+        - DDFM: Uses state-space model and MCMC to handle missing data
+        - Standardized/scaled data (mean=0, std=1) is recommended for better performance
         - Feature-engineered if needed
         If None, data_path must be provided.
     time_index : TimeIndex, optional
@@ -418,20 +415,22 @@ class DFMDataModule(lightning_pl.LightningDataModule):
         This method is called by Lightning to set up the data module.
         It loads preprocessed data and extracts statistics from the pipeline for forecasting/nowcasting.
         
-        **Important**: Data must be fully preprocessed by the user before passing to this DataModule.
-        All preprocessing (imputation, scaling, feature engineering, etc.) is the user's responsibility.
+        **Important**: DFM and DDFM can handle missing data (NaN values) implicitly:
+        - **DFM**: Uses Kalman filter's `handle_missing_data()` method
+        - **DDFM**: Uses state-space model and MCMC procedure
         
         **Pipeline Purpose**:
         - The pipeline is used to extract statistics (e.g., Mx/Wx from StandardScaler) needed for
           forecasting and nowcasting operations, not to preprocess the data
-        - Data is already preprocessed - the pipeline is fitted to extract standardization parameters
         - The pipeline is fitted on the **entire dataset** to extract statistics
         - If `val_split` is provided, it's used for validation during training (e.g., DDFM neural network)
         
         **Usage**:
-        - Provide preprocessed data (standardized, no missing values)
+        - Data can contain NaN values - models will handle them automatically
         - Optionally provide pipeline (e.g., TransformerPipeline with StandardScaler) to extract Mx/Wx for predictions
         - If pipeline=None, uses passthrough (no statistics extracted, Mx/Wx computed from data)
+        - For better performance, users can preprocess data (imputation, scaling) before passing,
+          but it's not required
         """
         # Load data if not already provided
         if self.data is None:
@@ -452,6 +451,9 @@ class DFMDataModule(lightning_pl.LightningDataModule):
             self.time_index = Time
         
         # Convert to pandas DataFrame if needed
+        # Note: DFM/DDFM can handle NaN values implicitly via Kalman filter
+        # (DFM uses handle_missing_data() in Kalman filter, DDFM uses state-space model)
+        # So we don't validate NaN here - let the models handle it
         if isinstance(self.data, np.ndarray):
             series_ids = self.config.get_series_ids()
             X_df = pd.DataFrame(self.data, columns=series_ids)
@@ -505,6 +507,9 @@ class DFMDataModule(lightning_pl.LightningDataModule):
                 f"If pipeline creates new columns (e.g., WindowSummarizer), column names will be "
                 f"automatically extracted from the pipeline."
             ) from e
+        
+        # Note: DFM/DDFM can handle NaN values implicitly via Kalman filter
+        # So we don't validate NaN here - let the models handle it
         
         # Ensure output is pandas DataFrame with compatible index
         if not isinstance(X_transformed, pd.DataFrame):
@@ -612,9 +617,7 @@ class DFMDataModule(lightning_pl.LightningDataModule):
         # This is optional - some pipelines may not have standardization
         # Mx and Wx are already initialized in __init__
         try:
-            # Extract scaler from pipeline (works with TransformerPipeline, StandardScaler directly, or TabularToSeriesAdaptor for backward compatibility)
-            # Supports any scaler type: StandardScaler, MinMaxScaler, RobustScaler, etc.
-            # Note: New code should use StandardScaler() directly per sktime docs (unified scaling)
+            # Extract scaler from pipeline (supports TransformerPipeline, StandardScaler, etc.)
             scaler = _get_scaler(pipeline_to_use)
             
             if scaler is not None:

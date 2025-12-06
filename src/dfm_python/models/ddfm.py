@@ -103,11 +103,11 @@ class DDFMModel:
         self,
         encoder_layers: Optional[List[int]] = None,
         num_factors: Optional[int] = None,
-        activation: str = 'tanh',
+        activation: str = 'relu',
         use_batch_norm: bool = True,
         learning_rate: float = 0.001,
         epochs: int = 100,
-        batch_size: int = 32,
+        batch_size: int = 100,
         factor_order: int = 1,
         use_idiosyncratic: bool = True,
         min_obs_idio: int = 5,
@@ -127,7 +127,7 @@ class DDFMModel:
         num_factors : int, optional
             Number of factors. If None, will be inferred from config during fit.
         activation : str
-            Activation function ('tanh', 'relu', 'sigmoid'). Default: 'tanh'
+            Activation function ('tanh', 'relu', 'sigmoid'). Default: 'relu' (matches original DDFM)
         use_batch_norm : bool
             Whether to use batch normalization in encoder. Default: True
         learning_rate : float
@@ -135,7 +135,7 @@ class DDFMModel:
         epochs : int
             Number of epochs per MCMC iteration. Default: 100
         batch_size : int
-            Batch size for training. Default: 32
+            Batch size for training. Default: 100 (matches original DDFM)
         factor_order : int
             VAR lag order for factor dynamics (1 or 2). Default: 1
         use_idiosyncratic : bool
@@ -540,7 +540,7 @@ class DDFM(BaseFactorModel):
     
     Note on GPU Memory Usage:
         DDFM typically uses less GPU memory than DFM because:
-        1. DDFM uses batch training (batch_size=32), processing data in small chunks
+        1. DDFM uses batch training (batch_size=100, matching original DDFM), processing data in small chunks
         2. DFM uses EM algorithm with Kalman filtering, which stores large covariance
            matrices on GPU: V (m x m x T+1), R (N x N), Q (m x m) for all time steps
         3. DDFM's neural network (encoder/decoder) is relatively small compared to
@@ -560,11 +560,11 @@ class DDFM(BaseFactorModel):
         config: Optional[DFMConfig] = None,
         encoder_layers: Optional[List[int]] = None,
         num_factors: Optional[int] = None,
-        activation: str = 'tanh',
+        activation: str = 'relu',
         use_batch_norm: bool = True,
-        learning_rate: float = 0.001,
+        learning_rate: float = 0.005,
         epochs: int = 100,
-        batch_size: int = 32,
+        batch_size: int = 100,
         factor_order: int = 1,
         use_idiosyncratic: bool = True,
         min_obs_idio: int = 5,
@@ -572,6 +572,9 @@ class DDFM(BaseFactorModel):
         tolerance: float = 0.0005,
         disp: int = 10,
         seed: Optional[int] = None,
+        decay_learning_rate: bool = True,
+        min_obs_pretrain: int = 50,
+        mult_epoch_pretrain: int = 1,
         **kwargs
     ):
         """Initialize DDFM instance.
@@ -584,16 +587,16 @@ class DDFM(BaseFactorModel):
             Hidden layer dimensions for encoder. Default: [64, 32]
         num_factors : int, optional
             Number of factors. If None, inferred from config.
-        activation : str, default 'tanh'
-            Activation function ('tanh', 'relu', 'sigmoid')
+        activation : str, default 'relu'
+            Activation function ('tanh', 'relu', 'sigmoid'). Default: 'relu' (matches original DDFM)
         use_batch_norm : bool, default True
             Whether to use batch normalization in encoder
-        learning_rate : float, default 0.001
-            Learning rate for Adam optimizer
+        learning_rate : float, default 0.005
+            Learning rate for Adam optimizer (matches original DDFM default)
         epochs : int, default 100
             Number of epochs per MCMC iteration
-        batch_size : int, default 32
-            Batch size for training
+        batch_size : int, default 100
+            Batch size for training (matches original DDFM)
         factor_order : int, default 1
             VAR lag order for factor dynamics (1 or 2)
         use_idiosyncratic : bool, default True
@@ -605,6 +608,13 @@ class DDFM(BaseFactorModel):
         tolerance : float, default 0.0005
             Convergence tolerance
         disp : int, default 10
+            Display progress every 'disp' iterations
+        decay_learning_rate : bool, default True
+            Whether to use exponential decay learning rate scheduler (matches original DDFM)
+        min_obs_pretrain : int, default 50
+            Minimum number of observations for pre-training without interpolation
+        mult_epoch_pretrain : int, default 1
+            Multiplier for number of epochs during pre-training
             Display progress every 'disp' iterations
         seed : int, optional
             Random seed for reproducibility
@@ -630,6 +640,9 @@ class DDFM(BaseFactorModel):
         self.max_iter = max_iter
         self.tolerance = tolerance
         self.disp = disp
+        self.decay_learning_rate = decay_learning_rate
+        self.min_obs_pretrain = min_obs_pretrain
+        self.mult_epoch_pretrain = mult_epoch_pretrain
         
         # Determine number of factors
         # Note: DDFM does not use block structure - num_factors is specified directly
@@ -736,6 +749,34 @@ class DDFM(BaseFactorModel):
                 output_dim=input_dim,
                 use_bias=True,
             )
+            
+            # Validate decoder weights are not all zeros (initialization check)
+            decoder_weight = self.decoder.decoder.weight.data.cpu().numpy()
+            if np.allclose(decoder_weight, 0.0, atol=1e-8):
+                error_msg = format_error_message(
+                    model_type="DDFM",
+                    operation="decoder initialization",
+                    reason="decoder weights are all zeros after initialization",
+                    guidance=(
+                        f"This indicates a problem with decoder initialization. "
+                        f"Check: (1) Decoder class implementation, (2) Weight initialization method, "
+                        f"(3) PyTorch version compatibility. "
+                        f"Decoder weight shape: {decoder_weight.shape}, "
+                        f"weight mean: {np.mean(decoder_weight):.6f}, "
+                        f"weight std: {np.std(decoder_weight):.6f}"
+                    )
+                )
+                raise RuntimeError(error_msg)
+            
+            # Log decoder initialization statistics
+            decoder_weight_mean = np.mean(decoder_weight)
+            decoder_weight_std = np.std(decoder_weight)
+            decoder_weight_nonzero = np.count_nonzero(decoder_weight)
+            _logger.debug(
+                f"DDFM decoder initialized: weight shape={decoder_weight.shape}, "
+                f"mean={decoder_weight_mean:.6f}, std={decoder_weight_std:.6f}, "
+                f"nonzero={decoder_weight_nonzero}/{decoder_weight.size}"
+            )
         except (ValueError, RuntimeError, TypeError) as e:
             error_msg = format_error_message(
                 model_type="DDFM",
@@ -816,8 +857,28 @@ class DDFM(BaseFactorModel):
         data = data.to(device)
         target = target.to(device)
         
+        # Clip input data to prevent extreme values that cause NaN
+        # Clip to reasonable range: -10 to 10 standard deviations
+        data_clipped = torch.clamp(data, min=-10.0, max=10.0)
+        
         # Forward pass
-        reconstructed = self.forward(data)
+        reconstructed = self.forward(data_clipped)
+        
+        # Check for NaN in forward pass output (indicates numerical instability)
+        if torch.any(torch.isnan(reconstructed)) or torch.any(torch.isinf(reconstructed)):
+            nan_count = torch.sum(torch.isnan(reconstructed)).item()
+            inf_count = torch.sum(torch.isinf(reconstructed)).item()
+            _logger.error(
+                f"DDFM training_step: Forward pass produced {nan_count} NaN and {inf_count} Inf values. "
+                f"This indicates severe numerical instability. Skipping this batch to prevent NaN propagation. "
+                f"Possible causes: (1) learning rate too high, (2) gradient explosion, "
+                f"(3) extreme input values, (4) unstable activation functions."
+            )
+            # Return a large but finite loss to signal the issue, but don't update weights
+            # This prevents NaN from propagating to decoder weights
+            loss = torch.tensor(1e6, device=data.device, dtype=data.dtype, requires_grad=False)
+            self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True)
+            return loss
         
         # Compute loss with missing data masking (mse_missing)
         # Create mask: 1 for non-missing, 0 for missing (NaN)
@@ -833,6 +894,15 @@ class DDFM(BaseFactorModel):
         # MSE = mean((target_clean - reconstructed_masked)^2) over non-missing elements
         squared_diff = (target_clean - reconstructed_masked) ** 2
         loss = torch.sum(squared_diff) / (torch.sum(mask) + 1e-8)  # Avoid division by zero
+        
+        # Check for NaN/Inf in loss (indicates numerical instability)
+        if torch.isnan(loss) or torch.isinf(loss):
+            _logger.error(
+                f"DDFM training_step: Loss is NaN/Inf (loss={loss.item()}). "
+                f"This indicates numerical instability. Returning large loss value."
+            )
+            # Return a large but finite loss to signal the issue
+            loss = torch.tensor(1e6, device=loss.device, dtype=loss.dtype, requires_grad=True)
         
         # Log metrics
         self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True)
@@ -1389,13 +1459,16 @@ class DDFM(BaseFactorModel):
             )
             return A_f, Q_f
     
-    def configure_optimizers(self) -> List[torch.optim.Optimizer]:
-        """Configure optimizer for autoencoder training.
+    def configure_optimizers(self) -> Union[List[torch.optim.Optimizer], Dict[str, Any]]:
+        """Configure optimizer and learning rate scheduler for autoencoder training.
+        
+        Matches original DDFM implementation with exponential decay scheduler.
         
         Returns
         -------
-        List[torch.optim.Optimizer]
-            List containing the optimizer (PyTorch Lightning expects list/dict/tuple)
+        List[torch.optim.Optimizer] or Dict
+            If decay_learning_rate=False: List containing the optimizer
+            If decay_learning_rate=True: Dict with optimizer and scheduler config
         """
         if self.encoder is None or self.decoder is None:
             # If still not initialized, create placeholder optimizer as fallback
@@ -1407,6 +1480,19 @@ class DDFM(BaseFactorModel):
             # Create dummy parameter for optimizer (Lightning requires at least one optimizer)
             dummy_param = nn.Parameter(torch.zeros(1))
             optimizer = torch.optim.Adam([dummy_param], lr=self.learning_rate)
+            if self.decay_learning_rate:
+                # Create scheduler matching original DDFM: decay_rate=0.96, decay_steps=epochs
+                scheduler = torch.optim.lr_scheduler.ExponentialLR(
+                    optimizer, gamma=0.96
+                )
+                return {
+                    "optimizer": optimizer,
+                    "lr_scheduler": {
+                        "scheduler": scheduler,
+                        "interval": "epoch",
+                        "frequency": 1,
+                    }
+                }
             return [optimizer]
         
         optimizer = torch.optim.Adam(
@@ -1414,14 +1500,35 @@ class DDFM(BaseFactorModel):
             lr=self.learning_rate
         )
         
+        if self.decay_learning_rate:
+            # Exponential decay scheduler matching original DDFM implementation
+            # Original: decay_rate=0.96, decay_steps=epochs, staircase=True
+            # PyTorch: gamma=0.96, step every epoch (interval='epoch', frequency=1)
+            scheduler = torch.optim.lr_scheduler.ExponentialLR(
+                optimizer, gamma=0.96
+            )
+            return {
+                "optimizer": optimizer,
+                "lr_scheduler": {
+                    "scheduler": scheduler,
+                    "interval": "epoch",
+                    "frequency": 1,
+                }
+            }
+        
         return [optimizer]
     
-    def _create_optimizer(self) -> torch.optim.Optimizer:
+    def _create_optimizer(self, step: int = 0) -> torch.optim.Optimizer:
         """Create optimizer for autoencoder training.
         
         Helper method for internal use (e.g., in fit_mcmc()).
         For Lightning trainer setup, use configure_optimizers() instead.
         
+        Parameters
+        ----------
+        step : int, default 0
+            Current step/iteration for learning rate decay calculation
+            
         Returns
         -------
         torch.optim.Optimizer
@@ -1435,12 +1542,174 @@ class DDFM(BaseFactorModel):
             )
             raise RuntimeError(error_msg)
         
+        # Calculate learning rate with exponential decay if enabled
+        # Original DDFM: decay_rate=0.96, decay_steps=epochs, staircase=True
+        # lr = initial_lr * (decay_rate ^ floor(step / decay_steps))
+        if self.decay_learning_rate:
+            # For MCMC, we decay per MCMC iteration (not per epoch)
+            # Each MCMC iteration uses epochs_per_iter epochs
+            decay_steps = self.epochs_per_iter
+            decay_rate = 0.96
+            lr = self.learning_rate * (decay_rate ** (step // decay_steps))
+        else:
+            lr = self.learning_rate
+        
+        optimizer = torch.optim.Adam(
+            list(self.encoder.parameters()) + list(self.decoder.parameters()),
+            lr=lr
+        )
+        
+        return optimizer
+    
+    def pre_train(
+        self,
+        X: torch.Tensor,
+        x_clean: torch.Tensor,
+        missing_mask: np.ndarray,
+        device: Optional[torch.device] = None,
+    ) -> None:
+        """Pre-train autoencoder on data without missing values.
+        
+        This method matches the original DDFM implementation's pre-training step.
+        It trains the autoencoder on observations without missing values to provide
+        a stable initialization before MCMC training.
+        
+        Parameters
+        ----------
+        X : torch.Tensor
+            Standardized data with missing values, shape (T x N)
+        x_clean : torch.Tensor
+            Clean data (interpolated), shape (T x N)
+        missing_mask : np.ndarray
+            Missing data mask, shape (T x N), boolean array where True indicates missing
+        device : torch.device, optional
+            Device to use for training. If None, uses self.device
+            
+        Notes
+        -----
+        Original DDFM pre-training procedure:
+        1. Build inputs without interpolation (if enough observations)
+        2. If not enough observations, use interpolated data
+        3. Train autoencoder on non-missing data for epochs * mult_epoch_pretrain
+        4. Uses MSE loss (not mse_missing) if enough non-missing observations
+        """
+        if device is None:
+            device = self.device
+        
+        # Convert to numpy for easier missing data handling
+        x_clean_np = x_clean.cpu().numpy() if isinstance(x_clean, torch.Tensor) else x_clean
+        missing_mask_np = missing_mask if isinstance(missing_mask, np.ndarray) else missing_mask.cpu().numpy()
+        
+        # Check number of non-missing observations
+        bool_no_miss = ~missing_mask_np
+        n_non_missing = np.sum(bool_no_miss)
+        
+        # Determine if we have enough observations for pre-training without interpolation
+        use_interpolated = n_non_missing < self.min_obs_pretrain
+        
+        if use_interpolated:
+            # Use interpolated data (x_clean) for pre-training
+            _logger.info(
+                f"DDFM pre_train: Only {n_non_missing} non-missing observations (< {self.min_obs_pretrain}), "
+                f"using interpolated data for pre-training"
+            )
+            inpt_pre_train = x_clean_np
+            # Use mse_missing loss to handle any remaining missing values
+            use_mse_missing = True
+        else:
+            # Use only non-missing observations (original DDFM behavior)
+            _logger.info(
+                f"DDFM pre_train: {n_non_missing} non-missing observations (>= {self.min_obs_pretrain}), "
+                f"using non-missing data only for pre-training"
+            )
+            # Extract non-missing rows
+            non_missing_rows = np.all(bool_no_miss, axis=1)
+            inpt_pre_train = x_clean_np[non_missing_rows, :]
+            # Use standard MSE loss (no missing values)
+            use_mse_missing = False
+        
+        # Output is same as input for autoencoder (reconstruction task)
+        oupt_pre_train = inpt_pre_train.copy()
+        
+        # Convert to torch tensors and ensure they're on the correct device
+        inpt_tensor = torch.tensor(inpt_pre_train, device=device, dtype=torch.float32)
+        oupt_tensor = torch.tensor(oupt_pre_train, device=device, dtype=torch.float32)
+        
+        # Ensure encoder and decoder are on the same device
+        self.encoder = self.encoder.to(device)
+        self.decoder = self.decoder.to(device)
+        
+        # Create dataset and dataloader
+        dataset = torch.utils.data.TensorDataset(inpt_tensor, oupt_tensor)
+        dataloader = torch.utils.data.DataLoader(
+            dataset, batch_size=self.batch_size, shuffle=True
+        )
+        
+        # Create optimizer for pre-training
         optimizer = torch.optim.Adam(
             list(self.encoder.parameters()) + list(self.decoder.parameters()),
             lr=self.learning_rate
         )
         
-        return optimizer
+        # Pre-train for epochs * mult_epoch_pretrain
+        num_epochs = self.epochs_per_iter * self.mult_epoch_pretrain
+        _logger.info(f"DDFM pre_train: Starting pre-training for {num_epochs} epochs")
+        
+        self.encoder.train()
+        self.decoder.train()
+        
+        for epoch in range(num_epochs):
+            epoch_loss = 0.0
+            n_batches = 0
+            
+            for batch_data, batch_target in dataloader:
+                # Ensure batch data is on the correct device (should already be, but double-check)
+                batch_data = batch_data.to(device)
+                batch_target = batch_target.to(device)
+                optimizer.zero_grad()
+                
+                # Forward pass
+                reconstructed = self.forward(batch_data)
+                
+                # Compute loss
+                if use_mse_missing:
+                    # Handle missing values (though there shouldn't be any if use_interpolated=False)
+                    mask = torch.where(
+                        torch.isnan(batch_target),
+                        torch.zeros_like(batch_target),
+                        torch.ones_like(batch_target)
+                    )
+                    target_clean = torch.where(
+                        torch.isnan(batch_target),
+                        torch.zeros_like(batch_target),
+                        batch_target
+                    )
+                    reconstructed_masked = reconstructed * mask
+                    squared_diff = (target_clean - reconstructed_masked) ** 2
+                    loss = torch.sum(squared_diff) / (torch.sum(mask) + 1e-8)
+                else:
+                    # Standard MSE (no missing values)
+                    loss = nn.functional.mse_loss(reconstructed, batch_target)
+                
+                # Backward pass
+                loss.backward()
+                
+                # Gradient clipping for stability
+                torch.nn.utils.clip_grad_norm_(
+                    list(self.encoder.parameters()) + list(self.decoder.parameters()),
+                    max_norm=1.0
+                )
+                
+                optimizer.step()
+                
+                epoch_loss += loss.item()
+                n_batches += 1
+            
+            if (epoch + 1) % max(1, num_epochs // 10) == 0 or epoch == 0:
+                avg_loss = epoch_loss / n_batches if n_batches > 0 else 0.0
+                _logger.info(f"DDFM pre_train: Epoch {epoch + 1}/{num_epochs}, loss={avg_loss:.6f}")
+        
+        _logger.info(f"DDFM pre_train: Pre-training completed")
     
     def fit_mcmc(
         self,
@@ -1607,6 +1876,7 @@ class DDFM(BaseFactorModel):
         # Initialize data structures
         data_mod_only_miss = x_standardized_np.copy()  # Original with missing values
         data_mod = x_clean_np.copy()  # Clean data (will be modified during MCMC)
+        z_actual = x_standardized_np.copy()  # Actual observations (target for training, like original DDFM)
         
         # Initial prediction
         x_tensor = x_clean.to(device)
@@ -1661,9 +1931,15 @@ class DDFM(BaseFactorModel):
         
         _logger.info(f"Starting MCMC training: max_iter={max_iter}, tolerance={tolerance}, epochs_per_iter={self.epochs_per_iter}")
         
+        # Create optimizer once per MCMC iteration (reused across MC samples)
+        optimizer = None
+        
         while not_converged and iter_count < max_iter:
             iter_count += 1
             self.mcmc_iteration = iter_count
+            
+            # Create optimizer for this MCMC iteration (reused across MC samples)
+            optimizer = self._create_optimizer()
             
             # Get idiosyncratic distribution
             if self.use_idiosyncratic:
@@ -1729,7 +2005,8 @@ class DDFM(BaseFactorModel):
                 # Train autoencoder on corrupted sample (1 epoch)
                 # Convert to torch and create dataset
                 x_sample = torch.tensor(x_sim_den[i, :, :], device=device, dtype=dtype)
-                dataset = torch.utils.data.TensorDataset(x_sample, x_sample)
+                z_actual_tensor = torch.tensor(z_actual, device=device, dtype=dtype)
+                dataset = torch.utils.data.TensorDataset(x_sample, z_actual_tensor)
                 dataloader = torch.utils.data.DataLoader(
                     dataset, batch_size=self.batch_size, shuffle=True
                 )
@@ -1737,8 +2014,7 @@ class DDFM(BaseFactorModel):
                 # Train for 1 epoch
                 self.encoder.train()
                 self.decoder.train()
-                # Create optimizer directly (don't use configure_optimizers() here as it's a Lightning hook)
-                optimizer = self._create_optimizer()
+                # Optimizer is created once per MCMC iteration and reused across MC samples
                 
                 for batch_data, batch_target in dataloader:
                     optimizer.zero_grad()
@@ -1751,6 +2027,11 @@ class DDFM(BaseFactorModel):
                     squared_diff = (target_clean - reconstructed_masked) ** 2
                     loss = torch.sum(squared_diff) / (torch.sum(mask) + 1e-8)
                     loss.backward()
+                    # Gradient clipping to prevent NaN and improve stability
+                    torch.nn.utils.clip_grad_norm_(
+                        list(self.encoder.parameters()) + list(self.decoder.parameters()),
+                        max_norm=1.0
+                    )
                     optimizer.step()
                 # Extract factors from this sample
                 x_sample_tensor = torch.tensor(x_sim_den[i, :, :], device=device, dtype=dtype)
@@ -1921,6 +2202,33 @@ class DDFM(BaseFactorModel):
         # Extract decoder parameters (C, bias)
         C, bias = extract_decoder_params(self.decoder)
         
+        # Log decoder weight statistics for monitoring and debugging
+        C_mean = np.mean(C)
+        C_std = np.std(C)
+        C_min = np.min(C)
+        C_max = np.max(C)
+        C_nonzero = np.count_nonzero(C)
+        C_zero_ratio = 1.0 - (C_nonzero / C.size)
+        _logger.info(
+            f"DDFM get_result: C matrix statistics - mean={C_mean:.6f}, std={C_std:.6f}, "
+            f"min={C_min:.6f}, max={C_max:.6f}, nonzero={C_nonzero}/{C.size} ({1.0-C_zero_ratio:.1%}), "
+            f"zero_ratio={C_zero_ratio:.1%}"
+        )
+        
+        # Validate C matrix for NaN (extract_decoder_params should handle this, but double-check)
+        if np.any(np.isnan(C)):
+            nan_count = np.sum(np.isnan(C))
+            nan_ratio = nan_count / C.size
+            _logger.error(
+                f"DDFM get_result: C matrix contains {nan_count}/{C.size} NaN values ({nan_ratio:.1%}) "
+                f"after extraction. This indicates severe numerical instability. "
+                f"The model cannot be used for prediction. Consider: (1) reducing learning rate, "
+                f"(2) adding gradient clipping, (3) checking data quality, (4) reducing model complexity."
+            )
+            # Replace NaN with zeros as last resort (model will not work correctly)
+            C = np.nan_to_num(C, nan=0.0)
+            _logger.warning("Replaced NaN values in C matrix with zeros (model may not work correctly).")
+        
         # Get factors and prediction
         factors = self.training_state.factors  # T x num_factors
         prediction_iter = self.training_state.prediction  # T x N
@@ -2035,7 +2343,10 @@ class DDFM(BaseFactorModel):
         # Always run fit_mcmc() if training_state is None (first training run)
         # This ensures MCMC training happens even if encoder/decoder were already initialized
         if self.training_state is None:
-            # Handle missing data
+            # Handle missing data (NaN values)
+            # DDFM can handle NaN implicitly via state-space model, but for MCMC training
+            # we use imputation to provide clean initial data. The MCMC procedure will
+            # then handle missing data through the idiosyncratic component estimation.
             # Use method=1 (fill without trimming) to preserve data size for test compatibility
             # Method 1 fills missing values using spline interpolation + moving average without trimming rows
             # This ensures result shape matches data_module.data_processed.shape[0] as expected by tests
@@ -2043,36 +2354,79 @@ class DDFM(BaseFactorModel):
             # Note: nan_method and nan_k are internal parameters for missing data handling
             nan_method = safe_get_attr(self.config, 'nan_method', 1)
             nan_k = safe_get_attr(self.config, 'nan_k', 3)
-            x_clean, missing_mask = rem_nans_spline(
-                X_torch.cpu().numpy() if isinstance(X_torch, torch.Tensor) else X_torch,
-                method=nan_method,
-                k=nan_k
-            )
-            x_clean_torch = torch.tensor(x_clean, dtype=torch.float32, device=X_torch.device)
             
-            # Ensure missing_mask shape matches x_clean shape
+            # Check if data has NaN values
+            if isinstance(X_torch, torch.Tensor):
+                has_nan = torch.any(torch.isnan(X_torch)).item()
+                X_np = X_torch.cpu().numpy()
+            else:
+                has_nan = np.any(np.isnan(X_torch))
+                X_np = X_torch
+            
+            if has_nan:
+                _logger.info(
+                    f"DDFM on_train_start: NaN values detected in training data. "
+                    f"Using imputation (method={nan_method}) for MCMC initialization. "
+                    f"DDFM will handle remaining missing data through state-space model."
+                )
+                x_clean_np, missing_mask = rem_nans_spline(
+                    X_np,
+                    method=nan_method,
+                    k=nan_k
+                )
+                x_clean_torch = torch.tensor(x_clean_np, dtype=torch.float32, device=X_torch.device)
+            else:
+                # No NaN values - use data as-is
+                x_clean_torch = X_torch if isinstance(X_torch, torch.Tensor) else torch.tensor(X_torch, dtype=torch.float32, device=X_torch.device)
+                missing_mask = np.zeros(X_np.shape, dtype=bool)  # No missing data
+            
+            # Replace any remaining NaN/Inf with zeros (defensive check)
+            device = x_clean_torch.device
+            dtype = x_clean_torch.dtype
+            x_clean_torch = torch.where(
+                torch.isfinite(x_clean_torch),
+                x_clean_torch,
+                torch.tensor(0.0, device=device, dtype=dtype)
+            )
+            
+            # Ensure missing_mask shape matches x_clean_torch shape
             # This is critical for boolean indexing in fit_mcmc()
             # If shapes don't match (shouldn't happen with method=1, but defensive check),
-            # adjust missing_mask to match x_clean shape
-            if missing_mask.shape != x_clean.shape:
+            # adjust missing_mask to match x_clean_torch shape
+            if missing_mask.shape != x_clean_torch.shape:
                 _logger.warning(
                     f"DDFM on_train_start: missing_mask shape {missing_mask.shape} doesn't match "
-                    f"x_clean shape {x_clean.shape}. Adjusting missing_mask to match x_clean."
+                    f"x_clean_torch shape {x_clean_torch.shape}. Adjusting missing_mask to match x_clean_torch."
                 )
-                # If x_clean is smaller, truncate missing_mask
-                if missing_mask.shape[0] > x_clean.shape[0]:
-                    missing_mask = missing_mask[:x_clean.shape[0], :]
-                # If x_clean is larger, pad missing_mask with False (no missing data)
-                elif missing_mask.shape[0] < x_clean.shape[0]:
-                    pad_rows = x_clean.shape[0] - missing_mask.shape[0]
+                # If x_clean_torch is smaller, truncate missing_mask
+                if missing_mask.shape[0] > x_clean_torch.shape[0]:
+                    missing_mask = missing_mask[:x_clean_torch.shape[0], :]
+                # If x_clean_torch is larger, pad missing_mask with False (no missing data)
+                elif missing_mask.shape[0] < x_clean_torch.shape[0]:
+                    pad_rows = x_clean_torch.shape[0] - missing_mask.shape[0]
                     missing_mask = np.vstack([missing_mask, np.zeros((pad_rows, missing_mask.shape[1]), dtype=bool)])
                 # Adjust columns if needed
-                if missing_mask.shape[1] != x_clean.shape[1]:
-                    if missing_mask.shape[1] > x_clean.shape[1]:
-                        missing_mask = missing_mask[:, :x_clean.shape[1]]
+                if missing_mask.shape[1] != x_clean_torch.shape[1]:
+                    if missing_mask.shape[1] > x_clean_torch.shape[1]:
+                        missing_mask = missing_mask[:, :x_clean_torch.shape[1]]
                     else:
-                        pad_cols = x_clean.shape[1] - missing_mask.shape[1]
+                        pad_cols = x_clean_torch.shape[1] - missing_mask.shape[1]
                         missing_mask = np.hstack([missing_mask, np.zeros((missing_mask.shape[0], pad_cols), dtype=bool)])
+            
+            # Pre-train autoencoder on non-missing data (matching original DDFM)
+            # This provides stable initialization before MCMC training
+            try:
+                self.pre_train(
+                    X=x_clean_torch,
+                    x_clean=x_clean_torch,
+                    missing_mask=missing_mask,
+                    device=x_clean_torch.device,
+                )
+            except Exception as e:
+                _logger.warning(
+                    f"DDFM pre_train failed: {e}. Continuing with MCMC training without pre-training. "
+                    f"This may lead to less stable training."
+                )
             
             # Run MCMC training
             # Pass x_clean_torch as X to ensure all data arrays have consistent shape

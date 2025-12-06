@@ -62,7 +62,7 @@ def setup_logging(
 ) -> None:
     """Setup package-wide logging configuration.
     
-    This is an alias for configure_logging() for backward compatibility.
+    Alias for configure_logging().
     
     Parameters
     ----------

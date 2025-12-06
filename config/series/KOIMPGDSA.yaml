@@ -9,7 +9,6 @@ transformation: chg
 units: $, Millions
 category: Int. trade
 release: 1
-scaler: standard
 impute: null
 block:
 - Block_Global

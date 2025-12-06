@@ -9,7 +9,6 @@ transformation: chg
 units: Percent, Annual
 category: Finance
 release: 30
-scaler: standard
 impute: null
 block:
 - Block_Global

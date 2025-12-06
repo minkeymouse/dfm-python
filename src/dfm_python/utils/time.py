@@ -424,7 +424,7 @@ def find_time_index(
                 elif hasattr(t, 'to_pydatetime'):
                     t = t.to_pydatetime()
                 elif hasattr(t, 'to_python'):
-                    t = t.to_python()  # Backward compatibility for other types
+                    t = t.to_python()
                 else:
                     t = parse_timestamp(t)
             except (ValueError, TypeError, AttributeError):
@@ -486,7 +486,7 @@ def convert_to_timestamp(
             elif hasattr(result, 'to_pydatetime'):
                 return result.to_pydatetime()
             elif hasattr(result, 'to_python'):
-                return result.to_python()  # Backward compatibility
+                return result.to_python()
             else:
                 return to_python_datetime(result)
         else:
@@ -541,7 +541,7 @@ def get_latest_time(
             elif hasattr(latest, 'to_pydatetime'):
                 return latest.to_pydatetime()
             elif hasattr(latest, 'to_python'):
-                return latest.to_python()  # Backward compatibility
+                return latest.to_python()
             else:
                 return to_python_datetime(latest)
         except (IndexError, KeyError, TypeError):

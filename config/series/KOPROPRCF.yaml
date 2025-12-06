@@ -9,7 +9,6 @@ transformation: chg
 units: Index
 category: Price
 release: 20
-scaler: standard
 impute: null
 block:
 - Block_Global

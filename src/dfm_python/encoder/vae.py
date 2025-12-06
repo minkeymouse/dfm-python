@@ -454,6 +454,21 @@ def extract_decoder_params(decoder) -> Tuple[np.ndarray, np.ndarray]:
     # Decoder weight is already (N x m), so no transpose needed
     C = weight
     
+    # Check for NaN in extracted C matrix (indicates numerical instability during training)
+    if np.any(np.isnan(C)):
+        nan_count = np.sum(np.isnan(C))
+        nan_ratio = nan_count / C.size
+        from ..logger import get_logger
+        _logger = get_logger(__name__)
+        _logger.warning(
+            f"extract_decoder_params: C matrix contains {nan_count}/{C.size} NaN values ({nan_ratio:.1%}). "
+            f"This indicates the decoder weights contain NaN, likely due to numerical instability during training. "
+            f"Possible causes: (1) learning rate too high, (2) gradient explosion, (3) unstable training."
+        )
+        # Replace NaN with zeros to prevent further issues
+        C = np.nan_to_num(C, nan=0.0)
+        _logger.warning("Replaced NaN values in C matrix with zeros.")
+    
     return C, bias
 
 

@@ -9,7 +9,6 @@ transformation: chg
 units: Index
 category: Production
 release: 30
-scaler: standard
 impute: null
 block:
 - Block_Global

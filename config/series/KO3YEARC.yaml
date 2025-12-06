@@ -7,7 +7,6 @@ series_name: Corporate 3YR, AA-, Spread
 frequency: m
 transformation: chg
 release: 1
-scaler: standard
 impute: null
 units: Percent, Annual
 category: Finance

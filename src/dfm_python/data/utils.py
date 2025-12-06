@@ -209,7 +209,7 @@ def load_data(
     Time : TimeIndex
         Time index for the data (aligned to clock frequency)
     Z : np.ndarray
-        Original untransformed data (T x N), same as X (for backward compatibility)
+        Original untransformed data (T x N), same as X
         
     Raises
     ------

@@ -63,7 +63,7 @@ class ScalingStrategy(Protocol):
         class MyScalingStrategy:
             def get_scaler(self, series: SeriesConfig, series_index: int, 
                           column_name: str) -> Optional[str]:
-                # Custom logic (not recommended - use unified scaling instead)
+                # Custom logic (unified scaling is typically preferred)
                 if 'volatility' in column_name.lower():
                     return 'robust'
                 elif 'return' in column_name.lower():
@@ -191,23 +191,25 @@ def create_scaling_transformer_from_config(
     strategy: Optional[ScalingStrategy] = None,
     column_names: Optional[List[str]] = None
 ) -> Any:
-    """Create a unified scaling transformer (StandardScaler for all series).
+    """Create a unified scaling transformer from model-level scaler configuration.
     
-    This function returns a raw sklearn StandardScaler that can be used directly
-    in TransformerPipeline. Per sktime docs, sklearn transformers are automatically
-    applied per series instance when used in TransformerPipeline.
+    This function returns a raw sklearn scaler (StandardScaler, RobustScaler, etc.)
+    that can be used directly in TransformerPipeline. Per sktime docs, sklearn 
+    transformers are automatically applied per series instance when used in 
+    TransformerPipeline.
     
-    **Default behavior**: Unified scaling (StandardScaler for all series) is the
-    recommended approach for factor models as it ensures all series contribute
-    proportionally to factor extraction.
+    **Unified scaling**: The scaler type is now specified at the model level
+    (in model config YAML) rather than per-series. This ensures all series use
+    the same scaling method, which is the recommended approach for factor models
+    as it ensures all series contribute proportionally to factor extraction.
     
     Parameters
     ----------
     config : DFMConfig
-        DFM configuration containing series definitions (used for validation)
+        DFM configuration containing model-level scaler setting (config.scaler).
+        The scaler type is read from config.scaler (default: 'standard').
     strategy : Optional[ScalingStrategy], default None
-        Custom scaling strategy. If None, uses DefaultScalingStrategy which
-        returns 'standard' for unified scaling.
+        Custom scaling strategy. If None, uses the scaler type from config.scaler.
     column_names : Optional[List[str]], default None
         Column names in data (used for validation). If None, uses
         config.get_series_ids().
@@ -215,9 +217,9 @@ def create_scaling_transformer_from_config(
     Returns
     -------
     Any
-        Raw sklearn StandardScaler (can be used directly in TransformerPipeline).
-        Per sktime docs, sklearn transformers are applied per series instance
-        automatically when used in TransformerPipeline.
+        Raw sklearn scaler (StandardScaler, RobustScaler, etc.) that can be used
+        directly in TransformerPipeline. Per sktime docs, sklearn transformers
+        are applied per series instance automatically when used in TransformerPipeline.
         
     Examples
     --------
@@ -265,21 +267,25 @@ def create_scaling_transformer_from_config(
     """
     _check_sklearn()
     
-    if strategy is None:
-        strategy = DefaultScalingStrategy()
-    
-    # Get scaler type from strategy (default: 'standard' for unified scaling)
-    # For unified scaling, all series use the same scaler
-    if len(config.series) > 0:
-        first_series = config.series[0]
-        first_column_name = config.get_series_ids()[0] if config.series else "series_0"
-        scaler_type = strategy.get_scaler(first_series, 0, first_column_name)
+    # Get scaler type from model-level config (config.scaler)
+    # Unified scaling: all series use the same scaler specified at model level
+    if hasattr(config, 'scaler') and config.scaler is not None:
+        scaler_type = config.scaler
+    elif strategy is not None:
+        # Fallback to strategy if config.scaler not available
+        if len(config.series) > 0:
+            first_series = config.series[0]
+            first_column_name = config.get_series_ids()[0] if config.series else "series_0"
+            scaler_type = strategy.get_scaler(first_series, 0, first_column_name)
+        else:
+            scaler_type = 'standard'
     else:
-        scaler_type = 'standard'  # Default if no series
+        # Default to 'standard' for unified scaling
+        scaler_type = 'standard'
     
     # Return raw sklearn scaler (works directly in TransformerPipeline per sktime docs)
     # Per sktime: sklearn transformers are applied per series instance automatically
-    if scaler_type is None:
+    if scaler_type is None or scaler_type == 'null':
         # No scaling - return passthrough
         from sktime.transformations.series.func_transform import FunctionTransformer
         return FunctionTransformer(func=lambda x: x, inverse_func=lambda x: x)

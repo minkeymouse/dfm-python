@@ -9,7 +9,6 @@ transformation: cha
 units: Chained W, Billions
 category: Macro
 release: 25
-scaler: standard
 impute: null
 block:
 - Block_Global

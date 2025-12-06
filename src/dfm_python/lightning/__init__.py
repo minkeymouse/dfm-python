@@ -28,15 +28,14 @@ from .scaling import (
 )
 
 # DFMTrainingState is defined in models.dfm and exported here for convenience
-# Note: dfm_module.py has been removed - DFM class implements EM directly
 from ..models.dfm import DFMTrainingState
 
 __all__ = [
     # Kalman filter
-    'KalmanFilter',  # New module class
+    'KalmanFilter',
     'KalmanFilterState',
     # EM algorithm
-    'EMAlgorithm',  # New module class
+    'EMAlgorithm',
     'EMStepParams',
     # Data handling
     'DFMDataModule',
@@ -50,7 +49,5 @@ __all__ = [
     'NoScalingStrategy',
     # Training state (defined in models.dfm)
     'DFMTrainingState',
-    # DDFMLightningModule removed: deprecated and unused (DDFM uses DDFMModel directly)
-    # DDFMTrainingState removed: duplicate (also defined in models.ddfm)
 ]
 

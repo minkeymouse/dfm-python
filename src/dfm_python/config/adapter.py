@@ -214,8 +214,7 @@ class YamlSource:
                         frequency=series_data.get('frequency', 'm'),
                         transformation=series_data.get('transformation', 'lin'),
                         blocks=series_data.get('blocks', []),
-                        release_date=release_date,
-                        scaler=series_data.get('scaler', None)  # Optional, for per-series scaling
+                        release_date=release_date
                     ))
         
         # If no series loaded from separate files, try to get from main config

@@ -207,13 +207,39 @@ class EMAlgorithm(nn.Module):
             sum_EZZ_reg = sum_EZZ + torch.eye(m, device=device, dtype=dtype) * reg_scale
             C_new = torch.linalg.solve(sum_EZZ_reg.T, sum_yEZ.T).T
             
+            # Check for NaN in C_new after solve (indicates numerical instability)
+            if torch.any(torch.isnan(C_new)):
+                nan_count = torch.sum(torch.isnan(C_new)).item()
+                nan_ratio = nan_count / C_new.numel()
+                _logger.warning(
+                    f"EM algorithm: C matrix contains {nan_count}/{C_new.numel()} NaN values ({nan_ratio:.1%}) "
+                    f"after solve operation. This indicates numerical instability. "
+                    f"Possible causes: singular matrix, extreme values, or insufficient regularization."
+                )
+                # Set NaN columns to zero instead of leaving them as NaN
+                nan_cols = torch.any(torch.isnan(C_new), dim=0)
+                if torch.any(nan_cols):
+                    C_new[:, nan_cols] = 0.0
+                    _logger.warning(f"Set {torch.sum(nan_cols).item()} NaN columns in C matrix to zero.")
+            
             # Normalize C columns (factor loadings)
             for j in range(m):
                 norm = torch.linalg.norm(C_new[:, j])
                 if norm > 1e-8:
                     C_new[:, j] = C_new[:, j] / norm
-        except (RuntimeError, ValueError):
+                elif norm < 1e-8:
+                    # Very small norm: set column to zero to avoid division issues
+                    C_new[:, j] = 0.0
+                    _logger.debug(f"C matrix column {j} has very small norm ({norm:.2e}), set to zero.")
+        except (RuntimeError, ValueError) as e:
+            _logger.warning(f"EM algorithm: Error updating C matrix: {e}. Keeping previous C matrix.")
             C_new = params.C.clone()
+            # Check if previous C also contains NaN
+            if torch.any(torch.isnan(C_new)):
+                _logger.error(
+                    f"EM algorithm: Previous C matrix also contains NaN. "
+                    f"This indicates the model cannot be trained with current data/parameters."
+                )
         
         # Update Q (process noise covariance): residual covariance from transition
         if T > 1:
@@ -296,6 +322,51 @@ class EMAlgorithm(nn.Module):
         # Update Z_0 and V_0 (use first smoothed state)
         Z_0_new = Zsmooth[0, :]  # Initial state
         V_0_new = Vsmooth[:, :, 0]  # Initial covariance
+        
+        # Check for NaN in all updated parameters before returning
+        params_to_check = {
+            'C': C_new,
+            'A': A_new,
+            'Q': Q_new,
+            'R': R_new,
+            'Z_0': Z_0_new,
+            'V_0': V_0_new
+        }
+        
+        nan_detected = False
+        for param_name, param_tensor in params_to_check.items():
+            if torch.any(torch.isnan(param_tensor)):
+                nan_count = torch.sum(torch.isnan(param_tensor)).item()
+                nan_ratio = nan_count / param_tensor.numel()
+                _logger.warning(
+                    f"EM algorithm: {param_name} matrix contains {nan_count}/{param_tensor.numel()} NaN values "
+                    f"({nan_ratio:.1%}) after M-step. This indicates numerical instability."
+                )
+                nan_detected = True
+                # Replace NaN with previous value or zero
+                if param_name == 'C':
+                    # For C, we already handled NaN above, but check again
+                    if torch.any(torch.isnan(C_new)):
+                        C_new = torch.nan_to_num(C_new, nan=0.0)
+                elif param_name == 'A':
+                    A_new = torch.nan_to_num(A_new, nan=0.0)
+                elif param_name == 'Q':
+                    Q_new = torch.nan_to_num(Q_new, nan=params.Q.clone())
+                elif param_name == 'R':
+                    R_new = torch.nan_to_num(R_new, nan=params.R.clone())
+                elif param_name == 'Z_0':
+                    Z_0_new = torch.nan_to_num(Z_0_new, nan=params.Z_0.clone())
+                elif param_name == 'V_0':
+                    V_0_new = torch.nan_to_num(V_0_new, nan=params.V_0.clone())
+        
+        if nan_detected:
+            _logger.error(
+                "EM algorithm: NaN detected in parameter updates. "
+                "This usually indicates: (1) singular matrix in solve operations, "
+                "(2) extreme data values, (3) insufficient regularization, or "
+                "(4) numerical precision issues. Consider increasing regularization_scale "
+                "or checking data quality."
+            )
         
         # Ensure V_0 is positive definite
         # Ensure V_0 is positive definite with robust eigenvalue computation

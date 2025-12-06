@@ -394,6 +394,25 @@ class DFM(BaseFactorModel):
             # Perform EM step - use self.em(...) instead of em_step(...)
             C_new, R_new, A_new, Q_new, Z_0_new, V_0_new, loglik = self.em(em_params)
             
+            # Check for NaN in updated parameters (early stopping for numerical instability)
+            nan_detected = False
+            if torch.any(torch.isnan(C_new)) or torch.any(torch.isnan(A_new)) or \
+               torch.any(torch.isnan(Q_new)) or torch.any(torch.isnan(R_new)) or \
+               torch.any(torch.isnan(Z_0_new)) or torch.any(torch.isnan(V_0_new)) or \
+               (isinstance(loglik, float) and (np.isnan(loglik) or np.isinf(loglik))):
+                nan_detected = True
+                _logger.error(
+                    f"EM algorithm: NaN/Inf detected in parameters at iteration {num_iter + 1}. "
+                    f"Stopping early to prevent further numerical instability. "
+                    f"C NaN: {torch.any(torch.isnan(C_new)).item()}, "
+                    f"A NaN: {torch.any(torch.isnan(A_new)).item()}, "
+                    f"Q NaN: {torch.any(torch.isnan(Q_new)).item()}, "
+                    f"R NaN: {torch.any(torch.isnan(R_new)).item()}, "
+                    f"loglik: {loglik}"
+                )
+                # Don't update parameters if NaN detected - keep previous values
+                break
+            
             # Update parameters
             with torch.no_grad():
                 self.A.data = A_new

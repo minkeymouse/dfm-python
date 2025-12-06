@@ -279,7 +279,3 @@ def extract_news(
         'revision_impact': float(total_impact),  # Placeholder: returns total_impact
         'release_impact': 0.0  # Placeholder: returns 0.0
     }
-
-
-# Backward compatibility aliases removed - use direct function names
-

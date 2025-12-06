@@ -9,7 +9,6 @@ transformation: chg
 units: Percent
 category: Labor
 release: 11
-scaler: standard
 impute: null
 block:
 - Block_Global

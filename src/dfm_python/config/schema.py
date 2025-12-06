@@ -200,11 +200,6 @@ class SeriesConfig:
         - Positive value (1-31): Day of month when data is released
         - Negative value: Days before end of previous month when data is released
         Example: 25 = released on 25th of each month, -5 = released 5 days before end of previous month
-    scaler : str, optional
-        Scaler type for this series: 'standard', 'robust', 'minmax', 'maxabs', 
-        'quantile', or None/null (no scaling). Used by create_scaling_transformer_from_config()
-        to automatically create per-series scaling transformers. If None, uses default
-        scaling strategy (typically 'standard').
     """
     # Required fields (no defaults)
     frequency: str
@@ -215,7 +210,6 @@ class SeriesConfig:
     series_name: Optional[str] = None  # Optional metadata for display
     units: Optional[str] = None  # Optional metadata for display only (used in news.py output)
     release_date: Optional[int] = None  # Release date for pseudo real-time nowcasting
-    scaler: Optional[str] = None  # Scaler type: 'standard', 'robust', 'minmax', 'maxabs', 'quantile', or None
     
     def __post_init__(self):
         """Validate fields after initialization."""
@@ -308,6 +302,7 @@ class BaseModelConfig:
     nan_method: int = 2  # Missing data handling method (1-5). Preprocessing step before Kalman Filter-based handling
     nan_k: int = 3  # Spline parameter for NaN interpolation (cubic spline)
     clock: str = 'm'  # Base frequency for nowcasting (global clock): 'd', 'w', 'm', 'q', 'sa', 'a' (defaults to 'm' for monthly)
+    scaler: Optional[str] = 'standard'  # Unified scaler type for all series: 'standard', 'robust', 'minmax', 'maxabs', 'quantile', or None (no scaling). Default: 'standard' for unified scaling.
     
     # ========================================================================
     # Internal cache (not user-configurable)
@@ -660,6 +655,7 @@ class DFMConfig(BaseModelConfig):
             'nan_method': data.get('nan_method', 2),
             'nan_k': data.get('nan_k', 3),
             'clock': data.get('clock', 'm'),
+            'scaler': data.get('scaler', 'standard'),  # Unified scaler for all series (default: 'standard')
         }
     
     @classmethod
@@ -716,11 +712,11 @@ class DDFMConfig(BaseModelConfig):
     # ========================================================================
     encoder_layers: Optional[List[int]] = None  # Hidden layer dimensions for encoder (default: [64, 32])
     num_factors: Optional[int] = None  # Number of factors (inferred from config if None)
-    activation: str = 'tanh'  # Activation function ('tanh', 'relu', 'sigmoid', default: 'tanh')
+    activation: str = 'relu'  # Activation function ('tanh', 'relu', 'sigmoid', default: 'relu' to match original DDFM)
     use_batch_norm: bool = True  # Use batch normalization in encoder (default: True)
     learning_rate: float = 0.001  # Learning rate for Adam optimizer (default: 0.001)
     epochs: int = 100  # Number of training epochs (default: 100)
-    batch_size: int = 32  # Batch size for training (default: 32)
+    batch_size: int = 100  # Batch size for training (default: 100 to match original DDFM)
     factor_order: int = 1  # VAR lag order for factor dynamics (1 or 2, default: 1)
     use_idiosyncratic: bool = True  # Model idio components with AR(1) dynamics (default: True)
     min_obs_idio: int = 5  # Minimum observations for idio AR(1) estimation (default: 5)
@@ -750,15 +746,15 @@ class DDFMConfig(BaseModelConfig):
     def _extract_ddfm(cls, data: Dict[str, Any]) -> Dict[str, Any]:
         """Extract DDFM-specific parameters from config dict."""
         base_params = cls._extract_base(data)
-        # Handle both direct keys and ddfm_ prefix format (for backward compatibility)
+        # Handle both direct keys and ddfm_ prefix format
         base_params.update({
             'encoder_layers': data.get('encoder_layers') or data.get('ddfm_encoder_layers', None),
             'num_factors': data.get('num_factors') or data.get('ddfm_num_factors', None),
-            'activation': data.get('activation') or data.get('ddfm_activation', 'tanh'),
+            'activation': data.get('activation') or data.get('ddfm_activation', 'relu'),
             'use_batch_norm': data.get('use_batch_norm', data.get('ddfm_use_batch_norm', True)),
             'learning_rate': data.get('learning_rate', data.get('ddfm_learning_rate', 0.001)),
             'epochs': data.get('epochs', data.get('ddfm_epochs', 100)),
-            'batch_size': data.get('batch_size', data.get('ddfm_batch_size', 32)),
+            'batch_size': data.get('batch_size', data.get('ddfm_batch_size', 100)),
             'factor_order': data.get('factor_order', data.get('ddfm_factor_order', 1)),
             'use_idiosyncratic': data.get('use_idiosyncratic', data.get('ddfm_use_idiosyncratic', True)),
             'min_obs_idio': data.get('min_obs_idio', data.get('ddfm_min_obs_idio', 5)),
@@ -832,8 +828,7 @@ class DDFMConfig(BaseModelConfig):
                     transformation=series_cfg.get('transformation', 'lin'),
                     blocks=series_blocks,
                     units=series_cfg.get('units', None),  # Optional, for display only
-                    release_date=series_cfg.get('release_date', None),  # Optional, for nowcasting
-                    scaler=series_cfg.get('scaler', None)  # Optional, for per-series scaling
+                    release_date=series_cfg.get('release_date', None)  # Optional, for nowcasting
                 ))
         
         # Convert blocks_dict to dict of block properties

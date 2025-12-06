@@ -32,7 +32,7 @@ class DFMTrainer(pl.Trainer):
         - max_epochs: 100 (EM iterations)
         - enable_progress_bar: True
         - enable_model_summary: False (DFM modules are simple, usually not needed)
-        - logger: False (no logging by default)
+        - logger: True (uses CSVLogger, creates lightning_logs/dfm/ folder)
         - accelerator: 'auto'
         - devices: 'auto'
         - precision: 32
@@ -48,7 +48,7 @@ class DFMTrainer(pl.Trainer):
         Whether to show progress bar during training
     enable_model_summary : bool, default False
         Whether to print model summary (DFM modules are simple, usually not needed)
-    logger : bool or Logger, default False
+    logger : bool or Logger, default True
         Whether to use a logger. Can be False, True (uses CSVLogger), or a Logger instance
     callbacks : List[Callback], optional
         Additional callbacks beyond defaults
@@ -77,7 +77,7 @@ class DFMTrainer(pl.Trainer):
             max_epochs: int = 100,
             enable_progress_bar: bool = True,
             enable_model_summary: bool = False,
-            logger: Optional[Any] = False,
+            logger: Optional[Any] = True,
             callbacks: Optional[List[Any]] = None,
             accelerator: str = 'auto',
             devices: Any = 'auto',

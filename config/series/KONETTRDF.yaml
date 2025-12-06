@@ -9,7 +9,6 @@ transformation: chg
 units: Index
 category: Int. trade
 release: 14
-scaler: standard
 impute: null
 block:
 - Block_Global

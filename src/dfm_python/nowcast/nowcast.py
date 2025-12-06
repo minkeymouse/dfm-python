@@ -808,7 +808,7 @@ class Nowcast:
         view_date_new : datetime or str
             Newer data view date (contains additional data releases)
         return_dict : bool, default False
-            If True, returns dictionary (for backward compatibility).
+            If True, returns dictionary format.
             If False, returns NewsDecompResult dataclass.
             
         Returns
@@ -885,7 +885,7 @@ class Nowcast:
             )
             
             if return_dict:
-                # Return dictionary for backward compatibility
+                # Return dictionary format
                 return {
                     'y_old': news_result.y_old,
                     'y_new': news_result.y_new,

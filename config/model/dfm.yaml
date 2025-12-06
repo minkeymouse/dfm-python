@@ -38,3 +38,4 @@ nan_method: 2
 regularization_scale: 1.0e-05
 threshold: 1.0e-05
 use_regularization: true
+scaler: standard  # Unified scaler for all series: 'standard', 'robust', 'minmax', 'maxabs', 'quantile', or null (no scaling)

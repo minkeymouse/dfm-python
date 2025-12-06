@@ -11,10 +11,13 @@ RuntimeError for near-singular matrices (e.g., "cholesky_cpu: U(0,0) is zero" or
 "inverse_cuda: singular matrix").
 """
 
-import torch
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 import logging
 
+if TYPE_CHECKING:
+    import torch
+
+import torch
 from ..logger import get_logger
 
 _logger = get_logger(__name__)
@@ -27,7 +30,7 @@ DEFAULT_MIN_DIAGONAL_VARIANCE = 1e-6
 DEFAULT_INV_REGULARIZATION = 1e-6
 
 
-def check_finite(tensor: torch.Tensor, name: str = "tensor") -> bool:
+def check_finite(tensor: "torch.Tensor", name: str = "tensor") -> bool:
     """Check if tensor contains only finite values.
     
     Parameters
@@ -60,7 +63,7 @@ def check_finite(tensor: torch.Tensor, name: str = "tensor") -> bool:
     return True
 
 
-def ensure_real(tensor: torch.Tensor) -> torch.Tensor:
+def ensure_real(tensor: "torch.Tensor") -> "torch.Tensor":
     """Ensure tensor is real by extracting real part if complex.
     
     Parameters
@@ -78,7 +81,7 @@ def ensure_real(tensor: torch.Tensor) -> torch.Tensor:
     return tensor
 
 
-def ensure_symmetric(tensor: torch.Tensor) -> torch.Tensor:
+def ensure_symmetric(tensor: "torch.Tensor") -> "torch.Tensor":
     """Ensure matrix is symmetric by averaging with its transpose.
     
     Parameters
@@ -94,7 +97,7 @@ def ensure_symmetric(tensor: torch.Tensor) -> torch.Tensor:
     return 0.5 * (tensor + tensor.T)
 
 
-def ensure_real_and_symmetric(tensor: torch.Tensor) -> torch.Tensor:
+def ensure_real_and_symmetric(tensor: "torch.Tensor") -> "torch.Tensor":
     """Ensure matrix is real and symmetric.
     
     Parameters
@@ -113,10 +116,10 @@ def ensure_real_and_symmetric(tensor: torch.Tensor) -> torch.Tensor:
 
 
 def ensure_positive_definite(
-    M: torch.Tensor, 
+    M: "torch.Tensor", 
     min_eigenval: float = DEFAULT_MIN_EIGENVAL, 
     warn: bool = True
-) -> torch.Tensor:
+) -> "torch.Tensor":
     """Ensure matrix is positive semi-definite by adding regularization if needed.
     
     Parameters
@@ -164,10 +167,10 @@ def ensure_positive_definite(
 
 
 def ensure_covariance_stable(
-    M: torch.Tensor, 
+    M: "torch.Tensor", 
     min_eigenval: float = DEFAULT_MIN_EIGENVAL,
     ensure_real: bool = True
-) -> torch.Tensor:
+) -> "torch.Tensor":
     """Ensure covariance matrix is real, symmetric, and positive semi-definite.
     
     Parameters
@@ -199,13 +202,13 @@ def ensure_covariance_stable(
 
 
 def clean_matrix(
-    M: torch.Tensor, 
+    M: "torch.Tensor", 
     matrix_type: str = 'general', 
     default_nan: float = 0.0, 
     default_inf: Optional[float] = None,
     min_eigenval: float = DEFAULT_MIN_EIGENVAL,
     min_diagonal_variance: float = DEFAULT_MIN_DIAGONAL_VARIANCE
-) -> torch.Tensor:
+) -> "torch.Tensor":
     """Clean matrix by removing NaN/Inf values and ensuring numerical stability.
     
     Parameters
@@ -255,10 +258,10 @@ def clean_matrix(
 
 
 def safe_inverse(
-    M: torch.Tensor,
+    M: "torch.Tensor",
     regularization: float = DEFAULT_INV_REGULARIZATION,
     use_pinv_fallback: bool = True
-) -> torch.Tensor:
+) -> "torch.Tensor":
     """Safely compute matrix inverse with robust error handling.
     
     This function implements a progressive fallback strategy for matrix inversion:
@@ -303,7 +306,7 @@ def safe_inverse(
                 raise RuntimeError(f"Matrix inversion failed and pinv fallback disabled: {e}")
 
 
-def safe_determinant(M: torch.Tensor, use_logdet: bool = True) -> float:
+def safe_determinant(M: "torch.Tensor", use_logdet: bool = True) -> float:
     """Compute determinant safely to avoid overflow warnings.
     
     Parameters

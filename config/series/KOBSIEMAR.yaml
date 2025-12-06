@@ -9,7 +9,6 @@ transformation: chg
 units: Index
 category: Survey, Bsnss
 release: -5
-scaler: standard
 impute: null
 block:
 - Block_Global

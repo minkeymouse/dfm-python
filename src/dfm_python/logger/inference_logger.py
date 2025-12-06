@@ -207,7 +207,7 @@ class InferenceLogger:
             _logger.info("")
 
 
-# Convenience functions for backward compatibility and simpler usage
+# Convenience functions for simpler usage
 
 def log_inference_start(
     model_name: str = "DFM",

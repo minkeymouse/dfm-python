@@ -101,7 +101,7 @@ def create_dfm_dataloader(
 
 def create_ddfm_dataloader(
     dataset: DDFMDataset,
-    batch_size: int = 32,
+    batch_size: int = 100,
     shuffle: bool = True,
     num_workers: int = 0,
     pin_memory: bool = True
@@ -115,8 +115,8 @@ def create_ddfm_dataloader(
     ----------
     dataset : DDFMDataset
         DDFM dataset instance with windowed sequences
-    batch_size : int, default 32
-        Batch size for training
+    batch_size : int, default 100
+        Batch size for training (matches original DDFM)
     shuffle : bool, default True
         Whether to shuffle samples (typically True for training)
     num_workers : int, default 0

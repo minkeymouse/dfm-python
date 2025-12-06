@@ -9,7 +9,6 @@ transformation: chg
 units: Index
 category: Investment
 release: 31
-scaler: standard
 impute: null
 block:
 - Block_Global

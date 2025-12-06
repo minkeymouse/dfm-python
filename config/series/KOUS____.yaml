@@ -9,7 +9,6 @@ transformation: chg
 units: KRW per 1 USD
 category: Finance
 release: 1
-scaler: standard
 impute: null
 block:
 - Block_Global

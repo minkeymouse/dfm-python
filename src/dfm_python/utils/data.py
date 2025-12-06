@@ -4,11 +4,14 @@ This module provides functions for reading, sorting, transforming, and loading t
 for Dynamic Factor Model estimation.
 """
 
-from typing import List, Optional, Tuple, Union, Any, Dict
+from typing import List, Optional, Tuple, Union, Any, Dict, TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
 from datetime import datetime
+
+if TYPE_CHECKING:
+    import torch
 
 try:
     import torch
@@ -204,7 +207,7 @@ def rem_nans_spline(X: np.ndarray, method: int = 2, k: int = 3) -> Tuple[np.ndar
     return X, indNaN
 
 
-def rem_nans_spline_torch(X: torch.Tensor, method: int = 2, k: int = 3) -> Tuple[torch.Tensor, torch.Tensor]:
+def rem_nans_spline_torch(X: "torch.Tensor", method: int = 2, k: int = 3) -> Tuple["torch.Tensor", "torch.Tensor"]:
     """PyTorch version of rem_nans_spline for GPU acceleration.
     
     Treat NaNs in dataset for DFM estimation using standard interpolation methods.
@@ -454,6 +457,63 @@ def calculate_release_date(release_date: int, period: datetime) -> datetime:
     return datetime(prev_year, prev_month, day)
 
 
+def validate_no_nan(X: Union[np.ndarray, "torch.Tensor", pd.DataFrame], name: str = "data") -> None:
+    """Validate that data contains no NaN or Inf values.
+    
+    This function ensures that dfm-python receives only fully preprocessed data
+    without any missing values. NaN values must be imputed before passing data
+    to dfm-python.
+    
+    Parameters
+    ----------
+    X : np.ndarray, torch.Tensor, or pd.DataFrame
+        Data to validate
+    name : str, default "data"
+        Name of the data for error messages
+        
+    Raises
+    ------
+    ValueError
+        If data contains NaN or Inf values
+        
+    Notes
+    -----
+    dfm-python requires fully preprocessed data with no missing values.
+    Users must impute missing values before passing data to dfm-python.
+    This validation ensures data quality and prevents numerical issues during training.
+    """
+    import numpy as np
+    
+    # Convert to numpy for validation
+    if isinstance(X, pd.DataFrame):
+        X_array = X.values
+    elif hasattr(X, 'cpu'):  # torch.Tensor
+        X_array = X.cpu().numpy()
+    else:
+        X_array = np.asarray(X)
+    
+    # Check for NaN
+    nan_count = np.sum(np.isnan(X_array))
+    if nan_count > 0:
+        nan_ratio = nan_count / X_array.size
+        raise ValueError(
+            f"{name} contains {nan_count} NaN values ({nan_ratio:.2%} of all values). "
+            f"dfm-python requires fully preprocessed data with no missing values. "
+            f"Please impute missing values before passing data to dfm-python. "
+            f"You can use rem_nans_spline() or other imputation methods."
+        )
+    
+    # Check for Inf
+    inf_count = np.sum(np.isinf(X_array))
+    if inf_count > 0:
+        inf_ratio = inf_count / X_array.size
+        raise ValueError(
+            f"{name} contains {inf_count} Inf values ({inf_ratio:.2%} of all values). "
+            f"dfm-python requires fully preprocessed data with no infinite values. "
+            f"Please handle infinite values before passing data to dfm-python."
+        )
+
+
 def create_data_view(
     X: np.ndarray,
     Time: Union[TimeIndex, Any],
@@ -491,7 +551,7 @@ def create_data_view(
             elif hasattr(t, 'to_pydatetime'):
                 time_list.append(t.to_pydatetime())
             elif hasattr(t, 'to_python'):
-                time_list.append(t.to_python())  # Backward compatibility
+                time_list.append(t.to_python())
             else:
                 time_list.append(parse_timestamp(t))
     

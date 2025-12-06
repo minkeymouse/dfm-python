@@ -328,7 +328,7 @@ class TrainLogger:
             _logger.info("")
 
 
-# Convenience functions for backward compatibility and simpler usage
+# Convenience functions for simpler usage
 
 def log_training_start(
     model_name: str = "DFM",
