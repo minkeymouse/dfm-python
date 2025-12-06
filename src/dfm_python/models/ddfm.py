@@ -31,9 +31,8 @@ from ..config.results import DDFMResult
 from ..config.utils import get_periods_per_year
 from ..encoder.vae import Decoder, Encoder, extract_decoder_params
 from ..logger import get_logger
-from ..nowcast.dataview import DataView
-from ..nowcast.nowcast import Nowcast
-from ..utils.data import create_data_view, rem_nans_spline
+# Nowcasting removed - use src.nowcast instead
+from ..utils.data import rem_nans_spline
 from ..utils.helpers import (
     find_series_index,
     get_clock_frequency,
@@ -291,131 +290,8 @@ class DDFMModel:
             return X_forecast
         return Z_forecast
     
-    def generate_dataset(
-        self,
-        target_series: str,
-        periods: List[datetime],
-        backward: int = 0,
-        forward: int = 0,
-        dataview: Optional['DataView'] = None
-    ) -> Dict[str, Any]:
-        """Generate dataset for DFM evaluation.
-        
-        Note: Requires data to be stored during fit(). Data is automatically
-        stored from DataModule during fit().
-        """
-        if not hasattr(self, '_data') or self._data is None:
-            error_msg = format_error_message(
-                model_type="DDFM",
-                operation="generate_dataset",
-                reason="model has not been fitted with DataModule yet",
-                guidance="Please call trainer.fit(model, data_module) first to store data"
-            )
-            raise ValueError(error_msg)
-        
-        i_series = find_series_index(self._config, target_series)
-        X_features, y_baseline, y_actual, metadata, backward_results = [], [], [], [], []
-        
-        if dataview is not None:
-            dataview_factory = dataview
-        else:
-            # Convert data to numpy if needed
-            if hasattr(self._data, 'to_numpy'):
-                X_data = self._data.to_numpy()
-            else:
-                X_data = np.asarray(self._data)
-            
-            dataview_factory = DataView.from_arrays(
-                X=X_data, Time=self._time,
-                Z=self._original_data, config=self._config,
-                X_frame=self._data_frame
-            )
-        if dataview_factory.config is None:
-            dataview_factory.config = self._config
-        
-        for period in periods:
-            view_obj = dataview_factory.with_view_date(period)
-            X_view, Time_view, _ = view_obj.materialize()
-            
-            if backward > 0:
-                nowcasts, data_view_dates = [], []
-                for weeks_back in range(backward, -1, -1):
-                    data_view_date = period - timedelta(weeks=weeks_back)
-                    view_past = dataview_factory.with_view_date(data_view_date)
-                    X_view_past, Time_view_past, _ = view_past.materialize()
-                    # Access nowcast through _nowcast_ref (set by high-level DDFM class)
-                    nowcast_obj = getattr(self, '_nowcast_ref', None)
-                    if nowcast_obj is None:
-                        error_msg = format_error_message(
-                            model_type="DDFM",
-                            operation="nowcast",
-                            reason="requires high-level DDFM instance",
-                            guidance="Please call nowcast() from DDFM class, not DDFMModel"
-                        )
-                        raise ValueError(error_msg)
-                    nowcast_val = nowcast_obj(
-                        target_series=target_series,
-                        view_date=view_past.view_date or data_view_date,
-                        target_period=period
-                    )
-                    nowcasts.append(nowcast_val)
-                    data_view_dates.append(view_past.view_date or data_view_date)
-                baseline_nowcast = nowcasts[-1]
-                backward_results.append({
-                    'nowcasts': np.array(nowcasts),
-                    'data_view_dates': data_view_dates,
-                    'target_date': period
-                })
-            else:
-                # Access nowcast through _nowcast_ref (set by high-level DDFM class)
-                nowcast_obj = getattr(self, '_nowcast_ref', None)
-                if nowcast_obj is None:
-                    error_msg = format_error_message(
-                        model_type="DDFM",
-                        operation="nowcast",
-                        reason="requires high-level DDFM instance",
-                        guidance="Please call nowcast() from DDFM class, not DDFMModel"
-                    )
-                    raise ValueError(error_msg)
-                baseline_nowcast = nowcast_obj(
-                    target_series=target_series,
-                    view_date=view_obj.view_date or period,
-                    target_period=period
-                )
-            
-            y_baseline.append(baseline_nowcast)
-            t_idx = find_time_index(self._time, period)
-            actual_val = np.nan
-            # Convert data to numpy for indexing
-            if hasattr(self._data, 'to_numpy'):
-                data_array = self._data.to_numpy()
-            else:
-                data_array = np.asarray(self._data)
-            if t_idx is not None and t_idx < data_array.shape[0] and i_series < data_array.shape[1]:
-                actual_val = data_array[t_idx, i_series]
-            y_actual.append(actual_val)
-            
-            # Extract features
-            if self._result is not None and hasattr(self._result, 'Z'):
-                latest_factors = self._result.Z[-1, :] if self._result.Z.shape[0] > 0 else np.zeros(self._result.Z.shape[1])
-            else:
-                latest_factors = np.array([])
-            if X_view.shape[0] > 0:
-                mean_residual = np.nanmean(X_view[-1, :]) if X_view.shape[0] > 0 else 0.0
-            else:
-                mean_residual = 0.0
-            features = np.concatenate([latest_factors, [mean_residual]])
-            X_features.append(features)
-            metadata.append({'period': period, 'target_series': target_series})
-        
-        return {
-            'X': np.array(X_features),
-            'y_baseline': np.array(y_baseline),
-            'y_actual': np.array(y_actual),
-            'y_target': np.array(y_actual) - np.array(y_baseline),
-            'metadata': metadata,
-            'backward_results': backward_results if backward > 0 else []
-        }
+    # generate_dataset() method removed - application-specific functionality
+    # Use src.nowcast for nowcasting-related dataset generation
     
     def get_state(
         self,
@@ -450,22 +326,12 @@ class DDFMModel:
         else:
             X_data = np.asarray(self._data)
         
-        X_view, Time_view, _ = create_data_view(
-            X=X_data, Time=self._time,
-            Z=self._original_data, config=self._config, view_date=t
-        )
+        # create_data_view removed - use src.nowcast for data view functionality
+        # For get_state, we use the raw data directly
+        X_view = X_data
         
-        # Access nowcast through _nowcast_ref (set by high-level DDFM class)
-        nowcast_obj = getattr(self, '_nowcast_ref', None)
-        if nowcast_obj is None:
-            error_msg = format_error_message(
-                model_type="DDFM",
-                operation="nowcast",
-                reason="requires high-level DDFM instance",
-                guidance="Please call nowcast() from DDFM class, not DDFMModel"
-            )
-            raise ValueError(error_msg)
-        baseline_nowcast = nowcast_obj(target_series=target_series, view_date=t, target_period=None)
+        # Nowcast removed - use src.nowcast for nowcasting functionality
+        baseline_nowcast = np.nan  # Placeholder - use src.nowcast for actual nowcast values
         
         baseline_forecast, actual_history, residuals, factors_history = [], [], [], []
         t_idx = find_time_index(self._time, t)
@@ -480,7 +346,11 @@ class DDFMModel:
         
         for i in range(max(0, t_idx - lookback + 1), t_idx + 1):
             if i < X_data.shape[0]:
-                forecast_val = baseline_nowcast
+                # Use smoothed value from result if available, otherwise NaN
+                if self._result is not None and hasattr(self._result, 'X_sm') and i < self._result.X_sm.shape[0]:
+                    forecast_val = self._result.X_sm[i, i_series] if i_series < self._result.X_sm.shape[1] else np.nan
+                else:
+                    forecast_val = np.nan
                 baseline_forecast.append(forecast_val)
                 actual_val = X_data[i, i_series] if i_series < X_data.shape[1] else np.nan
                 actual_history.append(actual_val)
@@ -505,7 +375,6 @@ class DDFMModel:
 # ============================================================================
 
 if TYPE_CHECKING:
-    from ..nowcast import Nowcast
     from ..lightning import DFMDataModule
 
 class DDFM(BaseFactorModel):
@@ -2604,113 +2473,8 @@ class DDFM(BaseFactorModel):
         return self
     
     
-    def generate_dataset(
-        self,
-        target_series: str,
-        periods: List[datetime],
-        backward: int = 0,
-        forward: int = 0,
-        dataview: Optional['DataView'] = None
-    ) -> Dict[str, Any]:
-        """Generate dataset for DFM evaluation.
-        
-        Note: Requires data to be stored during fit(). Data is automatically
-        stored from DataModule during fit().
-        """
-        if not hasattr(self, '_data') or self._data is None:
-            error_msg = format_error_message(
-                model_type="DDFM",
-                operation="generate_dataset",
-                reason="model has not been fitted with DataModule yet",
-                guidance="Please call trainer.fit(model, data_module) first to store data"
-            )
-            raise ValueError(error_msg)
-        
-        i_series = find_series_index(self._config, target_series)
-        X_features, y_baseline, y_actual, metadata, backward_results = [], [], [], [], []
-        
-        if dataview is not None:
-            dataview_factory = dataview
-        else:
-            # Convert data to numpy if needed
-            if hasattr(self._data, 'to_numpy'):
-                X_data = self._data.to_numpy()
-            else:
-                X_data = np.asarray(self._data)
-            
-            dataview_factory = DataView.from_arrays(
-                X=X_data, Time=self._time,
-                Z=self._original_data, config=self._config,
-                X_frame=self._data_frame
-            )
-        if dataview_factory.config is None:
-            dataview_factory.config = self._config
-        
-        for period in periods:
-            view_obj = dataview_factory.with_view_date(period)
-            X_view, Time_view, _ = view_obj.materialize()
-            
-            if backward > 0:
-                nowcasts, data_view_dates = [], []
-                for weeks_back in range(backward, -1, -1):
-                    data_view_date = period - timedelta(weeks=weeks_back)
-                    view_past = dataview_factory.with_view_date(data_view_date)
-                    X_view_past, Time_view_past, _ = view_past.materialize()
-                    # Use nowcast property directly
-                    nowcast_val = self.nowcast(
-                        target_series=target_series,
-                        view_date=view_past.view_date or data_view_date,
-                        target_period=period
-                    )
-                    nowcasts.append(nowcast_val)
-                    data_view_dates.append(view_past.view_date or data_view_date)
-                baseline_nowcast = nowcasts[-1]
-                backward_results.append({
-                    'nowcasts': np.array(nowcasts),
-                    'data_view_dates': data_view_dates,
-                    'target_date': period
-                })
-            else:
-                # Use nowcast property directly
-                baseline_nowcast = self.nowcast(
-                    target_series=target_series,
-                    view_date=view_obj.view_date or period,
-                    target_period=period
-                )
-            
-            y_baseline.append(baseline_nowcast)
-            t_idx = find_time_index(self._time, period)
-            actual_val = np.nan
-            # Convert data to numpy for indexing
-            if hasattr(self._data, 'to_numpy'):
-                data_array = self._data.to_numpy()
-            else:
-                data_array = np.asarray(self._data)
-            if t_idx is not None and t_idx < data_array.shape[0] and i_series < data_array.shape[1]:
-                actual_val = data_array[t_idx, i_series]
-            y_actual.append(actual_val)
-            
-            # Extract features
-            if self._result is not None and hasattr(self._result, 'Z'):
-                latest_factors = self._result.Z[-1, :] if self._result.Z.shape[0] > 0 else np.zeros(self._result.Z.shape[1])
-            else:
-                latest_factors = np.array([])
-            if X_view.shape[0] > 0:
-                mean_residual = np.nanmean(X_view[-1, :]) if X_view.shape[0] > 0 else 0.0
-            else:
-                mean_residual = 0.0
-            features = np.concatenate([latest_factors, [mean_residual]])
-            X_features.append(features)
-            metadata.append({'period': period, 'target_series': target_series})
-        
-        return {
-            'X': np.array(X_features),
-            'y_baseline': np.array(y_baseline),
-            'y_actual': np.array(y_actual),
-            'y_target': np.array(y_actual) - np.array(y_baseline),
-            'metadata': metadata,
-            'backward_results': backward_results if backward > 0 else []
-        }
+    # generate_dataset() method removed - application-specific functionality
+    # Use src.nowcast for nowcasting-related dataset generation
     
     def get_state(
         self,
@@ -2720,7 +2484,7 @@ class DDFM(BaseFactorModel):
     ) -> Dict[str, Any]:
         """Get DFM state at time t.
         
-        Returns state information including baseline nowcast, actual history,
+        Returns state information including baseline forecast, actual history,
         residuals, and factor history for the specified time period.
         """
         if not hasattr(self, '_data') or self._data is None:
@@ -2743,8 +2507,8 @@ class DDFM(BaseFactorModel):
         else:
             X_data = np.asarray(self._data)
         
-        # Use nowcast property directly
-        baseline_nowcast = self.nowcast(target_series=target_series, view_date=t, target_period=None)
+        # Nowcast removed - use src.nowcast for nowcasting functionality
+        baseline_nowcast = np.nan  # Placeholder - use src.nowcast for actual nowcast values
         
         baseline_forecast, actual_history, residuals, factors_history = [], [], [], []
         t_idx = find_time_index(self._time, t)
@@ -2759,7 +2523,11 @@ class DDFM(BaseFactorModel):
         
         for i in range(max(0, t_idx - lookback + 1), t_idx + 1):
             if i < X_data.shape[0]:
-                forecast_val = baseline_nowcast
+                # Use smoothed value from result if available, otherwise NaN
+                if self._result is not None and hasattr(self._result, 'X_sm') and i < self._result.X_sm.shape[0]:
+                    forecast_val = self._result.X_sm[i, i_series] if i_series < self._result.X_sm.shape[1] else np.nan
+                else:
+                    forecast_val = np.nan
                 baseline_forecast.append(forecast_val)
                 actual_val = X_data[i, i_series] if i_series < X_data.shape[1] else np.nan
                 actual_history.append(actual_val)

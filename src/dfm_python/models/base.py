@@ -91,7 +91,6 @@ class BaseFactorModel(pl.LightningModule):
         self._result: Optional[BaseResult] = None
         self.training_state: Optional[Any] = None
         self._data_module: Optional[Any] = None
-        self._nowcast: Optional[Any] = None
     
     @property
     def config(self) -> DFMConfig:
@@ -494,7 +493,6 @@ class BaseFactorModel(pl.LightningModule):
         self._config = None
         self._data_module = None
         self._result = None
-        self._nowcast = None
         if hasattr(self, 'training_state'):
             self.training_state = None
         return self

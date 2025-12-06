@@ -3,7 +3,7 @@
 [![PyPI version](https://img.shields.io/pypi/v/dfm-python.svg)](https://pypi.org/project/dfm-python/)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 
-A comprehensive Python implementation of **Dynamic Factor Models (DFM)** for nowcasting and forecasting high-dimensional time series. Built for economists, researchers, and data scientists working with mixed-frequency macroeconomic data.
+A comprehensive Python implementation of **Dynamic Factor Models (DFM)** for forecasting high-dimensional time series. Built for economists, researchers, and data scientists working with mixed-frequency macroeconomic data.
 
 ## What is a Dynamic Factor Model?
 
@@ -12,7 +12,6 @@ A Dynamic Factor Model is a powerful statistical framework that:
 - **Extracts common factors** from many observed time series (e.g., GDP, consumption, investment, employment)
 - **Handles mixed frequencies** seamlessly (monthly, quarterly, annual data together)
 - **Deals with missing data** robustly (late-arriving indicators, publication delays)
-- **Provides nowcasts** (current-quarter GDP estimates before official release)
 - **Forecasts** future values of both factors and observed series
 
 **Key Innovation**: All latent factors evolve at a common "clock" frequency (configurable: `'d'`, `'w'`, `'m'`, `'q'`, `'sa'`, `'a'`), while observed series can be at different frequencies. This is achieved through deterministic tent kernel aggregation, allowing quarterly GDP to be modeled using monthly latent factors, or any slower-frequency series to be modeled using higher-frequency latent factors.
@@ -25,8 +24,7 @@ A Dynamic Factor Model is a powerful statistical framework that:
 - ✅ **Block structure**: Flexible factor organization (global common factor + sector-specific factors)
 - ✅ **Idiosyncratic components**: Per-series state augmentation for better fit (AR(1) for clock-frequency, tent-length chains for slower frequencies)
 - ✅ **Preprocessed data**: Package expects preprocessed data from users - users handle all preprocessing (imputation, scaling, feature engineering) using sktime or other tools
-- ✅ **News decomposition**: Attribute forecast changes to specific data releases
-- ✅ **Nowcasting & Forecasting**: Generate predictions for any horizon
+- ✅ **Forecasting**: Generate predictions for any horizon
 - ✅ **Deep Dynamic Factor Models (DDFM)**: Nonlinear encoder with PyTorch for capturing complex factor structures (optional, requires `dfm-python[deep]`)
 
 ### Technical Features
@@ -187,7 +185,7 @@ print(f"Log-likelihood: {result.loglik:.2f}")
 
 ### Example 4: Fast Reuse with `load_pickle`
 
-Once a model has been trained you can reload it instantly for forecasting/nowcasting without
+Once a model has been trained you can reload it instantly for forecasting without
 re-running EM:
 
 ```python
@@ -216,15 +214,12 @@ model.load_pickle(
 
 # Fast inference (milliseconds instead of minutes)
 X_forecast, Z_forecast = model.predict(horizon=12)
-gdp_nowcast = model.nowcast(
-    target_series='gdp',
-    view_date='2024-03-15'
-)
+# Note: Nowcasting functionality has been moved to src.nowcast
+# Use src.nowcast.Nowcast for nowcasting operations
 ```
 
 `DFM.load_pickle()` accepts either the auto-save payload (`{'result': ..., 'config': ...}`) or a
-raw `DFMResult`. Provide `load_data_path` or `data`/`time_index` when you need nowcasting/news
-decomposition abilities (which require the data view).
+raw `DFMResult`. Provide `load_data_path` or `data`/`time_index` when you need to access model results.
 
 ## Configuration Guide
 
@@ -454,105 +449,9 @@ idio_component = result.X_sm[:, series_idx] - series_factor_component
 
 ## Advanced Features
 
-### Nowcasting API
+### Nowcasting
 
-The package provides a comprehensive nowcasting API for pseudo real-time evaluation and downstream model integration:
-
-#### Basic Nowcasting
-
-```python
-import dfm_python as dfm
-from dfm_python import Nowcast
-
-# Load config and data, train model
-dfm.from_yaml('config/default.yaml')
-dfm.load_data('data/data.csv')
-dfm.train()
-
-# Get Nowcast instance
-model = dfm.DFM()
-nowcast = model.nowcast  # or: nowcast = Nowcast(model)
-
-# Calculate nowcast (simple callable interface)
-value = nowcast('gdp', view_date='2024-01-15', target_period='2024Q1')
-print(f"Nowcast value: {value:.4f}")
-
-# Or get full result with metadata
-result = nowcast('gdp', view_date='2024-01-15', target_period='2024Q1', return_result=True)
-print(f"Nowcast: {result.nowcast_value:.4f}")
-print(f"Data availability: {result.data_availability}")
-print(f"Factors at view: {result.factors_at_view}")
-```
-
-#### News Decomposition
-
-Decompose forecast updates into contributions from individual data releases:
-
-```python
-# News decomposition between two data views
-news = nowcast.decompose(
-    target_series='gdp',
-    target_period='2024Q1',
-    view_date_old='2024-01-15',
-    view_date_new='2024-02-15'
-)
-
-# Access results (NewsDecompResult)
-print(f"Old forecast: {news.y_old:.4f}")
-print(f"New forecast: {news.y_new:.4f}")
-print(f"Change: {news.change:.4f}")
-print(f"Top contributors: {news.top_contributors}")
-
-# Or get dictionary format (backward compatibility)
-news_dict = nowcast.decompose(
-    target_series='gdp',
-    target_period='2024Q1',
-    view_date_old='2024-01-15',
-    view_date_new='2024-02-15',
-    return_dict=True
-)
-```
-
-#### Pseudo Real-Time Backtesting
-
-Perform backtesting to evaluate model performance in pseudo real-time:
-
-```python
-from datetime import datetime
-
-# Perform backtest
-backtest_result = nowcast.backtest(
-    target_series='gdp',
-    target_date='2024Q4',
-    backward_steps=20,  # 20 backward steps
-    higher_freq=True,   # Use frequency one step faster than clock
-    include_actual=True # Compare with actual values
-)
-
-# Access metrics
-print(f"Overall RMSE: {backtest_result.overall_rmse:.4f}")
-print(f"Overall MAE: {backtest_result.overall_mae:.4f}")
-print(f"Failed steps: {backtest_result.failed_steps}")
-
-# Access point-wise metrics
-print(f"RMSE per step: {backtest_result.rmse_per_step}")
-print(f"MAE per step: {backtest_result.mae_per_step}")
-
-# Access individual nowcast results
-for i, nowcast_result in enumerate(backtest_result.nowcast_results):
-    print(f"Step {i}: nowcast={nowcast_result.nowcast_value:.4f}, "
-          f"view_date={nowcast_result.view_date}")
-
-# Access news decomposition between steps
-for i, news_result in enumerate(backtest_result.news_results):
-    if news_result is not None:
-        print(f"Step {i}: forecast change={news_result.change:.4f}")
-
-# Visualize results
-backtest_result.plot(save_path='backtest_results.png', show=False)
-```
-
-#### Pseudo Real-Time Evaluation (Alternative Method)
+Nowcasting functionality has been moved to `src.nowcast`. Use `src.nowcast.Nowcast` for nowcasting operations, news decomposition, and backtesting.
 
 Generate datasets for model evaluation across multiple periods:
 

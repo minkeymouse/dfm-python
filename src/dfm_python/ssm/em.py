@@ -15,6 +15,21 @@ Numerical Stability:
     All matrix inversions and solves use regularization (1e-6) to prevent
     singular matrix errors. This is critical for GPU stability, as PyTorch
     can throw RuntimeError for near-singular matrices.
+    
+    Known Limitations:
+    - Some target series (e.g., KOCNPER.D) may exhibit numerical instability
+      despite regularization measures. This can manifest as:
+      * Singular or ill-conditioned matrices in M-step
+      * NaN/Inf values in parameter updates
+      * Convergence failures or numerical overflow
+    - The package includes multiple stability measures (regularization, matrix
+      normalization, spectral radius capping, Q matrix floor), but some
+      data/model combinations may still fail due to inherent numerical
+      properties of the data structure.
+    - When EM algorithm fails for a specific target, consider:
+      * Using DDFM (nonlinear encoder) as an alternative
+      * Adjusting regularization_scale or other hyperparameters
+      * Checking data quality (outliers, missing patterns, collinearity)
 
 Performance:
     GPU acceleration provides significant speedup for large-scale problems.
@@ -687,6 +702,11 @@ class EMAlgorithm(nn.Module):
                     A_temp = torch.linalg.solve(ZTZ_reg, ZTz).T  # r_i x (r_i*p)
                     
                     # Ensure A_temp has correct shape
+                    # Defensive coding: Shape mismatch can occur if z has unexpected dimensions
+                    # despite z_T transformation, or if Z.T @ z produces unexpected shape.
+                    # This adjustment pads with zeros (safe, just zero-initializes some parameters)
+                    # and prevents crashes, but the warning log helps identify when this occurs.
+                    # If this warning appears frequently, investigate z/Z shape construction.
                     if A_temp.shape != (r_i, r_i * p):
                         _logger.warning(f"Block {i}: A_temp shape mismatch: {A_temp.shape}, expected ({r_i}, {r_i * p}). Adjusting...")
                         A_temp_new = torch.zeros(r_i, r_i * p, device=device, dtype=dtype)

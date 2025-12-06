@@ -6,7 +6,6 @@ This package implements a comprehensive Dynamic Factor Model framework with supp
 - Tent kernel aggregation for low-to-high frequency mapping
 - Expectation-Maximization (EM) algorithm for parameter estimation
 - Kalman filtering and smoothing for factor extraction
-- News decomposition for nowcasting
 - Deep Dynamic Factor Models (DDFM) with nonlinear encoders (requires PyTorch)
 
 The package implements a clock-based approach to mixed-frequency DFMs, where all latent 
@@ -23,7 +22,6 @@ Key Features:
     - Flexible block structure for factor modeling
     - Robust handling of missing data (internal spline interpolation)
     - Automatic standardization and data clipping
-    - News decomposition for forecast updates
 
 Example (Standard Lightning Pattern):
     >>> from dfm_python import DFM, DFMDataModule, DFMTrainer
@@ -81,7 +79,7 @@ __version__ = "0.4.6"
 # 2. High-level API: DFM, DDFM, module-level convenience functions
 # 3. Core utilities: TimeIndex, diagnostics
 # 4. Models: BaseFactorModel, DDFM (low-level)
-# 5. Nowcasting: Nowcast, result classes, para_const
+# 5. Data & Results: DFMResult
 # 6. Data & Results: DFMResult
 # ============================================================================
 
@@ -110,16 +108,7 @@ from .lightning import (
     EMAlgorithm,  # Module class
 )
 
-# Nowcasting (from nowcast/ subpackage)
-from .nowcast import (
-    Nowcast,
-    NowcastResult,
-)
-from .nowcast.helpers import (
-    para_const,
-    NewsDecompResult,
-    BacktestResult,
-)
+# Nowcasting removed - use src.nowcast instead
 
 # Model implementations
 from .models.base import BaseFactorModel
@@ -130,11 +119,9 @@ from .models.ddfm import DDFM, DDFMModel
 
 __all__ = [
     # Core classes
-    'DFM', 'Nowcast',
+    'DFM',
     # Model base and implementations
     'BaseFactorModel',
-    # Nowcast result classes
-    'NowcastResult', 'NewsDecompResult', 'BacktestResult',
     # Constants
     'DEFAULT_BLOCK_NAME',
     # Config sources
@@ -142,7 +129,6 @@ __all__ = [
     'MergedConfigSource', 'make_config_source',
     # Low-level API (functional interface - advanced usage)
     'BaseResult', 'DFMResult', 'DDFMResult', 'calculate_rmse', 'diagnose_series', 'print_series_diagnosis',
-    'para_const',  # Internal utility for nowcasting
 ]
 
 # DDFM high-level API (PyTorch is mandatory)
