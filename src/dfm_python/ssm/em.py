@@ -48,7 +48,7 @@ from typing import Tuple, Optional, Dict, Any
 from dataclasses import dataclass
 from ..logger import get_logger
 from .kalman import KalmanFilter
-from .utils import ensure_positive_definite, ensure_symmetric
+from .utils import ensure_positive_definite, ensure_symmetric, cap_max_eigenval
 
 _logger = get_logger(__name__)
 
@@ -107,6 +107,10 @@ class EMAlgorithm(nn.Module):
         else:
             self.kalman = kalman
         self.register_buffer('regularization_scale', torch.tensor(regularization_scale))
+    
+    def _cap_max_eigenval(self, M: torch.Tensor, max_eigenval: float = 1e6) -> torch.Tensor:
+        """Cap maximum eigenvalue of matrix to prevent numerical explosion."""
+        return cap_max_eigenval(M, max_eigenval=max_eigenval, warn=False)
     
     def forward(
         self,
@@ -241,8 +245,27 @@ class EMAlgorithm(nn.Module):
             # Transpose y to (T, N) for batch operations
             # Use y_for_mstep (NaN replaced with 0) for M-step
             sum_yEZ = torch.sum(y_for_mstep.T[:, :, None] * EZ[:, None, :], dim=0)  # (N, m)
-            # Compute sum_EZZ = sum_t E[Z_t Z_t^T]
-            sum_EZZ = torch.sum(EZZ, dim=0)
+            
+            # CRITICAL FIX: Remove NaN/Inf from EZZ before computing sum_EZZ
+            # This prevents ill-conditioned sum_EZZ caused by corrupted EZZ from smoother
+            # MATLAB doesn't check for NaN/Inf, but we need to handle it explicitly
+            EZZ_clean = EZZ.clone()
+            nan_inf_mask = torch.isnan(EZZ_clean) | torch.isinf(EZZ_clean)
+            if torch.any(nan_inf_mask):
+                # Replace NaN/Inf with zero (exclude corrupted time steps from sum)
+                EZZ_clean[nan_inf_mask] = 0.0
+                corrupted_count = torch.sum(nan_inf_mask).item()
+                total_count = EZZ_clean.numel()
+                _logger.warning(
+                    f"EM algorithm: EZZ contains {corrupted_count}/{total_count} NaN/Inf values "
+                    f"({corrupted_count/total_count:.1%}). Excluding corrupted time steps from sum_EZZ calculation."
+                )
+            
+            # Compute sum_EZZ = sum_t E[Z_t Z_t^T] (only from valid time steps)
+            sum_EZZ = torch.sum(EZZ_clean, dim=0)
+            
+            # Cap maximum eigenvalue to prevent condition number explosion
+            sum_EZZ = self._cap_max_eigenval(sum_EZZ, max_eigenval=1e6)
             
             # ROOT CAUSE FIX: Adaptive regularization based on condition number
             # Fixed regularization (1e-6) becomes insufficient as condition number grows
@@ -268,22 +291,38 @@ class EMAlgorithm(nn.Module):
                         reg_scale = base_reg_scale
                 else:
                     # All eigenvalues are near-zero, use stronger regularization
-                    reg_scale = base_reg_scale * 100
+                    # Ensure minimum regularization (1e-3) for numerical stability
+                    reg_scale = max(base_reg_scale * 100, 1e-3)
                     _logger.warning(
                         f"EM algorithm: sum_EZZ has no valid eigenvalues, "
-                        f"using strong regularization: {reg_scale:.2e}"
+                        f"using strong regularization: {reg_scale:.2e} (min=1e-3, base={base_reg_scale:.2e})"
                     )
             except (RuntimeError, ValueError) as e:
-                # Eigendecomposition failed, use stronger regularization
-                reg_scale = base_reg_scale * 10
+                # CRITICAL FIX: Eigendecomposition failed, use stronger regularization
+                # Ensure minimum regularization (1e-3) even if base_reg_scale * 10 is smaller
+                # This is the Ridge Regression approach: eigendecomposition failure means
+                # the matrix is too ill-conditioned, so we need strong regularization
+                reg_scale = max(base_reg_scale * 10, 1e-3)
                 _logger.warning(
                     f"EM algorithm: Failed to compute condition number for sum_EZZ ({e}), "
-                    f"using increased regularization: {reg_scale:.2e}"
+                    f"using strong regularization: {reg_scale:.2e} (min=1e-3, base={base_reg_scale:.2e})"
                 )
             
             # Apply adaptive regularization
             sum_EZZ_reg = sum_EZZ + torch.eye(m, device=device, dtype=dtype) * reg_scale
-            C_new = torch.linalg.solve(sum_EZZ_reg.T, sum_yEZ.T).T
+            
+            # CRITICAL FIX: Use pseudo-inverse as fallback when solve fails
+            # Original MATLAB uses pinv() in smoother (line 1039, 1064)
+            # This handles singular/ill-conditioned matrices more robustly
+            try:
+                C_new = torch.linalg.solve(sum_EZZ_reg.T, sum_yEZ.T).T
+            except RuntimeError as e:
+                # Fallback to pseudo-inverse (original MATLAB: pinv() in smoother)
+                _logger.warning(
+                    f"EM algorithm: torch.linalg.solve failed for C matrix update ({e}), "
+                    f"using pseudo-inverse fallback (original MATLAB: pinv() in smoother)"
+                )
+                C_new = (torch.linalg.pinv(sum_EZZ_reg.T) @ sum_yEZ.T).T
             
             # Check for NaN in C_new after solve (indicates numerical instability)
             if torch.any(torch.isnan(C_new)):
@@ -294,11 +333,25 @@ class EMAlgorithm(nn.Module):
                     f"after solve operation. This indicates numerical instability. "
                     f"Possible causes: singular matrix, extreme values, or insufficient regularization."
                 )
-                # Set NaN columns to zero instead of leaving them as NaN
-                nan_cols = torch.any(torch.isnan(C_new), dim=0)
-                if torch.any(nan_cols):
-                    C_new[:, nan_cols] = 0.0
-                    _logger.warning(f"Set {torch.sum(nan_cols).item()} NaN columns in C matrix to zero.")
+                # CRITICAL FIX: Preserve previous iteration values instead of setting to zero
+                # This allows gradual improvement and preserves information from previous iterations
+                nan_mask = torch.isnan(C_new)
+                if torch.any(nan_mask):
+                    # Check if previous C matrix is valid (no NaN)
+                    if not torch.any(torch.isnan(params.C)):
+                        C_new[nan_mask] = params.C[nan_mask]
+                        # Only log if significant NaN ratio to reduce log spam
+                        if nan_ratio > 0.1:  # Only log if >10% NaN
+                            _logger.warning(
+                                f"Preserved {torch.sum(nan_mask).item()} NaN values in C matrix from previous iteration "
+                                f"(total NaN: {nan_count}/{C_new.numel()}, {nan_ratio:.1%})"
+                            )
+                    else:
+                        # If previous C also has NaN, set to zero as last resort
+                        C_new[nan_mask] = 0.0
+                        _logger.warning(
+                            f"Previous C matrix also contains NaN. Set {torch.sum(nan_mask).item()} NaN values to zero."
+                        )
             
             # Normalize C columns (factor loadings)
             for j in range(m):

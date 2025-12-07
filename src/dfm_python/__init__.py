@@ -65,7 +65,7 @@ Note: DFMConfig and SeriesConfig are internal implementation details.
 For detailed documentation, see the README.md file and the tutorial notebooks/scripts.
 """
 
-__version__ = "0.4.7"
+__version__ = "0.4.8"
 
 # ============================================================================
 # PUBLIC API DEFINITION

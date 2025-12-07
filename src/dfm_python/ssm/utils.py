@@ -97,6 +97,51 @@ def ensure_symmetric(tensor: "torch.Tensor") -> "torch.Tensor":
     return 0.5 * (tensor + tensor.T)
 
 
+def cap_max_eigenval(
+    M: "torch.Tensor", 
+    max_eigenval: float = 1e6,
+    warn: bool = True
+) -> "torch.Tensor":
+    """Cap maximum eigenvalue of matrix to prevent numerical explosion.
+    
+    Parameters
+    ----------
+    M : torch.Tensor
+        Matrix to cap (square matrix)
+    max_eigenval : float, default 1e6
+        Maximum allowed eigenvalue
+    warn : bool, default True
+        Whether to log warnings
+        
+    Returns
+    -------
+    torch.Tensor
+        Matrix with capped eigenvalues
+    """
+    if M.numel() == 0 or M.shape[0] == 0:
+        return M
+    
+    try:
+        eigenvals = torch.linalg.eigvalsh(M)
+        max_eig = torch.max(eigenvals)
+        
+        if max_eig > max_eigenval:
+            # Scale matrix to cap maximum eigenvalue
+            scale_factor = max_eigenval / max_eig
+            M = M * scale_factor
+            M = ensure_symmetric(M)
+            if warn:
+                _logger.warning(
+                    f"Matrix maximum eigenvalue capped: {max_eig:.2e} -> {max_eigenval:.2e} "
+                    f"(scale_factor={scale_factor:.2e})"
+                )
+    except (RuntimeError, ValueError):
+        # If eigendecomposition fails, return matrix as-is
+        pass
+    
+    return M
+
+
 def ensure_real_and_symmetric(tensor: "torch.Tensor") -> "torch.Tensor":
     """Ensure matrix is real and symmetric.
     

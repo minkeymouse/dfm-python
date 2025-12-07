@@ -36,6 +36,7 @@ from .utils import (
     clean_matrix,
     safe_inverse,
     safe_determinant,
+    cap_max_eigenval,
 )
 
 _logger = get_logger(__name__)
@@ -343,6 +344,8 @@ class KalmanFilter(nn.Module):
                 # Fallback: use previous covariance with regularization
                 V = Vu + torch.eye(V.shape[0], device=device, dtype=dtype) * 1e-6
             
+            # Cap maximum eigenvalue to prevent explosion
+            V = self._cap_max_eigenval(V, max_eigenval=1e6)
             # Ensure V is real, symmetric, and positive semi-definite (MATLAB: V = 0.5 * (V+V'))
             V = ensure_real_and_symmetric(V)
             V = self._ensure_cov_stable(V, min_eigenval=self.min_eigenval.item(), ensure_real=True)
@@ -356,12 +359,23 @@ class KalmanFilter(nn.Module):
                 Zu = Z
                 Vu = V
             else:
-                # CRITICAL FIX: Adaptive regularization based on missing data ratio
+                # CRITICAL FIX: Adaptive regularization based on missing data ratio and n_obs
                 # When data is sparse (many masked values), increase regularization to prevent numerical instability
                 missing_ratio = 1.0 - (len(Y_t) / k)  # Ratio of missing observations
                 # Scale regularization: base regularization * (1 + missing_ratio * 10)
                 # This means: 0% missing -> base reg, 50% missing -> 6x reg, 100% missing -> 11x reg
                 adaptive_reg = self.inv_regularization.item() * (1.0 + missing_ratio * 10.0)
+                
+                # CRITICAL FIX: Additional regularization based on n_obs (number of observed series)
+                # Log analysis shows F matrix inversion becomes unstable when n_obs >= 30
+                # Scale regularization: n_obs >= 30 -> additional factor (more generic threshold)
+                n_obs = len(Y_t)
+                if n_obs >= 30:
+                    n_obs_factor = 1.0 + (n_obs - 29) * 0.1  # 30 -> 1.1x, 33 -> 1.4x, 39 -> 2.0x
+                    adaptive_reg = adaptive_reg * n_obs_factor
+                    # Only log once per iteration (first time step) to reduce log spam
+                    if t == 0:
+                        _logger.debug(f"kalman_filter_forward: n_obs={n_obs} >= 30, applying n_obs_factor={n_obs_factor:.2f}, adaptive_reg={adaptive_reg:.2e}")
                 
                 # Steps for variance and population regression coefficients:
                 # Var(c_t*Z_t + e_t) = c_t Var(Z) c_t' + Var(e) = c_t*V*c_t' + R
@@ -378,6 +392,26 @@ class KalmanFilter(nn.Module):
                     diag_R_t = torch.clamp(diag_R_t, min=self.min_diagonal_variance.item() * (1.0 + missing_ratio * 5.0))
                     R_t = torch.diag(diag_R_t)
                 
+                # ROOT CAUSE ANALYSIS: Compute and log F matrix condition number before capping
+                # This helps identify when F becomes ill-conditioned
+                try:
+                    eigenvals_F = torch.linalg.eigvalsh(F)
+                    eigenvals_F = eigenvals_F[eigenvals_F > 1e-12]
+                    if len(eigenvals_F) > 0:
+                        max_eig_F = torch.max(eigenvals_F).item()
+                        min_eig_F = torch.min(eigenvals_F).item()
+                        cond_F = max_eig_F / min_eig_F if min_eig_F > 1e-12 else float('inf')
+                        # Only log first 5 steps or when severely ill-conditioned to reduce log spam
+                        if cond_F > 1e10 or t < 5:
+                            _logger.debug(
+                                f"kalman_filter_forward: t={t}, n_obs={n_obs}, F condition={cond_F:.2e}, "
+                                f"eigenvals=[{min_eig_F:.2e}, {max_eig_F:.2e}], adaptive_reg={adaptive_reg:.2e}"
+                            )
+                except (RuntimeError, ValueError):
+                    pass  # Skip if eigendecomposition fails
+                
+                # Cap maximum eigenvalue to prevent condition number explosion
+                F = self._cap_max_eigenval(F, max_eigenval=1e6)
                 # Ensure F is real, symmetric, and positive semi-definite
                 # Use adaptive minimum eigenvalue based on missing data ratio
                 min_eig_adaptive = self.min_eigenval.item() * (1.0 + missing_ratio * 5.0)
@@ -393,6 +427,15 @@ class KalmanFilter(nn.Module):
                 # Use safe inverse with adaptive regularization
                 # This handles GPU numerical stability issues (singular matrix errors)
                 iF = self._safe_inv(F, regularization=adaptive_reg, use_pinv_fallback=True)
+                
+                # ROOT CAUSE ANALYSIS: Check if inversion was successful (only log warnings, not every occurrence)
+                if not self._check_finite(iF, f"iF (inverse of F) at t={t}"):
+                    # Only log first occurrence to reduce log spam
+                    if t < 5:
+                        _logger.warning(
+                            f"kalman_filter_forward: iF contains NaN/Inf at t={t}, n_obs={n_obs}, "
+                            f"adaptive_reg={adaptive_reg:.2e}, missing_ratio={missing_ratio:.2f}"
+                        )
                 
                 # Matrix of population regression coefficients (Kalman gain)
                 VCF = VC @ iF
@@ -431,6 +474,8 @@ class KalmanFilter(nn.Module):
                     
                     # MATLAB-style: Ensure symmetry immediately after update (V = 0.5 * (V+V'))
                     Vu = ensure_real_and_symmetric(Vu)
+                    # Cap maximum eigenvalue to prevent explosion
+                    Vu = self._cap_max_eigenval(Vu, max_eigenval=1e6)
                     
                     # Clean NaN/Inf before stabilization
                     if not self._check_finite(Vu, f"Vu at t={t}"):
@@ -829,6 +874,10 @@ class KalmanFilter(nn.Module):
         if min_eigenval is None:
             min_eigenval = self.min_eigenval.item()
         return ensure_covariance_stable(M, min_eigenval=min_eigenval, ensure_real=ensure_real)
+    
+    def _cap_max_eigenval(self, M: torch.Tensor, max_eigenval: float = 1e6) -> torch.Tensor:
+        """Cap maximum eigenvalue of matrix to prevent numerical explosion."""
+        return cap_max_eigenval(M, max_eigenval=max_eigenval, warn=False)
     
     def _clean_matrix(
         self,
