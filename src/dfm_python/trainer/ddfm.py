@@ -35,7 +35,7 @@ class DDFMTrainer(pl.Trainer):
         - accelerator: 'auto'
         - devices: 'auto'
         - precision: 32
-        - gradient_clip_val: None (no clipping by default)
+        - gradient_clip_val: 1.0 (default, for numerical stability)
         - accumulate_grad_batches: 1
     
     These defaults are optimized for DDFM neural network training. The trainer
@@ -60,8 +60,9 @@ class DDFMTrainer(pl.Trainer):
         Device configuration
     precision : str or int, default 32
         Training precision (16, 32, 'bf16', etc.)
-    gradient_clip_val : float, optional
-        Gradient clipping value (useful for training stability)
+    gradient_clip_val : float, optional, default 1.0
+        Gradient clipping value for numerical stability. Default 1.0 helps prevent
+        gradient explosion that can cause NaN values during training.
     accumulate_grad_batches : int, default 1
         Number of batches to accumulate gradients before optimizer step
     **kwargs
@@ -88,7 +89,7 @@ class DDFMTrainer(pl.Trainer):
             accelerator: str = 'auto',
             devices: Any = 'auto',
             precision: Any = 32,
-            gradient_clip_val: Optional[float] = None,
+            gradient_clip_val: Optional[float] = 1.0,  # Default: 1.0 for numerical stability
             accumulate_grad_batches: int = 1,
             **kwargs
     ):
