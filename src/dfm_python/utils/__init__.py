@@ -41,13 +41,9 @@ from .time import (
 # Frequency utilities from config.utils
 from ..config.utils import get_periods_per_year, FREQUENCY_HIERARCHY
 
-<<<<<<< HEAD
-# Re-export nowcast utilities from nowcast package (optional - nowcast module removed)
-=======
 # Re-export nowcast utilities from nowcast package
 # Note: Nowcasting functionality has been moved to src.nowcast in the main project
 # These imports are optional to maintain backward compatibility
->>>>>>> d26340b05822e133f93bde59b8d4d005ba56b883
 try:
     from ..nowcast.helpers import (
         NewsDecompResult,
@@ -63,28 +59,17 @@ try:
     )
     from ..nowcast.dataview import DataView
 except ImportError:
-<<<<<<< HEAD
-    # Nowcast module removed - use src.nowcast instead
-    # Define placeholder classes/types for backward compatibility
-    NewsDecompResult = None
-    BacktestResult = None
-=======
     # Nowcast module not available - define stubs for backward compatibility
     from typing import Any
     NewsDecompResult = Any
     BacktestResult = Any
->>>>>>> d26340b05822e133f93bde59b8d4d005ba56b883
     para_const = None
     get_higher_frequency = None
     calc_backward_date = None
     get_forecast_horizon = None
     check_config = None
     extract_news = None
-<<<<<<< HEAD
-    DataView = None
-=======
     DataView = Any
->>>>>>> d26340b05822e133f93bde59b8d4d005ba56b883
 
 # Data loading utilities (from utils.data)
 from .data import (
