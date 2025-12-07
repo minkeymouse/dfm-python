@@ -743,9 +743,11 @@ class DDFM(BaseFactorModel):
                 f"Possible causes: (1) learning rate too high, (2) gradient explosion, "
                 f"(3) extreme input values, (4) unstable activation functions."
             )
-            # Return a large but finite loss to signal the issue, but don't update weights
-            # This prevents NaN from propagating to decoder weights
-            loss = torch.tensor(1e6, device=data.device, dtype=data.dtype, requires_grad=False)
+            # Return a large but finite loss to signal the issue
+            # Must have requires_grad=True for Lightning backward() to work
+            # Create loss from model parameters to ensure it's in the computation graph
+            dummy_loss = sum(p.sum() * 0.0 for p in self.parameters() if p.requires_grad)
+            loss = dummy_loss + torch.tensor(1e6, device=data.device, dtype=data.dtype, requires_grad=True)
             self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True)
             return loss
         

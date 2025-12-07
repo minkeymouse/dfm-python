@@ -310,9 +310,32 @@ class KalmanFilter(nn.Module):
             
             # Prior covariance matrix of Z (i.e. V = V_t|t-1)
             # Var(Z) = Var(A*Z + u_t) = Var(A*Z) + Var(u) = A*Vu*A' + Q
-            # Ensure Vu is stable before matrix multiplication (prevent NaN propagation)
+            # PRE-REGULARIZATION: Check Vu condition number before V calculation to prevent NaN propagation
             if not self._check_finite(Vu, f"Vu before V calculation at t={t}"):
                 Vu = self._ensure_cov_stable(Vu, min_eigenval=self.min_eigenval.item(), ensure_real=True)
+            else:
+                # Pre-regularization: Check condition number and apply adaptive regularization if ill-conditioned
+                try:
+                    eigenvals = torch.linalg.eigvalsh(Vu)
+                    eigenvals = eigenvals[eigenvals > 1e-12]
+                    if len(eigenvals) > 0:
+                        max_eig = torch.max(eigenvals)
+                        min_eig = torch.min(eigenvals)
+                        cond_num = max_eig / min_eig if min_eig > 1e-12 else float('inf')
+                        
+                        # If ill-conditioned, apply pre-regularization (MATLAB-style stability)
+                        if cond_num > 1e8:
+                            reg_scale = self.min_eigenval.item() * (cond_num / 1e8)
+                            Vu = Vu + torch.eye(Vu.shape[0], device=device, dtype=dtype) * reg_scale
+                            _logger.debug(f"Pre-regularized Vu at t={t}: cond={cond_num:.2e}, reg={reg_scale:.2e}")
+                except (RuntimeError, ValueError):
+                    # Fallback: apply default regularization if eigendecomposition fails
+                    Vu = Vu + torch.eye(Vu.shape[0], device=device, dtype=dtype) * self.min_eigenval.item()
+            
+            # Ensure Vu is symmetric before matrix multiplication (MATLAB: V = 0.5 * (V+V'))
+            Vu = ensure_real_and_symmetric(Vu)
+            
+            # Now safely compute V
             V = A @ Vu @ A.T + Q
             
             # Check for NaN/Inf before stabilization
@@ -320,7 +343,8 @@ class KalmanFilter(nn.Module):
                 # Fallback: use previous covariance with regularization
                 V = Vu + torch.eye(V.shape[0], device=device, dtype=dtype) * 1e-6
             
-            # Ensure V is real, symmetric, and positive semi-definite
+            # Ensure V is real, symmetric, and positive semi-definite (MATLAB: V = 0.5 * (V+V'))
+            V = ensure_real_and_symmetric(V)
             V = self._ensure_cov_stable(V, min_eigenval=self.min_eigenval.item(), ensure_real=True)
             
             # Calculate posterior distribution
@@ -405,18 +429,24 @@ class KalmanFilter(nn.Module):
                     
                     Vu = V - VCF @ VC.T
                     
+                    # MATLAB-style: Ensure symmetry immediately after update (V = 0.5 * (V+V'))
+                    Vu = ensure_real_and_symmetric(Vu)
+                    
                     # Clean NaN/Inf before stabilization
                     if not self._check_finite(Vu, f"Vu at t={t}"):
                         Vu = self._clean_matrix(Vu, 'general', default_nan=1e-8, default_inf=1e6)
+                        Vu = ensure_real_and_symmetric(Vu)  # Re-apply symmetry after cleaning
                     
                     # Check for NaN/Inf after cleaning
                     if not self._check_finite(Vu, f"Vu at t={t}"):
                         _logger.warning(f"kalman_filter_forward: Vu contains NaN/Inf at t={t}, using V as fallback")
                         Vu = V.clone()
+                        Vu = ensure_real_and_symmetric(Vu)  # Ensure symmetry of fallback
                         # Ensure fallback is also stable
                         Vu = self._ensure_cov_stable(Vu, min_eigenval=self.min_eigenval.item(), ensure_real=True)
                     
-                    # Ensure Vu is real, symmetric, and positive semi-definite
+                    # Ensure Vu is real, symmetric, and positive semi-definite (MATLAB: Vu = 0.5 * (Vu+Vu'))
+                    Vu = ensure_real_and_symmetric(Vu)
                     Vu = self._ensure_cov_stable(Vu, min_eigenval=self.min_eigenval.item(), ensure_real=True)
                     
                     # Update log-likelihood (with safeguards)

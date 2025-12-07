@@ -12,20 +12,24 @@ Algorithm Structure:
     benefit greatly from GPU acceleration.
 
 Numerical Stability:
-    All matrix inversions and solves use regularization (1e-6) to prevent
-    singular matrix errors. This is critical for GPU stability, as PyTorch
-    can throw RuntimeError for near-singular matrices.
+    All matrix inversions and solves use adaptive regularization based on condition
+    number to prevent singular matrix errors. This is critical for GPU stability, as
+    PyTorch can throw RuntimeError for near-singular matrices.
+    
+    Root Cause of Divergence (Fixed):
+    - Fixed regularization (1e-6) was insufficient when condition number of sum_EZZ
+      (factor covariance) grows over iterations, leading to numerical instability in
+      C matrix solve operation
+    - Solution: Adaptive regularization scales up proportionally when condition number
+      exceeds 1e8, preventing ill-conditioned matrix inversions
     
     Known Limitations:
-    - Some target series (e.g., KOCNPER.D) may exhibit numerical instability
-      despite regularization measures. This can manifest as:
-      * Singular or ill-conditioned matrices in M-step
-      * NaN/Inf values in parameter updates
-      * Convergence failures or numerical overflow
-    - The package includes multiple stability measures (regularization, matrix
-      normalization, spectral radius capping, Q matrix floor), but some
-      data/model combinations may still fail due to inherent numerical
-      properties of the data structure.
+    - Some target series may still exhibit numerical instability if data quality is
+      poor (high collinearity, extreme missing data, small effective sample size)
+    - The package includes multiple stability measures (adaptive regularization,
+      matrix normalization, spectral radius capping, Q matrix floor), but some
+      data/model combinations may still fail due to inherent numerical properties
+      of the data structure
     - When EM algorithm fails for a specific target, consider:
       * Using DDFM (nonlinear encoder) as an alternative
       * Adjusting regularization_scale or other hyperparameters
@@ -179,8 +183,30 @@ class EMAlgorithm(nn.Module):
                 XTX_A = torch.sum(X_A[:, :, None] * X_A[:, None, :], dim=0)
                 # Compute XTY = sum_t X_t Y_t^T (vectorized: batch outer products)
                 XTY_A = torch.sum(X_A[:, :, None] * Y_A[:, None, :], dim=0)
-                # Regularization prevents singular matrix errors (critical for GPU stability)
-                reg_scale = self.regularization_scale.item()
+                
+                # ROOT CAUSE FIX: Adaptive regularization based on condition number
+                base_reg_scale = self.regularization_scale.item()
+                try:
+                    eigenvals = torch.linalg.eigvalsh(XTX_A)
+                    eigenvals = eigenvals[eigenvals > 1e-12]
+                    if len(eigenvals) > 0:
+                        max_eig = torch.max(eigenvals)
+                        min_eig = torch.min(eigenvals)
+                        cond_num = max_eig / min_eig if min_eig > 1e-12 else float('inf')
+                        
+                        if cond_num > 1e8:
+                            reg_scale = base_reg_scale * (cond_num / 1e8)
+                            _logger.debug(
+                                f"EM algorithm: XTX_A is ill-conditioned (cond={cond_num:.2e}), "
+                                f"increasing regularization to {reg_scale:.2e}"
+                            )
+                        else:
+                            reg_scale = base_reg_scale
+                    else:
+                        reg_scale = base_reg_scale * 100
+                except (RuntimeError, ValueError):
+                    reg_scale = base_reg_scale * 10
+                
                 XTX_A_reg = XTX_A + torch.eye(m, device=device, dtype=dtype) * reg_scale
                 A_new = torch.linalg.solve(XTX_A_reg, XTY_A).T
                 
@@ -217,8 +243,45 @@ class EMAlgorithm(nn.Module):
             sum_yEZ = torch.sum(y_for_mstep.T[:, :, None] * EZ[:, None, :], dim=0)  # (N, m)
             # Compute sum_EZZ = sum_t E[Z_t Z_t^T]
             sum_EZZ = torch.sum(EZZ, dim=0)
-            # Regularization prevents singular matrix errors (critical for GPU stability)
-            reg_scale = self.regularization_scale.item()
+            
+            # ROOT CAUSE FIX: Adaptive regularization based on condition number
+            # Fixed regularization (1e-6) becomes insufficient as condition number grows
+            # Compute condition number to determine appropriate regularization
+            base_reg_scale = self.regularization_scale.item()
+            try:
+                eigenvals = torch.linalg.eigvalsh(sum_EZZ)
+                eigenvals = eigenvals[eigenvals > 1e-12]  # Filter near-zero eigenvalues
+                if len(eigenvals) > 0:
+                    max_eig = torch.max(eigenvals)
+                    min_eig = torch.min(eigenvals)
+                    cond_num = max_eig / min_eig if min_eig > 1e-12 else float('inf')
+                    
+                    # Adaptive regularization: scale up if ill-conditioned
+                    # If cond_num > 1e8, increase regularization proportionally
+                    if cond_num > 1e8:
+                        reg_scale = base_reg_scale * (cond_num / 1e8)
+                        _logger.warning(
+                            f"EM algorithm: sum_EZZ is ill-conditioned (cond={cond_num:.2e}), "
+                            f"increasing regularization from {base_reg_scale:.2e} to {reg_scale:.2e}"
+                        )
+                    else:
+                        reg_scale = base_reg_scale
+                else:
+                    # All eigenvalues are near-zero, use stronger regularization
+                    reg_scale = base_reg_scale * 100
+                    _logger.warning(
+                        f"EM algorithm: sum_EZZ has no valid eigenvalues, "
+                        f"using strong regularization: {reg_scale:.2e}"
+                    )
+            except (RuntimeError, ValueError) as e:
+                # Eigendecomposition failed, use stronger regularization
+                reg_scale = base_reg_scale * 10
+                _logger.warning(
+                    f"EM algorithm: Failed to compute condition number for sum_EZZ ({e}), "
+                    f"using increased regularization: {reg_scale:.2e}"
+                )
+            
+            # Apply adaptive regularization
             sum_EZZ_reg = sum_EZZ + torch.eye(m, device=device, dtype=dtype) * reg_scale
             C_new = torch.linalg.solve(sum_EZZ_reg.T, sum_yEZ.T).T
             
@@ -266,24 +329,30 @@ class EMAlgorithm(nn.Module):
                 Q_new = var_val.unsqueeze(0).unsqueeze(0)  # (1, 1)
             else:
                 Q_new = torch.cov(residuals_Q.T)
-                Q_new = (Q_new + Q_new.T) / 2
+                # MATLAB-style: Ensure symmetry immediately (Q = 0.5 * (Q+Q'))
+                Q_new = ensure_symmetric(Q_new)
             # Ensure positive definite with robust eigenvalue computation
+            # MATLAB-style: Ensure symmetry after each update (Q = 0.5 * (Q+Q'))
+            Q_new = ensure_symmetric(Q_new)
             try:
                 eigenvals_Q = torch.linalg.eigvalsh(Q_new)
                 min_eigenval = torch.min(eigenvals_Q)
                 if min_eigenval < 1e-8:
                     Q_new = Q_new + torch.eye(m, device=device, dtype=dtype) * (1e-8 - min_eigenval)
+                    Q_new = ensure_symmetric(Q_new)  # Re-apply symmetry after regularization
             except (RuntimeError, ValueError) as e:
                 # eigvalsh failed due to ill-conditioning - apply stronger regularization
                 _logger.warning(f"eigvalsh failed for Q matrix: {e}. Applying stronger regularization.")
                 # Apply stronger regularization to ensure positive definiteness
                 Q_new = Q_new + torch.eye(m, device=device, dtype=dtype) * 1e-6
+                Q_new = ensure_symmetric(Q_new)  # Ensure symmetry after regularization
                 # Recompute eigenvalues with regularized matrix
                 try:
                     eigenvals_Q = torch.linalg.eigvalsh(Q_new)
                     min_eigenval = torch.min(eigenvals_Q)
                     if min_eigenval < 1e-8:
                         Q_new = Q_new + torch.eye(m, device=device, dtype=dtype) * (1e-8 - min_eigenval)
+                        Q_new = ensure_symmetric(Q_new)  # Re-apply symmetry after regularization
                 except (RuntimeError, ValueError):
                     # Still failing - use diagonal matrix with variance estimates
                     diag_Q = torch.diag(Q_new)
@@ -326,13 +395,14 @@ class EMAlgorithm(nn.Module):
         if diag_R.ndim > 1:
             diag_R = diag_R.flatten()
         
-        # Clean and clamp diagonal (like numpy version: clipping and epsilon)
-        diag_R = torch.nan_to_num(diag_R, nan=1e-6, posinf=1e4, neginf=1e-6)  # Clean NaN/Inf
-        diag_R = torch.clamp(diag_R, min=1e-6, max=1e4)  # Clip to reasonable range (like numpy version)
+        # Clean and clamp diagonal (MATLAB: RR(i_idio_M) = 1e-04, RR(nM+1:end) = 1e-04)
+        # Use 1e-4 as minimum (MATLAB default) instead of 1e-6 for better numerical stability
+        diag_R = torch.nan_to_num(diag_R, nan=1e-4, posinf=1e4, neginf=1e-4)  # Clean NaN/Inf
+        diag_R = torch.clamp(diag_R, min=1e-4, max=1e4)  # Clip to reasonable range (MATLAB: min=1e-4)
         R_new = torch.diag(diag_R)
         
-        # Ensure positive definite (minimum variance floor)
-        R_new = torch.maximum(R_new, torch.eye(N, device=device, dtype=dtype) * 1e-6)
+        # Ensure positive definite (minimum variance floor) - MATLAB: 1e-04 for all series
+        R_new = torch.maximum(R_new, torch.eye(N, device=device, dtype=dtype) * 1e-4)
         
         # Update Z_0 and V_0 (use first smoothed state)
         Z_0_new = Zsmooth[0, :]  # Initial state

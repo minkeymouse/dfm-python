@@ -219,6 +219,10 @@ class DFM(BaseFactorModel):
         For DFM, each "step" is actually one EM iteration. The batch contains
         the full time series data.
         
+        **Important**: If `fit_em()` has already completed training (in `on_train_start()`),
+        this method skips additional EM iterations to prevent double training and log-likelihood
+        deterioration. The model will use the results from `fit_em()` instead.
+        
         Parameters
         ----------
         batch : torch.Tensor or tuple
@@ -231,6 +235,19 @@ class DFM(BaseFactorModel):
         loss : torch.Tensor
             Negative log-likelihood (to minimize)
         """
+        # CRITICAL FIX: Skip additional EM iterations if fit_em() already completed training
+        # This prevents double training that causes log-likelihood deterioration.
+        # fit_em() runs in on_train_start() and completes the full EM algorithm.
+        # Lightning's training loop should not run additional EM iterations after that.
+        if self.training_state is not None:
+            # fit_em() has already run - use its results instead of doing more EM iterations
+            loglik = self.training_state.loglik
+            self.log('loglik', loglik, on_step=True, on_epoch=True, prog_bar=True)
+            self.log('em_iteration', float(self.training_state.num_iter), on_step=True, on_epoch=True)
+            # Return negative log-likelihood as loss (consistent with normal training_step)
+            device = next(self.parameters()).device if len(list(self.parameters())) > 0 else torch.device('cpu')
+            return -torch.tensor(loglik, device=device, dtype=torch.float32)
+        
         # Handle both tuple and single tensor batches
         if isinstance(batch, tuple):
             data, _ = batch
@@ -306,7 +323,10 @@ class DFM(BaseFactorModel):
         
         if converged:
             self.training_state.converged = True
-            _logger.info(f"EM algorithm converged at iteration {self.current_epoch}")
+            # Only log convergence once, not on every training_step call
+            if not hasattr(self, '_convergence_logged'):
+                _logger.info(f"EM algorithm converged at iteration {self.training_state.num_iter}")
+                self._convergence_logged = True
     
     def fit_em(
         self,
@@ -363,6 +383,8 @@ class DFM(BaseFactorModel):
         
         # Initialize state
         previous_loglik = float('-inf')
+        best_loglik = float('-inf')
+        best_params = None
         num_iter = 0
         converged = False
         
@@ -421,6 +443,41 @@ class DFM(BaseFactorModel):
                 self.R.data = R_new
                 self.Z_0.data = Z_0_new
                 self.V_0.data = V_0_new
+            
+            # Track best log-likelihood and parameters (for early stopping on divergence)
+            if loglik > best_loglik:
+                best_loglik = loglik
+                # Store best parameters in case we need to revert
+                best_params = {
+                    'A': self.A.data.clone(),
+                    'C': self.C.data.clone(),
+                    'Q': self.Q.data.clone(),
+                    'R': self.R.data.clone(),
+                    'Z_0': self.Z_0.data.clone(),
+                    'V_0': self.V_0.data.clone()
+                }
+            
+            # Check for significant log-likelihood deterioration (divergence detection)
+            # Stop early if log-likelihood worsens by more than 1000 from best (indicates divergence)
+            if num_iter > 10 and best_loglik != float('-inf') and loglik < best_loglik - 1000:
+                _logger.warning(
+                    f"EM algorithm: Log-likelihood deteriorated significantly from best value. "
+                    f"Best: {best_loglik:.4f}, Current: {loglik:.4f}, Deterioration: {best_loglik - loglik:.4f}. "
+                    f"Stopping early at iteration {num_iter + 1} to prevent further divergence. "
+                    f"Reverting to best parameters from iteration {num_iter}."
+                )
+                # Revert to best parameters
+                if best_params is not None:
+                    with torch.no_grad():
+                        self.A.data = best_params['A']
+                        self.C.data = best_params['C']
+                        self.Q.data = best_params['Q']
+                        self.R.data = best_params['R']
+                        self.Z_0.data = best_params['Z_0']
+                        self.V_0.data = best_params['V_0']
+                # Use best log-likelihood for final state
+                loglik = best_loglik
+                break
             
             # Check convergence - use self.em.check_convergence() instead of em_converged()
             if num_iter > 2:

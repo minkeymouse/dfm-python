@@ -40,7 +40,8 @@ def _setup_early_stopping(
     max_epochs: int,
     patience: int = 10,
     min_delta: Optional[float] = None,
-    monitor: str = 'train_loss'
+    monitor: str = 'train_loss',
+    mode: str = 'min'
 ) -> Optional[EarlyStopping]:
     """Create EarlyStopping callback if max_epochs > 0.
     
@@ -54,6 +55,9 @@ def _setup_early_stopping(
         Minimum change to qualify as improvement (None for DFM, 1e-6 for DDFM)
     monitor : str, default 'train_loss'
         Metric to monitor for early stopping. Use 'loglik' for DFM, 'train_loss' for DDFM.
+    mode : str, default 'min'
+        Whether to minimize ('min') or maximize ('max') the monitored metric.
+        Use 'max' for log-likelihood (DFM), 'min' for loss (DDFM).
         
     Returns
     -------
@@ -66,7 +70,7 @@ def _setup_early_stopping(
     kwargs = {
         'monitor': monitor,
         'patience': patience,
-        'mode': 'min',
+        'mode': mode,
         'verbose': True
     }
     if min_delta is not None:
@@ -680,11 +684,14 @@ def _create_base(
         - 'kwargs': Additional kwargs for Trainer
     """
     # Setup early stopping callback
+    # Determine mode: 'max' for loglik (DFM), 'min' for loss (DDFM)
+    early_stopping_mode = 'max' if early_stopping_monitor == 'loglik' else 'min'
     early_stopping = _setup_early_stopping(
         max_epochs=max_epochs,
         patience=early_stopping_patience,
         min_delta=early_stopping_min_delta,
-        monitor=early_stopping_monitor
+        monitor=early_stopping_monitor,
+        mode=early_stopping_mode
     )
     
     # Build callbacks list with early stopping and any additional callbacks
