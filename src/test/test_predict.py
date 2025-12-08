@@ -363,3 +363,57 @@ class TestPredictReturnValues:
         assert forecast.shape == (1, 2)
         assert np.allclose(forecast, np.full((1, 2), 5.0))
 
+    def test_update_can_replace_scaler_for_predict(self):
+        """Ensure update(scaler=...) replaces scaler used by predict()."""
+        import types
+        import torch
+        from typing import Any, cast
+
+        class DummyScalerA:
+            def inverse_transform(self, X):
+                return X + 1.0
+
+        class DummyScalerB:
+            def inverse_transform(self, X):
+                return X + 2.0
+
+        class SimpleResult:
+            def __init__(self):
+                self.Z = np.array([[0.0], [0.0]])
+                self.C = np.array([[1.0], [1.0]])
+                self.A = np.array([[0.0]])
+                self.Q = np.array([[1.0]])
+                self.R = np.eye(2) * 0.1
+                self.Z_0 = np.array([0.0])
+                self.V_0 = np.eye(1) * 0.1
+                self.Wx = np.array([1.0, 1.0])
+                self.Mx = np.array([0.0, 0.0])
+                self.p = 1
+
+        model = DFM()
+        model.training_state = types.SimpleNamespace(
+            A=torch.zeros((1, 1)),
+            C=torch.zeros((2, 1)),
+            Q=torch.zeros((1, 1)),
+            R=torch.zeros((2, 2)),
+            Z_0=torch.zeros((1,)),
+            V_0=torch.zeros((1, 1)),
+            loglik=0.0,
+            num_iter=1,
+            converged=True
+        )
+        model._result = cast(Any, SimpleResult())
+
+        # Initial scaler (not used after replacement)
+        object.__setattr__(model, "scaler", DummyScalerA())
+
+        # Replace scaler via update()
+        X_dummy = np.zeros((1, 2))
+        model.update(X_dummy, scaler=DummyScalerB())
+
+        forecast = model.predict(horizon=1, return_series=True, return_factors=False)
+        assert isinstance(forecast, np.ndarray)
+        assert forecast.shape == (1, 2)
+        # Should reflect DummyScalerB (+2)
+        assert np.allclose(forecast, np.full((1, 2), 2.0))
+
