@@ -104,6 +104,92 @@ class TestUpdateImplementation:
         with pytest.raises(ValueError, match="X_std must be 2D array"):
             model.update(np.random.randn(10))
     
+    def test_update_with_history(self, simple_config, simple_data):
+        """Test update with history parameter filters to recent periods."""
+        model = DFM()
+        model._config = simple_config
+        
+        df, time_index = simple_data
+        data_module = DFMDataModule(config=simple_config, data=df, time_index=time_index)
+        data_module.setup()
+        
+        simple_config.max_iter = 2
+        simple_config.threshold = 1e-2
+        trainer = DFMTrainer()
+        trainer.fit(model, data_module)
+        
+        # Create data with more periods than history
+        X_std = np.random.randn(20, 2)
+        
+        # Update with history=5 should use only last 5 periods
+        updated_model = model.update(X_std, history=5)
+        assert updated_model is model  # Should return self for chaining
+        
+        # After update, predict should work
+        forecast = model.predict(horizon=1, return_series=True, return_factors=False)
+        assert isinstance(forecast, np.ndarray)
+        assert forecast.shape[0] == 1
+        assert np.isfinite(forecast).all()
+    
+    def test_update_with_history_larger_than_data(self, simple_config, simple_data):
+        """Test update with history larger than data uses all data."""
+        model = DFM()
+        model._config = simple_config
+        
+        df, time_index = simple_data
+        data_module = DFMDataModule(config=simple_config, data=df, time_index=time_index)
+        data_module.setup()
+        
+        simple_config.max_iter = 2
+        simple_config.threshold = 1e-2
+        trainer = DFMTrainer()
+        trainer.fit(model, data_module)
+        
+        # Create data with fewer periods than history
+        X_std = np.random.randn(5, 2)
+        
+        # Update with history=20 should use all 5 periods (data is smaller)
+        updated_model = model.update(X_std, history=20)
+        assert updated_model is model
+        
+        # After update, predict should work
+        forecast = model.predict(horizon=1, return_series=True, return_factors=False)
+        assert isinstance(forecast, np.ndarray)
+        assert forecast.shape[0] == 1
+        assert np.isfinite(forecast).all()
+    
+    def test_update_with_history_none(self, simple_config, simple_data):
+        """Test update with history=None uses all data (default behavior)."""
+        model = DFM()
+        model._config = simple_config
+        
+        df, time_index = simple_data
+        data_module = DFMDataModule(config=simple_config, data=df, time_index=time_index)
+        data_module.setup()
+        
+        simple_config.max_iter = 2
+        simple_config.threshold = 1e-2
+        trainer = DFMTrainer()
+        trainer.fit(model, data_module)
+        
+        X_std = np.random.randn(10, 2)
+        
+        # Update with history=None should use all data
+        updated_model = model.update(X_std, history=None)
+        assert updated_model is model
+        
+        # Should work the same as update without history parameter
+        forecast1 = model.predict(horizon=1, return_series=True, return_factors=False)
+        
+        # Reset and update without history
+        model._result.Z[-1, :] = model._result.Z[-2, :]  # Reset to previous state
+        model.update(X_std)
+        forecast2 = model.predict(horizon=1, return_series=True, return_factors=False)
+        
+        # Both should produce valid forecasts
+        assert np.isfinite(forecast1).all()
+        assert np.isfinite(forecast2).all()
+    
     def test_predict_basic(self, simple_config, simple_data):
         """Test basic predict functionality."""
         model = DFM()

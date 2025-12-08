@@ -846,6 +846,95 @@ class DFM(BaseFactorModel):
             return X_forecast
         return Z_forecast
     
+    def update(
+        self,
+        X_std: np.ndarray,
+        *,
+        history: Optional[int] = None,
+        kalman_filter: Optional[Any] = None
+    ) -> 'DFM':
+        """Update factor state with standardized data.
+        
+        This method permanently updates the last factor state (result.Z[-1, :])
+        using the provided standardized data. Users should handle all preprocessing
+        (masking, imputation, standardization) before calling this method.
+        
+        Parameters
+        ----------
+        X_std : np.ndarray
+            Standardized data array (T x N), where T is number of time periods
+            and N is number of series. Data should already be standardized using
+            result.Mx and result.Wx.
+        history : int, optional
+            Number of recent periods to use for factor state update. If None, uses
+            all provided data (default). If specified (e.g., 60), uses only the most
+            recent N periods. Initial state (Z_0, V_0) is always estimated from
+            full training data, but the update uses only recent history for efficiency.
+        kalman_filter : Any, optional
+            Kalman filter instance. If None, uses default or model's kalman filter.
+            
+        Returns
+        -------
+        DFM
+            Self for method chaining
+            
+        Examples
+        --------
+        >>> # Update state with new data, then predict
+        >>> model.update(X_std).predict(horizon=1)
+        >>> # Or update with only recent 12 periods
+        >>> model.update(X_std, history=12)
+        >>> forecast = model.predict(horizon=6)
+        """
+        self._check_trained()
+        
+        result = self.result  # Use property which ensures non-None after _check_trained()
+        
+        # Validate input shape
+        if not isinstance(X_std, np.ndarray):
+            X_std = np.asarray(X_std)
+        if X_std.ndim != 2:
+            raise ValueError(
+                f"DFM update(): X_std must be 2D array (T x N), "
+                f"got shape {X_std.shape}"
+            )
+        
+        # Handle NaN/Inf values
+        X_std = np.where(np.isfinite(X_std), X_std, np.nan)
+        
+        # Filter to recent history if specified
+        # Note: Initial state (Z_0, V_0) from result is estimated from full training data,
+        # but we use only recent history for the update step
+        if history is not None and history > 0:
+            if X_std.shape[0] > history:
+                X_recent = X_std[-history:, :]
+                _logger.debug(
+                    f"DFM update(): Using {history} most recent periods out of {X_std.shape[0]} total periods"
+                )
+            else:
+                X_recent = X_std
+                _logger.debug(
+                    f"DFM update(): history={history} specified but data has only {X_std.shape[0]} periods, using all data"
+                )
+        else:
+            X_recent = X_std
+        
+        # Update factor state using Kalman filter directly on standardized data
+        Z_last_updated = self._update_factor_state_dfm(
+            X_recent, result, kalman_filter or getattr(self, 'kalman', None)
+        )
+        
+        # Update result.Z[-1, :] permanently
+        if Z_last_updated is not None:
+            result.Z[-1, :] = Z_last_updated
+        else:
+            _logger.warning(
+                f"DFM update(): Failed to update factor state, "
+                f"keeping current state"
+            )
+            
+        return self
+    
     @property
     def result(self) -> DFMResult:
         """Get model result from training state.

@@ -570,7 +570,7 @@ class EMAlgorithm(nn.Module):
         resNaN = x_clean.clone()
         resNaN[indNaN] = torch.nan
         
-        # Determine tent kernel size (pC) for quarterly-monthly aggregation
+        # Determine tent kernel size (pC) for slower-frequency aggregation
         pC = 5  # Default: quarterly to monthly uses 5 periods [1,2,3,2,1]
         if R_mat is not None:
             pC = R_mat.shape[1]

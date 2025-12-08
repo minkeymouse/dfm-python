@@ -336,7 +336,7 @@ pytest src/test/test_trainer.py -v
 
 **Version**: 0.5.1  
 **Status**: Stable  
-**Python**: 3.10+
+**Python**: 3.10+  
 
 ### What's New in 0.5.1
 
