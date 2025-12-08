@@ -8,20 +8,20 @@ A comprehensive Python implementation of **Dynamic Factor Models (DFM)** and **D
 ## Features
 
 ### Core Capabilities
-- ✅ **Mixed-frequency data**: Monthly, quarterly, semi-annual, annual series in one model
-- ✅ **Clock-based framework**: All factors evolve at a common clock frequency
-- ✅ **Block structure**: Flexible factor organization (global + sector-specific factors)
-- ✅ **Idiosyncratic components**: Per-series state augmentation for better fit
-- ✅ **Preprocessed data**: Users handle preprocessing (imputation, scaling) using sktime or other tools
-- ✅ **Forecasting**: Generate predictions for any horizon
-- ✅ **Nowcasting**: Estimate current period values using incomplete data
-- ✅ **Deep DFM (DDFM)**: Nonlinear encoder with PyTorch for capturing complex factor structures
+- **Mixed-frequency data**: Monthly, quarterly, semi-annual, annual series in one model
+- **Clock-based framework**: All factors evolve at a common clock frequency
+- **Block structure**: Flexible factor organization (global + sector-specific factors)
+- **Idiosyncratic components**: Per-series state augmentation for better fit
+- **Preprocessed data**: Users handle preprocessing (imputation, scaling) using sktime or other tools
+- **Forecasting**: Generate predictions for any horizon
+- **Nowcasting**: Estimate current period values using incomplete data
+- **Deep DFM (DDFM)**: Nonlinear encoder with PyTorch for capturing complex factor structures
 
 ### Technical Features
-- ✅ **PyTorch Lightning**: Standard training interface with DataModule and Trainer
-- ✅ **Multiple configuration methods**: YAML files, Python dictionaries, or Hydra
-- ✅ **Advanced numerical stability**: Adaptive regularization, spectral radius capping, variance floors
-- ✅ **Error handling**: Comprehensive error handling, extensive testing, well-documented
+- **PyTorch Lightning**: Standard training interface with DataModule and Trainer
+- **Multiple configuration methods**: YAML files, Python dictionaries, or Hydra
+- **Advanced numerical stability**: Adaptive regularization, spectral radius capping, variance floors
+- **Error handling**: Comprehensive error handling, extensive testing, well-documented
 
 ## Installation
 
@@ -340,12 +340,12 @@ pytest src/test/test_trainer.py -v
 
 ### What's New in 0.5.1
 
-- ✨ **New `update()` method**: Replaces legacy `nowcast()` with flexible `update().predict()` pattern
-- 🔧 **Improved API**: Users now control all preprocessing (masking, imputation, standardization)
-- 🧹 **Code cleanup**: Removed legacy code and overengineering (~200+ lines removed)
-- 🐛 **Bug fixes**: Fixed DDFM `update()` method for single-factor models
-- 📚 **Updated tutorials**: All 4 tutorials rewritten with new pattern and VAR(1) configuration
-- ✅ **VAR(1) only**: Simplified to VAR(1) factor dynamics throughout  
+- **New `update()` method**: Replaces legacy `nowcast()` with flexible `update().predict()` pattern
+- **Improved API**: Users now control all preprocessing (masking, imputation, standardization)
+- **Code cleanup**: Removed legacy code and overengineering (~200+ lines removed)
+- **Bug fixes**: Fixed DDFM `update()` method for single-factor models
+- **Updated tutorials**: All 4 tutorials rewritten with new pattern and VAR(1) configuration
+- **VAR(1) only**: Simplified to VAR(1) factor dynamics throughout  
 
 ## License
 
