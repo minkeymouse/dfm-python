@@ -3,7 +3,7 @@
 [![PyPI version](https://img.shields.io/pypi/v/dfm-python.svg)](https://pypi.org/project/dfm-python/)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 
-A comprehensive Python implementation of **Dynamic Factor Models (DFM)** and **Deep Dynamic Factor Models (DDFM)** for forecasting high-dimensional time series. Built with PyTorch Lightning for production-ready training and inference.
+A comprehensive Python implementation of **Dynamic Factor Models (DFM)** and **Deep Dynamic Factor Models (DDFM)** for forecasting high-dimensional time series. Built with PyTorch Lightning.
 
 ## Features
 
@@ -21,7 +21,7 @@ A comprehensive Python implementation of **Dynamic Factor Models (DFM)** and **D
 - ✅ **PyTorch Lightning**: Standard training interface with DataModule and Trainer
 - ✅ **Multiple configuration methods**: YAML files, Python dictionaries, or Hydra
 - ✅ **Advanced numerical stability**: Adaptive regularization, spectral radius capping, variance floors
-- ✅ **Production-ready**: Comprehensive error handling, extensive testing, well-documented
+- ✅ **Error handling**: Comprehensive error handling, extensive testing, well-documented
 
 ## Installation
 
@@ -335,7 +335,7 @@ pytest src/test/test_trainer.py -v
 ## Project Status
 
 **Version**: 0.5.1  
-**Status**: Stable and production-ready  
+**Status**: Stable  
 **Python**: 3.10+
 
 ### What's New in 0.5.1
