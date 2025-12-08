@@ -6,8 +6,9 @@ This module contains dataclasses for storing DFM estimation results and paramete
 import numpy as np
 import warnings
 from dataclasses import dataclass
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 from abc import ABC
+from datetime import datetime
 
 from .schema import DFMConfig
 
@@ -276,6 +277,57 @@ class DDFMResult(BaseResult):
     training_loss: Optional[float] = None  # Final training loss
     encoder_layers: Optional[List[int]] = None  # Encoder architecture
     use_idiosyncratic: Optional[bool] = None  # Whether idio components were used
+
+
+@dataclass
+class NowcastResult:
+    """Result from a single nowcast calculation.
+    
+    This dataclass contains all information from a nowcast operation,
+    including the nowcast value, metadata about the data view, and
+    optional diagnostic information.
+    
+    Attributes
+    ----------
+    target_series : str
+        Target series ID that was nowcasted.
+    target_period : datetime
+        Target period for the nowcast (the period being estimated).
+    view_date : datetime
+        View date (when data is available). This determines which
+        data points are masked/unmasked in the nowcast calculation.
+    nowcast_value : float
+        The calculated nowcast value for the target series.
+    confidence_interval : Tuple[float, float], optional
+        Confidence interval (lower, upper) for the nowcast, if available.
+    factors_at_view : np.ndarray, optional
+        Factor values at the view_date (m,). These are the updated
+        factor states after applying the data view masking.
+    dfm_result : BaseResult, optional
+        Full DFM/DDFM result for this view. Can be used for further
+        analysis or diagnostics.
+    data_availability : Dict[str, int], optional
+        Dictionary with keys 'n_available' and 'n_missing' indicating
+        how many data points were available vs missing in the data view.
+    
+    Examples
+    --------
+    >>> from dfm_python import DFM
+    >>> model = DFM()
+    >>> trainer.fit(model, data_module)
+    >>> # Get nowcast with full result
+    >>> result = model.nowcast('gdp', view_date='2024-01-15', return_result=True)
+    >>> print(f"Nowcast: {result.nowcast_value}")
+    >>> print(f"Available data: {result.data_availability['n_available']}")
+    """
+    target_series: str
+    target_period: datetime
+    view_date: datetime
+    nowcast_value: float
+    confidence_interval: Optional[Tuple[float, float]] = None  # (lower, upper)
+    factors_at_view: Optional[np.ndarray] = None  # Factor values at view_date
+    dfm_result: Optional[BaseResult] = None  # Full DFM/DDFM result for this view
+    data_availability: Optional[Dict[str, int]] = None  # n_available, n_missing
 
 
 @dataclass

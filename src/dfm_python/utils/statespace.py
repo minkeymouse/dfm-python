@@ -386,15 +386,14 @@ def _apply_ar_clipping(A: np.ndarray, config: Optional[Any] = None) -> Tuple[np.
     if config is None:
         return _clip_ar(A, -0.99, 0.99, True)
     
-    from ..utils.helpers import safe_get_attr
     
-    clip_enabled = safe_get_attr(config, 'clip_ar_coefficients', True)
+    clip_enabled = getattr(config, 'clip_ar_coefficients', True) if config is not None else True
     if not clip_enabled:
         return A, {'n_clipped': 0, 'n_total': A.size, 'clipped_indices': []}
     
-    min_val = safe_get_attr(config, 'ar_clip_min', -0.99)
-    max_val = safe_get_attr(config, 'ar_clip_max', 0.99)
-    warn = safe_get_attr(config, 'warn_on_ar_clip', True)
+    min_val = getattr(config, 'ar_clip_min', -0.99) if config is not None else -0.99
+    max_val = getattr(config, 'ar_clip_max', 0.99) if config is not None else 0.99
+    warn = getattr(config, 'warn_on_ar_clip', True) if config is not None else True
     return _clip_ar(A, min_val, max_val, warn)
 
 

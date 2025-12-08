@@ -19,6 +19,12 @@ from datetime import datetime
 from dfm_python import DFM, DFMDataModule, DFMTrainer
 from dfm_python.config import DFMConfig, SeriesConfig, DEFAULT_BLOCK_NAME
 from dfm_python.utils.time import TimeIndex, parse_timestamp
+from dfm_python.lightning.scaling import create_scaling_transformer_from_config
+
+# sktime imports for preprocessing
+from sktime.transformations.compose import TransformerPipeline
+from sktime.transformations.series.impute import Imputer
+from sklearn.preprocessing import StandardScaler
 
 print("=" * 80)
 print("DFM Tutorial: Macro Data")
@@ -43,16 +49,16 @@ print("\n[Step 2] Preparing data...")
 target_col = "KOEQUIPTE"
 
 # Select a subset of series for faster execution
-# Use a mix of different categories: employment, consumption, investment, etc.
+# Use fewer series for faster execution
 selected_cols = [
-    # Employment
-    "KOEMPTOTO", "KOEMPWREP", "KOHWRWEMP",
-    # Consumption
-    "KOWRCCNSE", "KOWRCDURE", "KOWRCSEME",
-    # Investment
-    "KOIMPCONA", "KOIPALL.G",
-    # Production
-    "KOCONPRCF", "KOCPCOREF",
+    # Employment (reduced)
+    "KOEMPTOTO", "KOHWRWEMP",
+    # Consumption (reduced)
+    "KOWRCCNSE", "KOWRCDURE",
+    # Investment (reduced)
+    "KOIMPCONA",
+    # Production (reduced)
+    "KOCONPRCF",
     # Target
     target_col
 ]
@@ -75,7 +81,75 @@ df_processed = df_processed.drop(columns=["date"])
 
 # Remove rows with all NaN
 df_processed = df_processed.dropna(how='all')
+
+# Use only recent data for faster execution
+# Take last 100 periods (further reduced for faster execution)
+max_periods = 100
+if len(df_processed) > max_periods:
+    df_processed = df_processed.iloc[-max_periods:]
+    date_col = date_col.iloc[-max_periods:]
+    print(f"   Using last {max_periods} periods for faster execution")
+
 print(f"   Data shape after cleaning: {df_processed.shape}")
+
+# Check for missing values
+missing_before = df_processed.isnull().sum().sum()
+print(f"   Missing values before preprocessing: {missing_before} ({missing_before/df_processed.size*100:.1f}%)")
+
+# ============================================================================
+# Step 2.5: Create Preprocessing Pipeline with sktime
+# ============================================================================
+print("\n[Step 2.5] Creating preprocessing pipeline with sktime...")
+
+# Simplified preprocessing: Apply difference to target series manually, then use unified pipeline
+# This is faster than ColumnEnsembleTransformer for small datasets
+
+# Apply difference transformation to target series manually (for chg transformation)
+if target_col in df_processed.columns:
+    target_idx = df_processed.columns.get_loc(target_col)
+    target_series = df_processed[target_col].values
+    # Apply first difference
+    target_diff = np.diff(target_series, prepend=target_series[0])
+    df_processed[target_col] = target_diff
+    print(f"   Applied difference transformation to {target_col}")
+
+# Create simplified preprocessing pipeline: Imputation → Scaling
+# (Transformations already applied manually above)
+preprocessing_pipeline = TransformerPipeline(
+    steps=[
+        ('impute_ffill', Imputer(method="ffill")),  # Forward fill missing values
+        ('impute_bfill', Imputer(method="bfill")),  # Backward fill remaining NaNs
+        ('scaler', StandardScaler())  # Unified scaling for all series
+    ]
+)
+
+print("   Pipeline: Imputer(ffill) → Imputer(bfill) → StandardScaler")
+print(f"   Transformations: {target_col} uses difference (chg), others use linear")
+print("   Applying preprocessing pipeline...")
+
+# Apply preprocessing
+df_preprocessed = preprocessing_pipeline.fit_transform(df_processed)
+
+# Ensure output is DataFrame
+if isinstance(df_preprocessed, np.ndarray):
+    df_preprocessed = pd.DataFrame(df_preprocessed, columns=df_processed.columns, index=df_processed.index)
+elif not isinstance(df_preprocessed, pd.DataFrame):
+    df_preprocessed = pd.DataFrame(df_preprocessed)
+
+missing_after = df_preprocessed.isnull().sum().sum()
+print(f"   Missing values after preprocessing: {missing_after}")
+print(f"   Preprocessed data shape: {df_preprocessed.shape}")
+
+# Verify standardization
+mean_vals = df_preprocessed.mean()
+std_vals = df_preprocessed.std()
+max_mean = float(mean_vals.abs().max())
+max_std_dev = float((std_vals - 1.0).abs().max())
+print(f"   Standardization check - Max |mean|: {max_mean:.6f} (should be ~0)")
+print(f"   Standardization check - Max |std - 1|: {max_std_dev:.6f} (should be ~0)")
+
+# Update df_processed to use preprocessed data
+df_processed = df_preprocessed
 
 # ============================================================================
 # Step 3: Create Configuration
@@ -109,7 +183,7 @@ for col in selected_cols:
 # Create blocks config
 blocks_config = {
     DEFAULT_BLOCK_NAME: {
-        "factors": 2,  # Small number for fast execution
+        "factors": 1,  # Reduced to 1 for faster execution
         "ar_lag": 1,
         "clock": "m"
     }
@@ -119,8 +193,8 @@ blocks_config = {
 config = DFMConfig(
     series=series_configs,
     blocks=blocks_config,
-    max_iter=10,  # Small number for fast execution
-    threshold=1e-4
+    max_iter=3,  # Further reduced for faster execution
+    threshold=1e-2  # More relaxed threshold for faster convergence
 )
 
 print(f"   Number of series: {len(series_configs)}")
@@ -137,11 +211,14 @@ print("\n[Step 4] Creating DataModule...")
 valid_dates = date_col.iloc[:len(df_processed)].values
 time_index = TimeIndex([parse_timestamp(str(d)) for d in valid_dates])
 
-# Create DataModule
+# Create DataModule with transformer
+# Note: DFMDataModule can accept a transformer parameter
+# We pass the preprocessing pipeline we created
 data_module = DFMDataModule(
     config=config,
     data=df_processed.values,
-    time=time_index
+    time=time_index,
+    transformer=preprocessing_pipeline  # Pass the preprocessing pipeline
 )
 data_module.setup()
 
@@ -160,7 +237,7 @@ print("\n[Step 5] Training DFM model...")
 model = DFM()
 model._config = config  # Set config directly
 
-trainer = DFMTrainer(max_epochs=10)  # Small number for fast execution
+trainer = DFMTrainer(max_epochs=1)  # Minimal epochs for faster execution
 trainer.fit(model, data_module)
 
 print("   Training completed!")

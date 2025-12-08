@@ -65,7 +65,7 @@ Note: DFMConfig and SeriesConfig are internal implementation details.
 For detailed documentation, see the README.md file and the tutorial notebooks/scripts.
 """
 
-__version__ = "0.4.9"
+__version__ = "0.5.0"
 
 # ============================================================================
 # PUBLIC API DEFINITION
@@ -106,8 +106,6 @@ from .lightning import (
     KalmanFilter,  # Module class
     EMAlgorithm,  # Module class
 )
-
-# Nowcasting removed - use src.nowcast instead
 
 # Model implementations
 from .models.base import BaseFactorModel

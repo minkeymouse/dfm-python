@@ -188,7 +188,7 @@ def ensure_positive_definite(
     
     try:
         eigenvals = torch.linalg.eigvalsh(M)
-        min_eig = float(torch.min(eigenvals))
+        min_eig = float(torch.min(eigenvals).detach())
         
         if min_eig < min_eigenval:
             reg_amount = min_eigenval - min_eig
@@ -383,7 +383,7 @@ def safe_determinant(M: "torch.Tensor", use_logdet: bool = True) -> float:
         try:
             det = torch.det(M)
             if torch.isfinite(det):
-                return float(det)
+                return float(det.detach() if hasattr(det, 'detach') else det)
         except (RuntimeError, ValueError):
             pass
     

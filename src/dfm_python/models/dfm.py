@@ -6,6 +6,7 @@ DFM is a PyTorch Lightning module that inherits from BaseFactorModel.
 
 # Standard library imports
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
@@ -235,10 +236,7 @@ class DFM(BaseFactorModel):
         loss : torch.Tensor
             Negative log-likelihood (to minimize)
         """
-        # CRITICAL FIX: Skip additional EM iterations if fit_em() already completed training
-        # This prevents double training that causes log-likelihood deterioration.
-        # fit_em() runs in on_train_start() and completes the full EM algorithm.
-        # Lightning's training loop should not run additional EM iterations after that.
+        # Skip if fit_em() already completed training
         if self.training_state is not None:
             # fit_em() has already run - use its results instead of doing more EM iterations
             loglik = self.training_state.loglik
@@ -362,17 +360,12 @@ class DFM(BaseFactorModel):
         device = X.device
         dtype = X.dtype
         
-        # CRITICAL: Impute missing data BEFORE EM loop
-        # Initialize parameters (this performs imputation internally)
+        # Initialize parameters and impute missing data
         self.initialize_from_data(X)
         
-        # After initialization, get the imputed data for EM loop
-        # initialize_from_data uses rem_nans_spline_torch internally, but we need
-        # to apply the same imputation to the data used in EM loop
+        # Impute missing data for EM loop
         from dfm_python.utils.data import rem_nans_spline_torch
-        opt_nan = {'method': self.nan_method, 'k': self.nan_k}
-        X_imputed, _ = rem_nans_spline_torch(X, method=opt_nan.get('method', 2), k=opt_nan.get('k', 3))
-        # Remove any remaining NaN/inf
+        X_imputed, _ = rem_nans_spline_torch(X, method=self.nan_method, k=self.nan_k)
         X_imputed = torch.where(torch.isfinite(X_imputed), X_imputed, torch.tensor(0.0, device=device, dtype=dtype))
         
         # Store imputed data
@@ -388,9 +381,7 @@ class DFM(BaseFactorModel):
         num_iter = 0
         converged = False
         
-        # Track condition numbers and parameter stability for diagnostics (Issue 5.1)
-        condition_number_history = []  # Track sum_EZZ condition numbers over iterations
-        parameter_change_history = []  # Track parameter change norms over iterations
+        # Track parameter stability for diagnostics
         previous_A_norm = None
         previous_C_norm = None
         
@@ -422,23 +413,15 @@ class DFM(BaseFactorModel):
             # Perform EM step - use self.em(...) instead of em_step(...)
             C_new, R_new, A_new, Q_new, Z_0_new, V_0_new, loglik = self.em(em_params)
             
-            # Check for NaN in updated parameters (early stopping for numerical instability)
-            nan_detected = False
-            if torch.any(torch.isnan(C_new)) or torch.any(torch.isnan(A_new)) or \
-               torch.any(torch.isnan(Q_new)) or torch.any(torch.isnan(R_new)) or \
-               torch.any(torch.isnan(Z_0_new)) or torch.any(torch.isnan(V_0_new)) or \
-               (isinstance(loglik, float) and (np.isnan(loglik) or np.isinf(loglik))):
-                nan_detected = True
-                _logger.error(
-                    f"EM algorithm: NaN/Inf detected in parameters at iteration {num_iter + 1}. "
-                    f"Stopping early to prevent further numerical instability. "
-                    f"C NaN: {torch.any(torch.isnan(C_new)).item()}, "
-                    f"A NaN: {torch.any(torch.isnan(A_new)).item()}, "
-                    f"Q NaN: {torch.any(torch.isnan(Q_new)).item()}, "
-                    f"R NaN: {torch.any(torch.isnan(R_new)).item()}, "
-                    f"loglik: {loglik}"
-                )
-                # Don't update parameters if NaN detected - keep previous values
+            # Check for NaN in parameters (early stopping)
+            has_nan = (
+                torch.any(torch.isnan(C_new)) or torch.any(torch.isnan(A_new)) or
+                torch.any(torch.isnan(Q_new)) or torch.any(torch.isnan(R_new)) or
+                torch.any(torch.isnan(Z_0_new)) or torch.any(torch.isnan(V_0_new)) or
+                (isinstance(loglik, float) and (np.isnan(loglik) or np.isinf(loglik)))
+            )
+            if has_nan:
+                _logger.error(f"EM algorithm: NaN/Inf detected at iteration {num_iter + 1}, stopping early")
                 break
             
             # Update parameters
@@ -450,57 +433,25 @@ class DFM(BaseFactorModel):
                 self.Z_0.data = Z_0_new
                 self.V_0.data = V_0_new
             
-            # Track condition numbers and parameter stability for diagnostics (Issue 5.1)
-            # Compute condition number of sum_EZZ (from Kalman smoother) for trend tracking
-            # This helps identify numerical instability patterns over iterations
-            try:
-                # Get EZZ from Kalman smoother (stored in em_params or need to recompute)
-                # For now, compute condition number of C matrix as proxy (C is updated from sum_EZZ)
-                if torch.all(torch.isfinite(C_new)):
-                    # Compute condition number of C matrix (proxy for sum_EZZ condition)
-                    C_singular_values = torch.linalg.svdvals(C_new)
-                    C_singular_values = C_singular_values[C_singular_values > 1e-12]
-                    if len(C_singular_values) > 0:
-                        cond_num_C = torch.max(C_singular_values) / torch.min(C_singular_values)
-                        condition_number_history.append(cond_num_C.item())
-                    else:
-                        condition_number_history.append(float('inf'))
-                else:
-                    condition_number_history.append(float('inf'))
-            except (RuntimeError, ValueError):
-                condition_number_history.append(float('inf'))
-            
-            # Track parameter stability (check if parameters are changing significantly)
-            # This helps detect when EM is stuck or oscillating
+            # Track parameter stability
             try:
                 A_norm = torch.linalg.norm(A_new).item()
                 C_norm = torch.linalg.norm(C_new).item()
                 
-                if previous_A_norm is not None and previous_C_norm is not None:
+                if previous_A_norm is not None and previous_C_norm is not None and num_iter > 5:
                     A_change = abs(A_norm - previous_A_norm) / max(previous_A_norm, 1e-10)
                     C_change = abs(C_norm - previous_C_norm) / max(previous_C_norm, 1e-10)
                     param_change = max(A_change, C_change)
-                    parameter_change_history.append(param_change)
                     
-                    # Warn if parameters are not changing (stuck) or changing too much (unstable)
-                    if num_iter > 5:  # Allow initial iterations to stabilize
-                        if param_change < 1e-6:
-                            _logger.debug(
-                                f"EM algorithm: Parameters appear stable (change={param_change:.2e} < 1e-6) "
-                                f"at iteration {num_iter + 1}. This may indicate convergence or being stuck."
-                            )
-                        elif param_change > 10.0:
-                            _logger.warning(
-                                f"EM algorithm: Parameters changing significantly (change={param_change:.2e} > 10) "
-                                f"at iteration {num_iter + 1}. This may indicate numerical instability."
-                            )
-                else:
-                    parameter_change_history.append(0.0)
+                    if param_change < 1e-6:
+                        _logger.debug(f"EM: Parameters stable (change={param_change:.2e}) at iter {num_iter + 1}")
+                    elif param_change > 10.0:
+                        _logger.warning(f"EM: Parameters changing significantly (change={param_change:.2e}) at iter {num_iter + 1}")
                 
                 previous_A_norm = A_norm
                 previous_C_norm = C_norm
             except (RuntimeError, ValueError):
-                parameter_change_history.append(float('inf'))
+                pass
             
             # Track best log-likelihood and parameters (for early stopping on divergence)
             if loglik > best_loglik:
@@ -515,9 +466,8 @@ class DFM(BaseFactorModel):
                     'V_0': self.V_0.data.clone()
                 }
             
-            # Check for significant log-likelihood deterioration (divergence detection)
-            # Stop early if log-likelihood worsens by more than 1000 from best (indicates divergence)
-            if num_iter > 10 and best_loglik != float('-inf') and loglik < best_loglik - 1000:
+            # Check for log-likelihood deterioration
+            if num_iter > 10 and loglik < best_loglik - 1000:
                 _logger.warning(
                     f"EM algorithm: Log-likelihood deteriorated significantly from best value. "
                     f"Best: {best_loglik:.4f}, Current: {loglik:.4f}, Deterioration: {best_loglik - loglik:.4f}. "
@@ -537,13 +487,10 @@ class DFM(BaseFactorModel):
                 loglik = best_loglik
                 break
             
-            # Check convergence - use self.em.check_convergence() instead of em_converged()
+            # Check convergence
             if num_iter > 2:
                 converged, change = self.em.check_convergence(
-                    loglik,
-                    previous_loglik,
-                    self.threshold,
-                    verbose=(num_iter % 10 == 0)
+                    loglik, previous_loglik, self.threshold, verbose=(num_iter % 10 == 0)
                 )
             else:
                 change = abs(loglik - previous_loglik) if previous_loglik != float('-inf') else 0.0
@@ -552,41 +499,15 @@ class DFM(BaseFactorModel):
             num_iter += 1
             
             # Log metrics using Lightning (enables TensorBoard, WandB, etc.)
-            # Note: on_step=False because fit_em may be called from on_train_start
+            # on_step=False because fit_em may be called from on_train_start
             self.log('train/loglik', loglik, on_step=False, on_epoch=True)
             self.log('train/em_iteration', float(num_iter), on_step=False, on_epoch=True)
             self.log('train/loglik_change', change, on_step=False, on_epoch=True)
             
-            # Log progress more frequently for visibility
+            # Log progress
             if num_iter % 5 == 0 or num_iter == 1:
-                # Include condition number and parameter stability in diagnostic output (Issue 5.1)
-                cond_info = ""
-                if len(condition_number_history) > 0:
-                    cond_num = condition_number_history[-1]
-                    if np.isfinite(cond_num):
-                        cond_info = f" | Cond: {cond_num:.2e}"
-                    else:
-                        cond_info = " | Cond: inf"
-                
-                param_info = ""
-                if len(parameter_change_history) > 0 and num_iter > 0:
-                    param_change = parameter_change_history[-1]
-                    if np.isfinite(param_change):
-                        param_info = f" | ParamΔ: {param_change:.2e}"
-                
-                # Log EM iteration progress with detailed information
-                # Use logger instead of print to avoid duplicate output
-                log_msg = (
-                    f"EM iteration {num_iter}/{self.max_iter}: "
-                    f"loglik={loglik:.4f}, change={change:.2e}"
-                )
-                if cond_info:
-                    log_msg += cond_info.replace(" | ", ", ")
-                if param_info:
-                    log_msg += param_info.replace(" | ", ", ")
-                if converged:
-                    log_msg += " ✓"
-                _logger.info(log_msg)
+                status = " ✓" if converged else ""
+                _logger.info(f"EM iteration {num_iter}/{self.max_iter}: loglik={loglik:.4f}, change={change:.2e}{status}")
         
         # Store final state
         self.training_state = DFMTrainingState(
@@ -601,37 +522,13 @@ class DFM(BaseFactorModel):
             converged=converged
         )
         
-        # Final status message with diagnostic summary (Issue 5.1)
+        # Final status
         if converged:
-            print(f"\n✓ EM algorithm converged after {num_iter} iterations (loglik: {loglik:.6f})")
+            print(f"\n✓ EM converged after {num_iter} iterations (loglik: {loglik:.6f})")
         else:
-            print(f"\n⚠ EM algorithm stopped after {num_iter} iterations (loglik: {loglik:.6f}, change: {change:.2e})")
+            print(f"\n⚠ EM stopped after {num_iter} iterations (loglik: {loglik:.6f}, change: {change:.2e})")
         
-        # Log diagnostic summary: condition number trends and parameter stability
-        if len(condition_number_history) > 0:
-            valid_cond_nums = [c for c in condition_number_history if np.isfinite(c)]
-            if len(valid_cond_nums) > 0:
-                cond_num_initial = valid_cond_nums[0] if len(valid_cond_nums) > 0 else None
-                cond_num_final = valid_cond_nums[-1] if len(valid_cond_nums) > 0 else None
-                cond_num_max = max(valid_cond_nums) if len(valid_cond_nums) > 0 else None
-                if cond_num_initial is not None and cond_num_final is not None:
-                    cond_trend = "increasing" if cond_num_final > cond_num_initial * 1.1 else "decreasing" if cond_num_final < cond_num_initial * 0.9 else "stable"
-                    _logger.info(
-                        f"EM diagnostic: Condition number trend - initial: {cond_num_initial:.2e}, "
-                        f"final: {cond_num_final:.2e}, max: {cond_num_max:.2e}, trend: {cond_trend}"
-                    )
-        
-        if len(parameter_change_history) > 0:
-            valid_param_changes = [p for p in parameter_change_history if np.isfinite(p) and p > 0]
-            if len(valid_param_changes) > 0:
-                avg_param_change = np.mean(valid_param_changes)
-                max_param_change = max(valid_param_changes)
-                _logger.info(
-                    f"EM diagnostic: Parameter stability - avg change: {avg_param_change:.2e}, "
-                    f"max change: {max_param_change:.2e}"
-                )
-        
-        _logger.info(f"EM training completed: converged={converged}, iterations={num_iter}, final_loglik={loglik:.6f}")
+        _logger.info(f"EM training completed: converged={converged}, iterations={num_iter}, loglik={loglik:.6f}")
         
         return self.training_state
     
@@ -820,35 +717,33 @@ class DFM(BaseFactorModel):
         training period), ensuring accuracy while maintaining efficiency.
         """
         if self.training_state is None:
-            error_msg = self._format_error_message(
-                operation="prediction",
-                reason="model has not been trained yet",
-                guidance="Please call trainer.fit(model, data_module) first"
+            raise ValueError(
+                f"{self.__class__.__name__} prediction failed: model has not been trained yet. "
+                f"Please call trainer.fit(model, data_module) first"
             )
-            raise ValueError(error_msg)
         
-        # Convert training state to result format for prediction
-        # CRITICAL: Only call get_result() if _result is None
-        # If _result exists, use it directly (may have been updated for nowcasting)
+        # Get result (only call get_result() if _result is None)
         if not hasattr(self, '_result') or self._result is None:
             self._result = self.get_result()
         
         result = self._result
         
-        # CRITICAL: Verify that result.Z exists and is not None
-        # This ensures we're using the updated factor state for nowcasting
         if not hasattr(result, 'Z') or result.Z is None:
             raise ValueError(
                 "DFM prediction failed: result.Z is not available. "
                 "This may indicate the model was not properly trained or result object is corrupted."
             )
         
-        # Compute default horizon using common helper
+        # Compute default horizon
         if horizon is None:
-            horizon = self._compute_default_horizon()
+            from ..config.utils import get_periods_per_year
+            from ..utils.helpers import get_clock_frequency
+            clock = get_clock_frequency(self.config, 'm')
+            horizon = get_periods_per_year(clock)
         
-        # Validate horizon using common helper
-        self._validate_horizon(horizon)
+        # Validate horizon
+        if horizon <= 0:
+            raise ValueError(f"horizon must be positive, got {horizon}")
         
         # Extract model parameters
         A = result.A
@@ -873,48 +768,20 @@ class DFM(BaseFactorModel):
             # Use training state (default behavior)
             Z_last = result.Z[-1, :]
         
-        # DEBUG: Log factor state being used for prediction
-        factor_norm = np.linalg.norm(Z_last)
-        factor_mean = np.mean(Z_last)
-        factor_std = np.std(Z_last)
-        factor_first5 = Z_last[:5] if len(Z_last) >= 5 else Z_last
-        _logger.debug(
-            f"DFM predict(): Using factor state Z_last - "
-            f"shape {Z_last.shape}, first 5: {factor_first5}, "
-            f"norm: {factor_norm:.4f}, mean: {factor_mean:.4f}, std: {factor_std:.4f}"
-        )
-        
-        # Enhanced factor state validation
-        if factor_std < 1e-6:
-            _logger.warning(
-                f"DFM predict(): Factor state has very low variation (std={factor_std:.2e} < 1e-6). "
-                f"This may indicate the factor state is constant or not properly updated. "
-                f"Consider checking Kalman filter updates or data masking."
-            )
-        
-        if factor_norm > 100.0:
-            _logger.warning(
-                f"DFM predict(): Factor state has extreme norm ({factor_norm:.2f} > 100). "
-                f"This may indicate numerical instability or poor model convergence. "
-                f"Consider checking training convergence or regularization parameters."
-            )
-        
-        # Validate that model is properly trained
+        # Validate factor state
         if np.any(np.isnan(Z_last)):
             nan_count = np.sum(np.isnan(Z_last))
             nan_ratio = nan_count / len(Z_last)
             raise ValueError(
-                f"DFM prediction failed: {nan_count}/{len(Z_last)} factors contain NaN values ({nan_ratio:.1%}). "
-                f"This usually indicates the model did not converge during training. "
-                f"Try increasing max_iter, checking data quality, or removing series with high missing data."
+                f"DFM prediction failed: {nan_count}/{len(Z_last)} factors contain NaN ({nan_ratio:.1%}). "
+                f"Model may not have converged. Try increasing max_iter or checking data quality."
             )
         
         # Validate parameters are finite
         if np.any(~np.isfinite(A)) or np.any(~np.isfinite(C)):
             raise ValueError(
-                "DFM prediction failed: model parameters (A or C) contain NaN or Inf values. "
-                "This indicates the model did not train successfully. "
-                "Please check training convergence and data quality."
+                "DFM prediction failed: model parameters (A or C) contain NaN/Inf. "
+                "Check training convergence and data quality."
             )
         
         # Forecast factors using VAR dynamics (common helper)
@@ -940,13 +807,11 @@ class DFM(BaseFactorModel):
             nan_count = np.sum(~np.isfinite(X_forecast))
             raise ValueError(
                 f"DFM prediction failed: produced {nan_count} NaN/Inf values in forecast. "
-                f"This may indicate numerical instability. "
+                f"Possible numerical instability. "
                 f"Please check model parameters and data quality."
             )
         
-        # Validate forecast values are within reasonable bounds (detect numerical instability)
-        # Check if any forecast values are extremely large compared to training distribution
-        # This helps catch cases like KOIPALL.G where forecasts are hundreds but actuals are around -1 to 1
+        # Validate forecast values are within reasonable bounds
         if Wx is not None and Mx is not None and len(Wx) > 0 and len(Mx) > 0:
             # Check each series individually
             extreme_threshold_std = 50.0  # Flag if forecast is > 50 std devs from mean
@@ -961,16 +826,15 @@ class DFM(BaseFactorModel):
                     if max_deviation > extreme_threshold_std:
                         extreme_count = np.sum(abs_deviations > extreme_threshold_std)
                         _logger.warning(
-                            f"DFM prediction: Extreme forecast values detected for series {i}. "
-                            f"Max deviation: {max_deviation:.1f} std devs, {extreme_count} values > {extreme_threshold_std} std devs. "
-                            f"This indicates numerical instability or poor model convergence. "
-                            f"Forecast values may be unreliable. Consider using DDFM or adjusting model parameters."
+                            f"DFM prediction: Extreme forecast for series {i} "
+                            f"(max deviation: {max_deviation:.1f} std devs). "
+                            f"Possible numerical instability."
                         )
         if return_factors and np.any(~np.isfinite(Z_forecast)):
             nan_count = np.sum(~np.isfinite(Z_forecast))
             raise ValueError(
                 f"DFM prediction failed: produced {nan_count} NaN/Inf values in factor forecast. "
-                f"This may indicate numerical instability in factor dynamics. "
+                f"Possible numerical instability in factor dynamics. "
                 f"Please check model parameters and training convergence."
             )
         
@@ -999,6 +863,8 @@ class DFM(BaseFactorModel):
         """Reset model state."""
         super().reset()
         return self
+    
+    # nowcast() is inherited from BaseFactorModel
     
 
 

@@ -112,6 +112,51 @@ class EMAlgorithm(nn.Module):
         """Cap maximum eigenvalue of matrix to prevent numerical explosion."""
         return cap_max_eigenval(M, max_eigenval=max_eigenval, warn=False)
     
+    def _compute_adaptive_regularization(
+        self, 
+        M: torch.Tensor, 
+        matrix_name: str = "matrix",
+        min_reg: float = 1e-3
+    ) -> float:
+        """Compute adaptive regularization based on condition number.
+        
+        Parameters
+        ----------
+        M : torch.Tensor
+            Matrix to compute regularization for
+        matrix_name : str
+            Name for logging
+        min_reg : float
+            Minimum regularization value
+            
+        Returns
+        -------
+        float
+            Regularization scale
+        """
+        base_reg = self.regularization_scale.item()
+        try:
+            eigenvals = torch.linalg.eigvalsh(M)
+            eigenvals = eigenvals[eigenvals > 1e-12]
+            if len(eigenvals) > 0:
+                max_eig = torch.max(eigenvals)
+                min_eig = torch.min(eigenvals)
+                cond_num = max_eig / min_eig if min_eig > 1e-12 else float('inf')
+                
+                if cond_num > 1e8:
+                    reg_scale = base_reg * (cond_num / 1e8)
+                    _logger.debug(f"EM: {matrix_name} ill-conditioned (cond={cond_num:.2e}), reg={reg_scale:.2e}")
+                else:
+                    reg_scale = base_reg
+            else:
+                reg_scale = max(base_reg * 100, min_reg)
+                _logger.warning(f"EM: {matrix_name} has no valid eigenvalues, using reg={reg_scale:.2e}")
+        except (RuntimeError, ValueError) as e:
+            reg_scale = max(base_reg * 10, min_reg)
+            _logger.warning(f"EM: Failed to compute condition number for {matrix_name} ({e}), using reg={reg_scale:.2e}")
+        
+        return reg_scale
+    
     def forward(
         self,
         params: EMStepParams
@@ -188,29 +233,8 @@ class EMAlgorithm(nn.Module):
                 # Compute XTY = sum_t X_t Y_t^T (vectorized: batch outer products)
                 XTY_A = torch.sum(X_A[:, :, None] * Y_A[:, None, :], dim=0)
                 
-                # ROOT CAUSE FIX: Adaptive regularization based on condition number
-                base_reg_scale = self.regularization_scale.item()
-                try:
-                    eigenvals = torch.linalg.eigvalsh(XTX_A)
-                    eigenvals = eigenvals[eigenvals > 1e-12]
-                    if len(eigenvals) > 0:
-                        max_eig = torch.max(eigenvals)
-                        min_eig = torch.min(eigenvals)
-                        cond_num = max_eig / min_eig if min_eig > 1e-12 else float('inf')
-                        
-                        if cond_num > 1e8:
-                            reg_scale = base_reg_scale * (cond_num / 1e8)
-                            _logger.debug(
-                                f"EM algorithm: XTX_A is ill-conditioned (cond={cond_num:.2e}), "
-                                f"increasing regularization to {reg_scale:.2e}"
-                            )
-                        else:
-                            reg_scale = base_reg_scale
-                    else:
-                        reg_scale = base_reg_scale * 100
-                except (RuntimeError, ValueError):
-                    reg_scale = base_reg_scale * 10
-                
+                # Adaptive regularization based on condition number
+                reg_scale = self._compute_adaptive_regularization(XTX_A, "XTX_A", min_reg=1e-6)
                 XTX_A_reg = XTX_A + torch.eye(m, device=device, dtype=dtype) * reg_scale
                 A_new = torch.linalg.solve(XTX_A_reg, XTY_A).T
                 
@@ -220,9 +244,9 @@ class EMAlgorithm(nn.Module):
                 if max_eigenval >= 0.99:
                     A_new = A_new * (0.99 / max_eigenval)
                 
-                # Additional stabilization: ensure A is real and finite (like numpy version)
+                # Clean and clip
                 A_new = torch.nan_to_num(A_new, nan=0.0, posinf=0.99, neginf=-0.99)
-                A_new = torch.clamp(A_new, min=-0.99, max=0.99)  # Clip to prevent instability
+                A_new = torch.clamp(A_new, min=-0.99, max=0.99)
             except (RuntimeError, ValueError):
                 A_new = params.A.clone()
                 # Still apply clipping even if eigvals failed
@@ -232,11 +256,9 @@ class EMAlgorithm(nn.Module):
             A_new = params.A.clone()
         
         # Update C (observation matrix): regression of y_t on Z_t
-        # CRITICAL: Match MATLAB behavior - set NaN to 0 for M-step calculations
-        # MATLAB: nanY = isnan(y); y(nanY) = 0;
-        y_for_mstep = params.y.clone()  # Work on copy
-        nanY = torch.isnan(y_for_mstep)
-        y_for_mstep[nanY] = 0.0  # Set NaN to 0 (MATLAB behavior)
+        # Set NaN to 0 for M-step calculations
+        y_for_mstep = params.y.clone()
+        y_for_mstep[torch.isnan(y_for_mstep)] = 0.0
         
         # C = (sum_t y_t E[Z_t^T]) (sum_t E[Z_t Z_t^T])^{-1}
         try:
@@ -246,107 +268,43 @@ class EMAlgorithm(nn.Module):
             # Use y_for_mstep (NaN replaced with 0) for M-step
             sum_yEZ = torch.sum(y_for_mstep.T[:, :, None] * EZ[:, None, :], dim=0)  # (N, m)
             
-            # CRITICAL FIX: Remove NaN/Inf from EZZ before computing sum_EZZ
-            # This prevents ill-conditioned sum_EZZ caused by corrupted EZZ from smoother
-            # MATLAB doesn't check for NaN/Inf, but we need to handle it explicitly
+            # Remove NaN/Inf from EZZ before computing sum_EZZ
             EZZ_clean = EZZ.clone()
             nan_inf_mask = torch.isnan(EZZ_clean) | torch.isinf(EZZ_clean)
             if torch.any(nan_inf_mask):
-                # Replace NaN/Inf with zero (exclude corrupted time steps from sum)
                 EZZ_clean[nan_inf_mask] = 0.0
                 corrupted_count = torch.sum(nan_inf_mask).item()
-                total_count = EZZ_clean.numel()
-                _logger.warning(
-                    f"EM algorithm: EZZ contains {corrupted_count}/{total_count} NaN/Inf values "
-                    f"({corrupted_count/total_count:.1%}). Excluding corrupted time steps from sum_EZZ calculation."
-                )
+                _logger.warning(f"EM: EZZ contains {corrupted_count}/{EZZ_clean.numel()} NaN/Inf, excluding from sum")
             
-            # Compute sum_EZZ = sum_t E[Z_t Z_t^T] (only from valid time steps)
             sum_EZZ = torch.sum(EZZ_clean, dim=0)
             
             # Cap maximum eigenvalue to prevent condition number explosion
             sum_EZZ = self._cap_max_eigenval(sum_EZZ, max_eigenval=1e6)
             
-            # ROOT CAUSE FIX: Adaptive regularization based on condition number
-            # Fixed regularization (1e-6) becomes insufficient as condition number grows
-            # Compute condition number to determine appropriate regularization
-            base_reg_scale = self.regularization_scale.item()
-            try:
-                eigenvals = torch.linalg.eigvalsh(sum_EZZ)
-                eigenvals = eigenvals[eigenvals > 1e-12]  # Filter near-zero eigenvalues
-                if len(eigenvals) > 0:
-                    max_eig = torch.max(eigenvals)
-                    min_eig = torch.min(eigenvals)
-                    cond_num = max_eig / min_eig if min_eig > 1e-12 else float('inf')
-                    
-                    # Adaptive regularization: scale up if ill-conditioned
-                    # If cond_num > 1e8, increase regularization proportionally
-                    if cond_num > 1e8:
-                        reg_scale = base_reg_scale * (cond_num / 1e8)
-                        _logger.warning(
-                            f"EM algorithm: sum_EZZ is ill-conditioned (cond={cond_num:.2e}), "
-                            f"increasing regularization from {base_reg_scale:.2e} to {reg_scale:.2e}"
-                        )
-                    else:
-                        reg_scale = base_reg_scale
-                else:
-                    # All eigenvalues are near-zero, use stronger regularization
-                    # Ensure minimum regularization (1e-3) for numerical stability
-                    reg_scale = max(base_reg_scale * 100, 1e-3)
-                    _logger.warning(
-                        f"EM algorithm: sum_EZZ has no valid eigenvalues, "
-                        f"using strong regularization: {reg_scale:.2e} (min=1e-3, base={base_reg_scale:.2e})"
-                    )
-            except (RuntimeError, ValueError) as e:
-                # CRITICAL FIX: Eigendecomposition failed, use stronger regularization
-                # Ensure minimum regularization (1e-3) even if base_reg_scale * 10 is smaller
-                # This is the Ridge Regression approach: eigendecomposition failure means
-                # the matrix is too ill-conditioned, so we need strong regularization
-                reg_scale = max(base_reg_scale * 10, 1e-3)
-                _logger.warning(
-                    f"EM algorithm: Failed to compute condition number for sum_EZZ ({e}), "
-                    f"using strong regularization: {reg_scale:.2e} (min=1e-3, base={base_reg_scale:.2e})"
-                )
-            
-            # Apply adaptive regularization
+            # Adaptive regularization based on condition number
+            reg_scale = self._compute_adaptive_regularization(sum_EZZ, "sum_EZZ", min_reg=1e-3)
             sum_EZZ_reg = sum_EZZ + torch.eye(m, device=device, dtype=dtype) * reg_scale
             
-            # CRITICAL FIX: Use pseudo-inverse as fallback when solve fails
-            # Original MATLAB uses pinv() in smoother (line 1039, 1064)
-            # This handles singular/ill-conditioned matrices more robustly
+            # Use pseudo-inverse as fallback when solve fails
             try:
                 C_new = torch.linalg.solve(sum_EZZ_reg.T, sum_yEZ.T).T
             except RuntimeError as e:
-                # Fallback to pseudo-inverse (original MATLAB: pinv() in smoother)
-                _logger.warning(
-                    f"EM algorithm: torch.linalg.solve failed for C matrix update ({e}), "
-                    f"using pseudo-inverse fallback (original MATLAB: pinv() in smoother)"
-                )
+                _logger.warning(f"EM: solve failed for C matrix ({e}), using pseudo-inverse fallback")
                 C_new = (torch.linalg.pinv(sum_EZZ_reg.T) @ sum_yEZ.T).T
             
-            # Check for NaN in C_new after solve (indicates numerical instability)
+            # Handle NaN in C_new
             if torch.any(torch.isnan(C_new)):
-                nan_count = torch.sum(torch.isnan(C_new)).item()
-                nan_ratio = nan_count / C_new.numel()
-                _logger.warning(
-                    f"EM algorithm: C matrix contains {nan_count}/{C_new.numel()} NaN values ({nan_ratio:.1%}) "
-                    f"after solve operation. This indicates numerical instability. "
-                    f"Possible causes: singular matrix, extreme values, or insufficient regularization."
-                )
-                # CRITICAL FIX: Preserve previous iteration values instead of setting to zero
-                # This allows gradual improvement and preserves information from previous iterations
                 nan_mask = torch.isnan(C_new)
-                if torch.any(nan_mask):
-                    # Check if previous C matrix is valid (no NaN)
-                    if not torch.any(torch.isnan(params.C)):
-                        C_new[nan_mask] = params.C[nan_mask]
-                        # Only log if significant NaN ratio to reduce log spam
-                        if nan_ratio > 0.1:  # Only log if >10% NaN
-                            _logger.warning(
-                                f"Preserved {torch.sum(nan_mask).item()} NaN values in C matrix from previous iteration "
-                                f"(total NaN: {nan_count}/{C_new.numel()}, {nan_ratio:.1%})"
-                            )
-                    else:
+                nan_count = torch.sum(nan_mask).item()
+                nan_ratio = nan_count / C_new.numel()
+                _logger.warning(f"EM: C matrix contains {nan_count}/{C_new.numel()} NaN ({nan_ratio:.1%})")
+                
+                # Preserve previous iteration values if available
+                if not torch.any(torch.isnan(params.C)):
+                    C_new[nan_mask] = params.C[nan_mask]
+                    if nan_ratio > 0.1:
+                        _logger.warning(f"EM: Preserved {nan_count} NaN values from previous iteration")
+                else:
                         # If previous C also has NaN, set to zero as last resort
                         C_new[nan_mask] = 0.0
                         _logger.warning(
@@ -382,11 +340,9 @@ class EMAlgorithm(nn.Module):
                 Q_new = var_val.unsqueeze(0).unsqueeze(0)  # (1, 1)
             else:
                 Q_new = torch.cov(residuals_Q.T)
-                # MATLAB-style: Ensure symmetry immediately (Q = 0.5 * (Q+Q'))
                 Q_new = ensure_symmetric(Q_new)
             # Ensure positive definite with robust eigenvalue computation
-            # MATLAB-style: Ensure symmetry after each update (Q = 0.5 * (Q+Q'))
-            Q_new = ensure_symmetric(Q_new)
+                Q_new = ensure_symmetric(Q_new)
             try:
                 eigenvals_Q = torch.linalg.eigvalsh(Q_new)
                 min_eigenval = torch.min(eigenvals_Q)
@@ -394,28 +350,23 @@ class EMAlgorithm(nn.Module):
                     Q_new = Q_new + torch.eye(m, device=device, dtype=dtype) * (1e-8 - min_eigenval)
                     Q_new = ensure_symmetric(Q_new)  # Re-apply symmetry after regularization
             except (RuntimeError, ValueError) as e:
-                # eigvalsh failed due to ill-conditioning - apply stronger regularization
-                _logger.warning(f"eigvalsh failed for Q matrix: {e}. Applying stronger regularization.")
-                # Apply stronger regularization to ensure positive definiteness
+                _logger.warning(f"eigvalsh failed for Q matrix ({e}), applying stronger regularization")
                 Q_new = Q_new + torch.eye(m, device=device, dtype=dtype) * 1e-6
-                Q_new = ensure_symmetric(Q_new)  # Ensure symmetry after regularization
-                # Recompute eigenvalues with regularized matrix
+                Q_new = ensure_symmetric(Q_new)
                 try:
                     eigenvals_Q = torch.linalg.eigvalsh(Q_new)
                     min_eigenval = torch.min(eigenvals_Q)
                     if min_eigenval < 1e-8:
                         Q_new = Q_new + torch.eye(m, device=device, dtype=dtype) * (1e-8 - min_eigenval)
-                        Q_new = ensure_symmetric(Q_new)  # Re-apply symmetry after regularization
+                        Q_new = ensure_symmetric(Q_new)
                 except (RuntimeError, ValueError):
-                    # Still failing - use diagonal matrix with variance estimates
                     diag_Q = torch.diag(Q_new)
                     diag_Q = torch.maximum(diag_Q, torch.ones_like(diag_Q) * 1e-6)
                     Q_new = torch.diag(diag_Q)
-            # Floor for Q - ensure minimum variance (like numpy version)
+            # Floor for Q and clean
             Q_new = torch.maximum(Q_new, torch.eye(m, device=device, dtype=dtype) * 0.01)
-            # Additional stabilization: ensure symmetric and clean NaN/Inf (like numpy version)
-            Q_new = ensure_symmetric(Q_new)  # Force symmetric
-            Q_new = torch.nan_to_num(Q_new, nan=0.01, posinf=1e6, neginf=0.01)  # Clean NaN/Inf
+            Q_new = ensure_symmetric(Q_new)
+            Q_new = torch.nan_to_num(Q_new, nan=0.01, posinf=1e6, neginf=0.01)
             # Final check: ensure positive definite with stronger regularization
             Q_new = ensure_positive_definite(Q_new, min_eigenval=1e-6, warn=False)
         else:
@@ -435,10 +386,8 @@ class EMAlgorithm(nn.Module):
             R_new = (R_new + R_new.T) / 2
         
         # Ensure R is diagonal (idiosyncratic variances only)
-        # Handle case where R_new might be 3D or have unexpected shape
         if R_new.ndim > 2:
-            _logger.warning(f"R_new has unexpected shape: {R_new.shape}, reshaping...")
-            # Take the last 2 dimensions if 3D
+            _logger.warning(f"R_new has unexpected shape: {R_new.shape}, reshaping")
             R_new = R_new.reshape(-1, R_new.shape[-1])[-R_new.shape[-1]:, :]
         elif R_new.ndim == 1:
             R_new = R_new.unsqueeze(0)
@@ -448,13 +397,13 @@ class EMAlgorithm(nn.Module):
         if diag_R.ndim > 1:
             diag_R = diag_R.flatten()
         
-        # Clean and clamp diagonal (MATLAB: RR(i_idio_M) = 1e-04, RR(nM+1:end) = 1e-04)
+        # Clean and clamp diagonal
         # Use 1e-4 as minimum (MATLAB default) instead of 1e-6 for better numerical stability
         diag_R = torch.nan_to_num(diag_R, nan=1e-4, posinf=1e4, neginf=1e-4)  # Clean NaN/Inf
-        diag_R = torch.clamp(diag_R, min=1e-4, max=1e4)  # Clip to reasonable range (MATLAB: min=1e-4)
+        diag_R = torch.clamp(diag_R, min=1e-4, max=1e4)
         R_new = torch.diag(diag_R)
         
-        # Ensure positive definite (minimum variance floor) - MATLAB: 1e-04 for all series
+        # Ensure positive definite (minimum variance floor)
         R_new = torch.maximum(R_new, torch.eye(N, device=device, dtype=dtype) * 1e-4)
         
         # Update Z_0 and V_0 (use first smoothed state)
@@ -1039,10 +988,30 @@ class EMAlgorithm(nn.Module):
             _logger.warning(f"resNaN is 1D: {resNaN.shape}, reshaping to 2D...")
             resNaN = resNaN.unsqueeze(0)
         
-        # torch.var returns (N,) for (T, N) input
-        var_res = torch.var(resNaN, dim=0, unbiased=False)  # Should be (N,)
-        # Handle NaN values in variance calculation
-        var_res = torch.where(torch.isfinite(var_res), var_res, torch.tensor(1e-4, device=device, dtype=dtype))
+        # Check degrees of freedom before computing variance
+        T_res, N_res = resNaN.shape
+        if T_res <= 1:
+            # Not enough data for variance calculation, use fallback
+            _logger.warning(f"resNaN has T={T_res} <= 1, using fallback variance values")
+            var_res = torch.ones(N_res, device=device, dtype=dtype) * 1e-4
+        else:
+            # Count valid (non-NaN) values per column
+            valid_counts = torch.sum(torch.isfinite(resNaN), dim=0)
+            # Compute variance only for columns with at least 2 valid values
+            var_res = torch.zeros(N_res, device=device, dtype=dtype)
+            for i in range(N_res):
+                if valid_counts[i] > 1:
+                    col_data = resNaN[:, i]
+                    col_valid = col_data[torch.isfinite(col_data)]
+                    if len(col_valid) > 1:
+                        var_res[i] = torch.var(col_valid, unbiased=False)
+                    else:
+                        var_res[i] = 1e-4
+                else:
+                    var_res[i] = 1e-4
+            
+            # Handle any remaining NaN/Inf values
+            var_res = torch.where(torch.isfinite(var_res), var_res, torch.tensor(1e-4, device=device, dtype=dtype))
         
         # Ensure var_res is 1D
         if var_res.ndim > 1:

@@ -17,7 +17,6 @@ from ..config import DFMConfig
 from ..config.utils import FREQUENCY_HIERARCHY
 from ..utils.time import TimeIndex, parse_timestamp
 from ..utils.helpers import (
-    safe_get_attr,
     get_frequencies,
     get_series_ids,
 )
@@ -267,7 +266,7 @@ def load_data(
     _logger.info(f"Loaded data: {X.shape[0]} time periods, {X.shape[1]} series (raw, not transformed)")
     
     # Validate data quality
-    clock = safe_get_attr(config, 'clock', 'm')
+    clock = getattr(config, 'clock', 'm')
     clock_hierarchy = FREQUENCY_HIERARCHY.get(clock, 3)
     
     frequencies = get_frequencies(config)

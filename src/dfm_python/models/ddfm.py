@@ -9,9 +9,8 @@ DDFM is a PyTorch Lightning module that inherits from BaseFactorModel.
 """
 
 # Standard library imports
-import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
@@ -31,12 +30,10 @@ from ..config.results import DDFMResult
 from ..config.utils import get_periods_per_year
 from ..encoder.vae import Decoder, Encoder, extract_decoder_params
 from ..logger import get_logger
-# Nowcasting removed - use src.nowcast instead
 from ..utils.data import rem_nans_spline
 from ..utils.helpers import (
     find_series_index,
     get_clock_frequency,
-    safe_get_attr,
 )
 from ..utils.statespace import (
     estimate_var1,
@@ -47,7 +44,7 @@ from ..utils.time import (
     find_time_index,
     TimeIndex,
 )
-from .base import BaseFactorModel, format_error_message
+from .base import BaseFactorModel
 from .utils import (
     estimate_var_ddfm,
     validate_factors_ddfm,
@@ -83,23 +80,6 @@ class DDFMModel:
     reconstruction error, then factor dynamics are estimated via OLS, and
     final smoothing is performed using Kalman filter.
     
-    .. note::
-        This is the low-level implementation used internally by the ``DDFM`` class.
-        For high-level API with Lightning training, use the ``DDFM`` class (defined below)
-        which is a PyTorch Lightning module.
-        
-        Example:
-        
-        .. code-block:: python
-        
-            from dfm_python import DDFM, DFMDataModule, DDFMTrainer
-            
-            model = DDFM()
-            model.load_config('config/ddfm.yaml')
-            dm = DFMDataModule(config=model.config, data=df_processed)
-            dm.setup()
-            trainer = DDFMTrainer(max_epochs=100)
-            trainer.fit(model, dm)
     """
     
     def __init__(
@@ -159,13 +139,10 @@ class DDFMModel:
         
         # PyTorch is mandatory - no need to check
         if factor_order not in [1, 2]:
-            error_msg = format_error_message(
-                model_type="DDFM",
-                operation="initialization",
-                reason=f"factor_order must be 1 or 2, got {factor_order}",
-                guidance="Please provide a valid factor_order value (1 for VAR(1) or 2 for VAR(2))"
+            raise ValueError(
+                f"DDFM initialization failed: factor_order must be 1 or 2, got {factor_order}. "
+                f"Please provide a valid factor_order value (1 for VAR(1) or 2 for VAR(2))"
             )
-            raise ValueError(error_msg)
         
         self.encoder_layers = encoder_layers or [64, 32]
         self.num_factors = num_factors
@@ -215,13 +192,10 @@ class DDFMModel:
             Forecasted series and/or factors
         """
         if self._result is None:
-            error_msg = format_error_message(
-                model_type="DDFM",
-                operation="prediction",
-                reason="model has not been fitted yet",
-                guidance="Please call trainer.fit(model, data_module) first"
+            raise ValueError(
+                f"DDFM prediction failed: model has not been fitted yet. "
+                f"Please call trainer.fit(model, data_module) first"
             )
-            raise ValueError(error_msg)
         
         # Default horizon
         if horizon is None:
@@ -232,13 +206,10 @@ class DDFMModel:
                 horizon = 12  # Default to 12 periods if no config
         
         if horizon <= 0:
-            error_msg = format_error_message(
-                model_type="DDFM",
-                operation="prediction",
-                reason=f"horizon must be a positive integer, got {horizon}",
-                guidance="Please provide a positive integer value for the forecast horizon"
+            raise ValueError(
+                f"DDFM prediction failed: horizon must be a positive integer, got {horizon}. "
+                f"Please provide a positive integer value for the forecast horizon"
             )
-            raise ValueError(error_msg)
         
         # Extract parameters
         A = self._result.A  # Factor dynamics (m x m) for VAR(1) or (m x 2m) for VAR(2)
@@ -276,13 +247,10 @@ class DDFMModel:
                 for h in range(2, horizon):
                     Z_forecast[h, :] = A1 @ Z_forecast[h - 1, :] + A2 @ Z_forecast[h - 2, :]
         else:
-            error_msg = format_error_message(
-                model_type="DDFM",
-                operation="prediction",
-                reason=f"unsupported VAR order {p}",
-                guidance="Only VAR(1) and VAR(2) are supported. Please use factor_order=1 or factor_order=2"
+            raise ValueError(
+                f"DDFM prediction failed: unsupported VAR order {p}. "
+                f"Only VAR(1) and VAR(2) are supported. Please use factor_order=1 or factor_order=2"
             )
-            raise ValueError(error_msg)
         
         # Transform to observations
         X_forecast_std = Z_forecast @ C.T
@@ -293,9 +261,6 @@ class DDFMModel:
         if return_series:
             return X_forecast
         return Z_forecast
-    
-    # generate_dataset() method removed - application-specific functionality
-    # Use src.nowcast for nowcasting-related dataset generation
     
     def get_state(
         self,
@@ -309,13 +274,10 @@ class DDFMModel:
         stored from DataModule during fit().
         """
         if not hasattr(self, '_data') or self._data is None:
-            error_msg = format_error_message(
-                model_type="DDFM",
-                operation="get_state",
-                reason="model has not been fitted with DataModule yet",
-                guidance="Please call trainer.fit(model, data_module) first to store data"
+            raise ValueError(
+                f"DDFM get_state failed: model has not been fitted with DataModule yet. "
+                f"Please call trainer.fit(model, data_module) first to store data"
             )
-            raise ValueError(error_msg)
         
         if lookback is None:
             clock = get_clock_frequency(self._config, 'm')
@@ -330,23 +292,19 @@ class DDFMModel:
         else:
             X_data = np.asarray(self._data)
         
-        # create_data_view removed - use src.nowcast for data view functionality
         # For get_state, we use the raw data directly
         X_view = X_data
         
-        # Nowcast removed - use src.nowcast for nowcasting functionality
-        baseline_nowcast = np.nan  # Placeholder - use src.nowcast for actual nowcast values
+        # Placeholder for nowcast (use src.nowcast for actual nowcasting functionality)
+        baseline_nowcast = np.nan
         
         baseline_forecast, actual_history, residuals, factors_history = [], [], [], []
         t_idx = find_time_index(self._time, t)
         if t_idx is None:
-            error_msg = format_error_message(
-                model_type="DDFM",
-                operation="get_state",
-                reason=f"time {t} not found in model_instance._time",
-                guidance="Please provide a valid time value that exists in the model's time index"
+            raise ValueError(
+                f"DDFM get_state failed: time {t} not found in model_instance._time. "
+                f"Please provide a valid time value that exists in the model's time index"
             )
-            raise ValueError(error_msg)
         
         for i in range(max(0, t_idx - lookback + 1), t_idx + 1):
             if i < X_data.shape[0]:
@@ -497,7 +455,7 @@ class DDFM(BaseFactorModel):
         super().__init__(**kwargs)
         
         # Initialize config using consolidated helper method
-        # Note: DDFM does not use block structure, but BaseModelConfig requires blocks
+        # DDFM does not use block structure, but BaseModelConfig requires blocks
         # We create a minimal default block that will be ignored by DDFM
         config = self._initialize_config(config)
         
@@ -518,7 +476,7 @@ class DDFM(BaseFactorModel):
         self.mult_epoch_pretrain = mult_epoch_pretrain
         
         # Determine number of factors
-        # Note: DDFM does not use block structure - num_factors is specified directly
+        # DDFM does not use block structure - num_factors is specified directly
         if num_factors is None:
             # Try to get from config num_factors (DDFM-specific parameter)
             if hasattr(config, 'num_factors') and config.num_factors is not None:
@@ -534,7 +492,7 @@ class DDFM(BaseFactorModel):
             self._num_factors_explicit = True
         
         # Initialize encoder and decoder
-        # Note: input_dim and output_dim will be set in setup() when we know data dimensions
+        # input_dim and output_dim will be set in setup() when we know data dimensions
         self.encoder: Optional[Encoder] = None
         self.decoder: Optional[Decoder] = None
         
@@ -562,7 +520,7 @@ class DDFM(BaseFactorModel):
                 self._data_module = self.trainer.datamodule
                 try:
                     # Get data to determine input dimension
-                    # Note: datamodule.setup() should have been called by Lightning already
+                    # datamodule.setup() should have been called by Lightning already
                     X_torch = self._data_module.get_processed_data()
                     input_dim = X_torch.shape[1]
                     
@@ -601,19 +559,14 @@ class DDFM(BaseFactorModel):
                 use_batch_norm=self.use_batch_norm,
             )
         except (ValueError, RuntimeError, TypeError) as e:
-            error_msg = format_error_message(
-                model_type="DDFM",
-                operation="encoder initialization",
-                reason=f"failed to initialize encoder: {type(e).__name__}: {str(e)}",
-                guidance=(
-                    f"Check encoder_layers={self.encoder_layers}, num_factors={self.num_factors}, "
-                    f"input_dim={input_dim}. "
-                    f"Suggestions: (1) Ensure input_dim > 0, (2) Reduce encoder_layers size if too large, "
-                    f"(3) Ensure num_factors > 0 and num_factors <= input_dim, "
-                    f"(4) Check that encoder_layers values are positive integers"
-                )
-            )
-            raise RuntimeError(error_msg) from e
+            raise RuntimeError(
+                f"DDFM encoder initialization failed: failed to initialize encoder: {type(e).__name__}: {str(e)}. "
+                f"Check encoder_layers={self.encoder_layers}, num_factors={self.num_factors}, "
+                f"input_dim={input_dim}. "
+                f"Suggestions: (1) Ensure input_dim > 0, (2) Reduce encoder_layers size if too large, "
+                f"(3) Ensure num_factors > 0 and num_factors <= input_dim, "
+                f"(4) Check that encoder_layers values are positive integers"
+            ) from e
         
         try:
             # Use standard decoder (block structure removed for simplicity)
@@ -626,20 +579,15 @@ class DDFM(BaseFactorModel):
             # Validate decoder weights are not all zeros (initialization check)
             decoder_weight = self.decoder.decoder.weight.data.cpu().numpy()
             if np.allclose(decoder_weight, 0.0, atol=1e-8):
-                error_msg = format_error_message(
-                    model_type="DDFM",
-                    operation="decoder initialization",
-                    reason="decoder weights are all zeros after initialization",
-                    guidance=(
-                        f"This indicates a problem with decoder initialization. "
-                        f"Check: (1) Decoder class implementation, (2) Weight initialization method, "
-                        f"(3) PyTorch version compatibility. "
-                        f"Decoder weight shape: {decoder_weight.shape}, "
-                        f"weight mean: {np.mean(decoder_weight):.6f}, "
-                        f"weight std: {np.std(decoder_weight):.6f}"
-                    )
+                raise RuntimeError(
+                    f"DDFM decoder initialization failed: decoder weights are all zeros after initialization. "
+                    f"This indicates a problem with decoder initialization. "
+                    f"Check: (1) Decoder class implementation, (2) Weight initialization method, "
+                    f"(3) PyTorch version compatibility. "
+                    f"Decoder weight shape: {decoder_weight.shape}, "
+                    f"weight mean: {np.mean(decoder_weight):.6f}, "
+                    f"weight std: {np.std(decoder_weight):.6f}"
                 )
-                raise RuntimeError(error_msg)
             
             # Log decoder initialization statistics
             decoder_weight_mean = np.mean(decoder_weight)
@@ -651,17 +599,20 @@ class DDFM(BaseFactorModel):
                 f"nonzero={decoder_weight_nonzero}/{decoder_weight.size}"
             )
         except (ValueError, RuntimeError, TypeError) as e:
-            error_msg = format_error_message(
-                model_type="DDFM",
-                operation="decoder initialization",
-                reason=f"failed to initialize decoder: {type(e).__name__}: {str(e)}",
-                guidance=(
-                    f"Check num_factors={self.num_factors}, input_dim={input_dim}. "
-                    f"Suggestions: (1) Ensure num_factors > 0, (2) Ensure input_dim > 0, "
-                    f"(3) Check that num_factors <= input_dim"
-                )
+            raise RuntimeError(
+                f"DDFM decoder initialization failed: failed to initialize decoder: {type(e).__name__}: {str(e)}. "
+                f"Check num_factors={self.num_factors}, input_dim={input_dim}. "
+                f"Suggestions: (1) Ensure num_factors > 0, (2) Ensure input_dim > 0, "
+                f"(3) Check that num_factors <= input_dim"
+            ) from e
+    
+    def _check_networks_initialized(self):
+        """Check if encoder and decoder are initialized."""
+        if self.encoder is None or self.decoder is None:
+            raise RuntimeError(
+                f"{self.__class__.__name__}: encoder and decoder must be initialized. "
+                f"Ensure setup() or on_train_start() has been called."
             )
-            raise RuntimeError(error_msg) from e
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass through encoder and decoder.
@@ -676,13 +627,7 @@ class DDFM(BaseFactorModel):
         reconstructed : torch.Tensor
             Reconstructed data
         """
-        if self.encoder is None or self.decoder is None:
-            error_msg = self._format_error_message(
-                operation="forward pass",
-                reason="encoder and decoder must be initialized",
-                guidance="Please ensure the model is properly initialized before calling forward(). This usually happens automatically during trainer.fit(), but if calling forward() directly, ensure setup() or on_train_start() has been called."
-            )
-            raise RuntimeError(error_msg)
+        self._check_networks_initialized()
         
         # Handle different input shapes
         if x.ndim == 3:
@@ -737,46 +682,24 @@ class DDFM(BaseFactorModel):
         # Forward pass
         reconstructed = self.forward(data_clipped)
         
-        # Check for NaN in forward pass output (indicates numerical instability)
-        if torch.any(torch.isnan(reconstructed)) or torch.any(torch.isinf(reconstructed)):
+        # Check for NaN/Inf in forward pass output
+        if not torch.all(torch.isfinite(reconstructed)):
             nan_count = torch.sum(torch.isnan(reconstructed)).item()
             inf_count = torch.sum(torch.isinf(reconstructed)).item()
-            _logger.error(
-                f"DDFM training_step: Forward pass produced {nan_count} NaN and {inf_count} Inf values. "
-                f"This indicates severe numerical instability. Skipping this batch to prevent NaN propagation. "
-                f"Possible causes: (1) learning rate too high, (2) gradient explosion, "
-                f"(3) extreme input values, (4) unstable activation functions."
-            )
-            # Return a large but finite loss to signal the issue
-            # Must have requires_grad=True for Lightning backward() to work
-            # Create loss from model parameters to ensure it's in the computation graph
-            dummy_loss = sum(p.sum() * 0.0 for p in self.parameters() if p.requires_grad)
-            loss = dummy_loss + torch.tensor(1e6, device=data.device, dtype=data.dtype, requires_grad=True)
+            _logger.error(f"DDFM training_step: Forward pass produced {nan_count} NaN and {inf_count} Inf values")
+            loss = torch.tensor(1e6, device=data.device, dtype=data.dtype, requires_grad=True)
             self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True)
             return loss
         
-        # Compute loss with missing data masking (mse_missing)
-        # Create mask: 1 for non-missing, 0 for missing (NaN)
-        mask = torch.where(torch.isnan(target), torch.zeros_like(target), torch.ones_like(target))
+        # Compute loss with missing data masking
+        mask = torch.isfinite(target)
+        target_clean = torch.where(mask, target, torch.zeros_like(target))
+        squared_diff = (target_clean - reconstructed) ** 2
+        loss = torch.sum(squared_diff * mask) / (torch.sum(mask) + 1e-8)
         
-        # Replace NaN with zeros for computation
-        target_clean = torch.where(torch.isnan(target), torch.zeros_like(target), target)
-        
-        # Apply mask to predictions
-        reconstructed_masked = reconstructed * mask
-        
-        # Compute MSE only on non-missing values
-        # MSE = mean((target_clean - reconstructed_masked)^2) over non-missing elements
-        squared_diff = (target_clean - reconstructed_masked) ** 2
-        loss = torch.sum(squared_diff) / (torch.sum(mask) + 1e-8)  # Avoid division by zero
-        
-        # Check for NaN/Inf in loss (indicates numerical instability)
-        if torch.isnan(loss) or torch.isinf(loss):
-            _logger.error(
-                f"DDFM training_step: Loss is NaN/Inf (loss={loss.item()}). "
-                f"This indicates numerical instability. Returning large loss value."
-            )
-            # Return a large but finite loss to signal the issue
+        # Handle NaN/Inf in loss
+        if not torch.isfinite(loss):
+            _logger.error(f"DDFM training_step: Loss is NaN/Inf")
             loss = torch.tensor(1e6, device=loss.device, dtype=loss.dtype, requires_grad=True)
         
         # Log metrics
@@ -795,8 +718,6 @@ class DDFM(BaseFactorModel):
             factors=factors,
             num_factors=self.num_factors,
             operation=operation,
-            format_error_message=self._format_error_message,
-            format_warning_message=self._format_warning_message,
         )
     
     def _validate_training_data(
@@ -816,8 +737,6 @@ class DDFM(BaseFactorModel):
             encoder_layers=self.encoder_layers,
             encoder=self.encoder,
             operation=operation,
-            format_error_message=self._format_error_message,
-            format_warning_message=self._format_warning_message,
         )
     
     
@@ -835,8 +754,6 @@ class DDFM(BaseFactorModel):
             factors=factors,
             factor_order=factor_order,
             num_factors=self.num_factors,
-            format_error_message=self._format_error_message,
-            format_warning_message=self._format_warning_message,
         )
     
     def configure_optimizers(self) -> Union[List[torch.optim.Optimizer], Dict[str, Any]]:
@@ -851,13 +768,7 @@ class DDFM(BaseFactorModel):
             If decay_learning_rate=True: Dict with optimizer and scheduler config
         """
         if self.encoder is None or self.decoder is None:
-            # If still not initialized, create placeholder optimizer as fallback
-            # This should not happen if setup() works correctly, but provides safety net
-            _logger.warning(
-                "Encoder/decoder not initialized in configure_optimizers(). "
-                "Creating placeholder optimizer. This may indicate an issue with setup()."
-            )
-            # Create dummy parameter for optimizer (Lightning requires at least one optimizer)
+            _logger.warning("Encoder/decoder not initialized, creating placeholder optimizer")
             dummy_param = nn.Parameter(torch.zeros(1))
             optimizer = torch.optim.Adam([dummy_param], lr=self.learning_rate)
             if self.decay_learning_rate:
@@ -914,13 +825,7 @@ class DDFM(BaseFactorModel):
         torch.optim.Optimizer
             Adam optimizer for encoder and decoder parameters
         """
-        if self.encoder is None or self.decoder is None:
-            error_msg = self._format_error_message(
-                operation="configure_optimizers",
-                reason="encoder and decoder must be initialized before creating optimizer",
-                guidance="Call initialize_networks() first. This usually happens automatically during setup() or on_train_start()"
-            )
-            raise RuntimeError(error_msg)
+        self._check_networks_initialized()
         
         # Calculate learning rate with exponential decay if enabled
         # Original DDFM: decay_rate=0.96, decay_steps=epochs, staircase=True
@@ -1182,20 +1087,12 @@ class DDFM(BaseFactorModel):
             Estimation results with parameters, factors, and diagnostics
         """
         if self.training_state is None:
-            error_msg = self._format_error_message(
-                operation="get_result",
-                reason="model has not been fitted yet",
-                guidance="Please call fit_mcmc() first. This usually happens automatically during trainer.fit()"
+            raise RuntimeError(
+                f"{self.__class__.__name__} get_result failed: model has not been fitted yet. "
+                f"Call fit_mcmc() first."
             )
-            raise RuntimeError(error_msg)
         
-        if self.encoder is None or self.decoder is None:
-            error_msg = self._format_error_message(
-                operation="get_result",
-                reason="encoder and decoder must be initialized",
-                guidance="Please ensure the model is properly initialized before getting results. This usually happens automatically during setup() or on_train_start()"
-            )
-            raise RuntimeError(error_msg)
+        self._check_networks_initialized()
         
         # Extract decoder parameters (C, bias)
         C, bias = extract_decoder_params(self.decoder)
@@ -1243,12 +1140,10 @@ class DDFM(BaseFactorModel):
             x_standardized = self.data_processed.cpu().numpy()
             # Ensure shapes match
             if x_standardized.shape != prediction_iter.shape:
-                warning_msg = self._format_warning_message(
-                    operation="get_result",
-                    issue=f"shape mismatch: data_processed {x_standardized.shape} vs prediction {prediction_iter.shape}",
-                    suggestion="Using prediction shape for residuals"
+                _logger.warning(
+                    f"{self.__class__.__name__} get_result: shape mismatch: data_processed {x_standardized.shape} vs prediction {prediction_iter.shape}. "
+                    f"Using prediction shape for residuals"
                 )
-                _logger.warning(warning_msg)
                 residuals = np.zeros_like(prediction_iter)
             else:
                 residuals = x_standardized - prediction_iter
@@ -1339,19 +1234,10 @@ class DDFM(BaseFactorModel):
             _logger.debug(f"Initialized encoder/decoder in on_train_start() with input_dim={input_dim}")
         
         # Always run fit_mcmc() if training_state is None (first training run)
-        # This ensures MCMC training happens even if encoder/decoder were already initialized
         if self.training_state is None:
-            # Handle missing data (NaN values)
-            # DDFM can handle NaN implicitly via state-space model, but for MCMC training
-            # we use imputation to provide clean initial data. The MCMC procedure will
-            # then handle missing data through the idiosyncratic component estimation.
-            # Use method=1 (fill without trimming) to preserve data size for test compatibility
-            # Method 1 fills missing values using spline interpolation + moving average without trimming rows
-            # This ensures result shape matches data_module.data_processed.shape[0] as expected by tests
-            # Method 2 (default) trims rows with >80% NaN, which causes shape mismatch with test expectations
-            # Note: nan_method and nan_k are internal parameters for missing data handling
-            nan_method = safe_get_attr(self.config, 'nan_method', 1)
-            nan_k = safe_get_attr(self.config, 'nan_k', 3)
+            # Handle missing data - use imputation for MCMC training
+            nan_method = getattr(self.config, 'nan_method', 1)
+            nan_k = getattr(self.config, 'nan_k', 3)
             
             # Check if data has NaN values
             if isinstance(X_torch, torch.Tensor):
@@ -1387,29 +1273,22 @@ class DDFM(BaseFactorModel):
                 torch.tensor(0.0, device=device, dtype=dtype)
             )
             
-            # Ensure missing_mask shape matches x_clean_torch shape
-            # This is critical for boolean indexing in fit_mcmc()
-            # If shapes don't match (shouldn't happen with method=1, but defensive check),
-            # adjust missing_mask to match x_clean_torch shape
+            # Adjust missing_mask shape to match x_clean_torch
             if missing_mask.shape != x_clean_torch.shape:
-                _logger.warning(
-                    f"DDFM on_train_start: missing_mask shape {missing_mask.shape} doesn't match "
-                    f"x_clean_torch shape {x_clean_torch.shape}. Adjusting missing_mask to match x_clean_torch."
-                )
-                # If x_clean_torch is smaller, truncate missing_mask
-                if missing_mask.shape[0] > x_clean_torch.shape[0]:
-                    missing_mask = missing_mask[:x_clean_torch.shape[0], :]
-                # If x_clean_torch is larger, pad missing_mask with False (no missing data)
-                elif missing_mask.shape[0] < x_clean_torch.shape[0]:
-                    pad_rows = x_clean_torch.shape[0] - missing_mask.shape[0]
+                _logger.warning(f"DDFM on_train_start: missing_mask shape {missing_mask.shape} != x_clean_torch shape {x_clean_torch.shape}, adjusting")
+                target_shape = x_clean_torch.shape
+                # Truncate or pad rows
+                if missing_mask.shape[0] > target_shape[0]:
+                    missing_mask = missing_mask[:target_shape[0], :]
+                elif missing_mask.shape[0] < target_shape[0]:
+                    pad_rows = target_shape[0] - missing_mask.shape[0]
                     missing_mask = np.vstack([missing_mask, np.zeros((pad_rows, missing_mask.shape[1]), dtype=bool)])
-                # Adjust columns if needed
-                if missing_mask.shape[1] != x_clean_torch.shape[1]:
-                    if missing_mask.shape[1] > x_clean_torch.shape[1]:
-                        missing_mask = missing_mask[:, :x_clean_torch.shape[1]]
-                    else:
-                        pad_cols = x_clean_torch.shape[1] - missing_mask.shape[1]
-                        missing_mask = np.hstack([missing_mask, np.zeros((missing_mask.shape[0], pad_cols), dtype=bool)])
+                # Truncate or pad columns
+                if missing_mask.shape[1] > target_shape[1]:
+                    missing_mask = missing_mask[:, :target_shape[1]]
+                elif missing_mask.shape[1] < target_shape[1]:
+                    pad_cols = target_shape[1] - missing_mask.shape[1]
+                    missing_mask = np.hstack([missing_mask, np.zeros((missing_mask.shape[0], pad_cols), dtype=bool)])
             
             # Pre-train autoencoder on non-missing data (matching original DDFM)
             # This provides stable initialization before MCMC training
@@ -1423,7 +1302,7 @@ class DDFM(BaseFactorModel):
             except Exception as e:
                 _logger.warning(
                     f"DDFM pre_train failed: {e}. Continuing with MCMC training without pre-training. "
-                    f"This may lead to less stable training."
+                    f"Continuing without pre-training."
                 )
             
             # Run MCMC training
@@ -1522,36 +1401,34 @@ class DDFM(BaseFactorModel):
         training period), ensuring accuracy while maintaining efficiency.
         """
         if self.training_state is None:
-            error_msg = format_error_message(
-                model_type="DDFM",
-                operation="prediction",
-                reason="model has not been trained yet",
-                guidance="Please call trainer.fit(model, data_module) first"
+            raise ValueError(
+                f"DDFM prediction failed: model has not been trained yet. "
+                f"Please call trainer.fit(model, data_module) first"
             )
-            raise ValueError(error_msg)
         
         # Convert training state to result format for prediction
         if not hasattr(self, '_result') or self._result is None:
             self._result = self.get_result()
         
         if self._result is None:
-            error_msg = format_error_message(
-                model_type="DDFM",
-                operation="prediction",
-                reason="model has not been fitted yet",
-                guidance="Please call trainer.fit(model, data_module) first"
+            raise ValueError(
+                f"DDFM prediction failed: model has not been fitted yet. "
+                f"Please call trainer.fit(model, data_module) first"
             )
-            raise ValueError(error_msg)
         
-        # Compute default horizon using common helper
+        # Compute default horizon
         if horizon is None:
             if self._config is not None:
-                horizon = self._compute_default_horizon()
+                from ..config.utils import get_periods_per_year
+                from ..utils.helpers import get_clock_frequency
+                clock = get_clock_frequency(self._config, 'm')
+                horizon = get_periods_per_year(clock)
             else:
                 horizon = 12  # Default to 12 periods if no config
         
-        # Validate horizon using common helper
-        self._validate_horizon(horizon)
+        # Validate horizon
+        if horizon <= 0:
+            raise ValueError(f"horizon must be positive, got {horizon}")
         
         # Extract parameters
         A = self._result.A  # Factor dynamics (m x m) for VAR(1) or (m x 2m) for VAR(2)
@@ -1620,9 +1497,7 @@ class DDFM(BaseFactorModel):
         super().reset()
         return self
     
-    
-    # generate_dataset() method removed - application-specific functionality
-    # Use src.nowcast for nowcasting-related dataset generation
+    # nowcast() is inherited from BaseFactorModel
     
     def get_state(
         self,
@@ -1636,13 +1511,10 @@ class DDFM(BaseFactorModel):
         residuals, and factor history for the specified time period.
         """
         if not hasattr(self, '_data') or self._data is None:
-            error_msg = format_error_message(
-                model_type="DDFM",
-                operation="get_state",
-                reason="model has not been fitted with DataModule yet",
-                guidance="Please call trainer.fit(model, data_module) first to store data"
+            raise ValueError(
+                f"DDFM get_state failed: model has not been fitted with DataModule yet. "
+                f"Please call trainer.fit(model, data_module) first to store data"
             )
-            raise ValueError(error_msg)
         
         if lookback is None:
             lookback = 12  # Default lookback
@@ -1655,19 +1527,16 @@ class DDFM(BaseFactorModel):
         else:
             X_data = np.asarray(self._data)
         
-        # Nowcast removed - use src.nowcast for nowcasting functionality
-        baseline_nowcast = np.nan  # Placeholder - use src.nowcast for actual nowcast values
+        # Placeholder for nowcast (use src.nowcast for actual nowcasting functionality)
+        baseline_nowcast = np.nan
         
         baseline_forecast, actual_history, residuals, factors_history = [], [], [], []
         t_idx = find_time_index(self._time, t)
         if t_idx is None:
-            error_msg = format_error_message(
-                model_type="DDFM",
-                operation="get_state",
-                reason=f"time {t} not found in model_instance._time",
-                guidance="Please provide a valid time value that exists in the model's time index"
+            raise ValueError(
+                f"DDFM get_state failed: time {t} not found in model_instance._time. "
+                f"Please provide a valid time value that exists in the model's time index"
             )
-            raise ValueError(error_msg)
         
         for i in range(max(0, t_idx - lookback + 1), t_idx + 1):
             if i < X_data.shape[0]:

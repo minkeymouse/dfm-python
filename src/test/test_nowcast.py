@@ -129,12 +129,13 @@ class TestNowcast:
         a unified interface for nowcasting operations.
         """
         model = DFM()
-        # BaseFactorModel should have nowcast property (check without calling it)
-        assert 'nowcast' in dir(model) or hasattr(type(model), 'nowcast')
+        # BaseFactorModel should have nowcast method (not property)
+        assert hasattr(model, 'nowcast')
+        assert callable(getattr(model, 'nowcast', None))
         
-        # Before training, accessing nowcast should raise ValueError
+        # Before training, calling nowcast should raise ValueError
         with pytest.raises(ValueError, match=r".*model has not been trained yet.*"):
-            _ = model.nowcast
+            _ = model.nowcast("target_series")
     
     def test_nowcast_property_returns_nowcast_instance(self, test_data_path, test_config_path):
         """Test that model.nowcast returns Nowcast instance.

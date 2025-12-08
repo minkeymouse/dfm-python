@@ -1,4 +1,4 @@
-"""Tutorial: DFM for Finance Data
+"""Tutorial: DDFM for Finance Data
 
 This tutorial demonstrates the complete workflow for training, prediction, and nowcasting
 using finance data with market_forward_excess_returns as the target variable.
@@ -17,12 +17,17 @@ sys.path.insert(0, str(project_root / "src"))
 import pandas as pd
 import numpy as np
 from datetime import datetime
-from dfm_python import DFM, DFMDataModule, DFMTrainer
+from dfm_python import DDFM, DFMDataModule, DDFMTrainer
 from dfm_python.config import DFMConfig, SeriesConfig, DEFAULT_BLOCK_NAME
 from dfm_python.utils.time import TimeIndex, parse_timestamp
 
+# sktime imports for preprocessing
+from sktime.transformations.compose import TransformerPipeline
+from sktime.transformations.series.impute import Imputer
+from sklearn.preprocessing import StandardScaler
+
 print("=" * 80)
-print("DFM Tutorial: Finance Data")
+print("DDFM Tutorial: Finance Data")
 print("=" * 80)
 
 # ============================================================================
@@ -45,10 +50,10 @@ target_col = "market_forward_excess_returns"
 exclude_cols = ["risk_free_rate", "forward_returns", "date_id"]
 
 # Select a subset of series for faster execution
-# Use first few series from each category: D, E, I, M, P, S, V
+# Use first 2 series from each category: D, E, I, M, P, S, V (balanced for speed)
 selected_cols = []
 for prefix in ["D", "E", "I", "M", "P", "S", "V"]:
-    for i in range(1, 6):  # Use first 5 from each category
+    for i in range(1, 3):  # Use first 2 from each category
         col = f"{prefix}{i}"
         if col in df.columns:
             selected_cols.append(col)
@@ -66,13 +71,58 @@ print(f"   Excluded: {exclude_cols}")
 df_processed = df_processed.dropna(how='all')
 
 # Use only recent data for faster execution and to avoid date overflow
-# Take last 500 periods (about 40 years of monthly data)
-max_periods = 500
+# Take last 100 periods (further reduced for faster execution)
+max_periods = 100
 if len(df_processed) > max_periods:
     df_processed = df_processed.iloc[-max_periods:]
     print(f"   Using last {max_periods} periods for faster execution")
 
 print(f"   Data shape after cleaning: {df_processed.shape}")
+
+# Check for missing values
+missing_before = df_processed.isnull().sum().sum()
+print(f"   Missing values before preprocessing: {missing_before}")
+
+# ============================================================================
+# Step 2.5: Create Preprocessing Pipeline with sktime
+# ============================================================================
+print("\n[Step 2.5] Creating preprocessing pipeline with sktime...")
+
+# Create preprocessing pipeline: Imputation → Scaling
+preprocessing_pipeline = TransformerPipeline(
+    steps=[
+        ('impute_ffill', Imputer(method="ffill")),  # Forward fill missing values
+        ('impute_bfill', Imputer(method="bfill")),  # Backward fill remaining NaNs
+        ('scaler', StandardScaler())  # Unified scaling for all series
+    ]
+)
+
+print("   Pipeline: Imputer(ffill) → Imputer(bfill) → StandardScaler")
+print("   Applying preprocessing pipeline...")
+
+# Apply preprocessing
+df_preprocessed = preprocessing_pipeline.fit_transform(df_processed)
+
+# Ensure output is DataFrame
+if isinstance(df_preprocessed, np.ndarray):
+    df_preprocessed = pd.DataFrame(df_preprocessed, columns=df_processed.columns, index=df_processed.index)
+elif not isinstance(df_preprocessed, pd.DataFrame):
+    df_preprocessed = pd.DataFrame(df_preprocessed)
+
+missing_after = df_preprocessed.isnull().sum().sum()
+print(f"   Missing values after preprocessing: {missing_after}")
+print(f"   Preprocessed data shape: {df_preprocessed.shape}")
+
+# Verify standardization
+mean_vals = df_preprocessed.mean()
+std_vals = df_preprocessed.std()
+max_mean = float(mean_vals.abs().max())
+max_std_dev = float((std_vals - 1.0).abs().max())
+print(f"   Standardization check - Max |mean|: {max_mean:.6f} (should be ~0)")
+print(f"   Standardization check - Max |std - 1|: {max_std_dev:.6f} (should be ~0)")
+
+# Update df_processed to use preprocessed data
+df_processed = df_preprocessed
 
 # ============================================================================
 # Step 3: Create Configuration
@@ -106,7 +156,7 @@ for col in selected_cols:
 # Create blocks config
 blocks_config = {
     DEFAULT_BLOCK_NAME: {
-        "factors": 2,  # Small number for fast execution
+        "factors": 1,  # Reduced to 1 for faster execution
         "ar_lag": 1,
         "clock": "m"
     }
@@ -115,13 +165,11 @@ blocks_config = {
 # Create DFM config
 config = DFMConfig(
     series=series_configs,
-    blocks=blocks_config,
-    max_iter=10,  # Small number for fast execution
-    threshold=1e-4
+    blocks=blocks_config
 )
 
 print(f"   Number of series: {len(series_configs)}")
-print(f"   Number of factors: {config.blocks[DEFAULT_BLOCK_NAME]['factors']}")
+print(f"   Number of factors: 1 (DDFM uses num_factors parameter)")
 print(f"   Target series: {target_col}")
 
 # ============================================================================
@@ -133,7 +181,7 @@ print("\n[Step 4] Creating DataModule...")
 # For finance data, date_id is an index, so we'll create a simple time index
 # Use a recent start date to avoid overflow
 n_periods = len(df_processed)
-# Start from 1980 to ensure we don't hit overflow (500 months = ~42 years)
+# Start from 1980 to ensure we don't hit overflow
 start_date = datetime(1980, 1, 1)
 time_list = [
     (pd.Timestamp(start_date) + pd.DateOffset(months=i)).to_pydatetime()
@@ -142,11 +190,12 @@ time_list = [
 
 time_index = TimeIndex(time_list)
 
-# Create DataModule
+# Create DataModule with transformer
 data_module = DFMDataModule(
     config=config,
     data=df_processed.values,
-    time=time_index
+    time=time_index,
+    transformer=preprocessing_pipeline  # Pass the preprocessing pipeline
 )
 data_module.setup()
 
@@ -159,12 +208,19 @@ else:
 # ============================================================================
 # Step 5: Train Model
 # ============================================================================
-print("\n[Step 5] Training DFM model...")
+print("\n[Step 5] Training DDFM model...")
 
-model = DFM()
+model = DDFM(
+    encoder_layers=[32, 16],  # Reduced for faster execution
+    num_factors=1,  # Reduced to 1 for faster execution
+    epochs=10,  # Reduced for faster execution
+    max_iter=3,  # Reduced for faster execution
+    batch_size=32,  # Reduced for faster execution
+    learning_rate=0.005
+)
 model._config = config  # Set config directly
 
-trainer = DFMTrainer(max_epochs=10)  # Small number for fast execution
+trainer = DDFMTrainer(max_epochs=1)  # Minimal epochs for faster execution
 trainer.fit(model, data_module)
 
 print("   Training completed!")
@@ -206,17 +262,13 @@ except ValueError as e:
 print("\n[Step 7] Nowcasting...")
 
 try:
-    # Get nowcast manager
+    # Use nowcast method (if available)
     # Note: nowcast requires src.nowcasting module which may not be available in dfm-python
     # This is expected if using dfm-python standalone
-    nowcast = model.nowcast
-    
-    # Calculate nowcast for target series
-    # Use latest available date
     latest_date = time_index[-1]
     view_date = latest_date
     
-    nowcast_value = nowcast(
+    nowcast_value = model.nowcast(
         target_series=target_col,
         view_date=view_date,
         target_period=latest_date
@@ -225,7 +277,7 @@ try:
     print(f"   Nowcast value for {target_col}: {nowcast_value:.6f}")
     print(f"   View date: {view_date}")
     
-except (ValueError, ImportError) as e:
+except (ValueError, ImportError, AttributeError) as e:
     print(f"   Nowcasting skipped: {e}")
     print("   Note: Nowcasting requires src.nowcasting module from main project")
 
@@ -236,7 +288,7 @@ print("\n" + "=" * 80)
 print("Tutorial Summary")
 print("=" * 80)
 print(f"✅ Data loaded: {df.shape[0]} rows, {len(selected_cols)} series")
-print(f"✅ Model trained: {len(series_configs)} series, {config.blocks[DEFAULT_BLOCK_NAME]['factors']} factors")
+print(f"✅ Model trained: {len(series_configs)} series, 1 factor")
 if X_forecast is not None:
     print(f"✅ Predictions generated: {X_forecast.shape[0]} periods ahead")
 else:

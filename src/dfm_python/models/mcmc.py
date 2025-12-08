@@ -164,29 +164,20 @@ class DDFMMCMCTrainer:
         T, N = X.shape
         
         # Validate shape consistency between X, x_clean, and missing_mask
-        # This prevents IndexError when using boolean indexing with missing_mask
         if x_clean.shape != X.shape:
-            error_msg = self.model._format_error_message(
-                operation="fit_mcmc",
-                reason=f"shape mismatch between X ({X.shape}) and x_clean ({x_clean.shape})",
-                guidance=(
-                    f"Both X and x_clean must have the same shape (T x N). "
-                    f"This indicates data preprocessing inconsistency. "
-                    f"Please ensure x_clean is created from the same data as X."
-                )
+            raise ValueError(
+                f"{self.model.__class__.__name__} fit_mcmc failed: shape mismatch between X ({X.shape}) and x_clean ({x_clean.shape}). "
+                f"Both X and x_clean must have the same shape (T x N). "
+                f"This indicates data preprocessing inconsistency. "
+                f"Please ensure x_clean is created from the same data as X."
             )
-            raise ValueError(error_msg)
         if missing_mask.shape != (T, N):
-            error_msg = self.model._format_error_message(
-                operation="fit_mcmc",
-                reason=f"shape mismatch between X ({X.shape}) and missing_mask ({missing_mask.shape})",
-                guidance=(
-                    f"missing_mask must have shape (T x N) matching X. "
-                    f"This indicates missing_mask was created from data with different shape. "
-                    f"Please ensure missing_mask is created from the same data passed as X parameter."
-                )
+            raise ValueError(
+                f"{self.model.__class__.__name__} fit_mcmc failed: shape mismatch between X ({X.shape}) and missing_mask ({missing_mask.shape}). "
+                f"missing_mask must have shape (T x N) matching X. "
+                f"This indicates missing_mask was created from data with different shape. "
+                f"Please ensure missing_mask is created from the same data passed as X parameter."
             )
-            raise ValueError(error_msg)
         
         # Use instance attributes if not provided
         max_iter = max_iter if max_iter is not None else self.model.max_iter
@@ -198,7 +189,7 @@ class DDFMMCMCTrainer:
             self.model.initialize_networks(N)
         
         # Ensure encoder and decoder are on the correct device
-        # This is critical even if they were initialized in on_train_start(),
+        # Ensure encoder/decoder are initialized
         # as the device might differ or they might not have been moved properly
         self.model.encoder = self.model.encoder.to(device)
         self.model.decoder = self.model.decoder.to(device)
@@ -252,20 +243,12 @@ class DDFMMCMCTrainer:
         
         # Check for very small dataset and warn about potential instability
         if T < 10:
-            warning_msg = self.model._format_warning_message(
-                operation="MCMC training",
-                issue=f"very small dataset (T={T} < 10) may cause unstable MCMC sampling",
-                context=(
-                    f"With only {T} time periods, encoder/decoder training per iteration "
-                    f"may have high variance. Factor extraction and VAR estimation will use "
-                    f"fallback strategies. Results may be less reliable."
-                ),
-                suggestion=(
-                    f"Monitor convergence carefully. Consider reducing num_factors or "
-                    f"using smaller encoder_layers for better stability"
-                )
+            _logger.warning(
+                f"{self.model.__class__.__name__} MCMC training: very small dataset (T={T} < 10) may cause unstable MCMC sampling. "
+                f"With only {T} time periods, encoder/decoder training per iteration may have high variance. "
+                f"Factor extraction and VAR estimation will use fallback strategies. Results may be less reliable. "
+                f"Monitor convergence carefully. Consider reducing num_factors or using smaller encoder_layers for better stability"
             )
-            _logger.warning(warning_msg)
         
         _logger.info(f"Starting MCMC training: max_iter={max_iter}, tolerance={tolerance}, epochs_per_iter={self.model.epochs_per_iter}")
         
@@ -321,12 +304,10 @@ class DDFMMCMCTrainer:
                 # Check for NaN/Inf in MC samples
                 eps_draws = self.model._check_finite(eps_draws, f"MC samples (eps_draws)", context=f"at iteration {iter_count}")
             except (ValueError, np.linalg.LinAlgError) as e:
-                warning_msg = self.model._format_warning_message(
-                    operation=f"MCMC iteration {iter_count}",
-                    issue=f"failed to generate MC samples: {e}",
-                    suggestion="Using zero samples as fallback"
+                _logger.warning(
+                    f"{self.model.__class__.__name__} MCMC iteration {iter_count}: failed to generate MC samples: {e}. "
+                    f"Using zero samples as fallback"
                 )
-                _logger.warning(warning_msg)
                 # Use zero samples as fallback
                 eps_draws = np.zeros((self.model.epochs_per_iter, T, N))
             
@@ -407,13 +388,11 @@ class DDFMMCMCTrainer:
                 clipped_count += np.sum((before_clip != factors[:, i]))
             
             if clipped_count > 0:
-                warning_msg = self.model._format_warning_message(
-                    operation=f"MCMC iteration {iter_count}",
-                    issue=f"clipped {clipped_count} extreme factor values (>{clip_threshold} std devs)",
-                    context=f"This prevents numerical instability in encoder/decoder forward passes",
-                    suggestion="If clipping occurs frequently, consider: (1) Reducing learning_rate, (2) Using smaller encoder_layers, (3) Checking data scaling"
+                _logger.warning(
+                    f"{self.model.__class__.__name__} MCMC iteration {iter_count}: clipped {clipped_count} extreme factor values (>{clip_threshold} std devs). "
+                    f"This prevents numerical instability in encoder/decoder forward passes. "
+                    f"If clipping occurs frequently, consider: (1) Reducing learning_rate, (2) Using smaller encoder_layers, (3) Checking data scaling"
                 )
-                _logger.warning(warning_msg)
             
             # Check convergence
             self.model.decoder.eval()
@@ -435,12 +414,10 @@ class DDFMMCMCTrainer:
                     mse = np.nanmean((prediction_prev_iter[mask] - prediction_iter[mask]) ** 2)
                     # Ensure MSE is finite
                     if not np.isfinite(mse):
-                        warning_msg = self.model._format_warning_message(
-                            operation=f"MCMC iteration {iter_count}",
-                            issue=f"MSE is not finite ({mse})",
-                            suggestion="Using previous delta value"
+                        _logger.warning(
+                            f"{self.model.__class__.__name__} MCMC iteration {iter_count}: MSE is not finite ({mse}). "
+                            f"Using previous delta value"
                         )
-                        _logger.warning(warning_msg)
                         mse = delta if np.isfinite(delta) else tolerance * 10
                     delta = mse
                     loss_now = mse
@@ -466,12 +443,10 @@ class DDFMMCMCTrainer:
                     loss_now = np.nanmean((data_mod_only_miss[mask] - prediction_iter[mask]) ** 2)
                     # Ensure loss is finite
                     if not np.isfinite(loss_now):
-                        warning_msg = self.model._format_warning_message(
-                            operation=f"MCMC iteration {iter_count}",
-                            issue=f"initial loss is not finite ({loss_now})",
-                            suggestion="Using large default value"
+                        _logger.warning(
+                            f"{self.model.__class__.__name__} MCMC iteration {iter_count}: initial loss is not finite ({loss_now}). "
+                            f"Using large default value"
                         )
-                        _logger.warning(warning_msg)
                         loss_now = 1e6
                 else:
                     loss_now = float('inf')
@@ -490,12 +465,10 @@ class DDFMMCMCTrainer:
         
         if not_converged:
             delta_str = f"{delta:.6f}" if iter_count > 1 else "N/A"
-            warning_msg = self.model._format_warning_message(
-                operation="MCMC training",
-                issue=f"convergence not achieved within {max_iter} iterations",
-                context=f"Final delta: {delta_str}"
+            _logger.warning(
+                f"{self.model.__class__.__name__} MCMC training: convergence not achieved within {max_iter} iterations. "
+                f"Final delta: {delta_str}"
             )
-            _logger.warning(warning_msg)
         
         converged = not not_converged
         

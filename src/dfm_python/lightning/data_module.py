@@ -182,34 +182,76 @@ def _get_scale(scaler: Any, data: np.ndarray) -> Optional[np.ndarray]:
 def _normalize_wx(wx: np.ndarray) -> np.ndarray:
     """Normalize Wx to avoid division by zero.
     
+    This function replaces zero or NaN values in Wx with 1.0 to prevent
+    division by zero during standardization/unstandardization.
+    
     Parameters
     ----------
     wx : np.ndarray
-        Scale values (N,)
+        Scale values (N,), may contain zeros or NaN
         
     Returns
     -------
     np.ndarray
-        Normalized scale values with zeros replaced by 1.0
+        Normalized scale values with zeros and NaN replaced by 1.0
     """
-    return np.where(wx == 0, 1.0, wx)
+    # Replace both zero and NaN with 1.0
+    return np.where((wx == 0) | np.isnan(wx), 1.0, wx)
 
 
 def _compute_mx_wx(data: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """Compute Mx and Wx from data as fallback.
     
+    This function computes mean (Mx) and standard deviation (Wx) from data,
+    handling missing values (NaN) by using nan-aware functions. If NaN values
+    are detected, a warning is issued recommending imputation.
+    
     Parameters
     ----------
     data : np.ndarray
-        Processed data array (T x N)
+        Processed data array (T x N), may contain NaN values
         
     Returns
     -------
     Tuple[np.ndarray, np.ndarray]
-        (Mx, Wx) tuple where Mx is mean and Wx is normalized std
+        (Mx, Wx) tuple where Mx is mean and Wx is normalized std.
+        NaN values are handled using nanmean and nanstd.
+        
+    Notes
+    -----
+    If data contains NaN values, this function will:
+    1. Use np.nanmean() and np.nanstd() to compute statistics ignoring NaN
+    2. Issue a warning recommending data imputation for better results
+    3. Continue processing with available data
     """
-    mx = np.mean(data, axis=0)
-    wx = np.std(data, axis=0)
+    # Check for NaN values
+    has_nan = np.any(np.isnan(data))
+    if has_nan:
+        nan_count = np.sum(np.isnan(data))
+        nan_pct = 100.0 * nan_count / data.size
+        _logger.warning(
+            f"Data contains {nan_count} NaN values ({nan_pct:.1f}%). "
+            f"Using nanmean/nanstd to compute standardization parameters. "
+            f"For better results, consider imputing missing values before creating DataModule. "
+            f"Suggested approaches: forward-fill, backward-fill, or interpolation."
+        )
+    
+    # Use nan-aware functions to handle missing values
+    mx = np.nanmean(data, axis=0)
+    wx = np.nanstd(data, axis=0)
+    
+    # Check if any series have all NaN values (would result in NaN std)
+    nan_std_mask = np.isnan(wx)
+    if np.any(nan_std_mask):
+        n_nan_std = np.sum(nan_std_mask)
+        _logger.warning(
+            f"{n_nan_std} series have all NaN values, resulting in NaN standard deviation. "
+            f"These will be normalized to 1.0 to avoid division by zero. "
+            f"Consider imputing or removing these series."
+        )
+        # Replace NaN std with 1.0 (will be normalized by _normalize_wx anyway)
+        wx = np.where(nan_std_mask, 1.0, wx)
+    
     wx = _normalize_wx(wx)
     return mx, wx
 

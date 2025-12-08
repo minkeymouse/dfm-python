@@ -42,9 +42,9 @@ class TestBaseFactorModel:
         # Error message format: "{ModelType} model has not been trained yet. Please call trainer.fit(model, data_module) first."
         with pytest.raises(ValueError, match=r".*model has not been trained yet.*"):
             _ = model.result
-        # Nowcast property also raises ValueError before training
+        # Nowcast method also raises ValueError before training
         with pytest.raises(ValueError, match=r".*model has not been trained yet.*"):
-            _ = model.nowcast
+            _ = model.nowcast("target_series")
 
 
 # TestDFMLinear removed: DFMLinear is now internal (_DFMLinear) and not part of public API.

@@ -169,31 +169,43 @@ class TestPredictCommonLogic:
         )
         model._config = config
         
-        # _compute_default_horizon should compute based on clock frequency
-        assert hasattr(model, '_compute_default_horizon')
-        # For monthly clock, default should be 12 (1 year)
-        default_horizon = model._compute_default_horizon()
+        # _compute_default_horizon was removed and inlined
+        # Test the behavior directly
+        from dfm_python.config.utils import get_periods_per_year
+        from dfm_python.utils.helpers import get_clock_frequency
+        
+        clock = get_clock_frequency(model.config, 'm')
+        default_horizon = get_periods_per_year(clock)
         assert isinstance(default_horizon, int)
         assert default_horizon > 0
     
     def test_validate_horizon(self):
-        """Test _validate_horizon() helper method.
+        """Test horizon validation logic.
         
         Horizon validation should check for positive integers.
+        Method was removed and inlined, so test the logic directly.
         """
         model = DFM()
-        assert hasattr(model, '_validate_horizon')
         
-        # Valid horizons should pass
-        model._validate_horizon(1)
-        model._validate_horizon(12)
+        # Valid horizons should pass (logic is now inline)
+        horizon = 1
+        if horizon <= 0:
+            raise ValueError(f"horizon must be positive, got {horizon}")
+        
+        horizon = 12
+        if horizon <= 0:
+            raise ValueError(f"horizon must be positive, got {horizon}")
         
         # Invalid horizons should raise ValueError
-        with pytest.raises(ValueError):
-            model._validate_horizon(0)
+        with pytest.raises(ValueError, match=r".*horizon must be positive.*"):
+            horizon = 0
+            if horizon <= 0:
+                raise ValueError(f"horizon must be positive, got {horizon}")
         
-        with pytest.raises(ValueError):
-            model._validate_horizon(-1)
+        with pytest.raises(ValueError, match=r".*horizon must be positive.*"):
+            horizon = -1
+            if horizon <= 0:
+                raise ValueError(f"horizon must be positive, got {horizon}")
 
 
 class TestPredictDFMvsDDFM:

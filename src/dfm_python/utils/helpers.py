@@ -111,7 +111,7 @@ def get_clock_frequency(config: DFMConfig, default: str = 'm') -> str:
     str
         Clock frequency code
     """
-    return safe_get_attr(config, 'clock', default)
+    return getattr(config, 'clock', default) if config is not None else default
 
 
 def get_series_ids(config: DFMConfig) -> List[str]:

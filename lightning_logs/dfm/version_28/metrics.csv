@@ -1,0 +1,4 @@
+em_iteration_epoch,epoch,loglik_epoch,step,train/em_iteration,train/loglik,train/loglik_change
+11.0,0,2891.228271484375,0,6.0,66.95512390136719,2067.301025390625
+11.0,1,2891.228271484375,1,,,
+11.0,2,2891.228271484375,2,,,
