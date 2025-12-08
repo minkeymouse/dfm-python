@@ -39,7 +39,6 @@ from ..utils.helpers import (
     safe_get_attr,
 )
 from ..utils.statespace import (
-    estimate_idio_dynamics,
     estimate_var1,
     estimate_var2,
 )
@@ -49,6 +48,11 @@ from ..utils.time import (
     TimeIndex,
 )
 from .base import BaseFactorModel, format_error_message
+from .utils import (
+    estimate_var_ddfm,
+    validate_factors_ddfm,
+    validate_training_data_ddfm,
+)
 
 if TYPE_CHECKING:
     from ..lightning import DFMDataModule
@@ -784,141 +788,16 @@ class DDFM(BaseFactorModel):
     def _validate_factors(self, factors: np.ndarray, operation: str = "operation") -> np.ndarray:
         """Validate and normalize factors shape and content quality.
         
-        This method performs comprehensive validation of factor arrays, checking for
-        shape correctness, numerical issues (NaN/Inf), constant factors, extreme scale,
-        and perfect correlation between factors. It raises errors for critical issues
-        and issues warnings for quality concerns.
-        
-        Parameters
-        ----------
-        factors : np.ndarray
-            Factors array to validate. Can be 1D or 2D, will be reshaped to 2D if needed.
-        operation : str, default "operation"
-            Operation name for error messages (e.g., "prediction", "factor extraction").
-            Used to provide context in error messages.
-            
-        Returns
-        -------
-        np.ndarray
-            Validated factors array, guaranteed to be 2D with shape (T x num_factors),
-            where T is number of time periods and num_factors is number of factors.
-            All values are finite (no NaN/Inf).
-            
-        Raises
-        ------
-        ValueError
-            If factors are empty or invalid shape (0D or 3D+).
-            If factors contain NaN/Inf values (critical numerical issue).
-            If factors cannot be reshaped to 2D array.
-            
-        Notes
-        -----
-        Validation checks performed (in order):
-        
-        1. **Shape validation**:
-           - Checks for empty or 0-dimensional arrays (raises error)
-           - Reshapes 1D arrays to 2D (T x num_factors)
-           - Ensures 2D shape (raises error if 3D+)
-        
-        2. **Numerical quality** (raises error if found):
-           - Detects NaN/Inf values
-           - Reports count and percentage of invalid values
-        
-        3. **Content quality** (issues warnings):
-           - Constant factors: Detects factors with zero variance
-           - Extreme scale: Detects factors with very large (>1e6) or very small (<1e-8) std
-           - Perfect correlation: Detects pairs of factors with |correlation| > 0.999
-        
-        4. **Debug logging**:
-           - When validation passes, logs factor statistics (mean range, std range) at DEBUG level
-        
-        This validation is critical for ensuring factors are suitable for:
-        - VAR estimation (requires finite, non-constant factors)
-        - Kalman filtering (requires valid covariance matrices)
-        - Prediction (requires stable factor dynamics)
+        This method delegates to validate_factors_ddfm() utility function.
+        See utils.py for detailed documentation.
         """
-        factors = np.asarray(factors)
-        if factors.ndim == 0 or factors.size == 0:
-            raise ValueError(
-                f"DDFM {operation} failed: factors is empty or invalid (shape: {factors.shape}). "
-                f"This indicates training did not complete properly. "
-                f"Please check training logs and ensure fit_mcmc() completed successfully."
-            )
-        if factors.ndim == 1:
-            # Reshape to (T, num_factors) if it's 1D
-            factors = factors.reshape(-1, self.num_factors) if factors.size > 0 else factors.reshape(0, self.num_factors)
-        if factors.ndim != 2:
-            raise ValueError(
-                f"DDFM {operation} failed: factors must be 2D array (T x m), got shape {factors.shape}"
-            )
-        
-        T, m = factors.shape
-        
-        # Check for NaN/Inf values
-        if not np.all(np.isfinite(factors)):
-            nan_count = np.sum(~np.isfinite(factors))
-            nan_pct = 100.0 * nan_count / factors.size
-            raise ValueError(
-                f"DDFM {operation} failed: factors contain {nan_count} ({nan_pct:.1f}%) NaN/Inf values. "
-                f"This indicates numerical issues during training. "
-                f"Please check training logs and data quality."
-            )
-        
-        # Check for constant factors (all same value)
-        factor_var = np.var(factors, axis=0)
-        constant_factors = factor_var < 1e-10
-        if np.any(constant_factors):
-            n_constant = np.sum(constant_factors)
-            constant_indices = np.where(constant_factors)[0].tolist()
-            warning_msg = self._format_warning_message(
-                operation=operation,
-                issue=f"{n_constant}/{m} factors are constant (zero variance)",
-                context=f"Constant factor indices: {constant_indices}",
-                suggestion="This may indicate training issues or insufficient data variation"
-            )
-            _logger.warning(warning_msg)
-        
-        # Check factor scale (warn if extremely large/small)
-        factor_std = np.std(factors, axis=0)
-        extreme_scale = (factor_std > 1e6) | (factor_std < 1e-8)
-        if np.any(extreme_scale):
-            n_extreme = np.sum(extreme_scale)
-            extreme_indices = np.where(extreme_scale)[0].tolist()
-            std_range = [np.min(factor_std), np.max(factor_std)]
-            warning_msg = self._format_warning_message(
-                operation=operation,
-                issue=f"{n_extreme}/{m} factors have extreme scale",
-                context=f"Extreme factor indices: {extreme_indices}, Factor std range: [{std_range[0]:.2e}, {std_range[1]:.2e}]",
-                suggestion="This may indicate numerical instability"
-            )
-            _logger.warning(warning_msg)
-        
-        # Check for perfect correlation between factors (detect linear dependencies)
-        if m > 1 and T > 1:
-            factor_corr = np.corrcoef(factors.T)
-            # Check off-diagonal elements for perfect correlation
-            np.fill_diagonal(factor_corr, 0.0)
-            perfect_corr = np.abs(factor_corr) > 0.999
-            if np.any(perfect_corr):
-                n_pairs = np.sum(perfect_corr) // 2  # Divide by 2 since symmetric
-                warning_msg = self._format_warning_message(
-                    operation=operation,
-                    issue=f"{n_pairs} pairs of factors are perfectly correlated (|corr| > 0.999)",
-                    suggestion="This may indicate redundant factors or training convergence issues"
-                )
-                _logger.warning(warning_msg)
-        
-        # Log factor statistics when validation passes (debug level)
-        if _logger.isEnabledFor(logging.DEBUG):
-            factor_mean = np.mean(factors, axis=0)
-            factor_std = np.std(factors, axis=0)
-            _logger.debug(
-                f"DDFM {operation}: Factor validation passed. "
-                f"Shape: {factors.shape}, Mean range: [{np.min(factor_mean):.4f}, {np.max(factor_mean):.4f}], "
-                f"Std range: [{np.min(factor_std):.4f}, {np.max(factor_std):.4f}]"
-            )
-        
-        return factors
+        return validate_factors_ddfm(
+            factors=factors,
+            num_factors=self.num_factors,
+            operation=operation,
+            format_error_message=self._format_error_message,
+            format_warning_message=self._format_warning_message,
+        )
     
     def _validate_training_data(
         self,
@@ -927,134 +806,19 @@ class DDFM(BaseFactorModel):
     ) -> None:
         """Validate data dimensions and model configuration before training starts.
         
-        This method performs early validation checks to catch configuration issues
-        before training begins. It validates:
-        1. Data dimensions (T >= min_obs_required for VAR estimation)
-        2. Factor count (num_factors <= N, number of series)
-        3. Encoder architecture (reasonable size for data dimensions)
-        
-        Parameters
-        ----------
-        X_torch : torch.Tensor
-            Input data tensor, shape (T x N) where T is time periods and N is number of series
-        operation : str, default "training setup"
-            Operation name for error messages
-            
-        Raises
-        ------
-        ValueError
-            If data dimensions are insufficient for training
-            If num_factors exceeds number of series
-            If encoder architecture is too large for data size
+        This method delegates to validate_training_data_ddfm() utility function.
+        See utils.py for detailed documentation.
         """
-        # Get data dimensions
-        if X_torch.ndim != 2:
-            error_msg = self._format_error_message(
-                operation=operation,
-                reason=f"data must be 2D array (T x N), got shape {X_torch.shape}",
-                guidance="Please ensure data is properly formatted as (time_periods x num_series)"
-            )
-            raise ValueError(error_msg)
-        
-        T, N = X_torch.shape
-        
-        # Validation 1: Check minimum time periods for VAR estimation
-        min_obs_required = self.factor_order + 5
-        if T < min_obs_required:
-            error_msg = self._format_error_message(
-                operation=operation,
-                reason=f"insufficient time periods (T={T}) for VAR({self.factor_order}) estimation",
-                guidance=(
-                    f"Need at least {min_obs_required} time periods for stable VAR estimation. "
-                    f"Current config: num_factors={self.num_factors}, factor_order={self.factor_order}, "
-                    f"encoder_layers={self.encoder_layers}. "
-                    f"With very small datasets (T < 10), training may be unstable due to: "
-                    f"(1) Insufficient data for encoder/decoder training, "
-                    f"(2) Poor VAR parameter estimation, "
-                    f"(3) High variance in MCMC sampling. "
-                    f"Suggestions: (1) Increase data size to at least {min_obs_required} periods, "
-                    f"(2) Reduce factor_order to 1 (requires {1 + 5} periods), "
-                    f"(3) Reduce num_factors to 1-2 for small datasets, "
-                    f"(4) Use smaller encoder_layers (e.g., [16, 8]) for better generalization"
-                )
-            )
-            raise ValueError(error_msg)
-        
-        # Additional warning for very small datasets (T < 10) even if above minimum
-        if T < 10:
-            warning_msg = self._format_warning_message(
-                operation=operation,
-                issue=f"very small dataset (T={T} < 10) may lead to unstable training",
-                context=(
-                    f"With T={T} time periods, encoder/decoder training and MCMC sampling "
-                    f"may have high variance. VAR estimation will use fallback strategies."
-                ),
-                suggestion=(
-                    f"Consider: (1) Using factor_order=1 (requires {1 + 5} periods), "
-                    f"(2) Reducing num_factors to 1-2, (3) Using smaller encoder_layers, "
-                    f"(4) Increasing data size if possible"
-                )
-            )
-            _logger.warning(warning_msg)
-        
-        # Validation 2: Check factor count vs. number of series
-        if self.num_factors > N:
-            error_msg = self._format_error_message(
-                operation=operation,
-                reason=f"num_factors ({self.num_factors}) exceeds number of series (N={N})",
-                guidance=(
-                    f"Cannot extract more factors than available series. "
-                    f"Current config: num_factors={self.num_factors}, N={N}. "
-                    f"Suggestions: (1) Reduce num_factors to {min(self.num_factors, N)}, "
-                    f"(2) Add more series to data, (3) Use num_factors <= N"
-                )
-            )
-            raise ValueError(error_msg)
-        
-        # Validation 3: Check factor count is positive
-        if self.num_factors <= 0:
-            error_msg = self._format_error_message(
-                operation=operation,
-                reason=f"num_factors must be positive, got {self.num_factors}",
-                guidance="Please set num_factors to a positive integer (typically 1-5)"
-            )
-            raise ValueError(error_msg)
-        
-        # Validation 4: Check encoder architecture is reasonable for data size
-        # Warn if encoder is too large for small datasets
-        total_encoder_params = sum(self.encoder_layers) if self.encoder_layers else 0
-        if T < 50 and total_encoder_params > 200:
-            warning_msg = self._format_warning_message(
-                operation=operation,
-                issue=f"encoder architecture may be too large for small dataset",
-                context=f"T={T}, encoder_layers={self.encoder_layers} (total params: ~{total_encoder_params})",
-                suggestion="Consider using smaller encoder_layers (e.g., [32, 16]) for better generalization"
-            )
-            _logger.warning(warning_msg)
-        
-        # Validation 5: Check encoder input dimension matches data dimension
-        # This will be validated when encoder is initialized, but we can check early
-        if self.encoder is not None:
-            if hasattr(self.encoder, 'input_dim') and self.encoder.input_dim != N:
-                error_msg = self._format_error_message(
-                    operation=operation,
-                    reason=f"encoder input_dim ({self.encoder.input_dim}) doesn't match data dimension (N={N})",
-                    guidance=(
-                        f"Encoder was initialized with input_dim={self.encoder.input_dim}, "
-                        f"but data has N={N} series. "
-                        f"This may indicate data dimension mismatch. "
-                        f"Please ensure data and encoder are compatible"
-                    )
-                )
-                raise ValueError(error_msg)
-        
-        # Log validation success at debug level
-        if _logger.isEnabledFor(logging.DEBUG):
-            _logger.debug(
-                f"DDFM {operation}: Data validation passed. "
-                f"T={T}, N={N}, num_factors={self.num_factors}, "
-                f"factor_order={self.factor_order}, encoder_layers={self.encoder_layers}"
-            )
+        validate_training_data_ddfm(
+            X_torch=X_torch,
+            num_factors=self.num_factors,
+            factor_order=self.factor_order,
+            encoder_layers=self.encoder_layers,
+            encoder=self.encoder,
+            operation=operation,
+            format_error_message=self._format_error_message,
+            format_warning_message=self._format_warning_message,
+        )
     
     
     def _estimate_var(
@@ -1064,271 +828,16 @@ class DDFM(BaseFactorModel):
     ) -> Tuple[np.ndarray, np.ndarray]:
         """Estimate VAR dynamics with comprehensive error handling and fallback.
         
-        This method estimates Vector Autoregression (VAR) parameters for factor dynamics
-        with robust error handling. It performs pre-estimation validation, handles edge
-        cases (insufficient data, constant factors, NaN/Inf values), and provides
-        fallback mechanisms when estimation fails.
-        
-        Parameters
-        ----------
-        factors : np.ndarray
-            Factors array (T x m), where T is number of time periods and m is number of factors.
-            Must be 2D array with at least 2 observations.
-        factor_order : int
-            VAR order, must be 1 or 2.
-            - VAR(1): Z_t = A Z_{t-1} + v_t
-            - VAR(2): Z_t = A1 Z_{t-1} + A2 Z_{t-2} + v_t
-            
-        Returns
-        -------
-        A : np.ndarray
-            Transition matrix.
-            - For VAR(1): shape (m x m)
-            - For VAR(2): shape (m x 2m), where first m columns are A1, last m columns are A2
-        Q : np.ndarray
-            Innovation covariance matrix, shape (m x m). Always positive definite.
-            
-        Raises
-        ------
-        ValueError
-            If factor_order is not 1 or 2.
-            
-        Notes
-        -----
-        This method includes comprehensive error handling:
-        
-        1. **Pre-estimation checks**:
-           - Validates factors shape and dimensionality
-           - Checks for sufficient observations (T >= factor_order + 5)
-           - Detects constant factors (zero variance)
-           - Cleans NaN/Inf values before estimation
-        
-        2. **Estimation validation**:
-           - Validates spectral radius (ensures stationarity)
-           - Checks positive definiteness of Q matrix
-           - Validates condition number (detects ill-conditioning)
-        
-        3. **Fallback mechanisms**:
-           - Insufficient observations: Uses scaled identity based on factor variance
-           - Constant factors: Uses small variance fallback
-           - Estimation failure: Uses scaled identity with factor variance
-           - Invalid Q shape: Reshapes or reconstructs from factor variance
-        
-        All fallbacks ensure the returned matrices are valid and stable for use in
-        Kalman filtering and prediction.
+        This method delegates to estimate_var_ddfm() utility function.
+        See utils.py for detailed documentation.
         """
-        # Validate factors shape - check for 0-dimensional array first
-        factors = np.asarray(factors)
-        if factors.ndim == 0:
-            warning_msg = self._format_warning_message(
-                operation="VAR estimation",
-                issue="factors is 0-dimensional array",
-                suggestion="Using identity matrix for A and small covariance for Q"
-            )
-            _logger.warning(warning_msg)
-            num_factors = self.num_factors if hasattr(self, 'num_factors') and self.num_factors > 0 else 1
-            return np.eye(num_factors), np.eye(num_factors) * 1e-6
-        
-        # Validate factors shape
-        if factors.size == 0 or factors.ndim < 2 or factors.shape[0] < 2 or factors.shape[1] == 0:
-            warning_msg = self._format_warning_message(
-                operation="VAR estimation",
-                issue=f"insufficient or invalid factors shape {factors.shape}",
-                suggestion="Using identity matrix for A and small covariance for Q"
-            )
-            _logger.warning(warning_msg)
-            num_factors = factors.shape[1] if factors.ndim == 2 and factors.shape[1] > 0 else self.num_factors
-            if num_factors == 0:
-                num_factors = 1
-            return np.eye(num_factors), np.eye(num_factors) * 1e-6
-        
-        T, m = factors.shape
-        
-        # Pre-estimation checks
-        min_obs_required = factor_order + 5
-        if T < min_obs_required:
-            warning_msg = self._format_warning_message(
-                operation="VAR estimation",
-                issue=f"insufficient observations (T={T}) for VAR({factor_order})",
-                context=f"need at least {min_obs_required}",
-                suggestion="Using scaled identity based on factor variance"
-            )
-            _logger.warning(warning_msg)
-            # Use scaled identity based on factor variance
-            factor_var = np.var(factors, axis=0)
-            factor_var = np.maximum(factor_var, 1e-8)  # Floor
-            if factor_order == 1:
-                A_f = np.eye(m) * 0.5  # Conservative initial value
-            else:
-                A_f = np.hstack([np.eye(m) * 0.5, np.zeros((m, m))])
-            Q_f = np.diag(factor_var)
-            return A_f, Q_f
-        
-        # Check for constant factors (zero variance)
-        factor_var = np.var(factors, axis=0)
-        constant_factors = factor_var < 1e-10
-        if np.any(constant_factors):
-            n_constant = np.sum(constant_factors)
-            warning_msg = self._format_warning_message(
-                operation="VAR estimation",
-                issue=f"{n_constant}/{m} factors have zero variance",
-                suggestion="These will be handled with small variance fallback"
-            )
-            _logger.warning(warning_msg)
-        
-        # Check for NaN/Inf in factors
-        if not np.all(np.isfinite(factors)):
-            nan_count = np.sum(~np.isfinite(factors))
-            warning_msg = self._format_warning_message(
-                operation="VAR estimation",
-                issue=f"factors contain {nan_count} NaN/Inf values",
-                suggestion="Cleaning before estimation"
-            )
-            _logger.warning(warning_msg)
-            factors = np.nan_to_num(factors, nan=0.0, posinf=1e6, neginf=-1e6)
-        
-        # Check for rank deficiency in factor covariance matrix
-        # This can occur when factors are highly correlated or redundant
-        try:
-            factor_cov = np.cov(factors.T)
-            rank = np.linalg.matrix_rank(factor_cov)
-            if rank < m:
-                warning_msg = self._format_warning_message(
-                    operation="VAR estimation",
-                    issue=f"factor covariance matrix is rank-deficient (rank={rank} < {m})",
-                    context=(
-                        f"This may indicate redundant factors, insufficient data variation, "
-                        f"or highly correlated factors. Regularization will be applied."
-                    ),
-                    suggestion="Using regularized estimation with small diagonal perturbation to improve conditioning"
-                )
-                _logger.warning(warning_msg)
-                # Add small diagonal perturbation to improve conditioning
-                # This helps with numerical stability without significantly changing the covariance structure
-                regularization = 1e-6
-                factor_cov += np.eye(m) * regularization
-        except (ValueError, np.linalg.LinAlgError) as e:
-            # If covariance computation fails, log warning but continue
-            warning_msg = self._format_warning_message(
-                operation="VAR estimation",
-                issue=f"failed to compute factor covariance for rank check: {type(e).__name__}",
-                suggestion="Proceeding with VAR estimation, will use fallback if needed"
-            )
-            _logger.warning(warning_msg)
-        
-        # Estimate VAR with error handling
-        try:
-            if factor_order == 1:
-                A_f, Q_f = estimate_var1(factors)
-            elif factor_order == 2:
-                A_f, Q_f = estimate_var2(factors)
-            else:
-                error_msg = self._format_error_message(
-                    operation="VAR estimation",
-                    reason=f"factor_order must be 1 or 2, got {factor_order}",
-                    guidance="Please set factor_order to 1 (VAR(1)) or 2 (VAR(2))"
-                )
-                raise ValueError(error_msg)
-            
-            # Validate Q_f shape
-            if Q_f.ndim == 0:
-                warning_msg = self._format_warning_message(
-                    operation="VAR estimation",
-                    issue="returned 0-dimensional Q",
-                    suggestion="Using scaled identity based on factor variance"
-                )
-                _logger.warning(warning_msg)
-                factor_var = np.var(factors, axis=0)
-                factor_var = np.maximum(factor_var, 1e-8)
-                Q_f = np.diag(factor_var)
-            elif Q_f.ndim != 2:
-                warning_msg = self._format_warning_message(
-                    operation="VAR estimation",
-                    issue=f"returned Q with unexpected shape {Q_f.shape}",
-                    suggestion="Reshaping"
-                )
-                _logger.warning(warning_msg)
-                if Q_f.size == m ** 2:
-                    Q_f = Q_f.reshape(m, m)
-                else:
-                    factor_var = np.var(factors, axis=0)
-                    factor_var = np.maximum(factor_var, 1e-8)
-                    Q_f = np.diag(factor_var)
-            
-            # Validate estimated parameters
-            # Check spectral radius of A (should be < 1 for stability)
-            if factor_order == 1:
-                eigenvals_A = np.linalg.eigvals(A_f)
-            else:
-                # For VAR(2), check companion form
-                A1 = A_f[:, :m]
-                A2 = A_f[:, m:]
-                companion = np.block([
-                    [A1, A2],
-                    [np.eye(m), np.zeros((m, m))]
-                ])
-                eigenvals_A = np.linalg.eigvals(companion)
-            
-            max_eigenval = np.max(np.abs(eigenvals_A))
-            if max_eigenval >= 0.99:
-                warning_msg = self._format_warning_message(
-                    operation=f"VAR({factor_order}) estimation",
-                    issue=f"estimated A has spectral radius {max_eigenval:.4f} >= 0.99",
-                    suggestion="This may indicate instability. Consider checking factor quality"
-                )
-                _logger.warning(warning_msg)
-            
-            # Validate Q is positive definite
-            Q_sym = (Q_f + Q_f.T) / 2  # Ensure symmetry
-            eigenvals_Q = np.linalg.eigvalsh(Q_sym)
-            min_eigenval_Q = np.min(eigenvals_Q)
-            if min_eigenval_Q < 1e-8:
-                warning_msg = self._format_warning_message(
-                    operation="VAR estimation",
-                    issue=f"estimated Q has minimum eigenvalue {min_eigenval_Q:.2e} < 1e-8",
-                    suggestion="Regularizing to ensure positive definiteness"
-                )
-                _logger.warning(warning_msg)
-                Q_f = Q_sym + np.eye(m) * (1e-8 - min_eigenval_Q)
-            else:
-                Q_f = Q_sym
-            
-            # Check condition number of Q
-            if m > 1:
-                max_eigenval_Q = np.max(eigenvals_Q)
-                cond_num_Q = max_eigenval_Q / max(min_eigenval_Q, 1e-12)
-                if cond_num_Q > 1e8:
-                    warning_msg = self._format_warning_message(
-                        operation="VAR estimation",
-                        issue=f"estimated Q is ill-conditioned (cond={cond_num_Q:.2e})",
-                        suggestion="This may indicate collinear factors"
-                    )
-                    _logger.warning(warning_msg)
-            
-            return A_f, Q_f
-            
-        except (ValueError, np.linalg.LinAlgError) as e:
-            warning_msg = self._format_warning_message(
-                operation=f"VAR({factor_order}) estimation",
-                issue=f"estimation failed: {e}",
-                suggestion="Using scaled identity based on factor variance as fallback"
-            )
-            _logger.warning(warning_msg)
-            # Use scaled identity based on factor variance as fallback
-            factor_var = np.var(factors, axis=0)
-            factor_var = np.maximum(factor_var, 1e-8)  # Floor
-            
-            if factor_order == 1:
-                A_f = np.eye(m) * 0.5  # Conservative initial value
-            else:
-                A_f = np.hstack([np.eye(m) * 0.5, np.zeros((m, m))])
-            
-            Q_f = np.diag(factor_var)
-            _logger.info(
-                f"VAR fallback: A shape={A_f.shape}, Q shape={Q_f.shape}, "
-                f"factor variance range=[{np.min(factor_var):.2e}, {np.max(factor_var):.2e}]"
-            )
-            return A_f, Q_f
+        return estimate_var_ddfm(
+            factors=factors,
+            factor_order=factor_order,
+            num_factors=self.num_factors,
+            format_error_message=self._format_error_message,
+            format_warning_message=self._format_warning_message,
+        )
     
     def configure_optimizers(self) -> Union[List[torch.optim.Optimizer], Dict[str, Any]]:
         """Configure optimizer and learning rate scheduler for autoencoder training.
@@ -1596,16 +1105,8 @@ class DDFM(BaseFactorModel):
     ) -> DDFMTrainingState:
         """Run MCMC iterative training procedure for DDFM.
         
-        This method implements the Markov Chain Monte Carlo (MCMC) procedure for
-        Deep Dynamic Factor Model training. It alternates between:
-        1. Estimating idiosyncratic dynamics (AR parameters)
-        2. Generating Monte Carlo samples from the state-space model
-        3. Training the autoencoder (encoder/decoder) on MC samples
-        4. Extracting factors from trained encoder
-        5. Checking convergence based on MSE between predictions and data
-        
-        The procedure continues until convergence (MSE change < tolerance) or
-        maximum iterations reached.
+        This method delegates to DDFMMCMCTrainer for the actual MCMC training procedure.
+        See mcmc.py for detailed documentation of the MCMC algorithm.
         
         Parameters
         ----------
@@ -1627,10 +1128,10 @@ class DDFM(BaseFactorModel):
             standardized predictions back to original scale. If None, uses values from
             data module.
         max_iter : int, optional
-            Maximum number of MCMC iterations. If None, uses self.max_iter (default: 50).
+            Maximum number of MCMC iterations. If None, uses self.max_iter (default: 200).
         tolerance : float, optional
             Convergence tolerance for MSE change between iterations. If None, uses
-            self.tolerance (default: 1e-4). Training stops when |MSE_new - MSE_old| < tolerance.
+            self.tolerance (default: 0.0005). Training stops when |MSE_new - MSE_old| < tolerance.
         disp : int, optional
             Display progress every 'disp' iterations. If None, uses self.disp (default: 10).
             Set to 0 to disable progress output.
@@ -1646,39 +1147,8 @@ class DDFM(BaseFactorModel):
             - prediction: np.ndarray, shape (T x N) - final predictions
             - converged: bool - whether convergence was achieved
             - num_iter: int - number of iterations completed
-            - mse_history: List[float] - MSE values at each iteration
+            - training_loss: float - final training loss (MSE)
             
-        Raises
-        ------
-        ValueError
-            If X and x_clean have mismatched shapes.
-            If missing_mask shape doesn't match X shape.
-            If numerical issues occur (NaN/Inf propagation) that cannot be handled.
-            
-        Notes
-        -----
-        The MCMC procedure includes comprehensive numerical stability checks:
-        
-        1. **Shape validation**: Validates X, x_clean, and missing_mask have consistent shapes.
-        
-        2. **Numerical stability**: 
-           - Checks for NaN/Inf after each major step
-           - Uses fallback mechanisms when numerical issues occur
-           - Logs warnings when fallbacks are used
-        
-        3. **Convergence checking**:
-           - Computes MSE between predictions and observed data (excluding missing values)
-           - Checks for convergence: |MSE_new - MSE_old| < tolerance
-           - Stops early if convergence achieved
-        
-        4. **Error handling**:
-           - VAR estimation failures: Uses fallback matrices
-           - Factor extraction failures: Uses previous iteration factors
-           - Prediction failures: Uses previous iteration predictions
-        
-        The method is designed to be robust to numerical edge cases and provides
-        graceful degradation when estimation fails.
-        
         Examples
         --------
         >>> model = DDFM(encoder_layers=[64, 32], num_factors=2)
@@ -1688,363 +1158,20 @@ class DDFM(BaseFactorModel):
         >>> factors = state.factors  # (T x 2) factor estimates
         >>> print(f"Converged: {state.converged}, Iterations: {state.num_iter}")
         """
-        self.Mx = Mx
-        self.Wx = Wx
-        self.data_processed = X
+        from .mcmc import DDFMMCMCTrainer
         
-        device = X.device
-        dtype = X.dtype
-        T, N = X.shape
-        
-        # Validate shape consistency between X, x_clean, and missing_mask
-        # This prevents IndexError when using boolean indexing with missing_mask
-        if x_clean.shape != X.shape:
-            error_msg = self._format_error_message(
-                operation="fit_mcmc",
-                reason=f"shape mismatch between X ({X.shape}) and x_clean ({x_clean.shape})",
-                guidance=(
-                    f"Both X and x_clean must have the same shape (T x N). "
-                    f"This indicates data preprocessing inconsistency. "
-                    f"Please ensure x_clean is created from the same data as X."
-                )
-            )
-            raise ValueError(error_msg)
-        if missing_mask.shape != (T, N):
-            error_msg = self._format_error_message(
-                operation="fit_mcmc",
-                reason=f"shape mismatch between X ({X.shape}) and missing_mask ({missing_mask.shape})",
-                guidance=(
-                    f"missing_mask must have shape (T x N) matching X. "
-                    f"This indicates missing_mask was created from data with different shape. "
-                    f"Please ensure missing_mask is created from the same data passed as X parameter."
-                )
-            )
-            raise ValueError(error_msg)
-        
-        # Use instance attributes if not provided
-        max_iter = max_iter if max_iter is not None else self.max_iter
-        tolerance = tolerance if tolerance is not None else self.tolerance
-        disp = disp if disp is not None else self.disp
-        
-        # Initialize networks if not done
-        if self.encoder is None or self.decoder is None:
-            self.initialize_networks(N)
-        
-        # Ensure encoder and decoder are on the correct device
-        # This is critical even if they were initialized in on_train_start(),
-        # as the device might differ or they might not have been moved properly
-        self.encoder = self.encoder.to(device)
-        self.decoder = self.decoder.to(device)
-        
-        # Random number generator for MC sampling
-        rng = np.random.RandomState(seed if seed is not None else (self.rng.randint(0, 2**31) if hasattr(self.rng, 'randint') else 3))
-        
-        # Convert to numpy for MCMC procedure (some operations are easier in numpy)
-        x_standardized_np = X.cpu().numpy()
-        x_clean_np = x_clean.cpu().numpy()
-        bool_no_miss = ~missing_mask
-        
-        # Initialize data structures
-        data_mod_only_miss = x_standardized_np.copy()  # Original with missing values
-        data_mod = x_clean_np.copy()  # Clean data (will be modified during MCMC)
-        z_actual = x_standardized_np.copy()  # Actual observations (target for training, like original DDFM)
-        
-        # Initial prediction
-        x_tensor = x_clean.to(device)
-        self.encoder.eval()
-        self.decoder.eval()
-        with torch.no_grad():
-            factors_init = self.encoder(x_tensor).cpu().numpy()
-            # Check for NaN/Inf in initial factors
-            factors_init = self._check_finite(factors_init, "initial factors", context="at iteration 0")
-            
-            factors_tensor = torch.tensor(factors_init, device=device, dtype=dtype)
-            prediction_iter = self.decoder(factors_tensor).cpu().numpy()
-            # Check for NaN/Inf in initial prediction
-            prediction_iter = self._check_finite(prediction_iter, "initial prediction", context="at iteration 0")
-        
-        # Initialize factors
-        factors = factors_init.copy()
-        
-        # Update missing values with initial prediction
-        bool_miss = missing_mask
-        if bool_miss.any():
-            data_mod_only_miss[bool_miss] = prediction_iter[bool_miss]
-        
-        # Initial residuals
-        eps = data_mod_only_miss - prediction_iter
-        # Check for NaN/Inf in initial residuals
-        eps = self._check_finite(eps, "initial residuals", context="at iteration 0")
-        
-        # MCMC loop
-        iter_count = 0
-        not_converged = True
-        prediction_prev_iter = None
-        delta = float('inf')
-        loss_now = float('inf')
-        
-        # Check for very small dataset and warn about potential instability
-        if T < 10:
-            warning_msg = self._format_warning_message(
-                operation="MCMC training",
-                issue=f"very small dataset (T={T} < 10) may cause unstable MCMC sampling",
-                context=(
-                    f"With only {T} time periods, encoder/decoder training per iteration "
-                    f"may have high variance. Factor extraction and VAR estimation will use "
-                    f"fallback strategies. Results may be less reliable."
-                ),
-                suggestion=(
-                    f"Monitor convergence carefully. Consider reducing num_factors or "
-                    f"using smaller encoder_layers for better stability"
-                )
-            )
-            _logger.warning(warning_msg)
-        
-        _logger.info(f"Starting MCMC training: max_iter={max_iter}, tolerance={tolerance}, epochs_per_iter={self.epochs_per_iter}")
-        
-        # Create optimizer once per MCMC iteration (reused across MC samples)
-        optimizer = None
-        
-        while not_converged and iter_count < max_iter:
-            iter_count += 1
-            self.mcmc_iteration = iter_count
-            
-            # Create optimizer for this MCMC iteration (reused across MC samples)
-            optimizer = self._create_optimizer()
-            
-            # Get idiosyncratic distribution
-            if self.use_idiosyncratic:
-                A_eps, Q_eps = estimate_idio_dynamics(eps, missing_mask, self.min_obs_idio)
-                # Check for NaN/Inf in estimated dynamics
-                A_eps = self._check_finite(A_eps, f"idiosyncratic AR coefficients (A_eps)", context=f"at iteration {iter_count}")
-                Q_eps = self._check_finite(Q_eps, f"idiosyncratic innovation covariance (Q_eps)", context=f"at iteration {iter_count}")
-                
-                # Convert to format expected by MCMC procedure
-                phi = A_eps if A_eps.ndim == 2 else np.diag(A_eps) if A_eps.ndim == 1 else np.eye(N)
-                mu_eps = np.zeros(N)
-                if Q_eps.ndim == 2:
-                    std_eps = np.sqrt(np.diag(Q_eps))
-                elif Q_eps.ndim == 1:
-                    std_eps = np.sqrt(Q_eps)
-                else:
-                    std_eps = np.ones(N) * 0.1
-                
-                # Ensure std_eps is finite and positive
-                std_eps = np.maximum(std_eps, 1e-8)  # Floor to prevent zero/negative
-                std_eps = self._check_finite(std_eps, f"idiosyncratic std (std_eps)", context=f"at iteration {iter_count}")
-            else:
-                phi = np.zeros((N, N))
-                mu_eps = np.zeros(N)
-                std_eps = np.ones(N) * 1e-8
-            
-            # Subtract conditional AR-idio mean from x
-            if self.use_idiosyncratic and eps.shape[0] > 1:
-                data_mod[1:] = data_mod_only_miss[1:] - eps[:-1, :] @ phi
-                data_mod[:1] = data_mod_only_miss[:1]
-            else:
-                data_mod = data_mod_only_miss.copy()
-            
-            # Generate MC samples for idio (dims = epochs_per_iter x T x N)
-            eps_draws = np.zeros((self.epochs_per_iter, T, N))
-            try:
-                for t in range(T):
-                    eps_draws[:, t, :] = rng.multivariate_normal(
-                        mu_eps, np.diag(std_eps), size=self.epochs_per_iter
-                    )
-                # Check for NaN/Inf in MC samples
-                eps_draws = self._check_finite(eps_draws, f"MC samples (eps_draws)", context=f"at iteration {iter_count}")
-            except (ValueError, np.linalg.LinAlgError) as e:
-                warning_msg = self._format_warning_message(
-                    operation=f"MCMC iteration {iter_count}",
-                    issue=f"failed to generate MC samples: {e}",
-                    suggestion="Using zero samples as fallback"
-                )
-                _logger.warning(warning_msg)
-                # Use zero samples as fallback
-                eps_draws = np.zeros((self.epochs_per_iter, T, N))
-            
-            # Initialize noisy inputs
-            x_sim_den = np.zeros((self.epochs_per_iter, T, N))
-            
-            # Loop over MC samples
-            factors_samples = []
-            for i in range(self.epochs_per_iter):
-                x_sim_den[i, :, :] = data_mod.copy()
-                # Corrupt input data by subtracting sampled idio innovations
-                x_sim_den[i, :, :] = x_sim_den[i, :, :] - eps_draws[i, :, :]
-                
-                # Train autoencoder on corrupted sample (1 epoch)
-                # Convert to torch and create dataset
-                x_sample = torch.tensor(x_sim_den[i, :, :], device=device, dtype=dtype)
-                z_actual_tensor = torch.tensor(z_actual, device=device, dtype=dtype)
-                dataset = torch.utils.data.TensorDataset(x_sample, z_actual_tensor)
-                dataloader = torch.utils.data.DataLoader(
-                    dataset, batch_size=self.batch_size, shuffle=True
-                )
-                
-                # Train for 1 epoch
-                self.encoder.train()
-                self.decoder.train()
-                # Optimizer is created once per MCMC iteration and reused across MC samples
-                
-                for batch_data, batch_target in dataloader:
-                    optimizer.zero_grad()
-                    reconstructed = self.forward(batch_data)
-                    # Use missing-aware loss (mse_missing) for consistency
-                    # Create mask for missing values (though in MCMC loop, missing values are filled)
-                    mask = torch.where(torch.isnan(batch_target), torch.zeros_like(batch_target), torch.ones_like(batch_target))
-                    target_clean = torch.where(torch.isnan(batch_target), torch.zeros_like(batch_target), batch_target)
-                    reconstructed_masked = reconstructed * mask
-                    squared_diff = (target_clean - reconstructed_masked) ** 2
-                    loss = torch.sum(squared_diff) / (torch.sum(mask) + 1e-8)
-                    loss.backward()
-                    # Gradient clipping to prevent NaN and improve stability
-                    torch.nn.utils.clip_grad_norm_(
-                        list(self.encoder.parameters()) + list(self.decoder.parameters()),
-                        max_norm=1.0
-                    )
-                    optimizer.step()
-                # Extract factors from this sample
-                x_sample_tensor = torch.tensor(x_sim_den[i, :, :], device=device, dtype=dtype)
-                self.encoder.eval()
-                with torch.no_grad():
-                    factors_sample = self.encoder(x_sample_tensor).cpu().numpy()
-                    # Check for NaN/Inf in factor sample
-                    factors_sample = self._check_finite(
-                        factors_sample, 
-                        f"factor sample {i+1}/{self.epochs_per_iter}", 
-                        context=f"at iteration {iter_count}"
-                    )
-                factors_samples.append(factors_sample)
-            
-            # Update factors: average over all MC samples
-            factors = np.mean(np.array(factors_samples), axis=0)  # T x num_factors
-            # Check for NaN/Inf in averaged factors
-            factors = self._check_finite(factors, "averaged factors", context=f"at iteration {iter_count}", fallback=factors_init)
-            
-            # Clip extreme factor values to prevent numerical instability
-            # Use configurable clipping threshold (default: 10 standard deviations)
-            clip_threshold = 10.0
-            factor_mean = np.mean(factors, axis=0)
-            factor_std = np.std(factors, axis=0)
-            # Avoid division by zero
-            factor_std = np.maximum(factor_std, 1e-8)
-            
-            clipped_count = 0
-            for i in range(factors.shape[1]):
-                lower_bound = factor_mean[i] - clip_threshold * factor_std[i]
-                upper_bound = factor_mean[i] + clip_threshold * factor_std[i]
-                before_clip = factors[:, i].copy()
-                factors[:, i] = np.clip(factors[:, i], lower_bound, upper_bound)
-                # Count how many values were clipped
-                clipped_count += np.sum((before_clip != factors[:, i]))
-            
-            if clipped_count > 0:
-                warning_msg = self._format_warning_message(
-                    operation=f"MCMC iteration {iter_count}",
-                    issue=f"clipped {clipped_count} extreme factor values (>{clip_threshold} std devs)",
-                    context=f"This prevents numerical instability in encoder/decoder forward passes",
-                    suggestion="If clipping occurs frequently, consider: (1) Reducing learning_rate, (2) Using smaller encoder_layers, (3) Checking data scaling"
-                )
-                _logger.warning(warning_msg)
-            
-            # Check convergence
-            self.decoder.eval()
-            with torch.no_grad():
-                factors_tensor = torch.tensor(factors, device=device, dtype=dtype)
-                prediction_iter = self.decoder(factors_tensor).cpu().numpy()
-                # Check for NaN/Inf in prediction
-                prediction_iter = self._check_finite(
-                    prediction_iter, 
-                    "prediction_iter", 
-                    context=f"at iteration {iter_count}",
-                    fallback=prediction_prev_iter if prediction_prev_iter is not None else prediction_iter
-                )
-            
-            if iter_count > 1:
-                # Compute MSE on non-missing values
-                mask = ~np.isnan(data_mod_only_miss)
-                if np.sum(mask) > 0:
-                    mse = np.nanmean((prediction_prev_iter[mask] - prediction_iter[mask]) ** 2)
-                    # Ensure MSE is finite
-                    if not np.isfinite(mse):
-                        warning_msg = self._format_warning_message(
-                            operation=f"MCMC iteration {iter_count}",
-                            issue=f"MSE is not finite ({mse})",
-                            suggestion="Using previous delta value"
-                        )
-                        _logger.warning(warning_msg)
-                        mse = delta if np.isfinite(delta) else tolerance * 10
-                    delta = mse
-                    loss_now = mse
-                else:
-                    delta = float('inf')
-                    loss_now = float('inf')
-                
-                if iter_count % disp == 0:
-                    _logger.info(
-                        f"Iteration {iter_count}/{max_iter}: loss={loss_now:.6f}, delta={delta:.6f}"
-                    )
-                
-                if delta < tolerance:
-                    not_converged = False
-                    _logger.info(
-                        f"Convergence achieved in {iter_count} iterations: "
-                        f"loss={loss_now:.6f}, delta={delta:.6f} < {tolerance}"
-                    )
-            else:
-                # First iteration: compute initial loss
-                mask = ~np.isnan(data_mod_only_miss)
-                if np.sum(mask) > 0:
-                    loss_now = np.nanmean((data_mod_only_miss[mask] - prediction_iter[mask]) ** 2)
-                    # Ensure loss is finite
-                    if not np.isfinite(loss_now):
-                        warning_msg = self._format_warning_message(
-                            operation=f"MCMC iteration {iter_count}",
-                            issue=f"initial loss is not finite ({loss_now})",
-                            suggestion="Using large default value"
-                        )
-                        _logger.warning(warning_msg)
-                        loss_now = 1e6
-                else:
-                    loss_now = float('inf')
-            
-            # Store previous prediction for convergence checking
-            prediction_prev_iter = prediction_iter.copy()
-            
-            # Update missing values with current prediction
-            if bool_miss.any():
-                data_mod_only_miss[bool_miss] = prediction_iter[bool_miss]
-            
-            # Update residuals
-            eps = data_mod_only_miss - prediction_iter
-            # Check for NaN/Inf in residuals before next iteration
-            eps = self._check_finite(eps, "residuals (eps)", context=f"at iteration {iter_count}")
-        
-        if not_converged:
-            delta_str = f"{delta:.6f}" if iter_count > 1 else "N/A"
-            warning_msg = self._format_warning_message(
-                operation="MCMC training",
-                issue=f"convergence not achieved within {max_iter} iterations",
-                context=f"Final delta: {delta_str}"
-            )
-            _logger.warning(warning_msg)
-        
-        converged = not not_converged
-        
-        # Validate and normalize factors shape before storing
-        factors = self._validate_factors(factors, operation="fit_mcmc")
-        
-        # Store final state
-        self.training_state = DDFMTrainingState(
-            factors=factors,
-            prediction=prediction_iter,
-            converged=converged,
-            num_iter=iter_count,
-            training_loss=loss_now
+        trainer = DDFMMCMCTrainer(self)
+        return trainer.fit(
+            X=X,
+            x_clean=x_clean,
+            missing_mask=missing_mask,
+            Mx=Mx,
+            Wx=Wx,
+            max_iter=max_iter,
+            tolerance=tolerance,
+            disp=disp,
+            seed=seed,
         )
-        
-        return self.training_state
     
     def get_result(self) -> DDFMResult:
         """Extract DDFMResult from trained model.
@@ -2353,6 +1480,7 @@ class DDFM(BaseFactorModel):
         self,
         horizon: Optional[int] = None,
         *,
+        history: Optional[int] = None,
         return_series: bool = True,
         return_factors: bool = True
     ) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
@@ -2360,6 +1488,38 @@ class DDFM(BaseFactorModel):
         
         This method can be called after training. It uses the training state
         from the Lightning module to generate forecasts.
+        
+        Parameters
+        ----------
+        horizon : int, optional
+            Number of periods ahead to forecast. If None, defaults to 1 year
+            of periods based on clock frequency.
+        history : int, optional
+            Number of historical periods to use for Kalman filter update before prediction.
+            If None, uses full history (default). If specified (e.g., 60), uses only the most
+            recent N periods for efficiency. Initial state (Z_0, V_0) is always estimated from
+            full history (including any new data beyond training period).
+        return_series : bool, optional
+            Whether to return forecasted series (default: True)
+        return_factors : bool, optional
+            Whether to return forecasted factors (default: True)
+            
+        Returns
+        -------
+        np.ndarray or Tuple[np.ndarray, np.ndarray]
+            If both return_series and return_factors are True:
+                (X_forecast, Z_forecast) tuple
+            If only return_series is True:
+                X_forecast (horizon x N)
+            If only return_factors is True:
+                Z_forecast (horizon x m)
+            
+        Notes
+        -----
+        When history is specified, the method uses only the most recent N periods for
+        Kalman filter update, improving computational efficiency. The initial state
+        (Z_0, V_0) is always estimated from full history (including any new data beyond
+        training period), ensuring accuracy while maintaining efficiency.
         """
         if self.training_state is None:
             error_msg = format_error_message(
@@ -2383,70 +1543,56 @@ class DDFM(BaseFactorModel):
             )
             raise ValueError(error_msg)
         
-        # Default horizon
+        # Compute default horizon using common helper
         if horizon is None:
             if self._config is not None:
-                clock = get_clock_frequency(self._config, 'm')
-                horizon = get_periods_per_year(clock)
+                horizon = self._compute_default_horizon()
             else:
                 horizon = 12  # Default to 12 periods if no config
         
-        if horizon <= 0:
-            error_msg = format_error_message(
-                model_type="DDFM",
-                operation="prediction",
-                reason=f"horizon must be a positive integer, got {horizon}",
-                guidance="Please provide a positive integer value for the forecast horizon"
-            )
-            raise ValueError(error_msg)
+        # Validate horizon using common helper
+        self._validate_horizon(horizon)
         
         # Extract parameters
         A = self._result.A  # Factor dynamics (m x m) for VAR(1) or (m x 2m) for VAR(2)
         C = self._result.C
         Wx = self._result.Wx
         Mx = self._result.Mx
-        Z_last = self._result.Z[-1, :]  # Last factor estimate (m,)
         p = self._result.p  # VAR order
         
-        # Deterministic forecast
-        if p == 1:
-            # VAR(1): f_t = A @ f_{t-1}
-            Z_forecast = np.zeros((horizon, Z_last.shape[0]))
-            Z_forecast[0, :] = A @ Z_last
-            for h in range(1, horizon):
-                Z_forecast[h, :] = A @ Z_forecast[h - 1, :]
-        elif p == 2:
-            # VAR(2): f_t = A1 @ f_{t-1} + A2 @ f_{t-2}
-            # Need last two factor values
-            if self._result.Z.shape[0] < 2:
-                # Fallback to VAR(1) if not enough history
-                Z_forecast = np.zeros((horizon, Z_last.shape[0]))
-                A1 = A[:, :Z_last.shape[0]]
-                Z_forecast[0, :] = A1 @ Z_last
-                for h in range(1, horizon):
-                    Z_forecast[h, :] = A1 @ Z_forecast[h - 1, :]
-            else:
-                Z_prev = self._result.Z[-2, :]  # f_{t-2}
-                A1 = A[:, :Z_last.shape[0]]
-                A2 = A[:, Z_last.shape[0]:]
-                Z_forecast = np.zeros((horizon, Z_last.shape[0]))
-                Z_forecast[0, :] = A1 @ Z_last + A2 @ Z_prev
-                if horizon > 1:
-                    Z_forecast[1, :] = A1 @ Z_forecast[0, :] + A2 @ Z_last
-                for h in range(2, horizon):
-                    Z_forecast[h, :] = A1 @ Z_forecast[h - 1, :] + A2 @ Z_forecast[h - 2, :]
-        else:
-            error_msg = format_error_message(
-                model_type="DDFM",
-                operation="prediction",
-                reason=f"unsupported VAR order {p}",
-                guidance="Only VAR(1) and VAR(2) are supported. Please use factor_order=1 or factor_order=2"
+        # Update factor state with history if specified
+        if history is not None and history > 0:
+            Z_last_updated = self._update_factor_state_with_history(
+                history=history,
+                result=self._result,
+                kalman_filter=None  # Will be created in _update_factor_state_ddfm if needed
             )
-            raise ValueError(error_msg)
+            if Z_last_updated is not None:
+                Z_last = Z_last_updated
+            else:
+                # Fallback to training state if update failed
+                Z_last = self._result.Z[-1, :]
+        else:
+            # Use training state (default behavior)
+            Z_last = self._result.Z[-1, :]
         
-        # Transform to observations
-        X_forecast_std = Z_forecast @ C.T
-        X_forecast = X_forecast_std * Wx + Mx
+        # Forecast factors using VAR dynamics (common helper)
+        Z_prev = self._result.Z[-2, :] if self._result.Z.shape[0] >= 2 and p == 2 else None
+        Z_forecast = self._forecast_var_factors(
+            Z_last=Z_last,
+            A=A,
+            p=p,
+            horizon=horizon,
+            Z_prev=Z_prev
+        )
+        
+        # Transform factors to observations (common helper)
+        X_forecast = self._transform_factors_to_observations(
+            Z_forecast=Z_forecast,
+            C=C,
+            Wx=Wx,
+            Mx=Mx
+        )
         
         if return_series and return_factors:
             return X_forecast, Z_forecast

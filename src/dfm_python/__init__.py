@@ -65,7 +65,7 @@ Note: DFMConfig and SeriesConfig are internal implementation details.
 For detailed documentation, see the README.md file and the tutorial notebooks/scripts.
 """
 
-__version__ = "0.4.8"
+__version__ = "0.4.9"
 
 # ============================================================================
 # PUBLIC API DEFINITION
@@ -80,7 +80,6 @@ __version__ = "0.4.8"
 # 3. Core utilities: TimeIndex, diagnostics
 # 4. Models: BaseFactorModel, DDFM (low-level)
 # 5. Data & Results: DFMResult
-# 6. Data & Results: DFMResult
 # ============================================================================
 
 # Configuration (from config/ subpackage)

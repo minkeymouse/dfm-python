@@ -7,7 +7,7 @@ This package contains utility functions organized in modules:
 - statespace.py: State-space utilities (numerical stability, AR estimation, DDFM utilities)
 - time.py: Time utilities (datetime operations, frequency mapping) and metrics (RMSE, MAE, MAPE, R²)
 
-Nowcasting utilities are in the nowcast/ package.
+Note: Nowcasting utilities have been moved to src.nowcasting in the main project.
 """
 
 from .statespace import (
@@ -41,35 +41,9 @@ from .time import (
 # Frequency utilities from config.utils
 from ..config.utils import get_periods_per_year, FREQUENCY_HIERARCHY
 
-# Re-export nowcast utilities from nowcast package
-# Note: Nowcasting functionality has been moved to src.nowcast in the main project
-# These imports are optional to maintain backward compatibility
-try:
-    from ..nowcast.helpers import (
-        NewsDecompResult,
-        BacktestResult,
-        para_const,
-    )
-    from ..nowcast.utils import (
-        get_higher_frequency,
-        calc_backward_date,
-        get_forecast_horizon,
-        check_config,
-        extract_news,
-    )
-    from ..nowcast.dataview import DataView
-except ImportError:
-    # Nowcast module not available - define stubs for backward compatibility
-    from typing import Any
-    NewsDecompResult = Any
-    BacktestResult = Any
-    para_const = None
-    get_higher_frequency = None
-    calc_backward_date = None
-    get_forecast_horizon = None
-    check_config = None
-    extract_news = None
-    DataView = Any
+# Note: Nowcasting functionality has been moved to src.nowcasting in the main project.
+# These utilities are no longer exported from dfm_python.utils.
+# Import directly from src.nowcasting if needed.
 
 # Data loading utilities (from utils.data)
 from .data import (
@@ -79,7 +53,7 @@ from .data import (
     create_data_view,
 )
 
-# Helper utilities (from core.helpers)
+# Helper utilities (from utils.helpers)
 from .helpers import (
     safe_get_attr,
     safe_get_method,
@@ -99,7 +73,7 @@ from .helpers import (
     DFMImportError,
 )
 
-# Diagnostic utilities (from core.diagnostics)
+# Diagnostic utilities (from utils.diagnostics)
 from .diagnostics import (
     diagnose_series,
     print_series_diagnosis,
@@ -143,23 +117,12 @@ __all__ = [
     'to_python_datetime',
     'get_periods_per_year',
     'FREQUENCY_HIERARCHY',
-    # Nowcasting utilities
-    'NewsDecompResult',
-    'BacktestResult',
-    'para_const',
-    'get_higher_frequency',
-    'calc_backward_date',
-    'get_forecast_horizon',
-    'check_config',
-    'extract_news',
-    # DataView
-    'DataView',
-    # Data loading utilities (from core.loader)
+    # Data loading utilities (from utils.data)
     'sort_data',
     'rem_nans_spline',
     'calculate_release_date',
     'create_data_view',
-    # Helper utilities (from core.helpers)
+    # Helper utilities (from utils.helpers)
     'safe_get_attr',
     'safe_get_method',
     'resolve_param',
@@ -177,7 +140,7 @@ __all__ = [
     'DFMEstimationError',
     'DFMValidationError',
     'DFMImportError',
-    # Diagnostic utilities (from core.diagnostics)
+    # Diagnostic utilities (from utils.diagnostics)
     'diagnose_series',
     'print_series_diagnosis',
     'evaluate_factor_estimation',

@@ -17,8 +17,10 @@ __all__ = [
 
 # DDFM implementation
 from .ddfm import DDFM, DDFMModel
+from .mcmc import DDFMMCMCTrainer
 __all__.extend([
     'DDFM',  # High-level API
     'DDFMModel',  # Low-level implementation
+    'DDFMMCMCTrainer',  # MCMC training procedure
 ])
 

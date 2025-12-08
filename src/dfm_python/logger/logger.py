@@ -37,20 +37,29 @@ def get_logger(name: str) -> logging.Logger:
     # Configure package logger if not already configured
     # Use a flag to avoid re-configuring if already done
     if not hasattr(package_logger, '_dfm_configured'):
-        # Configure root logger for dfm_python package
-        handler = logging.StreamHandler(sys.stdout)
-        handler.setFormatter(
-            logging.Formatter(
-                '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-                datefmt='%Y-%m-%d %H:%M:%S'
+        # CRITICAL: Check if handlers already exist to prevent duplicates
+        # This can happen if configure_logging() was called before get_logger()
+        if not package_logger.handlers:
+            # Configure handler for dfm_python package logger
+            handler = logging.StreamHandler(sys.stdout)
+            handler.setFormatter(
+                logging.Formatter(
+                    '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+                    datefmt='%Y-%m-%d %H:%M:%S'
+                )
             )
-        )
-        package_logger.addHandler(handler)
+            package_logger.addHandler(handler)
+        
         package_logger.setLevel(logging.INFO)
+        # CRITICAL: Disable propagation to root logger to prevent duplicate messages
+        # Root logger may have handlers from other code (e.g., basicConfig)
+        # By setting propagate=False, we ensure messages only go through our handler
+        package_logger.propagate = False
         # Mark as configured to avoid duplicate handlers
         package_logger._dfm_configured = True
     
-    # Ensure child logger propagates to parent (default, but explicit for clarity)
+    # Child logger should propagate to package logger (not root)
+    # Since package logger has propagate=False, messages won't go to root
     logger.propagate = True
     
     return logger
@@ -109,6 +118,10 @@ def configure_logging(
     # Clear the configuration flag so it can be reconfigured
     if hasattr(logger, '_dfm_configured'):
         delattr(logger, '_dfm_configured')
+    
+    # CRITICAL: Disable propagation to root logger to prevent duplicate messages
+    # If root logger also has handlers, messages would be logged twice
+    logger.propagate = False
     
     # Add console handler
     console_handler = logging.StreamHandler(sys.stdout)

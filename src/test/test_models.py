@@ -34,12 +34,17 @@ class TestBaseFactorModel:
         model = DFM()
         assert isinstance(model, BaseFactorModel)
         assert hasattr(model, 'predict')
+        # Check that nowcast property exists (without calling it)
+        assert 'nowcast' in dir(model) or hasattr(type(model), 'nowcast')
         # DFM creates a placeholder config when none is provided
         assert model.config is not None
         # Result property raises ValueError when accessed before training
         # Error message format: "{ModelType} model has not been trained yet. Please call trainer.fit(model, data_module) first."
         with pytest.raises(ValueError, match=r".*model has not been trained yet.*"):
             _ = model.result
+        # Nowcast property also raises ValueError before training
+        with pytest.raises(ValueError, match=r".*model has not been trained yet.*"):
+            _ = model.nowcast
 
 
 # TestDFMLinear removed: DFMLinear is now internal (_DFMLinear) and not part of public API.
@@ -265,6 +270,25 @@ class TestPredictionConsistency:
         model = DFM()
         # Predict should accept horizon parameter
         assert hasattr(model, 'predict')
+        
+        # Check that predict signature includes history parameter
+        import inspect
+        sig = inspect.signature(model.predict)
+        assert 'horizon' in sig.parameters
+        assert 'history' in sig.parameters  # history parameter was added
+    
+    def test_predict_history_parameter(self):
+        """Test predict() history parameter.
+        
+        The history parameter allows using only recent N periods for
+        Kalman filter updates, improving efficiency and adaptability.
+        """
+        model = DFM()
+        import inspect
+        sig = inspect.signature(model.predict)
+        history_param = sig.parameters['history']
+        # history should be Optional[int] with default None
+        assert history_param.default is None
     
     def test_factor_forecast_structure(self):
         """Test factor forecast structure.
