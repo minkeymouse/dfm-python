@@ -4,6 +4,8 @@ This tutorial demonstrates the complete workflow for training, prediction, and n
 using macro data with KOEQUIPTE as the target variable.
 
 Target: KOEQUIPTE (Investment, Equipment, Estimation, SA)
+
+Nowcasting Pattern: model.update(X_std).predict(horizon=1)
 """
 
 import sys
@@ -179,11 +181,11 @@ for col in selected_cols:
             )
         )
 
-# Create blocks config
+# Create blocks config - VAR(1) only
 blocks_config = {
     DEFAULT_BLOCK_NAME: {
         "factors": 1,  # Reduced to 1 for faster execution
-        "ar_lag": 1,
+        "ar_lag": 1,   # VAR(1) - first-order autoregressive
         "clock": "m"
     }
 }
@@ -196,6 +198,7 @@ config = DFMConfig(
 
 print(f"   Number of series: {len(series_configs)}")
 print(f"   Number of factors: 1 (DDFM uses num_factors parameter)")
+print(f"   Factor dynamics: VAR(1) (ar_lag=1)")
 print(f"   Target series: {target_col}")
 
 # ============================================================================
@@ -212,8 +215,8 @@ time_index = TimeIndex([parse_timestamp(str(d)) for d in valid_dates])
 data_module = DFMDataModule(
     config=config,
     data=df_processed.values,
-    time=time_index,
-    transformer=preprocessing_pipeline  # Pass the preprocessing pipeline
+    time_index=time_index,
+    pipeline=preprocessing_pipeline  # Pass the preprocessing pipeline
 )
 data_module.setup()
 
@@ -232,6 +235,7 @@ print("\n[Step 5] Training DDFM model...")
 model = DDFM(
     encoder_layers=[32, 16],  # Reduced for faster execution
     num_factors=1,  # Reduced to 1 for faster execution
+    factor_order=1,  # VAR(1) - first-order factor dynamics
     epochs=10,  # Reduced for faster execution
     max_iter=3,  # Reduced for faster execution
     batch_size=32,  # Reduced for faster execution
@@ -279,29 +283,51 @@ except ValueError as e:
     print("   - Using different factor configurations")
 
 # ============================================================================
-# Step 7: Nowcasting
+# Step 7: Nowcasting with update().predict() pattern
 # ============================================================================
-print("\n[Step 7] Nowcasting...")
+print("\n[Step 7] Nowcasting using update().predict() pattern...")
 
 try:
-    # Use nowcast method (if available)
-    # Note: nowcast requires src.nowcasting module which may not be available in dfm-python
-    # This is expected if using dfm-python standalone
-    latest_date = time_index[-1]
-    view_date = latest_date
+    # Get the trained model's result for standardization parameters
+    result = model.result
+    Mx = result.Mx  # Mean for standardization
+    Wx = result.Wx  # Standard deviation for standardization
     
-    nowcast_value = model.nowcast(
-        target_series=target_col,
-        view_date=view_date,
-        target_period=latest_date
-    )
+    # Simulate new data for nowcasting (in practice, this would be real-time data)
+    # Use the last few periods of training data as "new" data
+    n_new_periods = 5
+    X_new_raw = df_processed.iloc[-n_new_periods:].values
+    
+    # Standardize new data using the same parameters from training
+    # Standardization: (X - Mx) / Wx
+    X_new_std = (X_new_raw - Mx) / Wx
+    
+    # Handle any NaN values (missing data in new observations)
+    X_new_std = np.where(np.isfinite(X_new_std), X_new_std, np.nan)
+    
+    print(f"   New data shape: {X_new_std.shape}")
+    print(f"   Standardized new data (first row): {X_new_std[0, :5]}")
+    
+    # Update model state with new standardized data, then predict
+    # Pattern: model.update(X_std).predict(horizon=1)
+    X_nowcast, Z_nowcast = model.update(X_new_std).predict(horizon=1)
+    
+    # Extract nowcast for target series
+    target_idx = selected_cols.index(target_col)
+    nowcast_value = X_nowcast[0, target_idx]
     
     print(f"   Nowcast value for {target_col}: {nowcast_value:.6f}")
-    print(f"   View date: {view_date}")
+    print(f"   Nowcast uses VAR(1) factor dynamics")
     
-except (ValueError, ImportError, AttributeError) as e:
-    print(f"   Nowcasting skipped: {e}")
-    print("   Note: Nowcasting requires src.nowcasting module from main project")
+    # Alternative: Update and predict separately
+    model.update(X_new_std)
+    X_nowcast2, Z_nowcast2 = model.predict(horizon=1)
+    nowcast_value2 = X_nowcast2[0, target_idx]
+    print(f"   Alternative pattern (separate calls): {nowcast_value2:.6f}")
+    
+except (ValueError, AttributeError, IndexError) as e:
+    print(f"   Nowcasting failed: {e}")
+    print("   Note: Ensure model is trained and data is properly standardized")
 
 # ============================================================================
 # Step 8: Summary
@@ -310,11 +336,11 @@ print("\n" + "=" * 80)
 print("Tutorial Summary")
 print("=" * 80)
 print(f"✅ Data loaded: {df.shape[0]} rows, {len(selected_cols)} series")
-print(f"✅ Model trained: {len(series_configs)} series, 1 factor")
+print(f"✅ Model trained: {len(series_configs)} series, 1 factor, VAR(1) dynamics")
 if X_forecast is not None:
     print(f"✅ Predictions generated: {X_forecast.shape[0]} periods ahead")
 else:
     print(f"⚠️  Predictions: Failed (see error message above)")
+print(f"✅ Nowcasting pattern: model.update(X_std).predict(horizon=1)")
 print(f"✅ Target series: {target_col}")
 print("=" * 80)
-

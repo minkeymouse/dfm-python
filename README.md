@@ -104,11 +104,12 @@ trainer.fit(ddfm_model, dm)
 Xf, Zf = ddfm_model.predict(horizon=6)
 ```
 
-### Example 3: Nowcasting
+### Example 3: Nowcasting with update().predict()
 
 ```python
 from dfm_python import DFM, DFMDataModule, DFMTrainer
 import pandas as pd
+import numpy as np
 
 # Load data and train model (same as above)
 df = pd.read_csv('data/macro.csv')
@@ -123,14 +124,25 @@ model.load_config('config/model/dfm.yaml')
 trainer = DFMTrainer(max_iter=10, threshold=1e-4)
 trainer.fit(model, dm)
 
-# Nowcast a target series at a specific view date
-result = model.nowcast(
-    target_series='KOEQUIPTE',
-    view_date='2024-01-15'
-)
+# Get standardization parameters from trained model
+result = model.result
+Mx = result.Mx  # Mean for standardization
+Wx = result.Wx  # Standard deviation for standardization
 
-print(f"Nowcast value: {result.nowcast_value}")
-print(f"Confidence interval: {result.confidence_interval}")
+# Prepare new data (in practice, this would be real-time incomplete data)
+# Standardize using the same parameters from training
+X_new_raw = df_processed.iloc[-5:].values  # Last 5 periods as example
+X_new_std = (X_new_raw - Mx) / Wx
+
+# Update model state with new standardized data, then predict
+# Pattern: model.update(X_std).predict(horizon=1)
+X_nowcast, Z_nowcast = model.update(X_new_std).predict(horizon=1)
+
+# Extract nowcast for target series
+target_idx = df_processed.columns.get_loc('KOEQUIPTE')
+nowcast_value = X_nowcast[0, target_idx]
+
+print(f"Nowcast value: {nowcast_value:.6f}")
 ```
 
 ## Configuration
@@ -238,8 +250,10 @@ trainer.fit(model, datamodule)  # Standard Lightning pattern
 # Prediction
 Xf, Zf = model.predict(horizon=6)  # Forecast future values
 
-# Nowcasting
-result = model.nowcast(target_series, view_date)  # Estimate current period
+# Nowcasting (update state with new data, then predict)
+result = model.result
+X_new_std = (X_new_raw - result.Mx) / result.Wx  # Standardize new data
+X_nowcast, Z_nowcast = model.update(X_new_std).predict(horizon=1)  # Update and predict
 ```
 
 ### Result Objects
@@ -320,9 +334,18 @@ pytest src/test/test_trainer.py -v
 
 ## Project Status
 
-**Version**: 0.4.9  
+**Version**: 0.5.1  
 **Status**: Stable and production-ready  
-**Python**: 3.10+  
+**Python**: 3.10+
+
+### What's New in 0.5.1
+
+- ✨ **New `update()` method**: Replaces legacy `nowcast()` with flexible `update().predict()` pattern
+- 🔧 **Improved API**: Users now control all preprocessing (masking, imputation, standardization)
+- 🧹 **Code cleanup**: Removed legacy code and overengineering (~200+ lines removed)
+- 🐛 **Bug fixes**: Fixed DDFM `update()` method for single-factor models
+- 📚 **Updated tutorials**: All 4 tutorials rewritten with new pattern and VAR(1) configuration
+- ✅ **VAR(1) only**: Simplified to VAR(1) factor dynamics throughout  
 
 ## License
 

@@ -664,7 +664,9 @@ class DFM(BaseFactorModel):
     def on_train_start(self) -> None:
         """Called when training starts. Run EM algorithm."""
         # Get processed data and standardization params from DataModule
-        X_torch, Mx, Wx = self._get_data_from_datamodule()
+        data_module = self._get_datamodule()
+        X_torch = data_module.get_processed_data()
+        Mx, Wx = data_module.get_std_params()
         
         # Run EM algorithm
         self.fit_em(X_torch, Mx=Mx, Wx=Wx)
@@ -863,8 +865,5 @@ class DFM(BaseFactorModel):
         """Reset model state."""
         super().reset()
         return self
-    
-    # nowcast() is inherited from BaseFactorModel
-    
 
 

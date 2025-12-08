@@ -313,12 +313,14 @@ class NowcastResult:
     Examples
     --------
     >>> from dfm_python import DFM
+    >>> import numpy as np
     >>> model = DFM()
     >>> trainer.fit(model, data_module)
-    >>> # Get nowcast with full result
-    >>> result = model.nowcast('gdp', view_date='2024-01-15', return_result=True)
-    >>> print(f"Nowcast: {result.nowcast_value}")
-    >>> print(f"Available data: {result.data_availability['n_available']}")
+    >>> # Update state with new data, then predict
+    >>> X_std = np.random.randn(10, 5)  # Standardized data
+    >>> model.update(X_std)
+    >>> forecast = model.predict(horizon=1)
+    >>> print(f"Forecast: {forecast[0, 0]}")
     """
     target_series: str
     target_period: datetime

@@ -34,17 +34,19 @@ class TestBaseFactorModel:
         model = DFM()
         assert isinstance(model, BaseFactorModel)
         assert hasattr(model, 'predict')
-        # Check that nowcast property exists (without calling it)
-        assert 'nowcast' in dir(model) or hasattr(type(model), 'nowcast')
+        # Check that update method exists (replaces legacy nowcast)
+        assert hasattr(model, 'update')
+        assert callable(getattr(model, 'update', None))
         # DFM creates a placeholder config when none is provided
         assert model.config is not None
         # Result property raises ValueError when accessed before training
         # Error message format: "{ModelType} model has not been trained yet. Please call trainer.fit(model, data_module) first."
         with pytest.raises(ValueError, match=r".*model has not been trained yet.*"):
             _ = model.result
-        # Nowcast method also raises ValueError before training
+        # Update method also raises ValueError before training
         with pytest.raises(ValueError, match=r".*model has not been trained yet.*"):
-            _ = model.nowcast("target_series")
+            import numpy as np
+            _ = model.update(np.random.randn(10, 2))
 
 
 # TestDFMLinear removed: DFMLinear is now internal (_DFMLinear) and not part of public API.

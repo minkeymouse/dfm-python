@@ -13,44 +13,39 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, Any
 
-# Import Nowcast from src.nowcasting (actual implementation)
-# dfm_python.nowcast may not exist, so we import from src
+# Import NowcastResult from dfm_python.config.results (v0.5.0)
+from dfm_python.config.results import NowcastResult
+
+# Import Nowcast and other utilities from src.nowcasting if available
+# These are not part of dfm-python package, they're in the main project
 try:
-    from dfm_python.nowcast import (
-        Nowcast, NowcastResult, NewsDecompResult, BacktestResult,
-        DataView, para_const,
-        get_higher_frequency,
-    )
-    from dfm_python.nowcast.utils import calc_backward_date
-except ImportError:
-    # Fallback to src.nowcasting if dfm_python.nowcast doesn't exist
+    import sys
+    from pathlib import Path
+    src_path = Path(__file__).parent.parent.parent.parent / 'src'
+    if str(src_path) not in sys.path:
+        sys.path.insert(0, str(src_path))
+    from nowcasting import Nowcast, para_const
     try:
-        import sys
-        from pathlib import Path
-        src_path = Path(__file__).parent.parent.parent.parent / 'src'
-        if str(src_path) not in sys.path:
-            sys.path.insert(0, str(src_path))
-        from nowcasting import Nowcast, NowcastResult, para_const
-        from nowcasting import NewsDecompResult
-        # BacktestResult may not exist in src.nowcasting
-        try:
-            from nowcasting import BacktestResult
-        except ImportError:
-            BacktestResult = None
-        # DataView and other utilities may not be available
-        DataView = None
-        get_higher_frequency = None
-        calc_backward_date = None
+        from nowcasting import NewsDecompResult, BacktestResult
     except ImportError:
-        # If src.nowcasting also fails, set everything to None
-        Nowcast = None
-        NowcastResult = None
         NewsDecompResult = None
         BacktestResult = None
+    try:
+        from nowcasting import DataView
+        from nowcasting.utils import get_higher_frequency, calc_backward_date
+    except ImportError:
         DataView = None
-        para_const = None
         get_higher_frequency = None
         calc_backward_date = None
+except ImportError:
+    # If src.nowcasting is not available, set to None
+    Nowcast = None
+    NewsDecompResult = None
+    BacktestResult = None
+    DataView = None
+    para_const = None
+    get_higher_frequency = None
+    calc_backward_date = None
 
 from dfm_python.config import DFMConfig, SeriesConfig, DEFAULT_BLOCK_NAME
 from dfm_python.config.adapter import YamlSource
@@ -122,22 +117,22 @@ class TestNowcast:
         # This tests the interface
         assert hasattr(Nowcast, '__init__')
     
-    def test_base_factor_model_nowcast_property(self):
-        """Test that BaseFactorModel has nowcast property.
+    def test_base_factor_model_has_update_method(self):
+        """Test that BaseFactorModel has update method.
         
-        The nowcast property was added to BaseFactorModel to provide
-        a unified interface for nowcasting operations.
+        The update method was added to BaseFactorModel to provide
+        a unified interface for updating factor state.
         """
         model = DFM()
-        # BaseFactorModel should have nowcast method (not property)
-        assert hasattr(model, 'nowcast')
-        assert callable(getattr(model, 'nowcast', None))
+        # BaseFactorModel should have update method
+        assert hasattr(model, 'update')
+        assert callable(getattr(model, 'update', None))
         
-        # Before training, calling nowcast should raise ValueError
+        # Before training, calling update should raise ValueError
         with pytest.raises(ValueError, match=r".*model has not been trained yet.*"):
-            _ = model.nowcast("target_series")
+            _ = model.update(np.random.randn(10, 2))
     
-    def test_nowcast_property_returns_nowcast_instance(self, test_data_path, test_config_path):
+    def test_update_method_chainable(self, test_data_path, test_config_path):
         """Test that model.nowcast returns Nowcast instance.
         
         After training, model.nowcast should return a Nowcast instance
@@ -185,10 +180,10 @@ class TestNowcast:
         trainer = DFMTrainer(max_epochs=5)  # Short training for test
         trainer.fit(model, data_module)
         
-        # After training, nowcast property should return Nowcast instance
-        nowcast = model.nowcast
-        assert isinstance(nowcast, Nowcast)
-        assert hasattr(nowcast, '__call__')  # Nowcast is callable
+        # After training, update should be chainable
+        X_std = np.random.randn(10, len(series_ids))
+        updated_model = model.update(X_std)
+        assert updated_model is model  # Should return self for chaining
     
     def test_nowcast_data_view(self, sample_data_from_file):
         """Test data view creation for pseudo real-time.
@@ -217,6 +212,7 @@ class TestNowcast:
     
     def test_nowcast_result_structure(self):
         """Test NowcastResult dataclass."""
+        from datetime import datetime
         result = NowcastResult(
             target_series="GDP",
             target_period=datetime(2020, 3, 31),
@@ -246,6 +242,8 @@ class TestNewsDecomposition:
     
     def test_news_decomp_result(self):
         """Test NewsDecompResult structure."""
+        if NewsDecompResult is None:
+            pytest.skip("NewsDecompResult not available (requires src.nowcasting)")
         # NewsDecompResult has different structure
         result = NewsDecompResult(
             y_old=2.0,
@@ -404,6 +402,8 @@ class TestNowcastUtilities:
         - para_const computes parameter constraints for nowcasting
         - Handles mixed frequencies and aggregation
         """
+        if para_const is None:
+            pytest.skip("para_const not available (requires src.nowcasting)")
         T, N = 100, 5
         X = np.random.randn(T, N)
         

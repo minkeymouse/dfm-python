@@ -1,6 +1,6 @@
-"""Tests for nowcast() and predict() implementations.
+"""Tests for update() and predict() implementations.
 
-Tests verify that nowcast() and predict() work correctly with dfm-python package only.
+Tests verify that update() and predict() work correctly with dfm-python package only.
 """
 
 import pytest
@@ -11,12 +11,11 @@ from datetime import datetime
 from dfm_python.models import DFM
 from dfm_python.config import DFMConfig, SeriesConfig
 from dfm_python import DFMDataModule, DFMTrainer
-from dfm_python.config.results import NowcastResult
 from dfm_python.utils.time import TimeIndex, parse_timestamp
 
 
-class TestNowcastImplementation:
-    """Test nowcast() implementation."""
+class TestUpdateImplementation:
+    """Test update() implementation."""
     
     @pytest.fixture
     def simple_config(self):
@@ -56,21 +55,18 @@ class TestNowcastImplementation:
         trainer = DFMTrainer()
         trainer.fit(model, data_module)
         
-        # Test nowcast returns float
-        value = model.nowcast('series1', return_result=False)
-        assert isinstance(value, (float, np.floating))
-        assert np.isfinite(value)
+        # Test update method works
+        X_std = np.random.randn(10, 2)
+        updated_model = model.update(X_std)
+        assert updated_model is model  # Should return self for chaining
         
-        # Test nowcast returns NowcastResult
-        result = model.nowcast('series1', return_result=True)
-        assert isinstance(result, NowcastResult)
-        assert result.target_series == 'series1'
-        assert np.isfinite(result.nowcast_value)
-        assert result.view_date is not None
-        assert result.target_period is not None
+        # After update, predict should work
+        forecast = model.predict(horizon=1, return_series=True, return_factors=False)
+        assert isinstance(forecast, np.ndarray)
+        assert forecast.shape[0] == 1
     
-    def test_nowcast_with_view_date(self, simple_config, simple_data):
-        """Test nowcast with explicit view_date."""
+    def test_update_with_different_data_shapes(self, simple_config, simple_data):
+        """Test update with different data shapes."""
         model = DFM()
         model._config = simple_config
         
@@ -81,16 +77,19 @@ class TestNowcastImplementation:
         trainer = DFMTrainer()
         trainer.fit(model, data_module)
         
-        # Test with string view_date
-        value1 = model.nowcast('series1', view_date='2020-12-31', return_result=False)
-        assert np.isfinite(value1)
+        # Test with different time periods
+        X_std1 = np.random.randn(5, 2)
+        model.update(X_std1)
+        forecast1 = model.predict(horizon=1, return_series=True, return_factors=False)
+        assert np.isfinite(forecast1).all()
         
-        # Test with datetime view_date
-        value2 = model.nowcast('series1', view_date=datetime(2020, 12, 31), return_result=False)
-        assert np.isfinite(value2)
+        X_std2 = np.random.randn(10, 2)
+        model.update(X_std2)
+        forecast2 = model.predict(horizon=1, return_series=True, return_factors=False)
+        assert np.isfinite(forecast2).all()
     
-    def test_nowcast_target_series_not_found(self, simple_config, simple_data):
-        """Test nowcast raises error for invalid target_series."""
+    def test_update_invalid_shape(self, simple_config, simple_data):
+        """Test update raises error for invalid data shape."""
         model = DFM()
         model._config = simple_config
         
@@ -101,8 +100,9 @@ class TestNowcastImplementation:
         trainer = DFMTrainer()
         trainer.fit(model, data_module)
         
-        with pytest.raises(ValueError, match="target_series.*not found"):
-            model.nowcast('invalid_series')
+        # 1D array should raise error
+        with pytest.raises(ValueError, match="X_std must be 2D array"):
+            model.update(np.random.randn(10))
     
     def test_predict_basic(self, simple_config, simple_data):
         """Test basic predict functionality."""
@@ -144,43 +144,6 @@ class TestNowcastImplementation:
         assert np.all(np.isfinite(X_forecast))
         assert np.all(np.isfinite(Z_forecast))
     
-    def test_nowcast_view_date_future(self, simple_config, simple_data):
-        """Test nowcast with view_date in the future."""
-        model = DFM()
-        model._config = simple_config
-        
-        df, time_index = simple_data
-        data_module = DFMDataModule(config=simple_config, data=df, time_index=time_index)
-        data_module.setup()
-        
-        simple_config.max_iter = 2
-        simple_config.threshold = 1e-2
-        trainer = DFMTrainer()
-        trainer.fit(model, data_module)
-        
-        # Future view_date should use latest available data
-        future_date = '2025-12-31'
-        value = model.nowcast('series1', view_date=future_date, return_result=False)
-        assert np.isfinite(value)
-    
-    def test_nowcast_view_date_past(self, simple_config, simple_data):
-        """Test nowcast with view_date in the past."""
-        model = DFM()
-        model._config = simple_config
-        
-        df, time_index = simple_data
-        data_module = DFMDataModule(config=simple_config, data=df, time_index=time_index)
-        data_module.setup()
-        
-        simple_config.max_iter = 2
-        simple_config.threshold = 1e-2
-        trainer = DFMTrainer()
-        trainer.fit(model, data_module)
-        
-        # Past view_date should work (uses available data up to that date)
-        past_date = '2020-06-30'
-        value = model.nowcast('series1', view_date=past_date, return_result=False)
-        assert np.isfinite(value)
     
     def test_nowcast_all_missing_data(self, simple_config, simple_data):
         """Test nowcast with all missing data (should handle gracefully)."""

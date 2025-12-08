@@ -32,7 +32,6 @@ from ..encoder.vae import Decoder, Encoder, extract_decoder_params
 from ..logger import get_logger
 from ..utils.data import rem_nans_spline
 from ..utils.helpers import (
-    find_series_index,
     get_clock_frequency,
 )
 from ..utils.statespace import (
@@ -40,8 +39,6 @@ from ..utils.statespace import (
     estimate_var2,
 )
 from ..utils.time import (
-    convert_to_timestamp,
-    find_time_index,
     TimeIndex,
 )
 from .base import BaseFactorModel
@@ -49,6 +46,7 @@ from .utils import (
     estimate_var_ddfm,
     validate_factors_ddfm,
     validate_training_data_ddfm,
+    forecast_var_factors,
 )
 
 if TYPE_CHECKING:
@@ -73,13 +71,14 @@ class DDFMModel:
     This class implements a DDFM with:
     - Nonlinear encoder (MLP) to extract factors from observations
     - Linear decoder for interpretability
-    - Linear factor dynamics (VAR)
+    - Linear factor dynamics (VAR) - supports VAR(1) and VAR(2), maximum order is VAR(2)
     - Kalman filtering for final smoothing
     
     The model is trained using gradient descent (Adam optimizer) to minimize
     reconstruction error, then factor dynamics are estimated via OLS, and
     final smoothing is performed using Kalman filter.
     
+    Note: Maximum supported VAR order for factor dynamics is VAR(2).
     """
     
     def __init__(
@@ -120,7 +119,7 @@ class DDFMModel:
         batch_size : int
             Batch size for training. Default: 100 (matches original DDFM)
         factor_order : int
-            VAR lag order for factor dynamics (1 or 2). Default: 1
+            VAR lag order for factor dynamics. Must be 1 or 2 (maximum supported order is VAR(2)). Default: 1
         use_idiosyncratic : bool
             Whether to model idiosyncratic components with AR(1) dynamics. Default: True
         min_obs_idio : int
@@ -141,7 +140,7 @@ class DDFMModel:
         if factor_order not in [1, 2]:
             raise ValueError(
                 f"DDFM initialization failed: factor_order must be 1 or 2, got {factor_order}. "
-                f"Please provide a valid factor_order value (1 for VAR(1) or 2 for VAR(2))"
+                f"Maximum supported VAR order is VAR(2). Please provide factor_order=1 (VAR(1)) or factor_order=2 (VAR(2))"
             )
         
         self.encoder_layers = encoder_layers or [64, 32]
@@ -212,45 +211,16 @@ class DDFMModel:
             )
         
         # Extract parameters
-        A = self._result.A  # Factor dynamics (m x m) for VAR(1) or (m x 2m) for VAR(2)
+        A = self._result.A
         C = self._result.C
         Wx = self._result.Wx
         Mx = self._result.Mx
-        Z_last = self._result.Z[-1, :]  # Last factor estimate (m,)
-        p = self._result.p  # VAR order
+        Z_last = self._result.Z[-1, :]
+        p = self._result.p
         
-        # Deterministic forecast
-        if p == 1:
-            # VAR(1): f_t = A @ f_{t-1}
-            Z_forecast = np.zeros((horizon, Z_last.shape[0]))
-            Z_forecast[0, :] = A @ Z_last
-            for h in range(1, horizon):
-                Z_forecast[h, :] = A @ Z_forecast[h - 1, :]
-        elif p == 2:
-            # VAR(2): f_t = A1 @ f_{t-1} + A2 @ f_{t-2}
-            # Need last two factor values
-            if self._result.Z.shape[0] < 2:
-                # Fallback to VAR(1) if not enough history
-                Z_forecast = np.zeros((horizon, Z_last.shape[0]))
-                A1 = A[:, :Z_last.shape[0]]
-                Z_forecast[0, :] = A1 @ Z_last
-                for h in range(1, horizon):
-                    Z_forecast[h, :] = A1 @ Z_forecast[h - 1, :]
-            else:
-                Z_prev = self._result.Z[-2, :]  # f_{t-2}
-                A1 = A[:, :Z_last.shape[0]]
-                A2 = A[:, Z_last.shape[0]:]
-                Z_forecast = np.zeros((horizon, Z_last.shape[0]))
-                Z_forecast[0, :] = A1 @ Z_last + A2 @ Z_prev
-                if horizon > 1:
-                    Z_forecast[1, :] = A1 @ Z_forecast[0, :] + A2 @ Z_last
-                for h in range(2, horizon):
-                    Z_forecast[h, :] = A1 @ Z_forecast[h - 1, :] + A2 @ Z_forecast[h - 2, :]
-        else:
-            raise ValueError(
-                f"DDFM prediction failed: unsupported VAR order {p}. "
-                f"Only VAR(1) and VAR(2) are supported. Please use factor_order=1 or factor_order=2"
-            )
+        # Forecast factors using VAR dynamics
+        Z_prev = self._result.Z[-2, :] if self._result.Z.shape[0] >= 2 and p == 2 else None
+        Z_forecast = forecast_var_factors(Z_last, A, p, horizon, Z_prev)
         
         # Transform to observations
         X_forecast_std = Z_forecast @ C.T
@@ -261,76 +231,6 @@ class DDFMModel:
         if return_series:
             return X_forecast
         return Z_forecast
-    
-    def get_state(
-        self,
-        t: Union[int, datetime],
-        target_series: str,
-        lookback: Optional[int] = None
-    ) -> Dict[str, Any]:
-        """Get DFM state at time t.
-        
-        Note: Requires data to be stored during fit(). Data is automatically
-        stored from DataModule during fit().
-        """
-        if not hasattr(self, '_data') or self._data is None:
-            raise ValueError(
-                f"DDFM get_state failed: model has not been fitted with DataModule yet. "
-                f"Please call trainer.fit(model, data_module) first to store data"
-            )
-        
-        if lookback is None:
-            clock = get_clock_frequency(self._config, 'm')
-            lookback = get_periods_per_year(clock)
-        
-        t = convert_to_timestamp(t, self._time, None)
-        i_series = find_series_index(self._config, target_series)
-        
-        # Convert data to numpy if needed
-        if hasattr(self._data, 'to_numpy'):
-            X_data = self._data.to_numpy()
-        else:
-            X_data = np.asarray(self._data)
-        
-        # For get_state, we use the raw data directly
-        X_view = X_data
-        
-        # Placeholder for nowcast (use src.nowcast for actual nowcasting functionality)
-        baseline_nowcast = np.nan
-        
-        baseline_forecast, actual_history, residuals, factors_history = [], [], [], []
-        t_idx = find_time_index(self._time, t)
-        if t_idx is None:
-            raise ValueError(
-                f"DDFM get_state failed: time {t} not found in model_instance._time. "
-                f"Please provide a valid time value that exists in the model's time index"
-            )
-        
-        for i in range(max(0, t_idx - lookback + 1), t_idx + 1):
-            if i < X_data.shape[0]:
-                # Use smoothed value from result if available, otherwise NaN
-                if self._result is not None and hasattr(self._result, 'X_sm') and i < self._result.X_sm.shape[0]:
-                    forecast_val = self._result.X_sm[i, i_series] if i_series < self._result.X_sm.shape[1] else np.nan
-                else:
-                    forecast_val = np.nan
-                baseline_forecast.append(forecast_val)
-                actual_val = X_data[i, i_series] if i_series < X_data.shape[1] else np.nan
-                actual_history.append(actual_val)
-                residuals.append(actual_val - forecast_val)
-                if self._result is not None and hasattr(self._result, 'Z') and i < self._result.Z.shape[0]:
-                    factors_history.append(self._result.Z[i, :])
-                else:
-                    factors_history.append(np.array([]))
-        
-        return {
-            'time': t,
-            'target_series': target_series,
-            'baseline_nowcast': baseline_nowcast,
-            'baseline_forecast': np.array(baseline_forecast),
-            'actual_history': np.array(actual_history),
-            'residuals': np.array(residuals),
-            'factors_history': factors_history
-        }
 
 # ============================================================================
 # High-level API Classes
@@ -345,6 +245,8 @@ class DDFM(BaseFactorModel):
     This class is a PyTorch Lightning module that can be used with standard
     Lightning training patterns. It inherits from BaseFactorModel and implements
     DDFM training using autoencoder and MCMC procedure.
+    
+    Note: Maximum supported VAR order for factor dynamics is VAR(2) (set via factor_order parameter).
     
     Example (Standard Lightning Pattern):
         >>> from dfm_python import DDFM, DFMDataModule, DDFMTrainer
@@ -429,7 +331,7 @@ class DDFM(BaseFactorModel):
         batch_size : int, default 100
             Batch size for training (matches original DDFM)
         factor_order : int, default 1
-            VAR lag order for factor dynamics (1 or 2)
+            VAR lag order for factor dynamics. Must be 1 or 2 (maximum supported order is VAR(2))
         use_idiosyncratic : bool, default True
             Whether to model idiosyncratic components
         min_obs_idio : int, default 5
@@ -458,6 +360,13 @@ class DDFM(BaseFactorModel):
         # DDFM does not use block structure, but BaseModelConfig requires blocks
         # We create a minimal default block that will be ignored by DDFM
         config = self._initialize_config(config)
+        
+        # Validate factor_order
+        if factor_order not in [1, 2]:
+            raise ValueError(
+                f"DDFM initialization failed: factor_order must be 1 or 2, got {factor_order}. "
+                f"Maximum supported VAR order is VAR(2). Please provide factor_order=1 (VAR(1)) or factor_order=2 (VAR(2))"
+            )
         
         self.encoder_layers = encoder_layers or [64, 32]
         self.activation = activation
@@ -1158,6 +1067,12 @@ class DDFM(BaseFactorModel):
         Q = Q_f
         Z_0 = factors[0, :]
         V_0 = np.cov(factors.T)
+        # Ensure V_0 is always 2D (np.cov returns scalar when m=1)
+        if V_0.ndim == 0:
+            V_0 = np.atleast_2d(V_0)
+        elif V_0.ndim == 1:
+            # If 1D, reshape to (m x m)
+            V_0 = np.atleast_2d(V_0).T if V_0.shape[0] == 1 else np.atleast_2d(V_0)
         
         # Estimate R from residuals
         R_diag = np.var(residuals, axis=0)
@@ -1217,7 +1132,9 @@ class DDFM(BaseFactorModel):
     def on_train_start(self) -> None:
         """Called when training starts. Run MCMC training."""
         # Get processed data and standardization params from DataModule
-        X_torch, Mx, Wx = self._get_data_from_datamodule()
+        data_module = self._get_datamodule()
+        X_torch = data_module.get_processed_data()
+        Mx, Wx = data_module.get_std_params()
         
         # Early validation: Check data dimensions and model configuration before training
         # This catches configuration issues early with clear error messages
@@ -1496,71 +1413,4 @@ class DDFM(BaseFactorModel):
         """Reset model state."""
         super().reset()
         return self
-    
-    # nowcast() is inherited from BaseFactorModel
-    
-    def get_state(
-        self,
-        t: Union[int, datetime],
-        target_series: str,
-        lookback: Optional[int] = None
-    ) -> Dict[str, Any]:
-        """Get DFM state at time t.
-        
-        Returns state information including baseline forecast, actual history,
-        residuals, and factor history for the specified time period.
-        """
-        if not hasattr(self, '_data') or self._data is None:
-            raise ValueError(
-                f"DDFM get_state failed: model has not been fitted with DataModule yet. "
-                f"Please call trainer.fit(model, data_module) first to store data"
-            )
-        
-        if lookback is None:
-            lookback = 12  # Default lookback
-        
-        i_series = find_series_index(self._config, target_series)
-        
-        # Convert data to numpy if needed
-        if hasattr(self._data, 'to_numpy'):
-            X_data = self._data.to_numpy()
-        else:
-            X_data = np.asarray(self._data)
-        
-        # Placeholder for nowcast (use src.nowcast for actual nowcasting functionality)
-        baseline_nowcast = np.nan
-        
-        baseline_forecast, actual_history, residuals, factors_history = [], [], [], []
-        t_idx = find_time_index(self._time, t)
-        if t_idx is None:
-            raise ValueError(
-                f"DDFM get_state failed: time {t} not found in model_instance._time. "
-                f"Please provide a valid time value that exists in the model's time index"
-            )
-        
-        for i in range(max(0, t_idx - lookback + 1), t_idx + 1):
-            if i < X_data.shape[0]:
-                # Use smoothed value from result if available, otherwise NaN
-                if self._result is not None and hasattr(self._result, 'X_sm') and i < self._result.X_sm.shape[0]:
-                    forecast_val = self._result.X_sm[i, i_series] if i_series < self._result.X_sm.shape[1] else np.nan
-                else:
-                    forecast_val = np.nan
-                baseline_forecast.append(forecast_val)
-                actual_val = X_data[i, i_series] if i_series < X_data.shape[1] else np.nan
-                actual_history.append(actual_val)
-                residuals.append(actual_val - forecast_val)
-                if self._result is not None and hasattr(self._result, 'Z') and i < self._result.Z.shape[0]:
-                    factors_history.append(self._result.Z[i, :])
-                else:
-                    factors_history.append(np.array([]))
-        
-        return {
-            'time': t,
-            'target_series': target_series,
-            'baseline_nowcast': baseline_nowcast,
-            'baseline_forecast': np.array(baseline_forecast),
-            'actual_history': np.array(actual_history),
-            'residuals': np.array(residuals),
-            'factors_history': factors_history
-        }
 

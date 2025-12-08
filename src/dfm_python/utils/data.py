@@ -527,6 +527,9 @@ def create_data_view(
     from ..utils.time import get_latest_time
     from ..utils.helpers import get_series_ids
     
+    if Time is None:
+        raise ValueError("Time index is required for create_data_view")
+    
     if isinstance(view_date, str):
         view_date = parse_timestamp(view_date)
     elif view_date is None:
@@ -541,6 +544,8 @@ def create_data_view(
     # Prepare time list
     if isinstance(Time, TimeIndex):
         time_list = [to_python_datetime(t) for t in Time]
+    elif Time is None:
+        raise ValueError("Time index is required for create_data_view")
     else:
         time_list = []
         for t in Time:

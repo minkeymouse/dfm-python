@@ -5,6 +5,8 @@ using finance data with market_forward_excess_returns as the target variable.
 
 Target: market_forward_excess_returns
 Excluded: risk_free_rate, forward_returns
+
+Nowcasting Pattern: model.update(X_std).predict(horizon=1)
 """
 
 import sys
@@ -20,12 +22,10 @@ from datetime import datetime
 from dfm_python import DFM, DFMDataModule, DFMTrainer
 from dfm_python.config import DFMConfig, SeriesConfig, DEFAULT_BLOCK_NAME
 from dfm_python.utils.time import TimeIndex, parse_timestamp
-from dfm_python.lightning.scaling import create_scaling_transformer_from_config
 
 # sktime imports for preprocessing
 from sktime.transformations.compose import TransformerPipeline
 from sktime.transformations.series.impute import Imputer
-from sktime.transformations.series.func_transform import FunctionTransformer
 from sklearn.preprocessing import StandardScaler
 
 print("=" * 80)
@@ -89,15 +89,6 @@ print(f"   Missing values before preprocessing: {missing_before}")
 # Step 2.5: Create Preprocessing Pipeline with sktime
 # ============================================================================
 print("\n[Step 2.5] Creating preprocessing pipeline with sktime...")
-
-# Create transformation transformers based on config
-# For now, we'll use linear transformation (no transformation)
-# In practice, you would apply transformations based on SeriesConfig.transformation
-transformation_steps = []
-
-# Note: Series-specific transformations would be applied using ColumnEnsembleTransformer
-# For simplicity, we'll use a unified pipeline here
-# In production, you'd create per-series transformers based on config.transformation
 
 # Create preprocessing pipeline: Imputation → Scaling
 preprocessing_pipeline = TransformerPipeline(
@@ -164,11 +155,11 @@ for col in selected_cols:
             )
         )
 
-# Create blocks config
+# Create blocks config - VAR(1) only
 blocks_config = {
     DEFAULT_BLOCK_NAME: {
         "factors": 1,  # Reduced to 1 for faster execution
-        "ar_lag": 1,
+        "ar_lag": 1,   # VAR(1) - first-order autoregressive
         "clock": "m"
     }
 }
@@ -183,6 +174,7 @@ config = DFMConfig(
 
 print(f"   Number of series: {len(series_configs)}")
 print(f"   Number of factors: {config.blocks[DEFAULT_BLOCK_NAME]['factors']}")
+print(f"   Factor dynamics: VAR(1) (ar_lag=1)")
 print(f"   Target series: {target_col}")
 
 # ============================================================================
@@ -204,15 +196,11 @@ time_list = [
 time_index = TimeIndex(time_list)
 
 # Create DataModule with transformer
-# Note: DFMDataModule can accept a transformer parameter
-# Since we've already preprocessed, we can pass None or an identity transformer
-# However, DFMDataModule expects raw data and applies its own preprocessing
-# So we'll pass the preprocessed data but note that DFMDataModule may apply additional scaling
 data_module = DFMDataModule(
     config=config,
     data=df_processed.values,
-    time=time_index,
-    transformer=preprocessing_pipeline  # Pass the preprocessing pipeline
+    time_index=time_index,
+    pipeline=preprocessing_pipeline  # Pass the preprocessing pipeline
 )
 data_module.setup()
 
@@ -267,33 +255,51 @@ except ValueError as e:
     print("   - Using different factor configurations")
 
 # ============================================================================
-# Step 7: Nowcasting
+# Step 7: Nowcasting with update().predict() pattern
 # ============================================================================
-print("\n[Step 7] Nowcasting...")
+print("\n[Step 7] Nowcasting using update().predict() pattern...")
 
 try:
-    # Get nowcast manager
-    # Note: nowcast requires src.nowcasting module which may not be available in dfm-python
-    # This is expected if using dfm-python standalone
-    nowcast = model.nowcast
+    # Get the trained model's result for standardization parameters
+    result = model.result
+    Mx = result.Mx  # Mean for standardization
+    Wx = result.Wx  # Standard deviation for standardization
     
-    # Calculate nowcast for target series
-    # Use latest available date
-    latest_date = time_index[-1]
-    view_date = latest_date
+    # Simulate new data for nowcasting (in practice, this would be real-time data)
+    # Use the last few periods of training data as "new" data
+    n_new_periods = 5
+    X_new_raw = df_processed.iloc[-n_new_periods:].values
     
-    nowcast_value = nowcast(
-        target_series=target_col,
-        view_date=view_date,
-        target_period=latest_date
-    )
+    # Standardize new data using the same parameters from training
+    # Standardization: (X - Mx) / Wx
+    X_new_std = (X_new_raw - Mx) / Wx
+    
+    # Handle any NaN values (missing data in new observations)
+    X_new_std = np.where(np.isfinite(X_new_std), X_new_std, np.nan)
+    
+    print(f"   New data shape: {X_new_std.shape}")
+    print(f"   Standardized new data (first row): {X_new_std[0, :5]}")
+    
+    # Update model state with new standardized data, then predict
+    # Pattern: model.update(X_std).predict(horizon=1)
+    X_nowcast, Z_nowcast = model.update(X_new_std).predict(horizon=1)
+    
+    # Extract nowcast for target series
+    target_idx = selected_cols.index(target_col)
+    nowcast_value = X_nowcast[0, target_idx]
     
     print(f"   Nowcast value for {target_col}: {nowcast_value:.6f}")
-    print(f"   View date: {view_date}")
+    print(f"   Nowcast uses VAR(1) factor dynamics")
     
-except (ValueError, ImportError) as e:
-    print(f"   Nowcasting skipped: {e}")
-    print("   Note: Nowcasting requires src.nowcasting module from main project")
+    # Alternative: Update and predict separately
+    model.update(X_new_std)
+    X_nowcast2, Z_nowcast2 = model.predict(horizon=1)
+    nowcast_value2 = X_nowcast2[0, target_idx]
+    print(f"   Alternative pattern (separate calls): {nowcast_value2:.6f}")
+    
+except (ValueError, AttributeError, IndexError) as e:
+    print(f"   Nowcasting failed: {e}")
+    print("   Note: Ensure model is trained and data is properly standardized")
 
 # ============================================================================
 # Step 8: Summary
@@ -302,11 +308,11 @@ print("\n" + "=" * 80)
 print("Tutorial Summary")
 print("=" * 80)
 print(f"✅ Data loaded: {df.shape[0]} rows, {len(selected_cols)} series")
-print(f"✅ Model trained: {len(series_configs)} series, {config.blocks[DEFAULT_BLOCK_NAME]['factors']} factors")
+print(f"✅ Model trained: {len(series_configs)} series, {config.blocks[DEFAULT_BLOCK_NAME]['factors']} factors, VAR(1) dynamics")
 if X_forecast is not None:
     print(f"✅ Predictions generated: {X_forecast.shape[0]} periods ahead")
 else:
     print(f"⚠️  Predictions: Failed (see error message above)")
+print(f"✅ Nowcasting pattern: model.update(X_std).predict(horizon=1)")
 print(f"✅ Target series: {target_col}")
 print("=" * 80)
-

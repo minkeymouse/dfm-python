@@ -16,16 +16,10 @@ import torch
 import pytorch_lightning as pl
 import pandas as pd
 
-if TYPE_CHECKING:
-    from ..config.results import NowcastResult
-
 from ..config import DFMConfig, make_config_source, ConfigSource, MergedConfigSource
 from ..config.results import BaseResult
 from ..config.schema import SeriesConfig, DEFAULT_BLOCK_NAME
 from ..logger import get_logger
-from .utils import create_nowcast_result
-from ..utils.time import parse_timestamp, get_latest_time
-from ..utils.data import create_data_view
 
 _logger = get_logger(__name__)
 
@@ -194,28 +188,6 @@ class BaseFactorModel(pl.LightningModule):
         
         return config
     
-    def _get_data_from_datamodule(self) -> Tuple[Any, Optional[np.ndarray], Optional[np.ndarray]]:
-        """Get processed data and standardization parameters from DataModule.
-        
-        Returns
-        -------
-        X_torch : torch.Tensor
-            Processed data tensor (T x N)
-        Mx : np.ndarray or None
-            Mean values for unstandardization (N,)
-        Wx : np.ndarray or None
-            Standard deviation values for unstandardization (N,)
-            
-        Raises
-        ------
-        ValueError
-            If DataModule is not available
-        """
-        data_module = self._get_datamodule()
-        X_torch = data_module.get_processed_data()
-        Mx, Wx = data_module.get_std_params()
-        return X_torch, Mx, Wx
-    
     def _get_datamodule(self):
         """Get DataModule from model or trainer.
         
@@ -250,7 +222,7 @@ class BaseFactorModel(pl.LightningModule):
     ) -> np.ndarray:
         """Forecast factors using VAR dynamics.
         
-        Supports VAR(1) and VAR(2) factor dynamics.
+        Supports VAR(1) and VAR(2) factor dynamics (maximum supported order is VAR(2)).
         
         Parameters
         ----------
@@ -259,7 +231,7 @@ class BaseFactorModel(pl.LightningModule):
         A : np.ndarray
             Transition matrix. For VAR(1): (m x m), for VAR(2): (m x 2m)
         p : int
-            VAR order (1 or 2)
+            VAR order. Must be 1 or 2 (maximum supported order is VAR(2))
         horizon : int
             Number of periods to forecast
         Z_prev : np.ndarray, optional
@@ -297,7 +269,7 @@ class BaseFactorModel(pl.LightningModule):
         else:
             raise ValueError(
                 f"{self.__class__.__name__} prediction failed: unsupported VAR order {p}. "
-                f"Only VAR(1) and VAR(2) are supported. Please use factor_order=1 or factor_order=2"
+                f"Maximum supported VAR order is VAR(2). Please use factor_order=1 (VAR(1)) or factor_order=2 (VAR(2))"
             )
         return Z_forecast
     
@@ -428,13 +400,22 @@ class BaseFactorModel(pl.LightningModule):
         Dict[str, torch.Tensor]
             Dictionary of torch tensors: A, C, Q, R, Z_0, V_0
         """
+        # Ensure V_0 is always 2D (defensive check for edge cases)
+        V_0 = result.V_0
+        if isinstance(V_0, np.ndarray):
+            if V_0.ndim == 0:
+                V_0 = np.atleast_2d(V_0)
+            elif V_0.ndim == 1:
+                # If 1D, reshape to (m x m) - assume it's a single value for m=1 case
+                V_0 = np.atleast_2d(V_0).T if V_0.shape[0] == 1 else np.atleast_2d(V_0)
+        
         return {
             'A': torch.tensor(result.A, dtype=torch.float32),
             'C': torch.tensor(C if C is not None else result.C, dtype=torch.float32),
             'Q': torch.tensor(result.Q, dtype=torch.float32),
             'R': torch.tensor(R if R is not None else result.R, dtype=torch.float32),
             'Z_0': torch.tensor(result.Z_0, dtype=torch.float32),
-            'V_0': torch.tensor(result.V_0, dtype=torch.float32)
+            'V_0': torch.tensor(V_0, dtype=torch.float32)
         }
     
     def _update_factor_state_dfm(
@@ -494,33 +475,66 @@ class BaseFactorModel(pl.LightningModule):
         """
         if not hasattr(self, 'encoder') or self.encoder is None:
             _logger.warning(
-                f"{self.__class__.__name__} predict(): Encoder not available, "
-                "using training state instead"
+                f"{self.__class__.__name__} update(): Encoder not available, "
+                "cannot update factor state"
             )
             return None
         
-        # Extract factors using encoder
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.encoder.eval()
-        X_tensor = torch.tensor(X_recent_std, device=device, dtype=torch.float32)
-        with torch.no_grad():
-            factors_raw = self.encoder(X_tensor).cpu().numpy()  # (T x m)
-        
-        # For DDFM: C = I (identity), R = small noise
-        m = factors_raw.shape[1]
-        C = np.eye(m)
-        R = np.eye(m) * 1e-8
-        
-        # Convert to torch: (m x T) format for Kalman filter
-        Y = torch.tensor(factors_raw.T, dtype=torch.float32)
-        params = self._result_to_torch_params(result, C=C, R=R)
-        
-        # Run Kalman smoother
-        kf = self._get_kalman_filter(kalman_filter)
-        zsmooth, _, _, _ = kf(Y, params['A'], params['C'], params['Q'],
-                              params['R'], params['Z_0'], params['V_0'])
-        
-        return zsmooth.T[-1, :].cpu().numpy()
+        try:
+            # Extract factors using encoder
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            self.encoder.eval()
+            X_tensor = torch.tensor(X_recent_std, device=device, dtype=torch.float32)
+            with torch.no_grad():
+                factors_raw = self.encoder(X_tensor).cpu().numpy()  # (T x m)
+            
+            # Validate factors shape
+            if factors_raw.ndim != 2 or factors_raw.shape[0] == 0:
+                _logger.warning(
+                    f"{self.__class__.__name__} update(): Invalid factors shape {factors_raw.shape}, "
+                    "cannot update factor state"
+                )
+                return None
+            
+            # For DDFM: C = I (identity), R = small noise
+            m = factors_raw.shape[1]
+            C = np.eye(m)
+            R = np.eye(m) * 1e-8
+            
+            # Convert to torch: (m x T) format for Kalman filter
+            Y = torch.tensor(factors_raw.T, dtype=torch.float32)
+            params = self._result_to_torch_params(result, C=C, R=R)
+            
+            # Run Kalman smoother
+            kf = self._get_kalman_filter(kalman_filter)
+            kf_result = kf(Y, params['A'], params['C'], params['Q'],
+                          params['R'], params['Z_0'], params['V_0'])
+            
+            # Handle return value - Kalman filter returns (zsmooth, Vsmooth, VVsmooth, loglik)
+            if isinstance(kf_result, tuple) and len(kf_result) >= 1:
+                zsmooth = kf_result[0]
+            else:
+                zsmooth = kf_result
+            
+            # zsmooth is (m x (T+1)), transpose to ((T+1) x m), then get last row
+            if not isinstance(zsmooth, torch.Tensor):
+                zsmooth = torch.tensor(zsmooth, dtype=torch.float32)
+            
+            zsmooth_T = zsmooth.T  # ((T+1) x m)
+            if zsmooth_T.ndim == 2 and zsmooth_T.shape[0] > 0:
+                return zsmooth_T[-1, :].cpu().numpy()
+            else:
+                _logger.warning(
+                    f"{self.__class__.__name__} update(): Invalid zsmooth shape {zsmooth_T.shape}, "
+                    "cannot extract last state"
+                )
+                return None
+                
+        except Exception as e:
+            _logger.warning(
+                f"{self.__class__.__name__} update(): Failed to update factor state: {e}"
+            )
+            return None
     
     @property
     def result(self) -> BaseResult:
@@ -576,149 +590,78 @@ class BaseFactorModel(pl.LightningModule):
         """
         pass
     
-    def nowcast(
+    def update(
         self,
-        target_series: str,
-        view_date: Optional[Union[datetime, str]] = None,
-        target_period: Optional[Union[datetime, str]] = None,
+        X_std: np.ndarray,
         *,
-        return_result: bool = False,
-        horizon: int = 1
-    ) -> Union[float, 'NowcastResult']:
-        """Calculate nowcast for target series.
+        kalman_filter: Optional[Any] = None
+    ) -> 'BaseFactorModel':
+        """Update factor state with standardized data.
         
-        This method performs nowcasting by:
-        1. Creating a data view with masking based on release dates
-        2. Re-running Kalman filter with masked data to update factor state
-        3. Calling predict() with the updated state
-        
-        This is equivalent to: masking → Kalman filter update → predict()
+        This method permanently updates the last factor state (result.Z[-1, :])
+        using the provided standardized data. Users should handle all preprocessing
+        (masking, imputation, standardization) before calling this method.
         
         Parameters
         ----------
-        target_series : str
-            Target series ID to nowcast
-        view_date : datetime or str, optional
-            Data view date (when data is available). If None, uses latest available.
-        target_period : datetime or str, optional
-            Target period for nowcast. If None, uses latest available period.
-        return_result : bool, default False
-            If True, returns NowcastResult with additional information.
-            If False, returns only the nowcast value (float).
-        horizon : int, default 1
-            Forecast horizon. For nowcasting, typically 1 (current period).
+        X_std : np.ndarray
+            Standardized data array (T x N), where T is number of time periods
+            and N is number of series. Data should already be standardized using
+            result.Mx and result.Wx.
+        kalman_filter : Any, optional
+            Kalman filter instance. If None, uses default or model's kalman filter.
             
         Returns
         -------
-        float or NowcastResult
-            Nowcast value if return_result=False, or NowcastResult if return_result=True
+        BaseFactorModel
+            Self for method chaining
             
         Examples
         --------
-        >>> model = DFM()
-        >>> trainer.fit(model, data_module)
-        >>> # Simple nowcast
-        >>> value = model.nowcast('gdp', view_date='2024-01-15', target_period='2024Q1')
-        >>> # With full result
-        >>> result = model.nowcast('gdp', view_date='2024-01-15', return_result=True)
+        >>> # Update state with new data, then predict
+        >>> model.update(X_std).predict(horizon=1)
+        >>> # Or update and predict separately
+        >>> model.update(X_std)
+        >>> forecast = model.predict(horizon=6)
         """
         self._check_trained()
         
-        # Get DataModule
-        data_module = self._get_datamodule()
-        raw_data = data_module.data
-        time_index = data_module.time_index
+        result = self.result  # Use property which ensures non-None after _check_trained()
         
-        # Convert to numpy
-        X = raw_data.to_numpy() if hasattr(raw_data, 'to_numpy') else np.asarray(raw_data)
+        # Validate input shape
+        if not isinstance(X_std, np.ndarray):
+            X_std = np.asarray(X_std)
+        if X_std.ndim != 2:
+            raise ValueError(
+                f"{self.__class__.__name__} update(): X_std must be 2D array (T x N), "
+                f"got shape {X_std.shape}"
+            )
         
-        # Parse view_date
-        if view_date is None:
-            view_date_dt = get_latest_time(time_index)
-        elif isinstance(view_date, str):
-            view_date_dt = parse_timestamp(view_date)
-        else:
-            view_date_dt = view_date
+        # Handle NaN/Inf values
+        X_std = np.where(np.isfinite(X_std), X_std, np.nan)
         
-        # Create data view with masking
-        X_view, Time_view, _ = create_data_view(
-            X=X,
-            Time=time_index,
-            Z=None,
-            config=self.config,
-            view_date=view_date_dt,
-            X_frame=raw_data if isinstance(raw_data, pd.DataFrame) else None
-        )
-        
-        # Standardize masked data
-        result = self._result
-        X_view_std = self._standardize_data(X_view, result.Mx, result.Wx)
-        X_view_std = np.where(np.isfinite(X_view_std), X_view_std, np.nan)
-        
-        # Update factor state using masked data (model-specific)
+        # Update factor state (model-specific)
         if hasattr(self, 'encoder') and self.encoder is not None:
             # DDFM: Extract factors via encoder, then use Kalman filter
-            Z_last_updated = self._update_factor_state_ddfm(X_view_std, result, None)
+            Z_last_updated = self._update_factor_state_ddfm(
+                X_std, result, kalman_filter
+            )
         else:
             # DFM: Use Kalman filter directly on standardized data
             Z_last_updated = self._update_factor_state_dfm(
-                X_view_std, result, getattr(self, 'kalman', None)
+                X_std, result, kalman_filter or getattr(self, 'kalman', None)
             )
         
-        if Z_last_updated is None:
-            Z_last_updated = result.Z[-1, :]
+        # Update result.Z[-1, :] permanently
+        if Z_last_updated is not None:
+            result.Z[-1, :] = Z_last_updated
+        else:
             _logger.warning(
-                f"{self.__class__.__name__} nowcast(): Failed to update factor state, "
-                f"using training state instead"
+                f"{self.__class__.__name__} update(): Failed to update factor state, "
+                f"keeping current state"
             )
         
-        # Temporarily update result.Z[-1, :] with updated state
-        original_Z_last = result.Z[-1, :].copy()
-        result.Z[-1, :] = Z_last_updated
-        
-        try:
-            # Call predict() with updated state
-            X_forecast = self.predict(horizon=horizon, return_series=True, return_factors=False)
-            
-            # Extract nowcast value for target series
-            series_ids = [s.series_id for s in self.config.series if s.series_id]
-            try:
-                target_idx = series_ids.index(target_series)
-            except ValueError:
-                available = ', '.join(str(sid) for sid in series_ids[:5])
-                raise ValueError(
-                    f"{self.__class__.__name__} nowcast failed: target_series '{target_series}' not found. "
-                    f"Available: {available}..."
-                )
-            
-            # Get nowcast value (first period of forecast)
-            if isinstance(X_forecast, np.ndarray):
-                nowcast_value = float(X_forecast[0, target_idx])
-            else:
-                nowcast_value = float(X_forecast[0][target_idx])
-            
-            if return_result:
-                # Calculate data availability
-                data_availability = {
-                    'n_available': int(np.sum(np.isfinite(X_view))),
-                    'n_missing': int(np.sum(np.isnan(X_view)))
-                }
-                
-                # Create NowcastResult using utility function
-                return create_nowcast_result(
-                    target_series=target_series,
-                    target_period=target_period,
-                    view_date=view_date_dt,
-                    nowcast_value=nowcast_value,
-                    factors_at_view=Z_last_updated,
-                    data_availability=data_availability,
-                    dfm_result=result
-                )
-            else:
-                return nowcast_value
-        finally:
-            # Restore original state
-            result.Z[-1, :] = original_Z_last
+        return self
     
     def get_result(self) -> BaseResult:
         """Extract result from trained model.

@@ -534,6 +534,8 @@ def _safe_divide(numerator: np.ndarray, denominator: np.ndarray, default: float 
 def estimate_var1(factors: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """Estimate VAR(1) dynamics for factors.
     
+    Note: Maximum supported VAR order is VAR(2). Use estimate_var2() for VAR(2) estimation.
+    
     Parameters
     ----------
     factors : np.ndarray
@@ -590,6 +592,8 @@ def estimate_var1(factors: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
 
 def estimate_var2(factors: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """Estimate VAR(2) dynamics for factors.
+    
+    Note: VAR(2) is the maximum supported VAR order in this implementation.
     
     Parameters
     ----------
@@ -956,8 +960,8 @@ def estimate_state_space_params(
         A2 = None
     else:
         raise NotImplementedError(
-            f"Only VAR(1) or VAR(2) for common factors are supported. "
-            f"Got factor_order={factor_order}"
+            f"Only VAR(1) or VAR(2) for common factors are supported (maximum supported order is VAR(2)). "
+            f"Got factor_order={factor_order}. Please use factor_order=1 (VAR(1)) or factor_order=2 (VAR(2))"
         )
     
     # Estimate idiosyncratic AR(1) dynamics

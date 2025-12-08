@@ -5,16 +5,12 @@ organization and maintainability.
 """
 
 import logging
-from typing import Tuple, Optional, Union, Any, Dict
-from datetime import datetime
+from typing import Tuple, Optional
 import numpy as np
 import torch
-import pandas as pd
 
 from ..logger import get_logger
 from ..utils.statespace import estimate_var1, estimate_var2
-from ..utils.time import parse_timestamp
-from ..config.results import NowcastResult
 
 _logger = get_logger(__name__)
 
@@ -32,7 +28,7 @@ def estimate_var_ddfm(
         Factors array (T x m), where T is number of time periods and m is number of factors.
         Must be 2D array with at least 2 observations.
     factor_order : int
-        VAR order, must be 1 or 2.
+        VAR order. Must be 1 or 2 (maximum supported order is VAR(2)).
     num_factors : int, optional
         Number of factors. Used for fallback when factors shape is invalid.
         If None, inferred from factors.shape[1].
@@ -49,7 +45,7 @@ def estimate_var_ddfm(
     Raises
     ------
     ValueError
-        If factor_order is not 1 or 2.
+        If factor_order is not 1 or 2 (maximum supported order is VAR(2)).
     """
     # Validate factors shape - check for 0-dimensional array first
     factors = np.asarray(factors)
@@ -113,7 +109,10 @@ def estimate_var_ddfm(
         elif factor_order == 2:
             A_f, Q_f = estimate_var2(factors)
         else:
-            raise ValueError(f"DDFM VAR estimation failed: factor_order must be 1 or 2, got {factor_order}. Please set factor_order to 1 (VAR(1)) or 2 (VAR(2))")
+            raise ValueError(
+                f"DDFM VAR estimation failed: factor_order must be 1 or 2, got {factor_order}. "
+                f"Maximum supported VAR order is VAR(2). Please set factor_order to 1 (VAR(1)) or 2 (VAR(2))"
+            )
         
         # Validate Q_f shape
         if Q_f.ndim == 0:
@@ -307,7 +306,7 @@ def validate_training_data_ddfm(
     num_factors : int
         Number of factors to extract
     factor_order : int
-        VAR order for factor dynamics (1 or 2)
+        VAR order for factor dynamics. Must be 1 or 2 (maximum supported order is VAR(2))
     encoder_layers : list
         Encoder hidden layer dimensions
     encoder : torch.nn.Module, optional
@@ -407,61 +406,65 @@ def validate_training_data_ddfm(
         )
 
 
-# ============================================================================
-# Nowcast utility functions
-# ============================================================================
-
-def create_nowcast_result(
-    target_series: str,
-    target_period: Optional[Union[datetime, str]],
-    view_date: datetime,
-    nowcast_value: float,
-    factors_at_view: Optional[np.ndarray] = None,
-    data_availability: Optional[Dict[str, int]] = None,
-    dfm_result: Optional[Any] = None,
-    confidence_interval: Optional[Tuple[float, float]] = None
-) -> NowcastResult:
-    """Create NowcastResult object.
+def forecast_var_factors(
+    Z_last: np.ndarray,
+    A: np.ndarray,
+    p: int,
+    horizon: int,
+    Z_prev: Optional[np.ndarray] = None
+) -> np.ndarray:
+    """Forecast factors using VAR dynamics (standalone function).
+    
+    Supports VAR(1) and VAR(2) factor dynamics (maximum supported order is VAR(2)). 
+    This is a module-level function that can be used by classes that don't inherit from BaseFactorModel.
     
     Parameters
     ----------
-    target_series : str
-        Target series ID that was nowcasted
-    target_period : datetime or str, optional
-        Target period for the nowcast. If None, uses view_date.
-    view_date : datetime
-        View date (when data is available)
-    nowcast_value : float
-        The calculated nowcast value
-    factors_at_view : np.ndarray, optional
-        Factor values at the view_date (m,)
-    data_availability : Dict[str, int], optional
-        Dictionary with 'n_available' and 'n_missing' keys
-    dfm_result : BaseResult, optional
-        Full DFM/DDFM result for this view
-    confidence_interval : Tuple[float, float], optional
-        Confidence interval (lower, upper) for the nowcast
+    Z_last : np.ndarray
+        Last factor state (m,)
+    A : np.ndarray
+        Transition matrix. For VAR(1): (m x m), for VAR(2): (m x 2m)
+    p : int
+        VAR order. Must be 1 or 2 (maximum supported order is VAR(2))
+    horizon : int
+        Number of periods to forecast
+    Z_prev : np.ndarray, optional
+        Previous factor state for VAR(2) (m,). Required if p == 2.
         
     Returns
     -------
-    NowcastResult
-        NowcastResult object with all provided information
+    np.ndarray
+        Forecasted factors (horizon x m)
     """
-    # Parse target_period
-    if target_period is None:
-        target_period_dt = view_date
-    elif isinstance(target_period, datetime):
-        target_period_dt = target_period
+    if p == 1:
+        # VAR(1): f_t = A @ f_{t-1}
+        Z_forecast = np.zeros((horizon, Z_last.shape[0]))
+        Z_forecast[0, :] = A @ Z_last
+        for h in range(1, horizon):
+            Z_forecast[h, :] = A @ Z_forecast[h - 1, :]
+    elif p == 2:
+        # VAR(2): f_t = A1 @ f_{t-1} + A2 @ f_{t-2}
+        if Z_prev is None:
+            # Fallback to VAR(1) if not enough history
+            A1 = A[:, :Z_last.shape[0]]
+            Z_forecast = np.zeros((horizon, Z_last.shape[0]))
+            Z_forecast[0, :] = A1 @ Z_last
+            for h in range(1, horizon):
+                Z_forecast[h, :] = A1 @ Z_forecast[h - 1, :]
+        else:
+            A1 = A[:, :Z_last.shape[0]]
+            A2 = A[:, Z_last.shape[0]:]
+            Z_forecast = np.zeros((horizon, Z_last.shape[0]))
+            Z_forecast[0, :] = A1 @ Z_last + A2 @ Z_prev
+            if horizon > 1:
+                Z_forecast[1, :] = A1 @ Z_forecast[0, :] + A2 @ Z_last
+            for h in range(2, horizon):
+                Z_forecast[h, :] = A1 @ Z_forecast[h - 1, :] + A2 @ Z_forecast[h - 2, :]
     else:
-        target_period_dt = parse_timestamp(str(target_period))
-    
-    return NowcastResult(
-        target_series=target_series,
-        target_period=target_period_dt,
-        view_date=view_date,
-        nowcast_value=nowcast_value,
-        factors_at_view=factors_at_view,
-        data_availability=data_availability,
-        dfm_result=dfm_result,
-        confidence_interval=confidence_interval
-    )
+        raise ValueError(
+            f"VAR forecasting failed: unsupported VAR order {p}. "
+            f"Maximum supported VAR order is VAR(2). Please use p=1 (VAR(1)) or p=2 (VAR(2))"
+        )
+    return Z_forecast
+
+

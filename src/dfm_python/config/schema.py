@@ -398,6 +398,11 @@ class BaseModelConfig:
                     f"Block '{block_name}' validation failed: AR lag must be at least 1, got {ar_lag}. "
                     f"Please set ar_lag >= 1 for block '{block_name}'."
                 )
+            if ar_lag > 2:
+                raise ValueError(
+                    f"Block '{block_name}' validation failed: AR lag must be at most 2 (maximum supported VAR order is VAR(2)), got {ar_lag}. "
+                    f"Please set ar_lag to 1 (VAR(1)) or 2 (VAR(2)) for block '{block_name}'."
+                )
         
         # Auto-generate series_id if not provided and convert blocks to indices
         n_blocks = len(self.block_names)
@@ -608,7 +613,7 @@ class DFMConfig(BaseModelConfig):
     # ========================================================================
     # EM Algorithm Parameters (HOW - controls the algorithm)
     # ========================================================================
-    ar_lag: int = 1  # Number of lags in AR transition equation (lookback window)
+    ar_lag: int = 1  # Number of lags in AR transition equation (lookback window). Must be 1 or 2 (maximum supported order is VAR(2))
     threshold: float = 1e-5  # EM convergence threshold
     max_iter: int = 5000  # Maximum EM iterations
     
@@ -717,7 +722,7 @@ class DDFMConfig(BaseModelConfig):
     learning_rate: float = 0.001  # Learning rate for Adam optimizer (default: 0.001)
     epochs: int = 100  # Number of training epochs (default: 100)
     batch_size: int = 100  # Batch size for training (default: 100 to match original DDFM)
-    factor_order: int = 1  # VAR lag order for factor dynamics (1 or 2, default: 1)
+    factor_order: int = 1  # VAR lag order for factor dynamics. Must be 1 or 2 (maximum supported order is VAR(2), default: 1)
     use_idiosyncratic: bool = True  # Model idio components with AR(1) dynamics (default: True)
     min_obs_idio: int = 5  # Minimum observations for idio AR(1) estimation (default: 5)
     
