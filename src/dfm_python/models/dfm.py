@@ -89,6 +89,7 @@ class DFM(BaseFactorModel):
         max_iter: int = 100,
         nan_method: int = 2,
         nan_k: int = 3,
+        tent_weights_dict: Optional[dict] = None,
         **kwargs
     ):
         """Initialize DFM instance.
@@ -119,6 +120,8 @@ class DFM(BaseFactorModel):
         self.max_iter = max_iter
         self.nan_method = nan_method
         self.nan_k = nan_k
+        # Optional tent weights to control aggregation (e.g., disable tent by passing {'q':[1.0]})
+        self.tent_weights_dict = tent_weights_dict
         
         # Determine number of factors
         if num_factors is None:
@@ -200,7 +203,7 @@ class DFM(BaseFactorModel):
             nQ=0,
             i_idio=None,
             clock=getattr(self.config, 'clock', 'm'),
-            tent_weights_dict=None,
+            tent_weights_dict=self.tent_weights_dict,
             frequencies=None,
             idio_chain_lengths=None,
             config=self.config
@@ -280,7 +283,7 @@ class DFM(BaseFactorModel):
             nQ=0,
             i_idio=torch.ones(y.shape[0], device=y.device, dtype=y.dtype),
             blocks=self.blocks.to(y.device),
-            tent_weights_dict={},
+            tent_weights_dict=self.tent_weights_dict,
             clock=getattr(self.config, 'clock', 'm'),
             frequencies=None,
             idio_chain_lengths=torch.zeros(y.shape[0], device=y.device, dtype=y.dtype),
@@ -832,6 +835,21 @@ class DFM(BaseFactorModel):
                             f"(max deviation: {max_deviation:.1f} std devs). "
                             f"Possible numerical instability."
                         )
+        
+        # Convert to numpy (handles torch inputs) and attempt scaler inverse_transform if available
+        X_forecast = np.asarray(
+            X_forecast.detach().cpu().numpy() if hasattr(X_forecast, "detach") else X_forecast
+        )
+        scaler = getattr(self, "scaler", None)
+        if scaler is not None and hasattr(scaler, "inverse_transform"):
+            try:
+                X_forecast = scaler.inverse_transform(X_forecast)
+            except Exception as e:
+                _logger.warning(
+                    f"DFM prediction: scaler.inverse_transform failed, returning unstandardized values. "
+                    f"error={e}"
+                )
+        
         if return_factors and np.any(~np.isfinite(Z_forecast)):
             nan_count = np.sum(~np.isfinite(Z_forecast))
             raise ValueError(
@@ -851,7 +869,8 @@ class DFM(BaseFactorModel):
         X_std: np.ndarray,
         *,
         history: Optional[int] = None,
-        kalman_filter: Optional[Any] = None
+        kalman_filter: Optional[Any] = None,
+        scaler: Optional[Any] = None
     ) -> 'DFM':
         """Update factor state with standardized data.
         
@@ -887,6 +906,10 @@ class DFM(BaseFactorModel):
         >>> forecast = model.predict(horizon=6)
         """
         self._check_trained()
+        
+        # Optionally replace scaler (e.g., if refit on new regime)
+        if scaler is not None:
+            self.scaler = scaler
         
         result = self.result  # Use property which ensures non-None after _check_trained()
         

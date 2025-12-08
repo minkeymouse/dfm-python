@@ -596,7 +596,8 @@ class BaseFactorModel(pl.LightningModule):
         X_std: np.ndarray,
         *,
         history: Optional[int] = None,
-        kalman_filter: Optional[Any] = None
+        kalman_filter: Optional[Any] = None,
+        scaler: Optional[Any] = None
     ) -> 'BaseFactorModel':
         """Update factor state with standardized data.
         
@@ -617,6 +618,9 @@ class BaseFactorModel(pl.LightningModule):
             full training data, but the update uses only recent history for efficiency.
         kalman_filter : Any, optional
             Kalman filter instance. If None, uses default or model's kalman filter.
+        scaler : Any, optional
+            If provided, attach/replace the model's scaler (e.g., refit on new regime).
+            When None, keep the existing scaler from training.
             
         Returns
         -------

@@ -1388,6 +1388,20 @@ class DDFM(BaseFactorModel):
             Mx=Mx
         )
         
+        # Convert to numpy (handles torch inputs) and attempt scaler inverse_transform if available
+        X_forecast = np.asarray(
+            X_forecast.detach().cpu().numpy() if hasattr(X_forecast, "detach") else X_forecast
+        )
+        scaler = getattr(self, "scaler", None)
+        if scaler is not None and hasattr(scaler, "inverse_transform"):
+            try:
+                X_forecast = scaler.inverse_transform(X_forecast)
+            except Exception as e:
+                _logger.warning(
+                    f"DDFM prediction: scaler.inverse_transform failed, returning unstandardized values. "
+                    f"error={e}"
+                )
+        
         if return_series and return_factors:
             return X_forecast, Z_forecast
         if return_series:
@@ -1399,7 +1413,8 @@ class DDFM(BaseFactorModel):
         X_std: np.ndarray,
         *,
         history: Optional[int] = None,
-        kalman_filter: Optional[Any] = None
+        kalman_filter: Optional[Any] = None,
+        scaler: Optional[Any] = None
     ) -> 'DDFM':
         """Update factor state with standardized data.
         
@@ -1435,6 +1450,10 @@ class DDFM(BaseFactorModel):
         >>> forecast = model.predict(horizon=6)
         """
         self._check_trained()
+        
+        # Optionally replace scaler (e.g., if refit on new regime)
+        if scaler is not None:
+            self.scaler = scaler
         
         result = self.result  # Use property which ensures non-None after _check_trained()
         

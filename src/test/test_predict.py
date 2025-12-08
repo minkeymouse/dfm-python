@@ -100,7 +100,7 @@ class TestPredictHistory:
         
         # Get series from config
         series_ids = [s.series_id for s in config.series]
-        data_cols = [col for col in df.columns if col != "date" and col in series_ids]
+        data_cols = [str(col) for col in df.columns if col != "date" and col in series_ids]
         
         if len(data_cols) == 0:
             pytest.skip("No matching series found in data")
@@ -319,4 +319,47 @@ class TestPredictReturnValues:
         # Without training, should raise error
         with pytest.raises(ValueError):
             model.predict(horizon=1, return_series=True, return_factors=True)
+
+    def test_predict_inverse_transform_applied(self):
+        """Ensure predict() applies scaler.inverse_transform to outputs."""
+        import types
+        import torch
+        from typing import Any, cast
+
+        class DummyScaler:
+            def inverse_transform(self, X):
+                return X + 5.0
+
+        class SimpleResult:
+            def __init__(self):
+                # Two time steps, one factor
+                self.Z = np.array([[0.0], [0.0]])
+                # Identity loadings for two series
+                self.C = np.array([[1.0], [1.0]])
+                # One-step VAR(1)
+                self.A = np.array([[0.0]])
+                self.Wx = np.array([1.0, 1.0])
+                self.Mx = np.array([0.0, 0.0])
+                self.p = 1
+
+        model = DFM()
+        # Minimal non-None training_state to pass checks
+        model.training_state = types.SimpleNamespace(
+            A=torch.zeros((1, 1)),
+            C=torch.zeros((2, 1)),
+            Q=torch.zeros((1, 1)),
+            R=torch.zeros((2, 2)),
+            Z_0=torch.zeros((1,)),
+            V_0=torch.zeros((1, 1)),
+            loglik=0.0,
+            num_iter=1,
+            converged=True
+        )
+        model._result = cast(Any, SimpleResult())
+        object.__setattr__(model, "scaler", DummyScaler())
+
+        forecast = model.predict(horizon=1, return_series=True, return_factors=False)
+        assert isinstance(forecast, np.ndarray)
+        assert forecast.shape == (1, 2)
+        assert np.allclose(forecast, np.full((1, 2), 5.0))
 

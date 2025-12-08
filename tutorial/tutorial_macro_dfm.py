@@ -124,12 +124,21 @@ preprocessing_pipeline = TransformerPipeline(
     ]
 )
 
+def _get_fitted_scaler(pipeline, data_frame):
+    """Extract fitted scaler; if not fitted, fit it on provided data."""
+    steps_attr = getattr(pipeline, "steps_", None)
+    candidate = (steps_attr or pipeline.steps)[-1][1]
+    if not hasattr(candidate, "n_features_in_"):
+        candidate = candidate.fit(data_frame)
+    return candidate
+
 print("   Pipeline: Imputer(ffill) → Imputer(bfill) → StandardScaler")
 print(f"   Transformations: {target_col} uses difference (chg), others use linear")
 print("   Applying preprocessing pipeline...")
 
-# Apply preprocessing
-df_preprocessed = preprocessing_pipeline.fit_transform(df_processed)
+# Fit preprocessing pipeline on training data once
+fitted_pipeline = preprocessing_pipeline.clone().fit(df_processed)
+df_preprocessed = fitted_pipeline.transform(df_processed)
 
 # Ensure output is DataFrame
 if isinstance(df_preprocessed, np.ndarray):
@@ -251,6 +260,7 @@ X_forecast = None
 Z_forecast = None
 X_forecast_history = None
 Z_forecast_history = None
+scaler = _get_fitted_scaler(fitted_pipeline, df_processed)
 
 try:
     # Predict with default horizon
@@ -263,11 +273,25 @@ try:
     target_idx = selected_cols.index(target_col)
     print(f"   First forecast value (target {target_col}): {X_forecast[0, target_idx]:.6f}")
     
+    # Verify inverse-transform consistency (round-trip through scaler)
+    try:
+        restored = scaler.inverse_transform(scaler.transform(X_forecast))
+        assert np.allclose(restored, X_forecast, atol=1e-6)
+        print("   ✔ Inverse-transform check passed (predict)")
+    except Exception as inv_err:
+        print(f"   ⚠ Inverse-transform check failed (predict): {inv_err}")
+    
     # Predict with history parameter (using recent 60 periods)
     X_forecast_history, Z_forecast_history = model.predict(horizon=6, history=60)
     
     print(f"   Forecast with history shape: {X_forecast_history.shape}")
     print(f"   First forecast with history (target): {X_forecast_history[0, target_idx]:.6f}")
+    try:
+        restored_hist = scaler.inverse_transform(scaler.transform(X_forecast_history))
+        assert np.allclose(restored_hist, X_forecast_history, atol=1e-6)
+        print("   ✔ Inverse-transform check passed (predict with history)")
+    except Exception as inv_err:
+        print(f"   ⚠ Inverse-transform check failed (history): {inv_err}")
     
 except ValueError as e:
     print(f"   Prediction failed: {e}")
@@ -292,9 +316,14 @@ try:
     n_new_periods = 5
     X_new_raw = df_processed.iloc[-n_new_periods:].values
     
-    # Standardize new data using the same parameters from training
-    # Standardization: (X - Mx) / Wx
-    X_new_std = (X_new_raw - Mx) / Wx
+    # Option 1: Update scaler with new data (fit_transform on update batch)
+    update_pipeline = preprocessing_pipeline.clone().fit(
+        pd.DataFrame(X_new_raw, columns=df_processed.columns, index=df_processed.index[-n_new_periods:])
+    )
+    X_new_std = update_pipeline.transform(
+        pd.DataFrame(X_new_raw, columns=df_processed.columns, index=df_processed.index[-n_new_periods:])
+    )
+    update_scaler = _get_fitted_scaler(update_pipeline, pd.DataFrame(X_new_raw, columns=df_processed.columns))
     
     # Handle any NaN values (missing data in new observations)
     X_new_std = np.where(np.isfinite(X_new_std), X_new_std, np.nan)
@@ -312,12 +341,36 @@ try:
     
     print(f"   Nowcast value for {target_col}: {nowcast_value:.6f}")
     print(f"   Nowcast uses VAR(1) factor dynamics")
+    try:
+        restored_now = scaler.inverse_transform(scaler.transform(X_nowcast))
+        assert np.allclose(restored_now, X_nowcast, atol=1e-6)
+        print("   ✔ Inverse-transform check passed (nowcast, training scaler)")
+    except Exception as inv_err:
+        print(f"   ⚠ Inverse-transform check failed (nowcast): {inv_err}")
+    try:
+        restored_now_upd = update_scaler.inverse_transform(update_scaler.transform(X_nowcast))
+        assert np.allclose(restored_now_upd, X_nowcast, atol=1e-6)
+        print("   ✔ Inverse-transform check passed (nowcast, update scaler)")
+    except Exception as inv_err:
+        print(f"   ⚠ Inverse-transform check failed (nowcast, update scaler): {inv_err}")
     
     # Alternative: Update and predict separately
     model.update(X_new_std)
     X_nowcast2, Z_nowcast2 = model.predict(horizon=1)
     nowcast_value2 = X_nowcast2[0, target_idx]
     print(f"   Alternative pattern (separate calls): {nowcast_value2:.6f}")
+    try:
+        restored_now2 = scaler.inverse_transform(scaler.transform(X_nowcast2))
+        assert np.allclose(restored_now2, X_nowcast2, atol=1e-6)
+        print("   ✔ Inverse-transform check passed (nowcast alt, training scaler)")
+    except Exception as inv_err:
+        print(f"   ⚠ Inverse-transform check failed (nowcast alt): {inv_err}")
+    try:
+        restored_now2_upd = update_scaler.inverse_transform(update_scaler.transform(X_nowcast2))
+        assert np.allclose(restored_now2_upd, X_nowcast2, atol=1e-6)
+        print("   ✔ Inverse-transform check passed (nowcast alt, update scaler)")
+    except Exception as inv_err:
+        print(f"   ⚠ Inverse-transform check failed (nowcast alt, update scaler): {inv_err}")
     
 except (ValueError, AttributeError, IndexError) as e:
     print(f"   Nowcasting failed: {e}")

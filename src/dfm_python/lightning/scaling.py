@@ -124,7 +124,10 @@ class NoScalingStrategy:
 # Scaler Factory
 # ============================================================================
 
-def _create_scaler_transformer(scaler_type: Optional[str]) -> Any:
+def _create_scaler_transformer(
+    scaler_type: Optional[str],
+    use_robust_as_default: bool = False
+) -> Any:
     """Create a raw sklearn scaler for unified scaling.
     
     Returns a raw sklearn scaler that can be used directly in TransformerPipeline.
@@ -160,10 +163,13 @@ def _create_scaler_transformer(scaler_type: Optional[str]) -> Any:
     )
     
     if scaler_type is None or scaler_type == 'none':
-        # Passthrough: no scaling
-        return FunctionTransformer(func=lambda x: x, inverse_func=lambda x: x)
-    
-    scaler_type_lower = scaler_type.lower()
+        if use_robust_as_default:
+            scaler_type_lower = 'robust'
+        else:
+            # Passthrough: no scaling
+            return FunctionTransformer(func=lambda x: x, inverse_func=lambda x: x)
+    else:
+        scaler_type_lower = scaler_type.lower()
     
     if scaler_type_lower == 'standard':
         return StandardScaler()

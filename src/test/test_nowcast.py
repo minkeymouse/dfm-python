@@ -224,6 +224,54 @@ class TestNowcast:
         assert result.nowcast_value == 2.5
         assert result.confidence_interval == (2.0, 3.0)
 
+    def test_nowcast_predict_inverse_transform_applied(self):
+        """Ensure predict() output is inverse-transformed after an update-style call."""
+        import types
+        import torch
+        from typing import Any, cast
+        from dfm_python.models import DFM
+
+        class DummyScaler:
+            def inverse_transform(self, X):
+                return X + 7.0
+
+        class SimpleResult:
+            def __init__(self):
+                # Two time steps, one factor
+                self.Z = np.array([[0.0], [0.0]])
+                # Identity loadings for two series
+                self.C = np.array([[1.0], [1.0]])
+                # One-step VAR(1)
+                self.A = np.array([[0.0]])
+                self.Wx = np.array([1.0, 1.0])
+                self.Mx = np.array([0.0, 0.0])
+                self.p = 1
+
+        model = DFM()
+        # Minimal non-None training_state to pass checks
+        model.training_state = types.SimpleNamespace(
+            A=torch.zeros((1, 1)),
+            C=torch.zeros((2, 1)),
+            Q=torch.zeros((1, 1)),
+            R=torch.zeros((2, 2)),
+            Z_0=torch.zeros((1,)),
+            V_0=torch.zeros((1, 1)),
+            loglik=0.0,
+            num_iter=1,
+            converged=True
+        )
+        model._result = cast(Any, SimpleResult())
+        object.__setattr__(model, "scaler", DummyScaler())
+
+        # Simulate update-before-predict flow
+        model.update = types.MethodType(lambda self, X_std, **kwargs: self, model)
+        model.update(np.zeros((1, 2)))
+
+        forecast = model.predict(horizon=1, return_series=True, return_factors=False)
+        assert isinstance(forecast, np.ndarray)
+        assert forecast.shape == (1, 2)
+        assert np.allclose(forecast, np.full((1, 2), 7.0))
+
 
 class TestNewsDecomposition:
     """Test news decomposition framework."""
