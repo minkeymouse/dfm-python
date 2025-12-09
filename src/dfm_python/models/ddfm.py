@@ -308,6 +308,10 @@ class DDFM(BaseFactorModel):
         decay_learning_rate: bool = True,
         min_obs_pretrain: int = 50,
         mult_epoch_pretrain: int = 1,
+        loss_function: str = 'mse',
+        huber_delta: float = 1.0,
+        weight_decay: float = 0.0,
+        grad_clip_val: float = 1.0,
         **kwargs
     ):
         """Initialize DDFM instance.
@@ -349,6 +353,19 @@ class DDFM(BaseFactorModel):
         mult_epoch_pretrain : int, default 1
             Multiplier for number of epochs during pre-training
             Display progress every 'disp' iterations
+        loss_function : str, default 'mse'
+            Loss function for training ('mse', 'huber'). 
+            'mse': Mean squared error (default, matches original DDFM)
+            'huber': Huber loss (more robust to outliers)
+        huber_delta : float, default 1.0
+            Delta parameter for Huber loss (only used if loss_function='huber').
+            Controls the transition point between quadratic and linear regions.
+        weight_decay : float, default 0.0
+            Weight decay (L2 regularization) for optimizer. Helps prevent overfitting to linear features.
+            Recommended: 1e-5 to 1e-3 for deeper encoders or when encoder collapses to linear behavior.
+        grad_clip_val : float, default 1.0
+            Maximum gradient norm for gradient clipping. Prevents training instability.
+            Set to 0.0 to disable gradient clipping.
         seed : int, optional
             Random seed for reproducibility
         **kwargs
@@ -383,6 +400,22 @@ class DDFM(BaseFactorModel):
         self.decay_learning_rate = decay_learning_rate
         self.min_obs_pretrain = min_obs_pretrain
         self.mult_epoch_pretrain = mult_epoch_pretrain
+        self.loss_function = loss_function.lower()
+        self.huber_delta = huber_delta
+        self.weight_decay = weight_decay
+        self.grad_clip_val = grad_clip_val
+        
+        # Validate loss function
+        if self.loss_function not in ['mse', 'huber']:
+            raise ValueError(
+                f"DDFM initialization failed: loss_function must be 'mse' or 'huber', got '{loss_function}'"
+            )
+        
+        # Validate gradient clipping value
+        if self.grad_clip_val < 0.0:
+            raise ValueError(
+                f"DDFM initialization failed: grad_clip_val must be >= 0.0, got {grad_clip_val}"
+            )
         
         # Determine number of factors
         # DDFM does not use block structure - num_factors is specified directly
@@ -586,7 +619,9 @@ class DDFM(BaseFactorModel):
         
         # Clip input data to prevent extreme values that cause NaN
         # Clip to reasonable range: -10 to 10 standard deviations
-        data_clipped = torch.clamp(data, min=-10.0, max=10.0)
+        # For deeper networks, use slightly tighter clipping to improve stability
+        clip_range = 8.0 if len(self.encoder_layers) > 2 else 10.0
+        data_clipped = torch.clamp(data, min=-clip_range, max=clip_range)
         
         # Forward pass
         reconstructed = self.forward(data_clipped)
@@ -603,8 +638,23 @@ class DDFM(BaseFactorModel):
         # Compute loss with missing data masking
         mask = torch.isfinite(target)
         target_clean = torch.where(mask, target, torch.zeros_like(target))
-        squared_diff = (target_clean - reconstructed) ** 2
-        loss = torch.sum(squared_diff * mask) / (torch.sum(mask) + 1e-8)
+        
+        # Use specified loss function
+        if self.loss_function == 'huber':
+            # Huber loss: more robust to outliers
+            # L_delta(a) = 0.5 * a^2 if |a| <= delta, else delta * (|a| - 0.5 * delta)
+            diff = target_clean - reconstructed
+            abs_diff = torch.abs(diff)
+            huber_loss = torch.where(
+                abs_diff <= self.huber_delta,
+                0.5 * diff ** 2,
+                self.huber_delta * (abs_diff - 0.5 * self.huber_delta)
+            )
+            loss = torch.sum(huber_loss * mask) / (torch.sum(mask) + 1e-8)
+        else:
+            # MSE loss (default)
+            squared_diff = (target_clean - reconstructed) ** 2
+            loss = torch.sum(squared_diff * mask) / (torch.sum(mask) + 1e-8)
         
         # Handle NaN/Inf in loss
         if not torch.isfinite(loss):
@@ -613,6 +663,9 @@ class DDFM(BaseFactorModel):
         
         # Log metrics
         self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True)
+        
+        # Note: Gradient clipping is handled automatically by Lightning trainer if gradient_clip_val is set
+        # The grad_clip_val parameter is used in pre_train() and MCMC training for manual training loops
         
         return loss
     
@@ -697,7 +750,8 @@ class DDFM(BaseFactorModel):
         
         optimizer = torch.optim.Adam(
             list(self.encoder.parameters()) + list(self.decoder.parameters()),
-            lr=self.learning_rate
+            lr=self.learning_rate,
+            weight_decay=self.weight_decay
         )
         
         if self.decay_learning_rate:
@@ -750,7 +804,8 @@ class DDFM(BaseFactorModel):
         
         optimizer = torch.optim.Adam(
             list(self.encoder.parameters()) + list(self.decoder.parameters()),
-            lr=lr
+            lr=lr,
+            weight_decay=self.weight_decay
         )
         
         return optimizer
@@ -842,7 +897,8 @@ class DDFM(BaseFactorModel):
         # Create optimizer for pre-training
         optimizer = torch.optim.Adam(
             list(self.encoder.parameters()) + list(self.decoder.parameters()),
-            lr=self.learning_rate
+            lr=self.learning_rate,
+            weight_decay=self.weight_decay
         )
         
         # Pre-train for epochs * mult_epoch_pretrain
@@ -889,10 +945,11 @@ class DDFM(BaseFactorModel):
                 loss.backward()
                 
                 # Gradient clipping for stability
-                torch.nn.utils.clip_grad_norm_(
-                    list(self.encoder.parameters()) + list(self.decoder.parameters()),
-                    max_norm=1.0
-                )
+                if self.grad_clip_val > 0.0:
+                    torch.nn.utils.clip_grad_norm_(
+                        list(self.encoder.parameters()) + list(self.decoder.parameters()),
+                        max_norm=self.grad_clip_val
+                    )
                 
                 optimizer.step()
                 

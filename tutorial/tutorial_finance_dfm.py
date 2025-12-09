@@ -215,7 +215,10 @@ else:
 # ============================================================================
 print("\n[Step 5] Training DFM model...")
 
-model = DFM()
+# Create DFM model
+# Note: mixed_freq=False (default) since all series are monthly (unified frequency)
+# Set mixed_freq=True if you have mixed frequencies (e.g., quarterly + monthly)
+model = DFM(mixed_freq=False)
 model._config = config  # Set config directly
 
 trainer = DFMTrainer(max_epochs=1)  # Minimal epochs for faster execution

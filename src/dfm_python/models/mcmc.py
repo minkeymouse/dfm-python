@@ -347,10 +347,11 @@ class DDFMMCMCTrainer:
                     loss = torch.sum(squared_diff) / (torch.sum(mask) + 1e-8)
                     loss.backward()
                     # Gradient clipping to prevent NaN and improve stability
-                    torch.nn.utils.clip_grad_norm_(
-                        list(self.model.encoder.parameters()) + list(self.model.decoder.parameters()),
-                        max_norm=1.0
-                    )
+                    if self.model.grad_clip_val > 0.0:
+                        torch.nn.utils.clip_grad_norm_(
+                            list(self.model.encoder.parameters()) + list(self.model.decoder.parameters()),
+                            max_norm=self.model.grad_clip_val
+                        )
                     optimizer.step()
                 # Extract factors from this sample
                 x_sample_tensor = torch.tensor(x_sim_den[i, :, :], device=device, dtype=dtype)

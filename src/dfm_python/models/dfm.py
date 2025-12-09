@@ -23,10 +23,14 @@ from ..config import (
     MergedConfigSource,
 )
 from ..config.results import DFMResult, FitParams
+from ..config.utils import get_agg_structure, get_tent_weights, FREQUENCY_HIERARCHY, TENT_WEIGHTS_LOOKUP
 from ..logger import get_logger
 from ..ssm.em import EMAlgorithm, EMStepParams
 from ..ssm.kalman import KalmanFilter
 from .base import BaseFactorModel
+
+# Frequency to integer mapping for tensor conversion
+_FREQ_TO_INT = {'d': 1, 'w': 2, 'm': 3, 'q': 4, 'sa': 5, 'a': 6}
 
 if TYPE_CHECKING:
     from omegaconf import DictConfig
@@ -90,6 +94,7 @@ class DFM(BaseFactorModel):
         nan_method: int = 2,
         nan_k: int = 3,
         tent_weights_dict: Optional[dict] = None,
+        mixed_freq: bool = False,
         **kwargs
     ):
         """Initialize DFM instance.
@@ -108,6 +113,12 @@ class DFM(BaseFactorModel):
             Missing data handling method
         nan_k : int, default 3
             Spline interpolation order
+        tent_weights_dict : dict, optional
+            [DEPRECATED] Optional tent weights to control aggregation. Use `mixed_freq` parameter instead.
+            Kept for backward compatibility only.
+        mixed_freq : bool, default False
+            If True, use tent kernels for mixed-frequency data. If False, treat all series as clock frequency.
+            When True, raises ValueError if any frequency pair is not in TENT_WEIGHTS_LOOKUP.
         **kwargs
             Additional arguments passed to BaseFactorModel
         """
@@ -120,8 +131,20 @@ class DFM(BaseFactorModel):
         self.max_iter = max_iter
         self.nan_method = nan_method
         self.nan_k = nan_k
-        # Optional tent weights to control aggregation (e.g., disable tent by passing {'q':[1.0]})
-        self.tent_weights_dict = tent_weights_dict
+        self.mixed_freq = mixed_freq
+        
+        # Legacy tent_weights_dict parameter (deprecated - use mixed_freq instead)
+        # Only used when mixed_freq=False for backward compatibility
+        self._legacy_tent_weights_dict = tent_weights_dict
+        
+        # Mixed frequency parameters (set during initialize_from_data)
+        self._em_R_mat = None
+        self._em_q = None
+        self._em_nQ = 0
+        self._em_tent_weights_dict = None
+        self._em_frequencies = None
+        self._em_i_idio = None
+        self._em_idio_chain_lengths = None
         
         # Determine number of factors
         if num_factors is None:
@@ -181,6 +204,53 @@ class DFM(BaseFactorModel):
         # Parameters will be initialized during fit_em() or first training step
         pass
     
+    def _create_em_step_params(
+        self, 
+        y: torch.Tensor, 
+        device: torch.device, 
+        dtype: torch.dtype
+    ) -> EMStepParams:
+        """Create EM step parameters using stored mixed frequency parameters.
+        
+        Parameters
+        ----------
+        y : torch.Tensor
+            Data tensor (N x T)
+        device : torch.device
+            Device for tensors
+        dtype : torch.dtype
+            Data type for tensors
+            
+        Returns
+        -------
+        EMStepParams
+            EM step parameters
+        """
+        clock = getattr(self.config, 'clock', 'm')
+        N = y.shape[0]
+        
+        return EMStepParams(
+            y=y,
+            A=self.A,
+            C=self.C,
+            Q=self.Q,
+            R=self.R,
+            Z_0=self.Z_0,
+            V_0=self.V_0,
+            r=self.r.to(device),
+            p=self.p,
+            R_mat=self._em_R_mat,
+            q=self._em_q,
+            nQ=self._em_nQ,
+            i_idio=self._em_i_idio if self._em_i_idio is not None else torch.ones(N, device=device, dtype=dtype),
+            blocks=self.blocks.to(device),
+            tent_weights_dict=self._em_tent_weights_dict,
+            clock=clock,
+            frequencies=self._em_frequencies,
+            idio_chain_lengths=self._em_idio_chain_lengths if self._em_idio_chain_lengths is not None else torch.zeros(N, device=device, dtype=dtype),
+            config=self.config
+        )
+    
     def initialize_from_data(self, X: torch.Tensor) -> None:
         """Initialize parameters from data using PCA and OLS.
         
@@ -190,22 +260,100 @@ class DFM(BaseFactorModel):
             Standardized data (T x N)
         """
         opt_nan = {'method': self.nan_method, 'k': self.nan_k}
+        clock = getattr(self.config, 'clock', 'm')
         
-        # Use self.em.initialize_parameters() with direct tensor operations (no CPU transfers)
+        # Handle mixed_freq parameter
+        if self.mixed_freq:
+            # Use tent kernels for mixed-frequency data
+            agg_structure = get_agg_structure(self.config, clock=clock)
+            
+            # Validate that all required frequency pairs are in TENT_WEIGHTS_LOOKUP
+            frequencies_list = [s.frequency for s in self.config.series]
+            frequencies_set = set(frequencies_list)
+            clock_hierarchy = FREQUENCY_HIERARCHY.get(clock, 3)
+            
+            missing_pairs = []
+            for freq in frequencies_set:
+                freq_hierarchy = FREQUENCY_HIERARCHY.get(freq, 3)
+                if freq_hierarchy > clock_hierarchy:
+                    # This frequency is slower than clock, needs tent kernel
+                    tent_w = get_tent_weights(freq, clock)
+                    if tent_w is None:
+                        missing_pairs.append((freq, clock))
+            
+            if missing_pairs:
+                raise ValueError(
+                    f"mixed_freq=True but the following frequency pairs are not in TENT_WEIGHTS_LOOKUP: {missing_pairs}. "
+                    f"Available pairs: {list(TENT_WEIGHTS_LOOKUP.keys())}. "
+                    f"Either add the missing pairs to TENT_WEIGHTS_LOOKUP or set mixed_freq=False."
+                )
+            
+            # Convert tent_weights to torch tensors
+            tent_weights_dict = {k: torch.tensor(v, dtype=torch.float32, device=X.device) 
+                                for k, v in agg_structure['tent_weights'].items()}
+            
+            # Get R_mat and q from first structure (if any)
+            R_mat = None
+            q = None
+            if agg_structure['structures']:
+                first_structure = list(agg_structure['structures'].values())[0]
+                R_mat = torch.tensor(first_structure[0], dtype=torch.float32, device=X.device)
+                q = torch.tensor(first_structure[1], dtype=torch.float32, device=X.device)
+            
+            # Create frequencies array
+            frequencies_array = np.array(frequencies_list, dtype=object)
+            
+            # Count slower-frequency series
+            nQ = sum(1 for freq in frequencies_list 
+                    if FREQUENCY_HIERARCHY.get(freq, 3) > clock_hierarchy)
+            
+            # Compute i_idio (1 for clock frequency, 0 for slower frequencies)
+            i_idio = torch.tensor([1 if freq == clock else 0 for freq in frequencies_list], 
+                                 dtype=torch.float32, device=X.device)
+        else:
+            # Treat all series as clock frequency (unified frequency)
+            tent_weights_dict = self._legacy_tent_weights_dict
+            R_mat = None
+            q = None
+            frequencies_array = None
+            nQ = 0
+            i_idio = torch.ones(X.shape[1], dtype=torch.float32, device=X.device)
+        
+        # Convert frequencies to torch tensor
+        frequencies_tensor = None
+        if frequencies_array is not None:
+            frequencies_tensor = torch.tensor(
+                [_FREQ_TO_INT.get(f, 3) for f in frequencies_array], 
+                dtype=torch.int32, 
+                device=X.device
+            )
+        
+        # Store for reuse in EM steps
+        self._em_R_mat = R_mat
+        self._em_q = q
+        self._em_nQ = nQ
+        self._em_tent_weights_dict = tent_weights_dict
+        self._em_frequencies = frequencies_tensor
+        self._em_i_idio = i_idio
+        
+        # Idiosyncratic chain lengths (currently unused, set to zeros)
+        self._em_idio_chain_lengths = torch.zeros(X.shape[1], dtype=torch.int32, device=X.device)
+        
+        # Initialize parameters using EM algorithm
         A, C, Q, R, Z_0, V_0 = self.em.initialize_parameters(
             X,
             r=self.r.to(X.device),
             p=self.p,
             blocks=self.blocks.to(X.device),
             opt_nan=opt_nan,
-            R_mat=None,
-            q=None,
-            nQ=0,
-            i_idio=None,
-            clock=getattr(self.config, 'clock', 'm'),
-            tent_weights_dict=self.tent_weights_dict,
-            frequencies=None,
-            idio_chain_lengths=None,
+            R_mat=R_mat,
+            q=q,
+            nQ=nQ,
+            i_idio=i_idio,
+            clock=clock,
+            tent_weights_dict=tent_weights_dict,
+            frequencies=frequencies_tensor,
+            idio_chain_lengths=self._em_idio_chain_lengths,
             config=self.config
         )
         
@@ -267,28 +415,8 @@ class DFM(BaseFactorModel):
         # EM expects y as (N x T), but data is (T x N)
         y = data.T  # (N x T)
         
-        # Create EM step parameters
-        em_params = EMStepParams(
-            y=y,
-            A=self.A,
-            C=self.C,
-            Q=self.Q,
-            R=self.R,
-            Z_0=self.Z_0,
-            V_0=self.V_0,
-            r=self.r.to(y.device),
-            p=self.p,
-            R_mat=None,
-            q=None,
-            nQ=0,
-            i_idio=torch.ones(y.shape[0], device=y.device, dtype=y.dtype),
-            blocks=self.blocks.to(y.device),
-            tent_weights_dict=self.tent_weights_dict,
-            clock=getattr(self.config, 'clock', 'm'),
-            frequencies=None,
-            idio_chain_lengths=torch.zeros(y.shape[0], device=y.device, dtype=y.dtype),
-            config=self.config
-        )
+        # Create EM step parameters using stored mixed frequency parameters
+        em_params = self._create_em_step_params(y, y.device, y.dtype)
         
         # Perform EM step - use self.em(...) instead of em_step(...)
         C_new, R_new, A_new, Q_new, Z_0_new, V_0_new, loglik = self.em(em_params)
@@ -390,28 +518,8 @@ class DFM(BaseFactorModel):
         
         # EM loop
         while num_iter < self.max_iter and not converged:
-            # Create EM step parameters
-            em_params = EMStepParams(
-                y=y,
-                A=self.A,
-                C=self.C,
-                Q=self.Q,
-                R=self.R,
-                Z_0=self.Z_0,
-                V_0=self.V_0,
-                r=self.r.to(device),
-                p=self.p,
-                R_mat=None,
-                q=None,
-                nQ=0,
-                i_idio=torch.ones(y.shape[0], device=device, dtype=dtype),
-                blocks=self.blocks.to(device),
-                tent_weights_dict={},
-                clock=getattr(self.config, 'clock', 'm'),
-                frequencies=None,
-                idio_chain_lengths=torch.zeros(y.shape[0], device=device, dtype=dtype),
-                config=self.config
-            )
+            # Create EM step parameters using stored mixed frequency parameters
+            em_params = self._create_em_step_params(y, device, dtype)
             
             # Perform EM step - use self.em(...) instead of em_step(...)
             C_new, R_new, A_new, Q_new, Z_0_new, V_0_new, loglik = self.em(em_params)

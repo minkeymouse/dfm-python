@@ -82,13 +82,27 @@ if _has_torch:
             # Build layers
             prev_dim = input_dim
             for hidden_dim in hidden_dims:
-                self.layers.append(nn.Linear(prev_dim, hidden_dim))
+                layer = nn.Linear(prev_dim, hidden_dim)
+                # Initialize weights using Xavier/Kaiming initialization for better training stability
+                # Use Kaiming for ReLU, Xavier for tanh/sigmoid
+                if activation == 'relu':
+                    nn.init.kaiming_normal_(layer.weight, mode='fan_in', nonlinearity='relu')
+                else:
+                    nn.init.xavier_normal_(layer.weight, gain=1.0)
+                # Initialize bias to small values
+                if layer.bias is not None:
+                    nn.init.constant_(layer.bias, 0.0)
+                self.layers.append(layer)
                 if use_batch_norm:
                     self.batch_norms.append(nn.BatchNorm1d(hidden_dim))
                 prev_dim = hidden_dim
             
-            # Output layer (no activation, linear)
+            # Output layer (linear, no activation)
+            # Use smaller initialization for output layer to prevent large initial factors
             self.output_layer = nn.Linear(prev_dim, output_dim)
+            nn.init.xavier_normal_(self.output_layer.weight, gain=0.1)  # Smaller gain for output
+            if self.output_layer.bias is not None:
+                nn.init.constant_(self.output_layer.bias, 0.0)
         
         def forward(self, x: torch.Tensor) -> torch.Tensor:
             """Forward pass through encoder.

@@ -1,12 +1,12 @@
 [project]
 name = "dfm-python"
-version = "0.5.2"
+version = "0.5.3"
 description = "Dynamic Factor Model (DFM) estimation and nowcasting in Python"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [
-    {name = "DFM Python Contributors"}
+    {name = "Minkey Chang"}
 ]
 keywords = ["dfm", "dynamic-factor-model", "nowcasting", "forecasting", "time-series", "econometrics"]
 classifiers = [
