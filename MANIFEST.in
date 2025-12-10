@@ -1,12 +1,11 @@
-# Include only the DFM module (src/nowcasting)
+# Include only the DFM module (src/dfm_python)
 # Exclude all application-specific code (adapters, database, scripts, config, etc.)
 
 include README.md
-include LICENSE
 include pyproject.toml
 
-# Include only the nowcasting package
-recursive-include src/nowcasting *.py
+# Include only the dfm_python package
+recursive-include src/dfm_python *.py
 
 # Exclude application-specific directories
 prune adapters

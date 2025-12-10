@@ -65,6 +65,10 @@ all = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.metadata]
+# Prevent automatic license-file field addition
+allow-direct-references = false
+
 [tool.hatch.build.targets.wheel]
 # Include DFM module
 # All application-specific code (adapters, database, scripts, etc.) is automatically excluded
