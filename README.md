@@ -274,6 +274,95 @@ result.confidence_interval  # Confidence interval
 result.factors_at_view     # Factor state at view date
 ```
 
+## Mixed-Frequency Data Handling
+
+### Clock Frequency and Target Series
+
+The package supports mixed-frequency data where the **clock frequency** (the frequency at which factors evolve) can differ from the **target series frequency**. The clock must always be the **minimum frequency** among all series (i.e., the fastest frequency).
+
+### Supported Frequency Combinations
+
+| Frequencies | Clock | Target | Status | Description |
+|------------|-------|--------|--------|-------------|
+| `[d]` | `d` | `d` | ✅ | All daily series |
+| `[d, w]` | `d` | `d` | ✅ | Daily clock, weekly series (7-day uniform average) |
+| `[w, m]` | `w` | `m` | ✅ | Weekly clock, monthly series (4-week uniform average) |
+| `[m]` | `m` | `m` | ✅ | All monthly series |
+| `[m, q]` | `m` | `q` | ✅ | Monthly clock, quarterly series (5-month tent kernel) |
+
+### Weekly Clock with Monthly Series
+
+When `clock='w'` and target series is `frequency='m'`:
+
+**Data Structure:**
+- All data is organized at weekly frequency (T × N, where T is weekly time points)
+- Weekly series: Full weekly observations (week-over-week changes)
+- Monthly series: 3-4 NaN values per month, 1 observation per month (week-over-week changes)
+
+**Model Interpretation:**
+- **Weekly data**: Week-over-week changes (전월비 증감)
+- **Monthly data**: 4-week uniform average of weekly changes (주간 전월비 증감의 4주 평균)
+- **DFM factors**: Weekly frequency, week-over-week changes
+- **Monthly observation**: Connected to 4 weekly state variables via uniform weights `[1, 1, 1, 1]`
+
+**Tent Kernel:**
+```python
+('m', 'w'): np.array([1, 1, 1, 1])  # 4-week uniform average
+# Normalized: [0.25, 0.25, 0.25, 0.25]
+```
+
+**Prediction:**
+- `predict(horizon=4)` returns 4 weekly forecasts (clock frequency)
+- Monthly series predictions are also at weekly frequency
+- **To get monthly forecast**: Average the 4 weekly predictions for that month
+- The monthly prediction equals the average of 4 weekly factors (due to uniform average constraint)
+
+**Mathematical Relationship:**
+```
+Monthly observation = c × (f_t + f_{t-1} + f_{t-2} + f_{t-3})
+                     = c × 4 × mean(f_t, f_{t-1}, f_{t-2}, f_{t-3})
+                     = mean(f_t, f_{t-1}, f_{t-2}, f_{t-3})  (when c = 0.25)
+```
+
+Where:
+- `f_t` is the weekly factor at time t
+- `c` is the loading coefficient (constrained to be uniform via R_mat)
+- The constraint `R_mat @ Cc = q` ensures `Cc[0] = Cc[1] = Cc[2] = Cc[3]` (uniform average)
+
+### Monthly Clock with Quarterly Series
+
+When `clock='m'` and target series is `frequency='q'`:
+
+**Tent Kernel:**
+```python
+('q', 'm'): np.array([1, 2, 3, 2, 1])  # 5-month tent kernel
+# Normalized: [0.111, 0.222, 0.333, 0.222, 0.111]
+```
+
+**Model Interpretation:**
+- Quarterly observation = weighted average of 5 monthly factors (tent shape, peaking at middle month)
+- This is the traditional DFM case (quarterly → monthly)
+
+### Prediction Behavior
+
+**Important Notes:**
+1. **Predictions are always at clock frequency**: `predict(horizon=4)` with `clock='w'` returns 4 weekly forecasts
+2. **No NaN in predictions**: All series (including slower-frequency ones) get predictions at clock frequency
+3. **Aggregation for target frequency**: To get target-frequency forecasts, aggregate clock-frequency predictions:
+   - Monthly target with weekly clock: Average 4 weekly predictions per month
+   - Quarterly target with monthly clock: Apply tent kernel `[1, 2, 3, 2, 1]` to 5 monthly predictions
+
+**Example:**
+```python
+# clock='w', target='m', predict(horizon=4)
+X_forecast = model.predict(horizon=4)  # Returns (4 × N) weekly forecasts
+
+# Get monthly forecast for target series
+monthly_idx = 2  # Index of monthly target series
+weekly_forecasts = X_forecast[:, monthly_idx]  # 4 weekly values
+monthly_forecast = np.mean(weekly_forecasts)  # Average to get monthly value
+```
+
 ## Architecture
 
 ### Core Modules
@@ -334,9 +423,15 @@ pytest src/test/test_trainer.py -v
 
 ## Project Status
 
-**Version**: 0.5.1  
+**Version**: 0.5.4  
 **Status**: Stable  
 **Python**: 3.10+  
+
+### What's New in 0.5.4
+
+- **Version consistency**: Unified version numbers across all files
+- **Documentation updates**: Updated README and package documentation
+- **Stability improvements**: Enhanced numerical stability and error handling
 
 ### What's New in 0.5.1
 

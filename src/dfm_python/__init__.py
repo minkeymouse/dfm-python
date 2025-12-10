@@ -65,7 +65,7 @@ Note: DFMConfig and SeriesConfig are internal implementation details.
 For detailed documentation, see the README.md file and the tutorial notebooks/scripts.
 """
 
-__version__ = "0.5.2"
+__version__ = "0.5.4"
 
 # ============================================================================
 # PUBLIC API DEFINITION
@@ -85,8 +85,8 @@ __version__ = "0.5.2"
 # Configuration (from config/ subpackage)
 from .config import (
     DEFAULT_BLOCK_NAME,
-    ConfigSource, YamlSource, DictSource, HydraSource,
-    MergedConfigSource, make_config_source,
+    ConfigSource, YamlSource, HydraSource,
+    make_config_source,
 )
 # Internal imports (for backward compatibility, but not recommended)
 from .config import DFMConfig, SeriesConfig  # Internal use only
@@ -122,8 +122,8 @@ __all__ = [
     # Constants
     'DEFAULT_BLOCK_NAME',
     # Config sources
-    'ConfigSource', 'YamlSource', 'DictSource', 'HydraSource',
-    'MergedConfigSource', 'make_config_source',
+    'ConfigSource', 'YamlSource', 'HydraSource',
+    'make_config_source',
     # Low-level API (functional interface - advanced usage)
     'BaseResult', 'DFMResult', 'DDFMResult', 'calculate_rmse', 'diagnose_series', 'print_series_diagnosis',
 ]
