@@ -19,7 +19,7 @@ sys.path.insert(0, str(project_root / "src"))
 import pandas as pd
 import numpy as np
 from datetime import datetime
-from dfm_python import DDFM, DFMDataModule, DDFMTrainer
+from dfm_python import DDFM, DDFMDataModule, DDFMTrainer
 from dfm_python.config import DFMConfig, SeriesConfig, DEFAULT_BLOCK_NAME
 from dfm_python.utils.time import TimeIndex, parse_timestamp
 
@@ -91,6 +91,8 @@ print(f"   Missing values before preprocessing: {missing_before}")
 print("\n[Step 2.5] Creating preprocessing pipeline with sktime...")
 
 # Create preprocessing pipeline: Imputation → Scaling
+# This pipeline will be fitted and used to preprocess feature data
+# Target series will be handled separately (not preprocessed by this pipeline)
 preprocessing_pipeline = TransformerPipeline(
     steps=[
         ('impute_ffill', Imputer(method="ffill")),  # Forward fill missing values
@@ -101,8 +103,11 @@ preprocessing_pipeline = TransformerPipeline(
 
 print("   Pipeline: Imputer(ffill) → Imputer(bfill) → StandardScaler")
 print("   Applying preprocessing pipeline...")
+print(f"   Note: Target series '{target_col}' will be handled separately in DataModule")
 
-# Apply preprocessing
+# Apply preprocessing (fit and transform)
+# Data will be preprocessed before passing to DataModule
+# In DDFMDataModule, target series will be excluded from preprocessing
 df_preprocessed = preprocessing_pipeline.fit_transform(df_processed)
 
 # Ensure output is DataFrame
@@ -193,12 +198,19 @@ time_list = [
 
 time_index = TimeIndex(time_list)
 
-# Create DataModule with transformer
-data_module = DFMDataModule(
+# Create DDFMDataModule with preprocessed data
+# Since data is already preprocessed, use preprocessed=True
+# Pipeline is already fitted, so it will only be used for statistics extraction
+# Target series are specified separately - they remain in raw form (not preprocessed)
+# Note: In this tutorial, target is included in preprocessed data, but DDFMDataModule
+# will handle it correctly by extracting it separately
+data_module = DDFMDataModule(
     config=config,
-    data=df_processed.values,
+    data=df_processed,  # Pass DataFrame directly (not .values)
     time_index=time_index,
-    pipeline=preprocessing_pipeline  # Pass the preprocessing pipeline
+    pipeline=preprocessing_pipeline,  # Already fitted pipeline (for statistics extraction)
+    preprocessed=True,  # Data is already preprocessed
+    target_series=[target_col]  # Specify target series (will be extracted separately)
 )
 data_module.setup()
 

@@ -71,10 +71,10 @@ class DDFMTrainer(pl.Trainer):
     Examples
     --------
     >>> from dfm_python.trainer import DDFMTrainer
-    >>> from dfm_python import DDFM, DFMDataModule
+    >>> from dfm_python import DDFM, DDFMDataModule
     >>> 
     >>> model = DDFM(encoder_layers=[64, 32], num_factors=2)
-    >>> dm = DFMDataModule(config_path='config.yaml', data=df)
+    >>> dm = DDFMDataModule(config_path='config.yaml', data=df)
     >>> trainer = DDFMTrainer(max_epochs=100, enable_progress_bar=True)
     >>> trainer.fit(model, dm)
     """

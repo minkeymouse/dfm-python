@@ -1,20 +1,20 @@
 """Configuration schema for DFM.
 
 This module provides the core configuration dataclasses:
-- BaseModelConfig: Base class with shared model structure
-- DFMConfig(BaseModelConfig): Linear DFM with EM algorithm parameters
-- DDFMConfig(BaseModelConfig): Deep DFM with neural network training parameters
+- BaseModelConfig: Base class with shared model structure (series, clock, data handling)
+- DFMConfig(BaseModelConfig): Linear DFM with EM algorithm parameters and block structure
+- DDFMConfig(BaseModelConfig): Deep DFM with neural network training parameters (no blocks)
 - SeriesConfig: Component configurations
 
 Note: Parameter classes (Params, FitParams) are in config/params.py
 Note: Validation functions are in config/utils.py
 
 The configuration hierarchy:
-- BaseModelConfig: Model structure (series, blocks, factors, clock, data handling)
-- DFMConfig: Adds EM algorithm parameters (max_iter, threshold, regularization)
-- DDFMConfig: Adds neural network parameters (epochs, learning_rate, encoder_layers)
+- BaseModelConfig: Model structure (series, clock, data handling) - NO blocks
+- DFMConfig: Adds blocks structure and EM algorithm parameters (max_iter, threshold, regularization)
+- DDFMConfig: Adds neural network parameters (epochs, learning_rate, encoder_layers) - NO blocks
 
-Blocks are defined as Dict[str, Dict[str, Any]] where each block is a dict with:
+Blocks are DFM-specific and defined as Dict[str, Dict[str, Any]] where each block is a dict with:
 - factors: int (number of factors)
 - ar_lag: int (AR lag order)
 - clock: str (block clock frequency)
@@ -282,9 +282,11 @@ class BaseModelConfig:
     This base class contains the model structure that is common to both
     DFM (linear) and DDFM (deep) models:
     - Series definitions
-    - Block structure
     - Clock frequency
     - Data preprocessing (missing data handling)
+    
+    Note: Blocks are DFM-specific and are NOT included in BaseModelConfig.
+    DFMConfig adds block structure, while DDFMConfig does not use blocks.
     
     Subclasses (DFMConfig, DDFMConfig) add model-specific training parameters.
     """
@@ -292,9 +294,6 @@ class BaseModelConfig:
     # Model Structure (WHAT - defines the model)
     # ========================================================================
     series: List[SeriesConfig]  # Series specifications
-    blocks: Dict[str, Dict[str, Any]]  # Block configurations (block_name -> {factors, ar_lag, clock, notes})
-    block_names: List[str] = field(init=False)  # Block names in order (derived from blocks dict)
-    factors_per_block: List[int] = field(init=False)  # Number of factors per block (derived from blocks)
     
     # ========================================================================
     # Shared Data Handling Parameters
@@ -304,22 +303,13 @@ class BaseModelConfig:
     clock: str = 'm'  # Base frequency for nowcasting (global clock): 'd', 'w', 'm', 'q', 'sa', 'a' (defaults to 'm' for monthly)
     scaler: Optional[str] = 'standard'  # Unified scaler type for all series: 'standard', 'robust', 'minmax', 'maxabs', 'quantile', or None (no scaling). Default: 'standard' for unified scaling.
     
-    # ========================================================================
-    # Internal cache (not user-configurable)
-    # ========================================================================
-    _cached_blocks: Optional[np.ndarray] = field(default=None, init=False, repr=False)
-    
     def __post_init__(self):
-        """Validate blocks structure and consistency.
+        """Validate basic model structure.
         
-        This method performs comprehensive validation of the model configuration:
-        - Derives block_names and factors_per_block from blocks dict
+        This method performs basic validation of the model configuration:
         - Ensures at least one series is specified
-        - Validates block structure consistency across all series
-        - Ensures all series load on the global block
-        - Validates block clock constraints (series frequency <= block clock)
-        - Validates factor dimensions match block structure
         - Validates clock frequency
+        - Auto-generates series_id if not provided
         
         Raises
         ------
@@ -336,15 +326,160 @@ class BaseModelConfig:
                 "Please add series definitions to your configuration."
             )
         
+        # Validate global clock
+        self.clock = validate_frequency(self.clock)
+        
+        # Auto-generate series_id if not provided
+        for i, s in enumerate(self.series):
+            if s.series_id is None:
+                s.series_id = f"series_{i}"
+            if s.series_name is None:
+                s.series_name = s.series_id
+    
+    # ========================================================================
+    # Helper Methods (snake_case - recommended)
+    # ========================================================================
+    
+    def get_series_ids(self) -> List[str]:
+        """Get list of series IDs (snake_case - recommended)."""
+        return [s.series_id if s.series_id is not None else f"series_{i}" 
+                for i, s in enumerate(self.series)]
+    
+    def get_series_names(self) -> List[str]:
+        """Get list of series names (snake_case - recommended)."""
+        return [s.series_name if s.series_name is not None else (s.series_id or f"series_{i}")
+                for i, s in enumerate(self.series)]
+    
+    def get_frequencies(self) -> List[str]:
+        """Get list of frequencies (snake_case - recommended)."""
+        return [s.frequency for s in self.series]
+    
+    def validate_and_report(self) -> Dict[str, Any]:
+        """Validate configuration and return structured report with issues and suggestions.
+        
+        This method performs validation checks without raising exceptions, returning
+        a structured report that can be used for debugging and user guidance.
+        
+        Returns
+        -------
+        Dict[str, Any]
+            Report dictionary with keys:
+            - 'valid': bool - Whether configuration is valid
+            - 'errors': List[str] - List of error messages
+            - 'warnings': List[str] - List of warning messages
+            - 'suggestions': List[str] - List of actionable suggestions
+        """
+        from .utils import FREQUENCY_HIERARCHY
+        
+        report = {
+            'valid': True,
+            'errors': [],
+            'warnings': [],
+            'suggestions': []
+        }
+        
+        # Check for empty series
+        if not self.series:
+            report['valid'] = False
+            report['errors'].append("Model configuration must contain at least one series.")
+            report['suggestions'].append("Add series definitions to your configuration.")
+            return report
+        
+        return report
+
+
+@dataclass
+class DFMConfig(BaseModelConfig):
+    """Linear DFM configuration - EM algorithm parameters and block structure.
+    
+    This configuration class extends BaseModelConfig with parameters specific
+    to linear Dynamic Factor Models trained using the Expectation-Maximization
+    (EM) algorithm. DFM uses block structure to organize factors (global + sector-specific).
+    
+    The configuration can be built from:
+    - Main settings (estimation parameters) from config/default.yaml
+    - Series definitions from config/series/default.yaml or CSV
+    - Block definitions from config/blocks/default.yaml
+    """
+    # ========================================================================
+    # Block Structure (DFM-specific)
+    # ========================================================================
+    blocks: Dict[str, Dict[str, Any]] = field(default_factory=dict)  # Block configurations (block_name -> {factors, ar_lag, clock, notes})
+    block_names: List[str] = field(init=False)  # Block names in order (derived from blocks dict)
+    factors_per_block: List[int] = field(init=False)  # Number of factors per block (derived from blocks)
+    _cached_blocks: Optional[np.ndarray] = field(default=None, init=False, repr=False)  # Internal cache
+    
+    # ========================================================================
+    # EM Algorithm Parameters (HOW - controls the algorithm)
+    # ========================================================================
+    ar_lag: int = 1  # Number of lags in AR transition equation (lookback window). Must be 1 or 2 (maximum supported order is VAR(2))
+    threshold: float = 1e-5  # EM convergence threshold
+    max_iter: int = 5000  # Maximum EM iterations
+    
+    # ========================================================================
+    # Numerical Stability Parameters (transparent and configurable)
+    # ========================================================================
+    # AR Coefficient Clipping
+    clip_ar_coefficients: bool = True  # Enable AR coefficient clipping for stationarity
+    ar_clip_min: float = -0.99  # Minimum AR coefficient (must be > -1 for stationarity)
+    ar_clip_max: float = 0.99   # Maximum AR coefficient (must be < 1 for stationarity)
+    warn_on_ar_clip: bool = True  # Warn when AR coefficients are clipped (indicates near-unit root)
+    
+    # Data Value Clipping
+    clip_data_values: bool = True  # Enable clipping of extreme data values
+    data_clip_threshold: float = 100.0  # Clip values beyond this many standard deviations
+    warn_on_data_clip: bool = True  # Warn when data values are clipped (indicates outliers)
+    
+    # Regularization
+    use_regularization: bool = True  # Enable regularization for numerical stability
+    regularization_scale: float = 1e-5  # Scale factor for ridge regularization (relative to trace, default 1e-5)
+    min_eigenvalue: float = 1e-8  # Minimum eigenvalue for positive definite matrices
+    max_eigenvalue: float = 1e6   # Maximum eigenvalue cap to prevent explosion
+    warn_on_regularization: bool = True  # Warn when regularization is applied
+    
+    # Damped Updates
+    use_damped_updates: bool = True  # Enable damped updates when likelihood decreases
+    damping_factor: float = 0.8  # Damping factor (0.8 = 80% new, 20% old)
+    warn_on_damped_update: bool = True  # Warn when damped updates are used
+    
+    # Idiosyncratic Component Augmentation
+    augment_idio: bool = True  # Enable state augmentation with idiosyncratic components (default: True)
+    augment_idio_slow: bool = True  # Enable tent-length chains for slower-frequency series (default: True)
+    idio_rho0: float = 0.1  # Initial AR coefficient for idiosyncratic components (default: 0.1)
+    idio_min_var: float = 1e-8  # Minimum variance for idiosyncratic innovation covariance (default: 1e-8)
+    
+    def __post_init__(self):
+        """Validate blocks structure and consistency for DFM.
+        
+        This method performs comprehensive validation of the DFM configuration:
+        - Derives block_names and factors_per_block from blocks dict
+        - Ensures at least one series is specified
+        - Validates block structure consistency across all series
+        - Ensures all series load on the global block
+        - Validates block clock constraints (series frequency <= block clock)
+        - Validates factor dimensions match block structure
+        - Validates clock frequency
+        
+        Raises
+        ------
+        ValueError
+            If any validation check fails, with a descriptive error message
+            indicating what needs to be fixed.
+        """
+        # Call parent __post_init__ first (validates series and clock)
+        super().__post_init__()
+        
+        # Import frequency hierarchy for validation
+        from .utils import FREQUENCY_HIERARCHY
+        
         if not self.blocks:
             raise ValueError(
-                "Model configuration must contain at least one block. "
+                "DFM configuration must contain at least one block. "
                 "Please add block definitions to your configuration."
             )
         
         # Derive block_names and factors_per_block from blocks dict
         # Ensure global block (first block) is present
-        # Find the global block (first block in order or named 'Block_Global')
         block_names_list = list(self.blocks.keys())
         global_block_name = None
         
@@ -359,7 +494,7 @@ class BaseModelConfig:
         
         if global_block_name is None:
             raise ValueError(
-                "Model configuration must include at least one block. "
+                "DFM configuration must include at least one block. "
                 "The first block serves as the global/common factor that all series load on."
             )
         
@@ -370,7 +505,6 @@ class BaseModelConfig:
                          [self.blocks[name].get('factors', 1) for name in self.block_names])
         
         # Validate global clock
-        self.clock = validate_frequency(self.clock)
         global_clock_hierarchy = FREQUENCY_HIERARCHY.get(self.clock, 3)
         
         # Validate block clocks (must be >= global clock)
@@ -407,11 +541,6 @@ class BaseModelConfig:
         # Auto-generate series_id if not provided and convert blocks to indices
         n_blocks = len(self.block_names)
         for i, s in enumerate(self.series):
-            if s.series_id is None:
-                s.series_id = f"series_{i}"
-            if s.series_name is None:
-                s.series_name = s.series_id
-            
             # Convert block names to indices if needed
             if isinstance(s.blocks, list) and len(s.blocks) > 0:
                 if isinstance(s.blocks[0], str):
@@ -477,177 +606,12 @@ class BaseModelConfig:
                 f"Each block must have at least one factor."
             )
     
-    # ========================================================================
-    # Helper Methods (snake_case - recommended)
-    # ========================================================================
-    
-    def get_series_ids(self) -> List[str]:
-        """Get list of series IDs (snake_case - recommended)."""
-        return [s.series_id if s.series_id is not None else f"series_{i}" 
-                for i, s in enumerate(self.series)]
-    
-    def get_series_names(self) -> List[str]:
-        """Get list of series names (snake_case - recommended)."""
-        return [s.series_name if s.series_name is not None else (s.series_id or f"series_{i}")
-                for i, s in enumerate(self.series)]
-    
-    def get_frequencies(self) -> List[str]:
-        """Get list of frequencies (snake_case - recommended)."""
-        return [s.frequency for s in self.series]
-    
     def get_blocks_array(self) -> np.ndarray:
         """Get blocks as numpy array (snake_case - recommended, cached)."""
         if self._cached_blocks is None:
             blocks_list = [s.blocks for s in self.series]
             self._cached_blocks = np.array(blocks_list, dtype=int)
         return self._cached_blocks
-    
-    def validate_and_report(self) -> Dict[str, Any]:
-        """Validate configuration and return structured report with issues and suggestions.
-        
-        This method performs validation checks without raising exceptions, returning
-        a structured report that can be used for debugging and user guidance.
-        
-        Returns
-        -------
-        Dict[str, Any]
-            Report dictionary with keys:
-            - 'valid': bool - Whether configuration is valid
-            - 'errors': List[str] - List of error messages
-            - 'warnings': List[str] - List of warning messages
-            - 'suggestions': List[str] - List of actionable suggestions
-        """
-        from .utils import FREQUENCY_HIERARCHY
-        
-        report = {
-            'valid': True,
-            'errors': [],
-            'warnings': [],
-            'suggestions': []
-        }
-        
-        # Check for empty series
-        if not self.series:
-            report['valid'] = False
-            report['errors'].append("Model configuration must contain at least one series.")
-            report['suggestions'].append("Add series definitions to your configuration.")
-            return report
-        
-        # Check for empty blocks
-        if not self.blocks:
-            report['valid'] = False
-            report['errors'].append("Model configuration must contain at least one block.")
-            report['suggestions'].append("Add block definitions to your configuration.")
-            return report
-        
-        # Check frequency constraints
-        global_clock_hierarchy = FREQUENCY_HIERARCHY.get(self.clock, 3)
-        for i, s in enumerate(self.series):
-            series_freq_hierarchy = FREQUENCY_HIERARCHY.get(s.frequency, 3)
-            
-            for block_idx, loads_on_block in enumerate(s.blocks):
-                if loads_on_block == 1:
-                    if block_idx < len(self.block_names):
-                        block_name = self.block_names[block_idx]
-                        block_cfg = self.blocks[block_name]
-                        block_clock = block_cfg.get('clock', self.clock)
-                        block_clock_hierarchy = FREQUENCY_HIERARCHY.get(block_clock, 3)
-                        
-                        if series_freq_hierarchy < block_clock_hierarchy:
-                            valid_freqs = [freq for freq, hier in FREQUENCY_HIERARCHY.items() 
-                                          if hier >= block_clock_hierarchy]
-                            valid_freqs_str = ', '.join(sorted(valid_freqs))
-                            report['valid'] = False
-                            report['errors'].append(
-                                f"Series '{s.series_id}' has frequency '{s.frequency}' which is faster than "
-                                f"block '{block_name}' clock '{block_clock}'."
-                            )
-                            report['suggestions'].append(
-                                f"For series '{s.series_id}': change frequency to one of [{valid_freqs_str}], "
-                                f"or set block '{block_name}' clock to '{s.frequency}' or faster."
-                            )
-        
-        # Check block clock constraints
-        for block_name, block_cfg in self.blocks.items():
-            block_clock = block_cfg.get('clock', self.clock)
-            block_clock_hierarchy = FREQUENCY_HIERARCHY.get(block_clock, 3)
-            if block_clock_hierarchy < global_clock_hierarchy:
-                report['valid'] = False
-                report['errors'].append(
-                    f"Block '{block_name}' has clock '{block_clock}' which is faster than "
-                    f"global clock '{self.clock}'."
-                )
-                report['suggestions'].append(
-                    f"Change block '{block_name}' clock to '{self.clock}' or slower, "
-                    f"or set global clock to '{block_clock}' or faster."
-                )
-        
-        # Check factors_per_block
-        if any(f < 1 for f in self.factors_per_block):
-            invalid_blocks = [i for i, f in enumerate(self.factors_per_block) if f < 1]
-            report['valid'] = False
-            report['errors'].append(
-                f"factors_per_block must contain positive integers (>= 1). "
-                f"Invalid values found at block indices {invalid_blocks}."
-            )
-            report['suggestions'].append(
-                f"Set factors_per_block[{invalid_blocks[0]}] to at least 1 for block '{self.block_names[invalid_blocks[0]]}'."
-            )
-        
-        return report
-
-
-@dataclass
-class DFMConfig(BaseModelConfig):
-    """Linear DFM configuration - EM algorithm parameters.
-    
-    This configuration class extends BaseModelConfig with parameters specific
-    to linear Dynamic Factor Models trained using the Expectation-Maximization
-    (EM) algorithm.
-    
-    The configuration can be built from:
-    - Main settings (estimation parameters) from config/default.yaml
-    - Series definitions from config/series/default.yaml or CSV
-    - Block definitions from config/blocks/default.yaml
-    """
-    # ========================================================================
-    # EM Algorithm Parameters (HOW - controls the algorithm)
-    # ========================================================================
-    ar_lag: int = 1  # Number of lags in AR transition equation (lookback window). Must be 1 or 2 (maximum supported order is VAR(2))
-    threshold: float = 1e-5  # EM convergence threshold
-    max_iter: int = 5000  # Maximum EM iterations
-    
-    # ========================================================================
-    # Numerical Stability Parameters (transparent and configurable)
-    # ========================================================================
-    # AR Coefficient Clipping
-    clip_ar_coefficients: bool = True  # Enable AR coefficient clipping for stationarity
-    ar_clip_min: float = -0.99  # Minimum AR coefficient (must be > -1 for stationarity)
-    ar_clip_max: float = 0.99   # Maximum AR coefficient (must be < 1 for stationarity)
-    warn_on_ar_clip: bool = True  # Warn when AR coefficients are clipped (indicates near-unit root)
-    
-    # Data Value Clipping
-    clip_data_values: bool = True  # Enable clipping of extreme data values
-    data_clip_threshold: float = 100.0  # Clip values beyond this many standard deviations
-    warn_on_data_clip: bool = True  # Warn when data values are clipped (indicates outliers)
-    
-    # Regularization
-    use_regularization: bool = True  # Enable regularization for numerical stability
-    regularization_scale: float = 1e-5  # Scale factor for ridge regularization (relative to trace, default 1e-5)
-    min_eigenvalue: float = 1e-8  # Minimum eigenvalue for positive definite matrices
-    max_eigenvalue: float = 1e6   # Maximum eigenvalue cap to prevent explosion
-    warn_on_regularization: bool = True  # Warn when regularization is applied
-    
-    # Damped Updates
-    use_damped_updates: bool = True  # Enable damped updates when likelihood decreases
-    damping_factor: float = 0.8  # Damping factor (0.8 = 80% new, 20% old)
-    warn_on_damped_update: bool = True  # Warn when damped updates are used
-    
-    # Idiosyncratic Component Augmentation
-    augment_idio: bool = True  # Enable state augmentation with idiosyncratic components (default: True)
-    augment_idio_slow: bool = True  # Enable tent-length chains for slower-frequency series (default: True)
-    idio_rho0: float = 0.1  # Initial AR coefficient for idiosyncratic components (default: 0.1)
-    idio_min_var: float = 1e-8  # Minimum variance for idiosyncratic innovation covariance (default: 1e-8)
     
     # ========================================================================
     # Factory Methods
@@ -703,14 +667,12 @@ class DDFMConfig(BaseModelConfig):
     This configuration class extends BaseModelConfig with parameters specific
     to Deep Dynamic Factor Models trained using neural networks (autoencoders).
     
-    Note: DDFM does not use block structure. Blocks are only required because
-    DDFMConfig inherits from BaseModelConfig. The blocks field will be ignored
-    by DDFM - use num_factors directly to specify the number of factors.
+    Note: DDFM does NOT use block structure. Use num_factors directly to specify
+    the number of factors. Blocks are DFM-specific and not needed for DDFM.
     
     The configuration can be built from:
     - Main settings (training parameters) from config/default.yaml
     - Series definitions from config/series/default.yaml or CSV
-    - Block definitions are not used by DDFM (only for DFM compatibility)
     """
     # ========================================================================
     # Neural Network Training Parameters
@@ -863,13 +825,9 @@ class DDFMConfig(BaseModelConfig):
         config_type = _detect_config_type(data)
         
         if config_type == 'ddfm':
-            # DDFM does not use block structure - create minimal default block if needed
-            # This is required by BaseModelConfig but will be ignored by DDFM
-            if not blocks_dict_final:
-                blocks_dict_final = {DEFAULT_BLOCK_NAME: {'factors': 1, 'ar_lag': 1, 'clock': 'm'}}
+            # DDFM does not use block structure - no blocks needed
             return DDFMConfig(
                 series=series_list,
-                blocks=blocks_dict_final,
                 **DDFMConfig._extract_ddfm(data)
             )
         else:
@@ -913,9 +871,9 @@ class DDFMConfig(BaseModelConfig):
             config_type = _detect_config_type(data)
             
             if config_type == 'ddfm':
+                # DDFM does not use block structure - no blocks needed
                 return DDFMConfig(
                     series=series_list,
-                    blocks=blocks_dict,
                     **DDFMConfig._extract_ddfm(data)
                 )
             else:
@@ -984,7 +942,7 @@ def _dfm_from_dict(cls, data: Dict[str, Any]) -> Union['DFMConfig', 'DDFMConfig'
                 raise ValueError(f"blocks must be a dict, got {type(blocks_data)}")
         else:
             # Infer blocks from series using helper
-            blocks_dict = _infer_blocks_from_series(series_list, data)
+            blocks_dict = _infer_blocks(series_list, data)
         
         # Determine config type using helper function
         config_type = _detect_config_type(data)
@@ -1047,19 +1005,15 @@ def _ddfm_from_dict(cls, data: Dict[str, Any]) -> Union['DFMConfig', 'DDFMConfig
                 raise ValueError(f"blocks must be a dict, got {type(blocks_data)}")
         else:
             # Infer blocks from series using helper
-            blocks_dict = _infer_blocks_from_series(series_list, data)
+            blocks_dict = _infer_blocks(series_list, data)
         
         # Determine config type using helper function
         config_type = _detect_config_type(data)
         
         if config_type == 'ddfm':
-            # DDFM does not use block structure - create minimal default block if needed
-            # This is required by BaseModelConfig but will be ignored by DDFM
-            if not blocks_dict:
-                blocks_dict = {DEFAULT_BLOCK_NAME: {'factors': 1, 'ar_lag': 1, 'clock': 'm'}}
+            # DDFM does not use block structure - no blocks needed
             return DDFMConfig(
                 series=series_list,
-                blocks=blocks_dict,
                 **DDFMConfig._extract_ddfm(data)
             )
         else:
@@ -1073,12 +1027,9 @@ def _ddfm_from_dict(cls, data: Dict[str, Any]) -> Union['DFMConfig', 'DDFMConfig
     config_type = _detect_config_type(data)
     
     if config_type == 'ddfm':
-        # DDFM does not use block structure - create minimal default block if needed
-        # This is required by BaseModelConfig but will be ignored by DDFM
-        if 'blocks' not in data or not data.get('blocks'):
-            data = data.copy()
-            data['blocks'] = {DEFAULT_BLOCK_NAME: {'factors': 1, 'ar_lag': 1, 'clock': 'm'}}
-        return DDFMConfig(**data)
+        # DDFM does not use block structure - remove blocks from data if present
+        data_clean = {k: v for k, v in data.items() if k != 'blocks'}
+        return DDFMConfig(**data_clean)
     else:
         return DFMConfig(**data)
 

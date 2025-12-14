@@ -716,14 +716,23 @@ class BaseFactorModel(pl.LightningModule):
         self._config = new_config
         
         # Recompute number of factors from new config
+        # DFM uses factors_per_block, DDFM uses num_factors
         if hasattr(new_config, 'factors_per_block') and new_config.factors_per_block:
+            # DFM: sum of factors per block
             self.num_factors = int(np.sum(new_config.factors_per_block))
-        else:
+        elif hasattr(new_config, 'num_factors') and new_config.num_factors is not None:
+            # DDFM: direct num_factors
+            self.num_factors = new_config.num_factors
+        elif hasattr(new_config, 'get_blocks_array'):
+            # DFM fallback: try to get from blocks array
             blocks = new_config.get_blocks_array()
             if blocks.shape[1] > 0:
                 self.num_factors = int(np.sum(blocks[:, 0]))
             else:
                 self.num_factors = 1
+        else:
+            # Default fallback
+            self.num_factors = 1
         
         return new_config
     

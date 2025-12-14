@@ -65,7 +65,7 @@ Note: DFMConfig and SeriesConfig are internal implementation details.
 For detailed documentation, see the README.md file and the tutorial notebooks/scripts.
 """
 
-__version__ = "0.5.4"
+__version__ = "0.5.5"
 
 # ============================================================================
 # PUBLIC API DEFINITION
@@ -102,7 +102,9 @@ from .utils.time import calculate_rmse
 # Users can import these directly from dfm_python
 from .lightning import (
     DFMDataModule,
+    DDFMDataModule,  # DDFM-specific DataModule
     DFMDataset,  # Dataset class (usually not needed directly)
+    DDFMDataset,  # DDFM Dataset class (usually not needed directly)
     KalmanFilter,  # Module class
     EMAlgorithm,  # Module class
 )
@@ -137,7 +139,9 @@ __all__.extend([
 # Lightning modules (mandatory dependency)
 __all__.extend([
     'DFMDataModule',
+    'DDFMDataModule',  # DDFM-specific DataModule
     'DFMDataset',  # Dataset class (usually not needed directly)
+    'DDFMDataset',  # DDFM Dataset class (usually not needed directly)
     'KalmanFilter',  # Module class
     'EMAlgorithm',  # Module class
 ])

@@ -13,12 +13,11 @@ from ..ssm.em import (
     EMStepParams,  # Dataclass
 )
 
-from .data_module import (
-    DFMDataModule,
-    DFMDataset,
-)
+from .dfm_dm import DFMDataModule
+from .ddfm_dm import DDFMDataModule
+from ..data.dataset import DFMDataset, DDFMDataset
 
-from .scaling import (
+from .utils import (
     create_scaling_transformer_from_config,
     create_uniform_scaling_transformer,
     create_preprocessing_pipeline_with_scaling,
@@ -39,7 +38,9 @@ __all__ = [
     'EMStepParams',
     # Data handling
     'DFMDataModule',
+    'DDFMDataModule',
     'DFMDataset',
+    'DDFMDataset',
     # Scaling utilities
     'create_scaling_transformer_from_config',
     'create_uniform_scaling_transformer',
@@ -50,4 +51,3 @@ __all__ = [
     # Training state (defined in models.dfm)
     'DFMTrainingState',
 ]
-

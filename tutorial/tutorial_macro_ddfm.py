@@ -18,9 +18,9 @@ sys.path.insert(0, str(project_root / "src"))
 import pandas as pd
 import numpy as np
 from datetime import datetime
-from dfm_python import DDFM, DFMDataModule, DDFMTrainer
+from dfm_python import DDFM, DDFMDataModule, DDFMTrainer
 from dfm_python.config import DFMConfig, SeriesConfig, DEFAULT_BLOCK_NAME
-from dfm_python.utils.time import TimeIndex, parse_timestamp
+from dfm_python.utils.time import TimeIndex
 
 # sktime imports for preprocessing
 from sktime.transformations.compose import TransformerPipeline
@@ -67,7 +67,7 @@ selected_cols = [
 # Filter to only columns that exist in the data
 selected_cols = [col for col in selected_cols if col in df.columns]
 
-# Filter data
+# Filter data (include date column for time index)
 df_processed = df[selected_cols + ["date"]].copy()
 print(f"   Selected {len(selected_cols)} series (including target)")
 print(f"   Series: {selected_cols[:5]}...")
@@ -75,10 +75,6 @@ print(f"   Series: {selected_cols[:5]}...")
 # Parse date column
 df_processed["date"] = pd.to_datetime(df_processed["date"])
 df_processed = df_processed.sort_values("date")
-
-# Remove date column for processing
-date_col = df_processed["date"].copy()
-df_processed = df_processed.drop(columns=["date"])
 
 # Remove rows with all NaN
 df_processed = df_processed.dropna(how='all')
@@ -88,7 +84,6 @@ df_processed = df_processed.dropna(how='all')
 max_periods = 100
 if len(df_processed) > max_periods:
     df_processed = df_processed.iloc[-max_periods:]
-    date_col = date_col.iloc[-max_periods:]
     print(f"   Using last {max_periods} periods for faster execution")
 
 print(f"   Data shape after cleaning: {df_processed.shape}")
@@ -114,8 +109,19 @@ if target_col in df_processed.columns:
     df_processed[target_col] = target_diff
     print(f"   Applied difference transformation to {target_col}")
 
+# Note: date column will be removed by DataModule when time_index_column='date' is used
+# For preprocessing, we need to temporarily remove it to avoid issues with datetime columns
+# Store date column separately for reference (though DataModule will extract it)
+if 'date' in df_processed.columns:
+    # Temporarily remove date column for preprocessing (DataModule will handle it)
+    df_for_preprocessing = df_processed.drop(columns=['date'])
+else:
+    df_for_preprocessing = df_processed
+
 # Create simplified preprocessing pipeline: Imputation → Scaling
 # (Transformations already applied manually above)
+# This pipeline will be fitted and used to preprocess feature data
+# Target series will be handled separately (not preprocessed by this pipeline)
 preprocessing_pipeline = TransformerPipeline(
     steps=[
         ('impute_ffill', Imputer(method="ffill")),  # Forward fill missing values
@@ -136,9 +142,19 @@ print("   Pipeline: Imputer(ffill) → Imputer(bfill) → StandardScaler")
 print(f"   Transformations: {target_col} uses difference (chg), others use linear")
 print("   Applying preprocessing pipeline...")
 
-# Fit preprocessing pipeline on training data once
-fitted_pipeline = preprocessing_pipeline.clone().fit(df_processed)
-df_preprocessed = fitted_pipeline.transform(df_processed)
+# Fit preprocessing pipeline on training data once (without date column)
+fitted_pipeline = preprocessing_pipeline.clone().fit(df_for_preprocessing)
+df_preprocessed = fitted_pipeline.transform(df_for_preprocessing)
+
+# Ensure output is DataFrame
+if isinstance(df_preprocessed, np.ndarray):
+    df_preprocessed = pd.DataFrame(df_preprocessed, columns=df_for_preprocessing.columns, index=df_for_preprocessing.index)
+elif not isinstance(df_preprocessed, pd.DataFrame):
+    df_preprocessed = pd.DataFrame(df_preprocessed)
+
+# Add date column back for DataModule to extract (if it exists)
+if 'date' in df_processed.columns:
+    df_preprocessed['date'] = df_processed['date'].values
 
 # Ensure output is DataFrame
 if isinstance(df_preprocessed, np.ndarray):
@@ -150,9 +166,10 @@ missing_after = df_preprocessed.isnull().sum().sum()
 print(f"   Missing values after preprocessing: {missing_after}")
 print(f"   Preprocessed data shape: {df_preprocessed.shape}")
 
-# Verify standardization
-mean_vals = df_preprocessed.mean()
-std_vals = df_preprocessed.std()
+# Verify standardization (exclude date column if present)
+df_for_check = df_preprocessed.drop(columns=['date']) if 'date' in df_preprocessed.columns else df_preprocessed
+mean_vals = df_for_check.mean()
+std_vals = df_for_check.std()
 max_mean = float(mean_vals.abs().max())
 max_std_dev = float((std_vals - 1.0).abs().max())
 print(f"   Standardization check - Max |mean|: {max_mean:.6f} (should be ~0)")
@@ -215,17 +232,20 @@ print(f"   Target series: {target_col}")
 # ============================================================================
 print("\n[Step 4] Creating DataModule...")
 
-# Create time index from date column
-# Align with processed data (after dropping NaN rows)
-valid_dates = date_col.iloc[:len(df_processed)].values
-time_index = TimeIndex([parse_timestamp(str(d)) for d in valid_dates])
-
-# Create DataModule with transformer
-data_module = DFMDataModule(
+# Create DDFMDataModule with preprocessed data
+# Since data is already preprocessed, use preprocessed=True
+# Pipeline is already fitted, so it will only be used for statistics extraction
+# Target series are specified separately - they remain in raw form (not preprocessed)
+# time_index_column='date' will extract time index from DataFrame and remove the column
+# Note: In this tutorial, target is included in preprocessed data, but DDFMDataModule
+# will handle it correctly by extracting it separately
+data_module = DDFMDataModule(
     config=config,
-    data=df_processed.values,
-    time_index=time_index,
-    pipeline=preprocessing_pipeline  # Pass the preprocessing pipeline
+    data=df_processed,  # Pass DataFrame directly (not .values)
+    time_index_column='date',  # Extract time index from 'date' column and exclude it from data
+    pipeline=fitted_pipeline,  # Already fitted pipeline (for statistics extraction)
+    preprocessed=True,  # Data is already preprocessed
+    target_series=[target_col]  # Specify target series (will be extracted separately)
 )
 data_module.setup()
 
@@ -234,7 +254,8 @@ if hasattr(data_module, 'data_processed') and data_module.data_processed is not 
     print(f"   Processed data shape: {data_module.data_processed.shape}")
 else:
     print(f"   Data shape: {df_processed.shape}")
-print(f"   Time range: {time_index[0]} to {time_index[-1]}")
+if data_module.time_index is not None:
+    print(f"   Time range: {data_module.time_index[0]} to {data_module.time_index[-1]}")
 
 # ============================================================================
 # Step 5: Train Model

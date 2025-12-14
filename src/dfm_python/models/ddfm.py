@@ -249,15 +249,15 @@ class DDFM(BaseFactorModel):
     Note: Maximum supported VAR order for factor dynamics is VAR(2) (set via factor_order parameter).
     
     Example (Standard Lightning Pattern):
-        >>> from dfm_python import DDFM, DFMDataModule, DDFMTrainer
+        >>> from dfm_python import DDFM, DDFMDataModule, DDFMTrainer
         >>> import pandas as pd
         >>> 
         >>> # Step 1: Load and preprocess data
         >>> df = pd.read_csv('data/finance.csv')
         >>> df_processed = df[[col for col in df.columns if col != 'date']]
         >>> 
-        >>> # Step 2: Create DataModule
-        >>> dm = DFMDataModule(config_path='config/ddfm_config.yaml', data=df_processed)
+        >>> # Step 2: Create DataModule (use DDFMDataModule for DDFM)
+        >>> dm = DDFMDataModule(config_path='config/ddfm_config.yaml', data=df_processed)
         >>> dm.setup()
         >>> 
         >>> # Step 3: Create model and load config
@@ -374,8 +374,7 @@ class DDFM(BaseFactorModel):
         super().__init__(**kwargs)
         
         # Initialize config using consolidated helper method
-        # DDFM does not use block structure, but BaseModelConfig requires blocks
-        # We create a minimal default block that will be ignored by DDFM
+        # DDFM does not use block structure
         config = self._initialize_config(config)
         
         # Validate factor_order
@@ -606,8 +605,12 @@ class DDFM(BaseFactorModel):
             Reconstruction loss (MSE with missing data masking)
         """
         # Handle both tuple and single tensor batches
-        if isinstance(batch, tuple):
+        # DataLoader may return tuple, list, or single tensor
+        if isinstance(batch, (tuple, list)) and len(batch) == 2:
             data, target = batch
+        elif isinstance(batch, (tuple, list)) and len(batch) == 1:
+            data = batch[0]
+            target = data  # For autoencoder, target is same as input
         else:
             data = batch
             target = data  # For autoencoder, target is same as input
@@ -1164,7 +1167,7 @@ class DDFM(BaseFactorModel):
             num_iter=self.training_state.num_iter,
             loglik=None,  # DDFM doesn't compute loglik in same way
             series_ids=self.config.get_series_ids() if hasattr(self.config, 'get_series_ids') else None,
-            block_names=None,  # DDFM does not use block structure
+            block_names=None,  # DDFM does not use block structure (DFM-specific)
             training_loss=self.training_state.training_loss,
             encoder_layers=self.encoder_layers,
             use_idiosyncratic=self.use_idiosyncratic,

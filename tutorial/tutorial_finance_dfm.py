@@ -91,6 +91,8 @@ print(f"   Missing values before preprocessing: {missing_before}")
 print("\n[Step 2.5] Creating preprocessing pipeline with sktime...")
 
 # Create preprocessing pipeline: Imputation → Scaling
+# This pipeline will be fitted and used to preprocess data
+# Then passed to DataModule for statistics extraction (Mx/Wx)
 preprocessing_pipeline = TransformerPipeline(
     steps=[
         ('impute_ffill', Imputer(method="ffill")),  # Forward fill missing values
@@ -102,7 +104,8 @@ preprocessing_pipeline = TransformerPipeline(
 print("   Pipeline: Imputer(ffill) → Imputer(bfill) → StandardScaler")
 print("   Applying preprocessing pipeline...")
 
-# Apply preprocessing
+# Apply preprocessing (fit and transform)
+# Data will be preprocessed before passing to DataModule
 df_preprocessed = preprocessing_pipeline.fit_transform(df_processed)
 
 # Ensure output is DataFrame
@@ -195,12 +198,15 @@ time_list = [
 
 time_index = TimeIndex(time_list)
 
-# Create DataModule with transformer
+# Create DataModule with preprocessed data
+# Since data is already preprocessed, use preprocessed=True
+# Pipeline is already fitted, so it will only be used for statistics extraction
 data_module = DFMDataModule(
     config=config,
-    data=df_processed.values,
+    data=df_processed,  # Pass DataFrame directly (not .values)
     time_index=time_index,
-    pipeline=preprocessing_pipeline  # Pass the preprocessing pipeline
+    pipeline=preprocessing_pipeline,  # Already fitted pipeline
+    preprocessed=True  # Data is already preprocessed
 )
 data_module.setup()
 

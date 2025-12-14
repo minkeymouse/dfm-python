@@ -239,12 +239,11 @@ def load_data(
         mask = Time >= sample_start
         if isinstance(mask, pd.Series):
             mask = mask.values
-        elif not isinstance(mask, np.ndarray):
-            # Convert to numpy array if needed
-            mask = np.asarray(mask)
-        Z = Z[mask]
-        # TimeIndex has filter() method
-        Time = Time.filter(mask)
+        # Ensure mask is boolean numpy array
+        mask = np.asarray(mask, dtype=bool)
+        Z = Z.iloc[mask] if isinstance(Z, pd.DataFrame) else Z[mask]
+        # TimeIndex has filter() method - convert mask to list for filter()
+        Time = Time.filter(mask.tolist())
         _logger.info(f"Filtered to start date: {sample_start}")
     
     if sample_end is not None:
@@ -253,12 +252,11 @@ def load_data(
         mask = Time <= sample_end
         if isinstance(mask, pd.Series):
             mask = mask.values
-        elif not isinstance(mask, np.ndarray):
-            # Convert to numpy array if needed
-            mask = np.asarray(mask)
-        Z = Z[mask]
-        # TimeIndex has filter() method
-        Time = Time.filter(mask)
+        # Ensure mask is boolean numpy array
+        mask = np.asarray(mask, dtype=bool)
+        Z = Z.iloc[mask] if isinstance(Z, pd.DataFrame) else Z[mask]
+        # TimeIndex has filter() method - convert mask to list for filter()
+        Time = Time.filter(mask.tolist())
         _logger.info(f"Filtered to end date: {sample_end}")
     
     # Return raw data (transformations should be applied via custom sktime transformer in DFMDataModule)

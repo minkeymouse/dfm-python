@@ -1,6 +1,6 @@
 [project]
 name = "dfm-python"
-version = "0.5.4"
+version = "0.5.5"
 description = "Dynamic Factor Model (DFM) estimation and nowcasting in Python"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -80,6 +80,11 @@ packages = [
 exclude = [
     "test_venv",
     "test_venv/**",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.1",
 ]
 
 [project.urls]
