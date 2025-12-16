@@ -1,0 +1,15 @@
+# Series Configuration (Legacy/Reference Format)
+# NOTE: In the new unified structure, series configs are embedded in experiment configs under preprocess.series.
+# This file is kept for reference and migration purposes.
+
+series_id: KOHWRWEMP
+series_name: Hours Worked, Average Per Week, All Employees
+frequency: m
+transformation: chg
+units: hours
+category: Labor
+release: 11
+impute: null
+block:
+- Block_Global
+- Block_Labor

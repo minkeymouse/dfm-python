@@ -1,0 +1,16 @@
+# Series Configuration (Legacy/Reference Format)
+# NOTE: In the new unified structure, series configs are embedded in experiment configs under preprocess.series.
+# This file is kept for reference and migration purposes.
+
+series_id: KOUS$...
+series_name: USD/KRW, avg
+frequency: m
+transformation: chg
+units: KRW per 1 USD
+category: Finance
+release: 1
+impute: null
+block:
+- Block_Global
+- Block_Export
+- Block_Nominal

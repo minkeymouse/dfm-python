@@ -1,0 +1,15 @@
+# Series Configuration (Legacy/Reference Format)
+# NOTE: In the new unified structure, series configs are embedded in experiment configs under preprocess.series.
+# This file is kept for reference and migration purposes.
+
+series_id: KOEQUITTE
+series_name: Investment, Transportation Equipment, SA, Index
+frequency: m
+transformation: chg
+units: Index
+category: Investment
+release: 30
+impute: null
+block:
+- Block_Global
+- Block_Investment

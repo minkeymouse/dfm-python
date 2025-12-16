@@ -1,0 +1,49 @@
+ar_clip_max: 0.99
+ar_clip_min: -0.99
+ar_lag: 1
+augment_idio: true
+augment_idio_slow: true
+blocks:
+  Block_Global:
+    ar_lag: 1
+    clock: m
+    factors: 5
+  Block_Consumption:
+    ar_lag: 1
+    clock: m
+    factors: 2
+  Block_Investment:
+    ar_lag: 1
+    clock: m
+    factors: 2
+  Block_Export:
+    ar_lag: 1
+    clock: m
+    factors: 1
+  Block_Nominal:
+    ar_lag: 1
+    clock: m
+    factors: 1
+  Block_Labor:
+    ar_lag: 1
+    clock: m
+    factors: 1
+clip_ar_coefficients: true
+clock: m
+idio_min_var: 1.0e-08
+idio_rho0: 0.1
+max_iter: 5000
+nan_k: 3
+nan_method: 2
+regularization_scale: 1.0e-05
+threshold: 1.0e-05
+use_regularization: true
+encoder_layers:
+- 64
+- 32
+num_factors: 2
+dropout: 0.1
+learning_rate: 0.001
+batch_size: 32
+epochs: 100
+scaler: standard  # Unified scaler for all series: 'standard', 'robust', 'minmax', 'maxabs', 'quantile', or null (no scaling)

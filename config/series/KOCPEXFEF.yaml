@@ -1,0 +1,15 @@
+# Series Configuration (Legacy/Reference Format)
+# NOTE: In the new unified structure, series configs are embedded in experiment configs under preprocess.series.
+# This file is kept for reference and migration purposes.
+
+series_id: KOCPEXFEF
+series_name: Consumer Prices, Excluding Food and Energy
+frequency: m
+transformation: chg
+units: Index
+category: Price
+release: 3
+impute: null
+block:
+- Block_Global
+- Block_Nominal

@@ -1,0 +1,16 @@
+# Series Configuration (Legacy/Reference Format)
+# NOTE: In the new unified structure, series configs are embedded in experiment configs under preprocess.series.
+# This file is kept for reference and migration purposes.
+
+series_id: KOEXPGDSA
+series_name: Exports, Free on Board, USD
+frequency: m
+transformation: chg
+units: $, Millions
+category: Int. trade
+release: 1
+impute: null
+block:
+- Block_Global
+- Block_Export
+- Block_Nominal

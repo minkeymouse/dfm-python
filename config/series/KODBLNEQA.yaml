@@ -1,0 +1,16 @@
+# Series Configuration (Legacy/Reference Format)
+# NOTE: In the new unified structure, series configs are embedded in experiment configs under preprocess.series.
+# This file is kept for reference and migration purposes.
+
+series_id: KODBLNEQA
+series_name: South Korea, Loans With Combs and SBS, Equipment, KRW
+frequency: m
+transformation: chg
+units: ￦, Billions
+category: Finance
+release: 45
+impute: null
+block:
+- Block_Global
+- Block_Investment
+- Block_Nominal

@@ -1,0 +1,547 @@
+"""Configuration utility functions.
+
+This module provides:
+1. Validation functions: validate_frequency, validate_transformation
+2. Frequency hierarchy and period calculations: FREQUENCY_HIERARCHY, PERIODS_PER_YEAR, get_periods_per_year, get_annual_factor
+3. Tent kernel utilities: generate_tent_weights, generate_R_mat, get_tent_weights
+4. Aggregation structure: get_agg_structure, group_by_freq, compute_idio_lengths
+5. Transformation mappings: TRANSFORM_UNITS_MAP
+"""
+
+import warnings
+import numpy as np
+from typing import Tuple, Optional, Dict, Any, List, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .schema import DFMConfig
+
+
+def validate_frequency(frequency: str) -> str:
+    """Validate frequency code.
+    
+    Parameters
+    ----------
+    frequency : str
+        Frequency code to validate
+        
+    Returns
+    -------
+    str
+        Validated frequency code (same as input if valid)
+        
+    Raises
+    ------
+    ValueError
+        If frequency is not in the set of valid frequencies
+        
+    Examples
+    --------
+    >>> validate_frequency('m')
+    'm'
+    >>> validate_frequency('invalid')
+    ValueError: Invalid frequency: invalid. Must be one of {'d', 'w', 'm', 'q', 'sa', 'a'}
+    """
+    if frequency not in _VALID_FREQUENCIES:
+        raise ValueError(f"Invalid frequency: {frequency}. Must be one of {_VALID_FREQUENCIES}")
+    return frequency
+
+
+def validate_transformation(transformation: str) -> str:
+    """Validate transformation code.
+    
+    Parameters
+    ----------
+    transformation : str
+        Transformation code to validate
+        
+    Returns
+    -------
+    str
+        Validated transformation code (same as input, even if unknown)
+        
+    Notes
+    -----
+    Unknown transformation codes trigger a warning but are not rejected,
+    allowing for extensibility. The code will be used as-is, and the
+    transformation logic should handle unknown codes appropriately.
+    
+    Examples
+    --------
+    >>> validate_transformation('lin')
+    'lin'
+    >>> validate_transformation('unknown')  # Issues warning but returns value
+    'unknown'
+    """
+    if transformation not in _VALID_TRANSFORMATIONS:
+        warnings.warn(f"Unknown transformation code: {transformation}. Will use untransformed data.")
+    return transformation
+
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+# Valid frequency codes
+_VALID_FREQUENCIES = {'d', 'w', 'm', 'q', 'sa', 'a'}
+
+# Valid transformation codes
+_VALID_TRANSFORMATIONS = {
+    'lin', 'chg', 'ch1', 'pch', 'pc1', 'pca', 
+    'cch', 'cca', 'log'
+}
+
+# Transformation to readable units mapping
+TRANSFORM_UNITS_MAP = {
+    'lin': 'Levels (No Transformation)',
+    'chg': 'Change (Difference)',
+    'ch1': 'Year over Year Change (Difference)',
+    'pch': 'Percent Change',
+    'pc1': 'Year over Year Percent Change',
+    'pca': 'Percent Change (Annual Rate)',
+    'cch': 'Continuously Compounded Rate of Change',
+    'cca': 'Continuously Compounded Annual Rate of Change',
+    'log': 'Natural Log'
+}
+
+# ============================================================================
+# Frequency Hierarchy
+# ============================================================================
+
+# Frequency hierarchy (from highest to lowest frequency)
+# Used to determine which frequencies are slower/faster than the clock
+FREQUENCY_HIERARCHY: Dict[str, int] = {
+    'd': 1,   # Daily (highest frequency)
+    'w': 2,   # Weekly
+    'm': 3,   # Monthly
+    'q': 4,   # Quarterly
+    'sa': 5,  # Semi-annual
+    'a': 6    # Annual (lowest frequency)
+}
+
+# Periods per year for each frequency (generic calculation)
+PERIODS_PER_YEAR: Dict[str, int] = {
+    'd': 365,   # Daily (approximate)
+    'w': 52,    # Weekly (approximate)
+    'm': 12,    # Monthly
+    'q': 4,     # Quarterly
+    'sa': 2,    # Semi-annual
+    'a': 1      # Annual
+}
+
+
+def get_periods_per_year(frequency: str) -> int:
+    """Get number of periods per year for a given frequency.
+    
+    Parameters
+    ----------
+    frequency : str
+        Frequency code: 'd', 'w', 'm', 'q', 'sa', 'a'
+        
+    Returns
+    -------
+    int
+        Number of periods per year
+        
+    Examples
+    --------
+    >>> get_periods_per_year('m')  # Monthly
+    12
+    >>> get_periods_per_year('q')  # Quarterly
+    4
+    >>> get_periods_per_year('sa')  # Semi-annual
+    2
+    """
+    return PERIODS_PER_YEAR.get(frequency, 12)  # Default to monthly if unknown
+
+
+def get_annual_factor(frequency: str, step: int = 1) -> float:
+    """Get annualization factor for a given frequency and step.
+    
+    Parameters
+    ----------
+    frequency : str
+        Frequency code: 'd', 'w', 'm', 'q', 'sa', 'a'
+    step : int, default 1
+        Number of periods per step
+        
+    Returns
+    -------
+    float
+        Annualization factor (periods_per_year / step)
+        
+    Examples
+    --------
+    >>> get_annual_factor('m', step=1)  # Monthly to annual
+    12.0
+    >>> get_annual_factor('q', step=1)  # Quarterly to annual
+    4.0
+    >>> get_annual_factor('m', step=3)  # 3-month change to annual
+    4.0
+    """
+    periods_per_year = get_periods_per_year(frequency)
+    if step <= 0:
+        return 1.0
+    return float(periods_per_year) / step
+
+# ============================================================================
+# Tent Kernel Configuration
+# ============================================================================
+
+# Maximum tent kernel size (number of periods)
+# For frequency gaps larger than this, the missing data approach is used instead
+# This prevents excessively large constraint matrices that would be computationally
+# expensive and potentially numerically unstable
+MAX_TENT_SIZE: int = 12
+
+# Deterministic tent weights lookup for supported frequency pairs
+# Format: (slower_freq, faster_freq) -> tent_weights_array
+# Example: ('q', 'm'): [1, 2, 3, 2, 1] means a quarterly observation aggregates
+# 5 monthly latent states with weights 1, 2, 3, 2, 1 (peaking at the middle month).
+TENT_WEIGHTS_LOOKUP: Dict[Tuple[str, str], np.ndarray] = {
+    ('q', 'm'): np.array([1, 2, 3, 2, 1]),                    # 5 periods: quarterly -> monthly
+    ('sa', 'm'): np.array([1, 2, 3, 4, 3, 2, 1]),             # 7 periods: semi-annual -> monthly
+    ('a', 'm'): np.array([1, 2, 3, 4, 5, 4, 3, 2, 1]),       # 9 periods: annual -> monthly
+    ('m', 'w'): np.array([1, 2, 3, 2, 1]),                    # 5 periods: monthly -> weekly
+    ('q', 'w'): np.array([1, 2, 3, 4, 5, 4, 3, 2, 1]),       # 9 periods: quarterly -> weekly
+    ('sa', 'q'): np.array([1, 2, 1]),                         # 3 periods: semi-annual -> quarterly
+    ('a', 'q'): np.array([1, 2, 3, 2, 1]),                    # 5 periods: annual -> quarterly
+    ('a', 'sa'): np.array([1, 2, 1]),                         # 3 periods: annual -> semi-annual
+}
+
+
+def generate_tent_weights(n_periods: int, tent_type: str = 'symmetric') -> np.ndarray:
+    """Generate tent-shaped weights for aggregation.
+    
+    Parameters:
+    -----------
+    n_periods : int
+        Number of base periods to aggregate (e.g., 5 for monthly->quarterly)
+    tent_type : str
+        Type of tent: 'symmetric' (default), 'linear', 'exponential'
+        
+    Returns:
+    --------
+    weights : np.ndarray
+        Array of weights that sum to a convenient number
+        
+    Examples:
+    --------
+    >>> generate_tent_weights(5, 'symmetric')
+    array([1, 2, 3, 2, 1])  # Classic tent for monthly->quarterly
+    
+    >>> generate_tent_weights(7, 'symmetric')
+    array([1, 2, 3, 4, 3, 2, 1])  # Weekly aggregation
+    """
+    if tent_type == 'symmetric':
+        if n_periods % 2 == 1:
+            # Odd number: symmetric around middle
+            half = n_periods // 2
+            weights = np.concatenate([
+                np.arange(1, half + 2),      # [1, 2, ..., peak]
+                np.arange(half, 0, -1)       # [peak-1, ..., 2, 1]
+            ])
+        else:
+            # Even number: symmetric with two peaks
+            half = n_periods // 2
+            weights = np.concatenate([
+                np.arange(1, half + 1),     # [1, 2, ..., half]
+                np.arange(half, 0, -1)       # [half, ..., 2, 1]
+            ])
+    elif tent_type == 'linear':
+        # Linear weights (simple average)
+        weights = np.ones(n_periods)
+    elif tent_type == 'exponential':
+        # Exponential decay from center
+        center = n_periods / 2
+        weights = np.exp(-np.abs(np.arange(n_periods) - center) / (n_periods / 4))
+        weights = weights / weights.sum() * n_periods  # Normalize
+    else:
+        raise ValueError(f"Unknown tent_type: {tent_type}. Must be 'symmetric', 'linear', or 'exponential'")
+    
+    return weights.astype(int)
+
+
+def generate_R_mat(tent_weights: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Generate constraint matrix R_mat from tent weights.
+    
+    Parameters:
+    -----------
+    tent_weights : np.ndarray
+        Tent weights array, e.g., [1, 2, 3, 2, 1] for monthly->quarterly
+        
+    Returns:
+    --------
+    R_mat : np.ndarray
+        Constraint matrix of shape (n-1) × n
+    q : np.ndarray
+        Constraint vector of zeros, shape (n-1,)
+        
+    Examples:
+    --------
+    >>> weights = np.array([1, 2, 3, 2, 1])
+    >>> R_mat, q = generate_R_mat(weights)
+    >>> # Returns the classic monthly->quarterly R_mat
+    """
+    n = len(tent_weights)
+    w1 = tent_weights[0]  # First weight (reference)
+    
+    # Create constraint matrix: (n-1) rows × n columns
+    R_mat = np.zeros((n - 1, n))
+    q = np.zeros(n - 1)
+    
+    # Row i: relates w1*c1 to w(i+1)*c(i+1)
+    # Constraint: w1*c1 - w(i+1)*c(i+1) = 0
+    for i in range(n - 1):
+        R_mat[i, 0] = w1              # Coefficient for c1
+        R_mat[i, i + 1] = -tent_weights[i + 1]  # Coefficient for c(i+1)
+        # All other columns remain 0
+    
+    return R_mat, q
+
+
+def get_tent_weights(slower_freq: str, faster_freq: str) -> Optional[np.ndarray]:
+    """Get deterministic tent weights for a frequency pair.
+    
+    Parameters:
+    -----------
+    slower_freq : str
+        Slower frequency (e.g., 'q' for quarterly)
+    faster_freq : str
+        Faster frequency (e.g., 'm' for monthly) - this is the clock
+    
+    Returns:
+    --------
+    tent_weights : np.ndarray or None
+        Tent weights array if pair is supported, None otherwise
+        
+    Examples:
+    --------
+    >>> get_tent_weights('q', 'm')
+    array([1, 2, 3, 2, 1])  # Quarterly -> monthly
+    
+    >>> get_tent_weights('m', 'd')
+    None  # Not supported (too large gap)
+    """
+    return TENT_WEIGHTS_LOOKUP.get((slower_freq, faster_freq))
+
+
+def get_agg_structure(
+    config: 'DFMConfig', 
+    clock: str = 'm'
+) -> Dict[str, Any]:
+    """Get aggregation structure for all frequency combinations in config based on clock.
+    
+    This function determines which series need tent kernels (those with frequencies
+    slower than the clock) and generates the corresponding constraint matrices (R_mat)
+    and constraint vectors (q) for use in constrained least squares estimation.
+    
+    The aggregation structure follows the clock-based approach:
+    - All latent factors evolve at the clock frequency
+    - Series with frequencies slower than the clock use tent kernels
+    - Series with frequencies faster than the clock use missing data approach
+    - If tent kernel size exceeds MAX_TENT_SIZE, missing data approach is used
+    
+    Parameters
+    ----------
+    config : DFMConfig
+        Model configuration containing series frequencies and structure
+    clock : str, optional
+        Base frequency (global clock) for nowcasting, by default 'm' (monthly).
+        All latent factors will evolve at this frequency.
+        
+    Returns
+    -------
+    aggregation_info : Dict[str, Any]
+        Dictionary containing:
+        - 'structures': Dict[Tuple[str, str], Tuple[np.ndarray, np.ndarray]]
+            Maps (slower_freq, clock) tuples to (R_mat, q) constraint pairs
+        - 'tent_weights': Dict[str, np.ndarray]
+            Maps frequency strings to their tent weight arrays
+        - 'n_periods': Dict[str, int]
+            Maps frequency strings to tent kernel sizes
+        - 'clock': str
+            The clock frequency used
+            
+    Examples
+    --------
+    >>> from dfm_python import load_config
+    >>> config = load_config('config.yaml')
+    >>> agg_info = get_agg_structure(config, clock='m')
+    >>> # Check which frequencies need tent kernels
+    >>> print(agg_info['tent_weights'])
+    {'q': array([1, 2, 3, 2, 1]), 'sa': array([1, 2, 3, 4, 3, 2, 1])}
+    """
+    # Get frequencies from config
+    frequencies_list = [s.frequency for s in config.series]
+    frequencies = set(frequencies_list)
+    structures = {}
+    tent_weights = {}
+    n_periods_map = {}
+    
+    # Find series with frequencies slower than clock (need tent kernels)
+    for freq in frequencies:
+        if FREQUENCY_HIERARCHY.get(freq, 999) > FREQUENCY_HIERARCHY.get(clock, 0):
+            # This frequency is slower than clock, check if tent kernel is available
+            tent_w = get_tent_weights(freq, clock)
+            if tent_w is not None and len(tent_w) <= MAX_TENT_SIZE:
+                # Tent kernel available and within size limit
+                tent_weights[freq] = tent_w
+                n_periods_map[freq] = len(tent_w)
+                # Generate R_mat from tent weights
+                R_mat, q = generate_R_mat(tent_w)
+                structures[(freq, clock)] = (R_mat, q)
+            # If tent kernel not available or too large, use missing data approach (no structure needed)
+    
+    return {
+        'structures': structures,
+        'tent_weights': tent_weights,
+        'n_periods': n_periods_map,
+        'clock': clock
+    }
+
+
+def group_by_freq(
+    idx_i: np.ndarray,
+    frequencies: np.ndarray,
+    clock: str
+) -> Dict[str, np.ndarray]:
+    """Group series indices by their actual frequency.
+    
+    Groups series by their actual frequency values, allowing each frequency
+    to be processed independently. Faster frequencies than clock are rejected.
+    
+    Parameters
+    ----------
+    idx_i : np.ndarray
+        Array of series indices to group (1D integer array)
+    frequencies : np.ndarray
+        Array of frequency strings for each series (e.g., 'm', 'q', 'sa', 'a')
+        Length should match total number of series
+    clock : str
+        Clock frequency ('m', 'q', 'sa', 'a') - all factors evolve at this frequency
+        
+    Returns
+    -------
+    Dict[str, np.ndarray]
+        Dictionary mapping frequency strings to arrays of series indices.
+        Keys are frequency strings (e.g., 'm', 'q'), values are numpy arrays
+        of integer indices for series with that frequency.
+        
+    Raises
+    ------
+    ValueError
+        If any series has a frequency faster than the clock frequency
+        (e.g., daily/weekly when clock is monthly)
+        
+    Notes
+    -----
+    - Faster frequencies (lower hierarchy number) are not supported and raise ValueError
+    - If frequencies is None or empty, all series are grouped under clock frequency
+    - Used in init_conditions and em_step for mixed-frequency handling
+    """
+    if frequencies is None or len(frequencies) == 0:
+        # Fallback: assume all are same as clock if frequencies not provided
+        return {clock: idx_i.copy()}
+    
+    clock_hierarchy = FREQUENCY_HIERARCHY.get(clock, 3)  # Default to monthly
+    
+    freq_groups: Dict[str, List[int]] = {}
+    faster_indices = []
+    
+    for idx in idx_i:
+        if idx >= len(frequencies):
+            # Index out of bounds - skip
+            continue
+        
+        freq = frequencies[idx]
+        freq_hierarchy = FREQUENCY_HIERARCHY.get(freq, 3)  # Default to monthly
+        
+        if freq_hierarchy < clock_hierarchy:
+            # Faster frequency (lower hierarchy number) - NOT SUPPORTED
+            faster_indices.append(idx)
+        else:
+            # Group by actual frequency
+            if freq not in freq_groups:
+                freq_groups[freq] = []
+            freq_groups[freq].append(idx)
+    
+    # Validate: faster frequencies are not supported
+    if len(faster_indices) > 0:
+        raise ValueError(
+            f"Higher frequencies (daily, weekly) are not supported. "
+            f"Found {len(faster_indices)} series with frequency faster than clock '{clock}'. "
+            f"Please use monthly, quarterly, semi-annual, or annual frequencies only."
+        )
+    
+    # Convert lists to numpy arrays
+    return {freq: np.array(indices, dtype=int) for freq, indices in freq_groups.items()}
+
+
+def compute_idio_lengths(
+    config: 'DFMConfig',
+    clock: str,
+    tent_weights_dict: Optional[Dict[str, np.ndarray]] = None
+) -> np.ndarray:
+    """Compute idiosyncratic chain length for each series.
+    
+    For clock-frequency series: returns 1 (single AR(1) state).
+    For slower-frequency series: returns tent length (L) if augment_idio_slow is True, else 0.
+    If augment_idio is False: all series return 0.
+    
+    Parameters
+    ----------
+    config : DFMConfig
+        Model configuration containing series frequencies and idio augmentation flags
+    clock : str
+        Clock frequency ('d', 'w', 'm', 'q', 'sa', 'a')
+    tent_weights_dict : Dict[str, np.ndarray], optional
+        Dictionary mapping frequency strings to tent weight arrays.
+        If None, will be computed from config using get_agg_structure.
+        
+    Returns
+    -------
+    idio_chain_lengths : np.ndarray
+        Array of chain lengths, one per series.
+        - 0: no idio augmentation
+        - 1: clock-frequency series (AR(1) idio)
+        - L: slower-frequency series (tent-length chain, where L = len(tent_weights))
+        
+    Examples
+    --------
+    >>> from dfm_python import load_config
+    >>> config = load_config('config.yaml')
+    >>> lengths = compute_idio_lengths(config, clock='m')
+    >>> # Returns array with 1 for monthly series, 5 for quarterly, etc.
+    """
+    if not config.augment_idio:
+        # Feature disabled: all zeros
+        return np.zeros(len(config.series), dtype=int)
+    
+    # Get frequencies for each series
+    frequencies = [s.frequency for s in config.series]
+    clock_hierarchy = FREQUENCY_HIERARCHY.get(clock, 3)
+    
+    # Get tent weights if not provided
+    if tent_weights_dict is None:
+        agg_structure = get_agg_structure(config, clock=clock)
+        tent_weights_dict = agg_structure.get('tent_weights', {})
+    
+    lengths = np.zeros(len(config.series), dtype=int)
+    
+    for i, freq in enumerate(frequencies):
+        freq_hierarchy = FREQUENCY_HIERARCHY.get(freq, 3)
+        
+        if freq_hierarchy == clock_hierarchy:
+            # Clock-frequency series: AR(1) idio state
+            lengths[i] = 1
+        elif freq_hierarchy > clock_hierarchy:
+            # Slower-frequency series: tent-length chain (if enabled)
+            if config.augment_idio_slow:
+                tent_weights = tent_weights_dict.get(freq)
+                if tent_weights is not None:
+                    lengths[i] = len(tent_weights)
+                # If no tent weights available, length stays 0 (no idio for this series)
+            # If augment_idio_slow is False, length stays 0
+    
+    return lengths
+
