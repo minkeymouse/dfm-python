@@ -12,13 +12,14 @@ from typing import Optional, List, Any
 from dfm_python.trainer import (
     DFMTrainer,
     DDFMTrainer,
+    KDFMTrainer,
 )
 # Import private functions directly (not exported in __all__)
 # These are internal functions used for testing
 import dfm_python.trainer as trainer_module
 _normalize_accelerator = trainer_module._normalize_accel
 _normalize_precision = trainer_module._normalize_prec
-from dfm_python.config import DFMConfig, DDFMConfig, SeriesConfig, DEFAULT_BLOCK_NAME
+from dfm_python.config import DFMConfig, DDFMConfig, KDFMConfig, SeriesConfig, DEFAULT_BLOCK_NAME
 from dfm_python.config.adapter import YamlSource
 from dfm_python.utils.data import rem_nans_spline, sort_data
 from dfm_python.utils.time import TimeIndex, parse_timestamp
@@ -201,6 +202,111 @@ class TestDDFMTrainer:
         assert_trainer_attribute_value(trainer, 'gradient_clip_val', 1.0)
 
 
+class TestKDFMTrainer:
+    """Test KDFMTrainer for KDFM models."""
+    
+    def test_kdfm_trainer_initialization(self):
+        """Test KDFMTrainer initialization."""
+        trainer = KDFMTrainer(max_epochs=100)
+        assert trainer.max_epochs == 100
+        assert isinstance(trainer, KDFMTrainer)
+    
+    def test_kdfm_trainer_defaults(self):
+        """Test KDFMTrainer default parameters.
+        
+        Verifies that default values match documented defaults in KDFMTrainer class:
+        - max_epochs: 100 (training epochs)
+        - enable_progress_bar: True
+        - enable_model_summary: True (useful for debugging KDFM architecture)
+        """
+        trainer = KDFMTrainer()
+        # KDFM uses gradient descent training, so defaults should be appropriate
+        # Verify actual default values match implementation and documentation
+        assert_trainer_defaults(
+            trainer,
+            expected_max_epochs=100,
+            expected_progress_bar=True,
+            expected_model_summary=True
+        )
+    
+    @pytest.fixture
+    def test_kdfm_config_path(self):
+        """Path to test KDFM config."""
+        return Path(__file__).parent.parent.parent / "config" / "experiment" / "test_kdfm.yaml"
+    
+    def test_kdfm_trainer_from_config(self, test_kdfm_config_path):
+        """Test KDFMTrainer.from_config() method using test config.
+        
+        Note: KDFMTrainer may not have from_config method yet.
+        If it doesn't exist, this test will be skipped.
+        """
+        if not test_kdfm_config_path.exists():
+            pytest.skip(f"Test KDFM config file not found: {test_kdfm_config_path}")
+        
+        # Check if from_config method exists
+        if not hasattr(KDFMTrainer, 'from_config'):
+            pytest.skip("KDFMTrainer.from_config() method not implemented")
+        
+        source = YamlSource(test_kdfm_config_path)
+        config = source.load()
+        
+        trainer = KDFMTrainer.from_config(config)
+        assert isinstance(trainer, KDFMTrainer)
+        # Should extract max_epochs from config
+        if hasattr(config, 'max_epochs'):
+            assert trainer.max_epochs == config.max_epochs
+        else:
+            # If not specified, should default to 100
+            assert trainer.max_epochs == 100
+    
+    def test_kdfm_trainer_callbacks(self):
+        """Test KDFMTrainer callback setup.
+        
+        Verifies that KDFMTrainer has expected callbacks:
+        - EarlyStopping callback (patience=20, monitoring 'train_loss')
+        - LearningRateMonitor callback
+        - ModelCheckpoint callback
+        """
+        trainer = KDFMTrainer(max_epochs=100)
+        # KDFMTrainer should have multiple callbacks configured
+        assert_trainer_callbacks(
+            trainer,
+            expected_callback_types=['EarlyStopping', 'LearningRateMonitor', 'ModelCheckpoint']
+        )
+        
+        # Verify EarlyStopping callback properties
+        early_stopping = next(
+            (cb for cb in trainer.callbacks if isinstance(cb, EarlyStopping)),
+            None
+        )
+        assert early_stopping is not None, "EarlyStopping callback should be present"
+        assert early_stopping.patience == 20, "EarlyStopping should have patience=20 for KDFM"
+        assert early_stopping.monitor == 'train_loss', "EarlyStopping should monitor 'train_loss' for KDFM"
+        
+        # Verify LearningRateMonitor is present
+        lr_monitor = next(
+            (cb for cb in trainer.callbacks if isinstance(cb, LearningRateMonitor)),
+            None
+        )
+        assert lr_monitor is not None, "LearningRateMonitor callback should be present"
+        
+        # Verify ModelCheckpoint is present
+        checkpoint = next(
+            (cb for cb in trainer.callbacks if isinstance(cb, ModelCheckpoint)),
+            None
+        )
+        assert checkpoint is not None, "ModelCheckpoint callback should be present"
+    
+    def test_kdfm_trainer_gradient_clipping(self):
+        """Test KDFMTrainer gradient clipping for stability.
+        
+        Verifies that gradient_clip_val is properly configured when provided.
+        """
+        trainer = KDFMTrainer(max_epochs=100, gradient_clip_val=1.0)
+        # Should have gradient clipping configured with the specified value
+        assert_trainer_attribute_value(trainer, 'gradient_clip_val', 1.0)
+
+
 class TestTrainerConsistency:
     """Test trainer consistency with PyTorch Lightning."""
     
@@ -208,10 +314,12 @@ class TestTrainerConsistency:
         """Test that trainers inherit from pl.Trainer."""
         dfm_trainer = DFMTrainer()
         ddfm_trainer = DDFMTrainer()
+        kdfm_trainer = KDFMTrainer()
         
         import pytorch_lightning as pl
         assert isinstance(dfm_trainer, pl.Trainer)
         assert isinstance(ddfm_trainer, pl.Trainer)
+        assert isinstance(kdfm_trainer, pl.Trainer)
     
     def test_trainer_device_handling(self):
         """Test trainer device configuration."""

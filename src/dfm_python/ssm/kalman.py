@@ -836,11 +836,13 @@ class KalmanFilter(nn.Module):
     # Private helper methods (delegate to utils module)
     def _check_finite(self, tensor: torch.Tensor, name: str = "tensor") -> bool:
         """Check if tensor contains only finite values."""
-        return check_finite(tensor, name)
+        from ..utils.validation import check_finite_tensor
+        return check_finite_tensor(tensor, name)
     
     def _ensure_real(self, tensor: torch.Tensor) -> torch.Tensor:
         """Ensure tensor is real by extracting real part if complex."""
-        return ensure_real(tensor)
+        from ..utils.validation import ensure_real as _ensure_real
+        return _ensure_real(tensor)
     
     def _ensure_symmetric(self, tensor: torch.Tensor) -> torch.Tensor:
         """Ensure matrix is symmetric by averaging with its transpose."""

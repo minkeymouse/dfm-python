@@ -15,6 +15,7 @@ from ..ssm.em import (
 
 from .dfm_dm import DFMDataModule
 from .ddfm_dm import DDFMDataModule
+from .kdfm_dm import KDFMDataModule
 from ..data.dataset import DFMDataset, DDFMDataset
 
 from .utils import (
@@ -39,6 +40,7 @@ __all__ = [
     # Data handling
     'DFMDataModule',
     'DDFMDataModule',
+    'KDFMDataModule',
     'DFMDataset',
     'DDFMDataset',
     # Scaling utilities

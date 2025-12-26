@@ -130,23 +130,23 @@ class DDFM(BaseFactorModel):
         num_factors: Optional[int] = None,
         activation: str = 'relu',
         use_batch_norm: bool = True,
-        learning_rate: float = 0.005,
+        learning_rate: Optional[float] = None,
         epochs: int = 100,
-        batch_size: int = 100,
+        batch_size: Optional[int] = None,
         factor_order: int = 1,
         use_idiosyncratic: bool = True,
-        min_obs_idio: int = 5,
-        max_iter: int = 200,
-        tolerance: float = 0.0005,
+        min_obs_idio: Optional[int] = None,
+        max_iter: Optional[int] = None,
+        tolerance: Optional[float] = None,
         disp: int = 10,
         seed: Optional[int] = None,
         decay_learning_rate: bool = True,
         min_obs_pretrain: int = 50,
         mult_epoch_pretrain: int = 1,
         loss_function: str = 'mse',
-        huber_delta: float = 1.0,
-        weight_decay: float = 0.0,
-        grad_clip_val: float = 1.0,
+        huber_delta: Optional[float] = None,
+        weight_decay: Optional[float] = None,
+        grad_clip_val: Optional[float] = None,
         decoder: str = "linear",
         decoder_layers: Optional[List[int]] = None,
         **kwargs
@@ -228,27 +228,37 @@ class DDFM(BaseFactorModel):
                 f"Maximum supported VAR order is VAR(2). Please provide factor_order=1 (VAR(1)) or factor_order=2 (VAR(2))"
             )
         
-        self.encoder_layers = encoder_layers or [64, 32]
+        # Import constants for defaults
+        from ..config.constants import DEFAULT_ENCODER_LAYERS
+        
+        self.encoder_layers = encoder_layers or DEFAULT_ENCODER_LAYERS
         self.activation = activation
         self.use_batch_norm = use_batch_norm
         self.decoder_type = decoder
         self.decoder_layers = decoder_layers
-        self.learning_rate = learning_rate
+        # Import constants for defaults
+        from ..config.constants import (
+            DEFAULT_DDFM_LEARNING_RATE, DEFAULT_DDFM_BATCH_SIZE,
+            DEFAULT_MAX_MCMC_ITER, DEFAULT_TOLERANCE, DEFAULT_MIN_OBS_IDIO,
+            DEFAULT_HUBER_DELTA, DEFAULT_WEIGHT_DECAY, DEFAULT_GRAD_CLIP_VAL
+        )
+        
+        self.learning_rate = learning_rate if learning_rate is not None else DEFAULT_DDFM_LEARNING_RATE
         self.epochs_per_iter = epochs
-        self.batch_size = batch_size
+        self.batch_size = batch_size if batch_size is not None else DEFAULT_DDFM_BATCH_SIZE
         self.factor_order = factor_order
         self.use_idiosyncratic = use_idiosyncratic
-        self.min_obs_idio = min_obs_idio
-        self.max_iter = max_iter
-        self.tolerance = tolerance
+        self.min_obs_idio = min_obs_idio if min_obs_idio is not None else DEFAULT_MIN_OBS_IDIO
+        self.max_iter = max_iter if max_iter is not None else DEFAULT_MAX_MCMC_ITER
+        self.tolerance = tolerance if tolerance is not None else DEFAULT_TOLERANCE
         self.disp = disp
         self.decay_learning_rate = decay_learning_rate
         self.min_obs_pretrain = min_obs_pretrain
         self.mult_epoch_pretrain = mult_epoch_pretrain
         self.loss_function = loss_function.lower()
-        self.huber_delta = huber_delta
-        self.weight_decay = weight_decay
-        self.grad_clip_val = grad_clip_val
+        self.huber_delta = huber_delta if huber_delta is not None else DEFAULT_HUBER_DELTA
+        self.weight_decay = weight_decay if weight_decay is not None else DEFAULT_WEIGHT_DECAY
+        self.grad_clip_val = grad_clip_val if grad_clip_val is not None else DEFAULT_GRAD_CLIP_VAL
         
         # Validate loss function
         if self.loss_function not in ['mse', 'huber']:
@@ -382,7 +392,8 @@ class DDFM(BaseFactorModel):
                 )
             
             # Validate decoder weights are not all zeros (initialization check)
-            if np.allclose(decoder_weight, 0.0, atol=1e-8):
+            from ..config.constants import MIN_EIGENVALUE
+            if np.allclose(decoder_weight, 0.0, atol=MIN_EIGENVALUE):
                 raise RuntimeError(
                     f"DDFM decoder initialization failed: decoder weights are all zeros after initialization. "
                     f"This indicates a problem with decoder initialization. "
@@ -486,7 +497,8 @@ class DDFM(BaseFactorModel):
         # Clip input data to prevent extreme values that cause NaN
         # Clip to reasonable range: -10 to 10 standard deviations
         # For deeper networks, use slightly tighter clipping to improve stability
-        clip_range = 8.0 if len(self.encoder_layers) > 2 else 10.0
+        from ..config.constants import DEFAULT_DDFM_CLIP_RANGE_DEEP, DEFAULT_DDFM_CLIP_RANGE_SHALLOW
+        clip_range = DEFAULT_DDFM_CLIP_RANGE_DEEP if len(self.encoder_layers) > 2 else DEFAULT_DDFM_CLIP_RANGE_SHALLOW
         data_clipped = torch.clamp(data, min=-clip_range, max=clip_range)
         
         # Forward pass
@@ -497,7 +509,8 @@ class DDFM(BaseFactorModel):
             nan_count = torch.sum(torch.isnan(reconstructed)).item()
             inf_count = torch.sum(torch.isinf(reconstructed)).item()
             _logger.error(f"DDFM training_step: Forward pass produced {nan_count} NaN and {inf_count} Inf values")
-            loss = torch.tensor(1e6, device=data.device, dtype=data.dtype, requires_grad=True)
+            from ..config.constants import MAX_EIGENVALUE
+            loss = torch.tensor(float(MAX_EIGENVALUE), device=data.device, dtype=data.dtype, requires_grad=True)
             self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True)
             return loss
         
@@ -516,16 +529,19 @@ class DDFM(BaseFactorModel):
                 0.5 * diff ** 2,
                 self.huber_delta * (abs_diff - 0.5 * self.huber_delta)
             )
-            loss = torch.sum(huber_loss * mask) / (torch.sum(mask) + 1e-8)
+            from ..config.constants import DEFAULT_EPSILON
+            loss = torch.sum(huber_loss * mask) / (torch.sum(mask) + DEFAULT_EPSILON)
         else:
             # MSE loss (default)
+            from ..config.constants import DEFAULT_EPSILON
             squared_diff = (target_clean - reconstructed) ** 2
-            loss = torch.sum(squared_diff * mask) / (torch.sum(mask) + 1e-8)
+            loss = torch.sum(squared_diff * mask) / (torch.sum(mask) + DEFAULT_EPSILON)
         
         # Handle NaN/Inf in loss
         if not torch.isfinite(loss):
             _logger.error(f"DDFM training_step: Loss is NaN/Inf")
-            loss = torch.tensor(1e6, device=loss.device, dtype=loss.dtype, requires_grad=True)
+            from ..config.constants import MAX_EIGENVALUE
+            loss = torch.tensor(float(MAX_EIGENVALUE), device=loss.device, dtype=loss.dtype, requires_grad=True)
         
         # Log metrics
         self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True)
@@ -597,21 +613,9 @@ class DDFM(BaseFactorModel):
         """
         if self.encoder is None or self.decoder is None:
             _logger.warning("Encoder/decoder not initialized, creating placeholder optimizer")
-            dummy_param = nn.Parameter(torch.zeros(1))
-            optimizer = torch.optim.Adam([dummy_param], lr=self.learning_rate)
+            optimizer = self._create_dummy_optimizer(self.learning_rate)
             if self.decay_learning_rate:
-                # Create scheduler matching original DDFM: decay_rate=0.96, decay_steps=epochs
-                scheduler = torch.optim.lr_scheduler.ExponentialLR(
-                    optimizer, gamma=0.96
-                )
-                return {
-                    "optimizer": optimizer,
-                    "lr_scheduler": {
-                        "scheduler": scheduler,
-                        "interval": "epoch",
-                        "frequency": 1,
-                    }
-                }
+                return self._create_lr_scheduler(optimizer)
             return [optimizer]
         
         optimizer = torch.optim.Adam(
@@ -621,22 +625,37 @@ class DDFM(BaseFactorModel):
         )
         
         if self.decay_learning_rate:
-            # Exponential decay scheduler matching original DDFM implementation
-            # Original: decay_rate=0.96, decay_steps=epochs, staircase=True
-            # PyTorch: gamma=0.96, step every epoch (interval='epoch', frequency=1)
-            scheduler = torch.optim.lr_scheduler.ExponentialLR(
-                optimizer, gamma=0.96
-            )
-            return {
-                "optimizer": optimizer,
-                "lr_scheduler": {
-                    "scheduler": scheduler,
-                    "interval": "epoch",
-                    "frequency": 1,
-                }
-            }
+            return self._create_lr_scheduler(optimizer)
         
         return [optimizer]
+    
+    def _create_lr_scheduler(self, optimizer: torch.optim.Optimizer) -> Dict[str, Any]:
+        """Create learning rate scheduler configuration for Lightning.
+        
+        Helper method to consolidate scheduler creation logic.
+        
+        Parameters
+        ----------
+        optimizer : torch.optim.Optimizer
+            Optimizer to attach scheduler to
+            
+        Returns
+        -------
+        Dict[str, Any]
+            Lightning scheduler configuration dict
+        """
+        from ..config.constants import DEFAULT_LR_DECAY_RATE
+        scheduler = torch.optim.lr_scheduler.ExponentialLR(
+            optimizer, gamma=DEFAULT_LR_DECAY_RATE
+        )
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "interval": "epoch",
+                "frequency": 1,
+            }
+        }
     
     def _create_optimizer(self, step: int = 0) -> torch.optim.Optimizer:
         """Create optimizer for autoencoder training.
@@ -662,8 +681,9 @@ class DDFM(BaseFactorModel):
         if self.decay_learning_rate:
             # For MCMC, we decay per MCMC iteration (not per epoch)
             # Each MCMC iteration uses epochs_per_iter epochs
+            from ..config.constants import DEFAULT_LR_DECAY_RATE
             decay_steps = self.epochs_per_iter
-            decay_rate = 0.96
+            decay_rate = DEFAULT_LR_DECAY_RATE
             lr = self.learning_rate * (decay_rate ** (step // decay_steps))
         else:
             lr = self.learning_rate
@@ -802,7 +822,8 @@ class DDFM(BaseFactorModel):
                     )
                     reconstructed_masked = reconstructed * mask
                     squared_diff = (target_clean - reconstructed_masked) ** 2
-                    loss = torch.sum(squared_diff) / (torch.sum(mask) + 1e-8)
+                    from ..config.constants import DEFAULT_EPSILON
+                    loss = torch.sum(squared_diff) / (torch.sum(mask) + DEFAULT_EPSILON)
                 else:
                     # Standard MSE (no missing values)
                     loss = nn.functional.mse_loss(reconstructed, batch_target)
@@ -891,7 +912,7 @@ class DDFM(BaseFactorModel):
         >>> factors = state.factors  # (T x 2) factor estimates
         >>> print(f"Converged: {state.converged}, Iterations: {state.num_iter}")
         """
-        from ..trainer.denoising import DDFMDenoisingTrainer
+        from ..trainer.ddfm import DDFMDenoisingTrainer
         
         trainer = DDFMDenoisingTrainer(self)
         return trainer.fit(
@@ -994,7 +1015,8 @@ class DDFM(BaseFactorModel):
         
         # Estimate R from residuals
         R_diag = np.var(residuals, axis=0)
-        R = np.diag(np.maximum(R_diag, 1e-8))
+        from ..config.constants import MIN_DIAGONAL_VARIANCE
+        R = np.diag(np.maximum(R_diag, MIN_DIAGONAL_VARIANCE))
         
         # Compute smoothed data
         x_sm = prediction_iter  # T x N (standardized, already preprocessed)

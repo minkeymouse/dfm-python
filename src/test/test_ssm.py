@@ -14,6 +14,7 @@ from typing import Tuple
 
 from dfm_python.ssm import (
     KalmanFilter, KalmanFilterState, EMAlgorithm, EMStepParams,
+    CompanionSSM, MACompanionSSM,
     check_finite, ensure_real, ensure_symmetric,
     ensure_positive_definite, safe_inverse,
 )
@@ -327,6 +328,174 @@ class TestStateSpaceConsistency:
         
         # Should be stationary
         assert max_eigenval < 1.0
+
+
+class TestCompanionSSM:
+    """Test Companion SSM implementation for KDFM."""
+    
+    def test_companion_ssm_initialization(self):
+        """Test CompanionSSM initialization."""
+        n_vars, lag_order = 3, 1
+        ssm = CompanionSSM(n_vars=n_vars, lag_order=lag_order)
+        assert isinstance(ssm, torch.nn.Module)
+        assert ssm.n_vars == n_vars
+        assert ssm.order == lag_order  # Base class uses 'order'
+        assert ssm.latent_dim == lag_order * n_vars
+    
+    def test_companion_ssm_forward(self):
+        """Test CompanionSSM forward pass."""
+        n_vars, lag_order, T = 3, 1, 50
+        ssm = CompanionSSM(n_vars=n_vars, lag_order=lag_order)
+        
+        # Create dummy input (structural shocks) - needs batch dimension
+        # CompanionSSM expects (B, L, D) format
+        epsilon = torch.randn(1, T, n_vars)  # Add batch dimension
+        
+        # Forward pass
+        output = ssm(epsilon)
+        assert output is not None
+        # Output should be factors (B, T, n_vars)
+        assert output.shape == (1, T, n_vars)
+    
+    def test_companion_ssm_companion_matrix(self):
+        """Test companion matrix extraction."""
+        n_vars, lag_order = 3, 1
+        ssm = CompanionSSM(n_vars=n_vars, lag_order=lag_order)
+        
+        # Get companion matrix
+        A = ssm.get_companion_matrix()
+        assert A is not None
+        # Companion matrix may have batch dimension (n_kernels, latent_dim, latent_dim)
+        # or just (latent_dim, latent_dim)
+        if A.dim() == 3:
+            assert A.shape == (1, lag_order * n_vars, lag_order * n_vars)  # (n_kernels, ...)
+        else:
+            assert A.shape == (lag_order * n_vars, lag_order * n_vars)
+    
+    def test_ma_companion_ssm_initialization(self):
+        """Test MACompanionSSM initialization."""
+        n_vars, ma_order = 3, 1
+        ssm = MACompanionSSM(n_vars=n_vars, ma_order=ma_order)
+        assert isinstance(ssm, torch.nn.Module)
+        assert ssm.n_vars == n_vars
+        assert ssm.order == ma_order  # Base class uses 'order'
+        assert ssm.latent_dim == ma_order * n_vars
+    
+    def test_ma_companion_ssm_forward(self):
+        """Test MACompanionSSM forward pass."""
+        n_vars, ma_order, T = 3, 1, 50
+        ssm = MACompanionSSM(n_vars=n_vars, ma_order=ma_order)
+        
+        # Create dummy input (factors from AR stage) - needs batch dimension
+        # MACompanionSSM expects (B, L, D) format
+        z = torch.randn(1, T, n_vars)  # Add batch dimension
+        
+        # Forward pass
+        output = ssm(z)
+        assert output is not None
+        # Output should be observables (B, T, n_vars)
+        assert output.shape == (1, T, n_vars)
+    
+    def test_companion_ssm_var_coefficients(self):
+        """Test VAR coefficient extraction from companion SSM."""
+        n_vars, lag_order = 3, 1
+        ssm = CompanionSSM(n_vars=n_vars, lag_order=lag_order)
+        
+        # Extract VAR coefficients
+        coeffs = ssm.extract_var_coefficients()
+        assert coeffs is not None
+        # Coefficients should be (order x n_vars x n_vars)
+        assert coeffs.shape == (lag_order, n_vars, n_vars)
+    
+    def test_ma_companion_ssm_ma_coefficients(self):
+        """Test MA coefficient extraction from MA companion SSM."""
+        n_vars, ma_order = 3, 1
+        ssm = MACompanionSSM(n_vars=n_vars, ma_order=ma_order)
+        
+        # Extract MA coefficients
+        coeffs = ssm.extract_ma_coefficients()
+        assert coeffs is not None
+        # Coefficients should be (order x n_vars x n_vars)
+        assert coeffs.shape == (ma_order, n_vars, n_vars)
+
+
+class TestStructuralIdentification:
+    """Test structural identification for KDFM."""
+    
+    def test_structural_identification_initialization(self):
+        """Test StructuralIdentificationSSM initialization."""
+        from dfm_python.models.functional.structural import StructuralIdentificationSSM
+        
+        n_vars, lag_order = 3, 1
+        ssm = StructuralIdentificationSSM(
+            n_vars=n_vars,
+            lag_order=lag_order,
+            method='cholesky'
+        )
+        assert isinstance(ssm, torch.nn.Module)
+        assert ssm.n_vars == n_vars
+        assert ssm.lag_order == lag_order
+        assert ssm.method == 'cholesky'
+    
+    def test_structural_identification_forward(self):
+        """Test structural identification forward pass."""
+        from dfm_python.models.functional.structural import StructuralIdentificationSSM
+        
+        n_vars, lag_order, T = 3, 1, 50
+        ssm = StructuralIdentificationSSM(
+            n_vars=n_vars,
+            lag_order=lag_order,
+            method='cholesky'
+        )
+        
+        # Create dummy reduced-form residuals
+        residuals = torch.randn(T, n_vars)
+        
+        # Forward pass: transform residuals to structural shocks
+        shocks = ssm(residuals)
+        assert shocks is not None
+        # Structural shocks should have dimension matching latent state
+        assert shocks.shape == (T, lag_order * n_vars)
+    
+    def test_structural_identification_methods(self):
+        """Test different structural identification methods."""
+        from dfm_python.models.functional.structural import StructuralIdentificationSSM
+        
+        n_vars, lag_order = 3, 1
+        
+        # Test Cholesky method
+        ssm_chol = StructuralIdentificationSSM(
+            n_vars=n_vars,
+            lag_order=lag_order,
+            method='cholesky'
+        )
+        assert ssm_chol.method == 'cholesky'
+        
+        # Test full method
+        ssm_full = StructuralIdentificationSSM(
+            n_vars=n_vars,
+            lag_order=lag_order,
+            method='full'
+        )
+        assert ssm_full.method == 'full'
+    
+    def test_structural_identification_matrix(self):
+        """Test structural identification matrix structure."""
+        from dfm_python.models.functional.structural import StructuralIdentificationSSM
+        
+        n_vars, lag_order = 3, 1
+        ssm = StructuralIdentificationSSM(
+            n_vars=n_vars,
+            lag_order=lag_order,
+            method='cholesky'
+        )
+        
+        # Get structural matrix
+        S = ssm.get_structural_matrix()
+        assert S is not None
+        # Structural matrix should be (shock_dim x shock_dim)
+        shock_dim = lag_order * n_vars
+        assert S.shape == (shock_dim, shock_dim)
 
 
 class TestKalmanFilterProperties:

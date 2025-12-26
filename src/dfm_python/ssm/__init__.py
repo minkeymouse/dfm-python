@@ -23,12 +23,18 @@ from .utils import (
     DEFAULT_INV_REGULARIZATION,
 )
 
+from .companion import CompanionSSM, MACompanionSSM, CompanionSSMBase
+
 __all__ = [
     # Main modules
     'KalmanFilter',
     'KalmanFilterState',
     'EMAlgorithm',
     'EMStepParams',
+    # Companion SSM modules
+    'CompanionSSM',
+    'MACompanionSSM',
+    'CompanionSSMBase',
     # Utilities
     'check_finite',
     'ensure_real',

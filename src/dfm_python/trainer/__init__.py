@@ -735,13 +735,14 @@ def _create_base(
 # ============================================================================
 
 from .dfm import DFMTrainer
-from .ddfm import DDFMTrainer
-from .denoising import DDFMDenoisingTrainer
+from .ddfm import DDFMTrainer, DDFMDenoisingTrainer
+from .kdfm import KDFMTrainer
 
 __all__ = [
     'DFMTrainer',
     'DDFMTrainer',
     'DDFMDenoisingTrainer',
+    'KDFMTrainer',
     'DFM_TRAINER_DEFAULTS',
     'DDFM_TRAINER_DEFAULTS',
 ]

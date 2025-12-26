@@ -5,11 +5,24 @@ This subpackage provides:
 - IO (ConfigSource, YamlSource, etc.) in adapter.py
 """
 
-from .schema import (
-    BaseModelConfig, DFMConfig, DDFMConfig, SeriesConfig,
+from .base import (
+    BaseModelConfig, SeriesConfig, BaseResult,
     DEFAULT_BLOCK_NAME,
 )
-from .results import BaseResult, DFMResult, DDFMResult, FitParams
+from .constants import (
+    DEFAULT_CONVERGENCE_THRESHOLD,
+    DEFAULT_TOLERANCE,
+    DEFAULT_MAX_ITER,
+    DEFAULT_MAX_EPOCHS,
+    DEFAULT_LEARNING_RATE,
+    DEFAULT_BATCH_SIZE,
+    MIN_EIGENVALUE,
+    MIN_STD,
+)
+from .schema import (
+    DFMConfig, DDFMConfig, KDFMConfig,
+)
+from .results import DFMResult, DDFMResult, KDFMResult, FitParams
 from .utils import validate_frequency, validate_transformation
 from .adapter import (
     ConfigSource,
@@ -33,13 +46,15 @@ from .utils import (
 )
 
 __all__ = [
-    # Schema
-    'BaseModelConfig', 'DFMConfig', 'DDFMConfig', 'SeriesConfig',
+    # Base classes (from base.py)
+    'BaseModelConfig', 'SeriesConfig', 'BaseResult',
     'DEFAULT_BLOCK_NAME',
+    # Model-specific configs (from schema.py)
+    'DFMConfig', 'DDFMConfig', 'KDFMConfig',
     # Parameter overrides
     'FitParams',
-    # Results
-    'BaseResult', 'DFMResult', 'DDFMResult',
+    # Model-specific results (from results.py)
+    'DFMResult', 'DDFMResult', 'KDFMResult',
     # Utilities
     'validate_frequency', 'validate_transformation',
     # IO

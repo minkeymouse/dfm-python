@@ -92,7 +92,7 @@ from .config import (
 from .config import DFMConfig, SeriesConfig  # Internal use only
 
 # Results
-from .config.results import DFMResult, DDFMResult, BaseResult
+from .config.results import DFMResult, DDFMResult, KDFMResult, BaseResult
 
 # Utilities (from utils/ subpackage)
 from .utils.diagnostics import diagnose_series, print_series_diagnosis
@@ -103,6 +103,7 @@ from .utils.time import calculate_rmse
 from .lightning import (
     DFMDataModule,
     DDFMDataModule,  # DDFM-specific DataModule
+    KDFMDataModule,  # KDFM-specific DataModule
     DFMDataset,  # Dataset class (usually not needed directly)
     DDFMDataset,  # DDFM Dataset class (usually not needed directly)
     KalmanFilter,  # Module class
@@ -116,6 +117,9 @@ from .models.dfm import DFM
 # DDFM high-level API (PyTorch is mandatory)
 from .models.ddfm import DDFM
 
+# KDFM high-level API
+from .models.kdfm import KDFM
+
 __all__ = [
     # Core classes
     'DFM',
@@ -127,7 +131,7 @@ __all__ = [
     'ConfigSource', 'YamlSource', 'HydraSource',
     'make_config_source',
     # Low-level API (functional interface - advanced usage)
-    'BaseResult', 'DFMResult', 'DDFMResult', 'calculate_rmse', 'diagnose_series', 'print_series_diagnosis',
+    'BaseResult', 'DFMResult', 'DDFMResult', 'KDFMResult', 'calculate_rmse', 'diagnose_series', 'print_series_diagnosis',
 ]
 
 # DDFM high-level API (PyTorch is mandatory)
@@ -135,10 +139,16 @@ __all__.extend([
     'DDFM',  # High-level API class
 ])
 
+# KDFM high-level API
+__all__.extend([
+    'KDFM',  # High-level API class
+])
+
 # Lightning modules (mandatory dependency)
 __all__.extend([
     'DFMDataModule',
     'DDFMDataModule',  # DDFM-specific DataModule
+    'KDFMDataModule',  # KDFM-specific DataModule
     'DFMDataset',  # Dataset class (usually not needed directly)
     'DDFMDataset',  # DDFM Dataset class (usually not needed directly)
     'KalmanFilter',  # Module class
@@ -146,11 +156,12 @@ __all__.extend([
 ])
 
 # Trainer classes (mandatory dependency)
-from .trainer import DFMTrainer, DDFMTrainer
+from .trainer import DFMTrainer, DDFMTrainer, KDFMTrainer
 
 __all__.extend([
     'DFMTrainer',
     'DDFMTrainer',
+    'KDFMTrainer',
 ])
 
 

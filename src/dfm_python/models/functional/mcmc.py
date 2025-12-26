@@ -9,11 +9,11 @@ from typing import Optional, TYPE_CHECKING
 import numpy as np
 import torch
 
-from ..logger import get_logger
-from ..utils.statespace import estimate_idio_dynamics
+from ...logger import get_logger
+from ...utils.statespace import estimate_idio_dynamics
 
 if TYPE_CHECKING:
-    from .ddfm import DDFM, DDFMTrainingState
+    from ..ddfm import DDFM, DDFMTrainingState
 
 _logger = get_logger(__name__)
 
@@ -477,7 +477,7 @@ class DDFMMCMCTrainer:
         factors = self.model._validate_factors(factors, operation="fit_mcmc")
         
         # Import DDFMTrainingState here to avoid circular dependency
-        from .ddfm import DDFMTrainingState
+        from ..ddfm import DDFMTrainingState
         
         # Store final state
         self.model.training_state = DDFMTrainingState(

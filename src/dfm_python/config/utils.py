@@ -545,3 +545,147 @@ def compute_idio_lengths(
     
     return lengths
 
+
+# ============================================================================
+# Configuration Parsing Utilities
+# ============================================================================
+
+def parse_series_list(series_data: List[Any]) -> List[Any]:
+    """Parse series from list format.
+    
+    Parameters
+    ----------
+    series_data : List[Union[Dict, SeriesConfig]]
+        List of series configurations (dicts or SeriesConfig instances)
+        
+    Returns
+    -------
+    List[SeriesConfig]
+        List of SeriesConfig instances
+    """
+    from .base import SeriesConfig
+    return [
+        SeriesConfig(**s) if isinstance(s, dict) else s
+        for s in series_data
+    ]
+
+
+def parse_blocks_dict(blocks_data: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """Parse blocks from dict format.
+    
+    Parameters
+    ----------
+    blocks_data : Dict[str, Any]
+        Dictionary mapping block names to block configurations
+        
+    Returns
+    -------
+    Dict[str, Dict[str, Any]]
+        Dictionary mapping block names to block config dicts
+        
+    Raises
+    ------
+    ValueError
+        If block config is not a dict
+    """
+    blocks_dict = {}
+    for block_name, block_cfg in blocks_data.items():
+        if isinstance(block_cfg, dict):
+            blocks_dict[block_name] = block_cfg
+        else:
+            raise ValueError(f"Invalid block config for {block_name}: {block_cfg}. Must be a dict.")
+    return blocks_dict
+
+
+def infer_blocks(
+    series_list: List[Any],
+    data: Dict[str, Any]
+) -> Dict[str, Dict[str, Any]]:
+    """Infer blocks from configuration data when blocks not explicitly provided.
+    
+    Note: SeriesConfig no longer contains blocks information.
+    Blocks are defined in DFMConfig, not in SeriesConfig.
+    
+    Parameters
+    ----------
+    series_list : List[SeriesConfig]
+        List of series configurations (blocks information not used)
+    data : Dict[str, Any]
+        Configuration data (for clock default and block_names)
+        
+    Returns
+    -------
+    Dict[str, Dict[str, Any]]
+        Dictionary mapping block names to block config dicts
+    """
+    from .base import DEFAULT_BLOCK_NAME
+    
+    blocks_dict = {}
+    
+    # Try to get block_names from data
+    if 'block_names' in data:
+        block_names_list = data['block_names']
+        clock = data.get('clock', 'm')
+        for block_name in block_names_list:
+            blocks_dict[block_name] = {'factors': 1, 'ar_lag': 1, 'clock': clock}
+    else:
+        # Default: create default block if no blocks specified
+        clock = data.get('clock', 'm')
+        blocks_dict[DEFAULT_BLOCK_NAME] = {'factors': 1, 'ar_lag': 1, 'clock': clock}
+    
+    return blocks_dict
+
+
+def detect_config_type(data: Dict[str, Any]) -> str:
+    """Detect config type (DFM, DDFM, or KDFM) from data dictionary.
+    
+    This helper function provides a single source of truth for config type detection.
+    It checks for model-specific parameters or explicit model_type specification.
+    
+    Parameters
+    ----------
+    data : Dict[str, Any]
+        Configuration data dictionary
+        
+    Returns
+    -------
+    str
+        'kdfm' if KDFM config detected, 'ddfm' if DDFM config detected, 'dfm' otherwise
+        
+    Detection Logic:
+    - Checks if model_type is 'kdfm', 'ddfm', 'deep', or 'dfm'
+    - Checks for KDFM-specific parameters: 'ar_order', 'ma_order', 'structural_method'
+    - Checks for DDFM-specific parameters:
+      - Keys starting with 'ddfm_'
+      - Keys: 'encoder_layers', 'epochs', 'learning_rate', 'batch_size'
+    - Returns appropriate type if any condition is met
+    """
+    model_type = data.get('model_type', '').lower()
+    
+    # Check for explicit model type
+    if model_type in ('kdfm', 'kernelized'):
+        return 'kdfm'
+    if model_type in ('ddfm', 'deep'):
+        return 'ddfm'
+    if model_type == 'dfm':
+        return 'dfm'
+    
+    # Check for KDFM-specific parameters
+    has_kdfm_params = any(
+        key in ['ar_order', 'ma_order', 'structural_method', 'structural_reg_weight']
+        for key in data.keys()
+    )
+    if has_kdfm_params:
+        return 'kdfm'
+    
+    # Check for DDFM-specific parameters
+    has_ddfm_params = any(
+        key.startswith('ddfm_') or 
+        key in ['encoder_layers', 'epochs', 'learning_rate', 'batch_size']
+        for key in data.keys()
+    )
+    if has_ddfm_params:
+        return 'ddfm'
+    
+    # Default to DFM
+    return 'dfm'

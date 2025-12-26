@@ -7,19 +7,25 @@ This package contains implementations of different factor models:
 
 from .base import BaseFactorModel
 from .dfm import DFM
-from ..config.results import BaseResult, DFMResult, DDFMResult, FitParams
+from ..config.results import BaseResult, DFMResult, DDFMResult, KDFMResult, FitParams
 
 __all__ = [
     'BaseFactorModel', 'DFM',
     # Results
-    'BaseResult', 'DFMResult', 'DDFMResult', 'FitParams',
+    'BaseResult', 'DFMResult', 'DDFMResult', 'KDFMResult', 'FitParams',
 ]
 
 # DDFM implementation
 from .ddfm import DDFM
-from ..trainer.denoising import DDFMDenoisingTrainer
+from ..trainer.ddfm import DDFMDenoisingTrainer
 __all__.extend([
     'DDFM',  # High-level API
     'DDFMDenoisingTrainer',  # Denoising training procedure
+])
+
+# KDFM implementation
+from .kdfm import KDFM
+__all__.extend([
+    'KDFM',  # High-level API
 ])
 

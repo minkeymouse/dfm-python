@@ -101,6 +101,7 @@ class BaseFactorModel(pl.LightningModule):
         """Check array for NaN/Inf values and apply fallback if needed.
         
         This is a shared utility method for numerical stability checks across all models.
+        Uses consolidated validation utility.
         
         Parameters
         ----------
@@ -118,24 +119,19 @@ class BaseFactorModel(pl.LightningModule):
         np.ndarray
             Cleaned array (or fallback if provided)
         """
-        if not np.all(np.isfinite(arr)):
-            nan_count = np.sum(~np.isfinite(arr))
+        from ..utils.validation import check_finite_array
+        from ..config.constants import MAX_EIGENVALUE
+        
+        try:
+            return check_finite_array(arr, name, context, fallback)
+        except ValueError:
+            # Replace NaN/Inf with finite values as last resort
+            arr_clean = np.nan_to_num(arr, nan=0.0, posinf=MAX_EIGENVALUE, neginf=-MAX_EIGENVALUE)
             context_str = f" {context}" if context else ""
             _logger.warning(
-                f"{self.__class__.__name__} numerical stability check: {name} contains {nan_count} NaN/Inf values{context_str}. "
-                f"Shape: {arr.shape}"
+                f"{self.__class__.__name__} numerical stability check: replaced NaN/Inf in {name}{context_str} with finite values"
             )
-            if fallback is not None:
-                _logger.info(f"{self.__class__.__name__}: Using fallback for {name}")
-                return fallback
-            else:
-                # Replace NaN/Inf with finite values as last resort
-                arr_clean = np.nan_to_num(arr, nan=0.0, posinf=1e6, neginf=-1e6)
-                _logger.warning(
-                    f"{self.__class__.__name__} numerical stability check: replaced NaN/Inf in {name} with finite values"
-                )
-                return arr_clean
-        return arr
+            return arr_clean
     
     def _create_temp_config(self, block_name: Optional[str] = None) -> DFMConfig:
         """Create a temporary configuration for model initialization.
@@ -706,6 +702,25 @@ class BaseFactorModel(pl.LightningModule):
         """
         raise NotImplementedError("Subclasses must implement get_result()")
     
+    def _create_dummy_optimizer(self, learning_rate: float = 0.001) -> torch.optim.Optimizer:
+        """Create a dummy optimizer for models not yet initialized.
+        
+        This helper method creates a placeholder optimizer when model components
+        are not yet initialized. Used by configure_optimizers() in subclasses.
+        
+        Parameters
+        ----------
+        learning_rate : float, default=0.001
+            Learning rate for the dummy optimizer
+            
+        Returns
+        -------
+        torch.optim.Optimizer
+            Adam optimizer with a single dummy parameter
+        """
+        import torch.nn as nn
+        dummy_param = nn.Parameter(torch.zeros(1))
+        return torch.optim.Adam([dummy_param], lr=learning_rate)
     
     def _load_config_common(
         self,

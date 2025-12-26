@@ -69,8 +69,9 @@ def estimate_var_ddfm(
     if T < min_obs_required:
         _logger.warning(f"DDFM VAR estimation: insufficient observations (T={T}) for VAR({factor_order}), need at least {min_obs_required}. Using scaled identity based on factor variance")
         # Use scaled identity based on factor variance
+        from ..config.constants import MIN_STD
         factor_var = np.var(factors, axis=0)
-        factor_var = np.maximum(factor_var, 1e-8)  # Floor
+        factor_var = np.maximum(factor_var, MIN_STD ** 2)  # Floor (MIN_STD squared for variance)
         if factor_order == 1:
             A_f = np.eye(m) * 0.5  # Conservative initial value
         else:
@@ -89,7 +90,8 @@ def estimate_var_ddfm(
     if not np.all(np.isfinite(factors)):
         nan_count = np.sum(~np.isfinite(factors))
         _logger.warning(f"DDFM VAR estimation: factors contain {nan_count} NaN/Inf values. Cleaning before estimation")
-        factors = np.nan_to_num(factors, nan=0.0, posinf=1e6, neginf=-1e6)
+        from ..config.constants import MAX_EIGENVALUE
+        factors = np.nan_to_num(factors, nan=0.0, posinf=MAX_EIGENVALUE, neginf=-MAX_EIGENVALUE)
     
     # Check for rank deficiency in factor covariance matrix
     try:
@@ -97,7 +99,8 @@ def estimate_var_ddfm(
         rank = np.linalg.matrix_rank(factor_cov)
         if rank < m:
             _logger.warning(f"DDFM VAR estimation: factor covariance matrix is rank-deficient (rank={rank} < {m}). Applying regularization")
-            regularization = 1e-6
+            from ..config.constants import DEFAULT_REGULARIZATION
+            regularization = DEFAULT_REGULARIZATION
             factor_cov += np.eye(m) * regularization
     except (ValueError, np.linalg.LinAlgError) as e:
         _logger.warning(f"DDFM VAR estimation: failed to compute factor covariance for rank check: {type(e).__name__}. Proceeding with VAR estimation, will use fallback if needed")
