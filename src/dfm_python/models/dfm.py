@@ -1,40 +1,47 @@
 """Linear Dynamic Factor Model (DFM) implementation.
 
 This module contains the linear DFM implementation using EM algorithm.
-DFM is a PyTorch Lightning module that inherits from BaseFactorModel.
+DFM inherits from BaseFactorModel (not PyTorch Lightning) since all
+calculations are performed in NumPy using pykalman.
 """
 
 # Standard library imports
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 # Third-party imports
 import numpy as np
-import torch
-import torch.nn as nn
+from scipy.linalg import block_diag
+
+# NumPy-based Kalman filter (pykalman) - now a required dependency
+from ..ssm.kalman import DFMKalmanFilter
 
 # Local imports
 from ..config import (
     DFMConfig,
     make_config_source,
     ConfigSource,
-    MergedConfigSource,
 )
-from ..config.results import DFMResult, FitParams
+from ..config.results import DFMResult
 from ..config.utils import get_agg_structure, get_tent_weights, FREQUENCY_HIERARCHY, TENT_WEIGHTS_LOOKUP
 from ..logger import get_logger
-from ..ssm.em import EMAlgorithm, EMStepParams
-from ..ssm.kalman import KalmanFilter
 from .base import BaseFactorModel
 
-# Frequency to integer mapping for tensor conversion
+# Constants
 _FREQ_TO_INT = {'d': 1, 'w': 2, 'm': 3, 'q': 4, 'sa': 5, 'a': 6}
+_DEFAULT_DTYPE = np.float32
+
+# Import EM algorithm from functional module
+from .functional.em import EMConfig, em_step, run_em_algorithm, _DEFAULT_EM_CONFIG as _EM_CONFIG
+from .functional.block import (
+    build_lag_matrix,
+    initialize_block_loadings,
+    initialize_block_transition
+)
 
 if TYPE_CHECKING:
-    from omegaconf import DictConfig
-    from ..lightning import DFMDataModule
+    from ..datamodule import DFMDataModule
 
 _logger = get_logger(__name__)
 
@@ -42,24 +49,32 @@ _logger = get_logger(__name__)
 @dataclass
 class DFMTrainingState:
     """State tracking for DFM training."""
-    A: torch.Tensor
-    C: torch.Tensor
-    Q: torch.Tensor
-    R: torch.Tensor
-    Z_0: torch.Tensor
-    V_0: torch.Tensor
+    A: np.ndarray
+    C: np.ndarray
+    Q: np.ndarray
+    R: np.ndarray
+    Z_0: np.ndarray
+    V_0: np.ndarray
     loglik: float
     num_iter: int
     converged: bool
 
 
-
 class DFM(BaseFactorModel):
-    """High-level API for Linear Dynamic Factor Model (PyTorch Lightning module).
+    """High-level API for Linear Dynamic Factor Model.
     
-    This class is a PyTorch Lightning module that can be used with standard
-    Lightning training patterns. It inherits from BaseFactorModel and implements
-    the EM algorithm for DFM estimation.
+    This class implements the EM algorithm for DFM estimation using NumPy and pykalman.
+    It inherits from BaseFactorModel (not PyTorch Lightning) since all calculations
+    are performed in NumPy.
+    
+    **Note**: All calculations are performed in NumPy (using pykalman) for better
+    numerical stability. Parameters are stored as NumPy arrays (no PyTorch dependencies).
+    
+    **Block Structure**: The model supports block-structured factors (factors organized
+    in blocks). Block structure is established during initialization and is preserved
+    during EM updates. pykalman handles the E-step (Kalman filter/smoother), while
+    the M-step uses custom code that maintains block structure, mixed-frequency handling,
+    and idiosyncratic components.
     
     Example (Standard Lightning Pattern):
         >>> from dfm_python import DFM, DFMDataModule, DFMTrainer
@@ -77,9 +92,8 @@ class DFM(BaseFactorModel):
         >>> model = DFM()
         >>> model.load_config('config/dfm_config.yaml')
         >>> 
-        >>> # Step 4: Create trainer and fit
-        >>> trainer = DFMTrainer(max_epochs=100)
-        >>> trainer.fit(model, dm)
+        >>> # Step 4: Fit model
+        >>> model.fit(X_torch, Mx=Mx, Wx=Wx)
         >>> 
         >>> # Step 5: Predict
         >>> Xf, Zf = model.predict(horizon=6)
@@ -93,9 +107,7 @@ class DFM(BaseFactorModel):
         max_iter: Optional[int] = None,
         nan_method: int = 2,
         nan_k: int = 3,
-        tent_weights_dict: Optional[dict] = None,
-        mixed_freq: bool = False,
-        **kwargs
+        mixed_freq: bool = False
     ):
         """Initialize DFM instance.
         
@@ -113,16 +125,11 @@ class DFM(BaseFactorModel):
             Missing data handling method
         nan_k : int, default 3
             Spline interpolation order
-        tent_weights_dict : dict, optional
-            [DEPRECATED] Optional tent weights to control aggregation. Use `mixed_freq` parameter instead.
-            Kept for backward compatibility only.
         mixed_freq : bool, default False
             If True, use tent kernels for mixed-frequency data. If False, treat all series as clock frequency.
             When True, raises ValueError if any frequency pair is not in TENT_WEIGHTS_LOOKUP.
-        **kwargs
-            Additional arguments passed to BaseFactorModel
         """
-        super().__init__(**kwargs)
+        super().__init__()
         
         # Initialize config using consolidated helper method
         config = self._initialize_config(config)
@@ -133,18 +140,14 @@ class DFM(BaseFactorModel):
         self.nan_k = nan_k
         self.mixed_freq = mixed_freq
         
-        # Legacy tent_weights_dict parameter (deprecated - use mixed_freq instead)
-        # Only used when mixed_freq=False for backward compatibility
-        self._legacy_tent_weights_dict = tent_weights_dict
-        
-        # Mixed frequency parameters (set during initialize_from_data)
-        self._em_R_mat = None
-        self._em_q = None
-        self._em_nQ = 0
-        self._em_tent_weights_dict = None
-        self._em_frequencies = None
-        self._em_i_idio = None
-        self._em_idio_chain_lengths = None
+        # Mixed frequency parameters (set during fit)
+        self._constraint_matrix = None  # R_mat: constraint matrix for tent kernel aggregation
+        self._constraint_vector = None  # q: constraint vector for tent kernel aggregation
+        self._n_slower_freq = 0  # nQ: number of slower-frequency series
+        self._tent_weights_dict = None
+        self._frequencies = None
+        self._idio_indicator = None  # i_idio: indicator for idiosyncratic components
+        self._idio_chain_lengths = None
         
         # Determine number of factors
         if num_factors is None:
@@ -159,489 +162,584 @@ class DFM(BaseFactorModel):
         else:
             self.num_factors = num_factors
         
-        # Get model structure
-        self.r = torch.tensor(
+        # Get model structure (stored as NumPy arrays)
+        self.r = np.array(
             config.factors_per_block if config.factors_per_block is not None
             else np.ones(config.get_blocks_array().shape[1]),
-            dtype=torch.float32
+            dtype=np.float32
         )
         self.p = getattr(config, 'ar_lag', 1)
-        self.blocks = torch.tensor(config.get_blocks_array(), dtype=torch.float32)
+        self.blocks = np.array(config.get_blocks_array(), dtype=np.float32)
         
-        # Compose modules as components
-        self.kalman = KalmanFilter(
-            min_eigenval=1e-8,
-            inv_regularization=1e-6,
-            cholesky_regularization=1e-8
-        )
-        self.em = EMAlgorithm(
-            kalman=self.kalman,  # Share same KalmanFilter instance
-            regularization_scale=1e-6
-        )
+        # Use NumPy for all calculations (pykalman is now a required dependency)
+        # PyKalman instance will be created when needed
         
-        # Parameters will be initialized in setup() or fit_em()
-        self.A: Optional[torch.nn.Parameter] = None
-        self.C: Optional[torch.nn.Parameter] = None
-        self.Q: Optional[torch.nn.Parameter] = None
-        self.R: Optional[torch.nn.Parameter] = None
-        self.Z_0: Optional[torch.nn.Parameter] = None
-        self.V_0: Optional[torch.nn.Parameter] = None
+        # Parameters stored as NumPy arrays (no PyTorch dependencies)
+        self.A: Optional[np.ndarray] = None
+        self.C: Optional[np.ndarray] = None
+        self.Q: Optional[np.ndarray] = None
+        self.R: Optional[np.ndarray] = None
+        self.Z_0: Optional[np.ndarray] = None
+        self.V_0: Optional[np.ndarray] = None
+        
+        # DFM Kalman filter instance (created when needed)
+        self._kalman_filter: Optional[DFMKalmanFilter] = None
         
         # Training state
         self.Mx: Optional[np.ndarray] = None
         self.Wx: Optional[np.ndarray] = None
-        self.data_processed: Optional[torch.Tensor] = None
-        
-        # Use manual optimization for EM algorithm
-        self.automatic_optimization = False
+        self.data_processed: Optional[np.ndarray] = None
     
-    def setup(self, stage: Optional[str] = None) -> None:
-        """Initialize model parameters.
-        
-        This is called by Lightning before training starts.
-        Parameters are initialized from data if available.
-        """
-        # Parameters will be initialized during fit_em() or first training step
-        pass
-    
-    def _create_em_step_params(
-        self, 
-        y: torch.Tensor, 
-        device: torch.device, 
-        dtype: torch.dtype
-    ) -> EMStepParams:
-        """Create EM step parameters using stored mixed frequency parameters.
+    def _update_parameters(self, A: np.ndarray, C: np.ndarray, Q: np.ndarray,
+                          R: np.ndarray, Z_0: np.ndarray, V_0: np.ndarray) -> None:
+        """Update model parameters from NumPy arrays.
         
         Parameters
         ----------
-        y : torch.Tensor
-            Data tensor (N x T)
-        device : torch.device
-            Device for tensors
-        dtype : torch.dtype
-            Data type for tensors
-            
-        Returns
-        -------
-        EMStepParams
-            EM step parameters
+        A, C, Q, R, Z_0, V_0 : np.ndarray
+            Parameter arrays
         """
-        clock = getattr(self.config, 'clock', 'm')
-        N = y.shape[0]
+        def ensure_dtype(arr: Optional[np.ndarray]) -> Optional[np.ndarray]:
+            return arr.astype(_DEFAULT_DTYPE) if arr is not None else None
         
-        return EMStepParams(
-            y=y,
-            A=self.A,
-            C=self.C,
-            Q=self.Q,
-            R=self.R,
-            Z_0=self.Z_0,
-            V_0=self.V_0,
-            r=self.r.to(device),
-            p=self.p,
-            R_mat=self._em_R_mat,
-            q=self._em_q,
-            nQ=self._em_nQ,
-            i_idio=self._em_i_idio if self._em_i_idio is not None else torch.ones(N, device=device, dtype=dtype),
-            blocks=self.blocks.to(device),
-            tent_weights_dict=self._em_tent_weights_dict,
-            clock=clock,
-            frequencies=self._em_frequencies,
-            idio_chain_lengths=self._em_idio_chain_lengths if self._em_idio_chain_lengths is not None else torch.zeros(N, device=device, dtype=dtype),
-            config=self.config
-        )
+        self.A = ensure_dtype(A)
+        self.C = ensure_dtype(C)
+        self.Q = ensure_dtype(Q)
+        self.R = ensure_dtype(R)
+        self.Z_0 = ensure_dtype(Z_0)
+        self.V_0 = ensure_dtype(V_0)
     
-    def initialize_from_data(self, X: torch.Tensor) -> None:
-        """Initialize parameters from data using PCA and OLS.
-        
-        Parameters
-        ----------
-        X : torch.Tensor
-            Standardized data (T x N)
-        """
-        opt_nan = {'method': self.nan_method, 'k': self.nan_k}
-        clock = getattr(self.config, 'clock', 'm')
-        
-        # Handle mixed_freq parameter
-        if self.mixed_freq:
-            # Use tent kernels for mixed-frequency data
-            agg_structure = get_agg_structure(self.config, clock=clock)
-            
-            # Validate that all required frequency pairs are in TENT_WEIGHTS_LOOKUP
-            frequencies_list = [s.frequency for s in self.config.series]
-            frequencies_set = set(frequencies_list)
-            clock_hierarchy = FREQUENCY_HIERARCHY.get(clock, 3)
-            
-            missing_pairs = []
-            for freq in frequencies_set:
-                freq_hierarchy = FREQUENCY_HIERARCHY.get(freq, 3)
-                if freq_hierarchy > clock_hierarchy:
-                    # This frequency is slower than clock, needs tent kernel
-                    tent_w = get_tent_weights(freq, clock)
-                    if tent_w is None:
-                        missing_pairs.append((freq, clock))
-            
-            if missing_pairs:
-                raise ValueError(
-                    f"mixed_freq=True but the following frequency pairs are not in TENT_WEIGHTS_LOOKUP: {missing_pairs}. "
-                    f"Available pairs: {list(TENT_WEIGHTS_LOOKUP.keys())}. "
-                    f"Either add the missing pairs to TENT_WEIGHTS_LOOKUP or set mixed_freq=False."
-                )
-            
-            # Convert tent_weights to torch tensors
-            tent_weights_dict = {k: torch.tensor(v, dtype=torch.float32, device=X.device) 
-                                for k, v in agg_structure['tent_weights'].items()}
-            
-            # Get R_mat and q from first structure (if any)
-            R_mat = None
-            q = None
-            if agg_structure['structures']:
-                first_structure = list(agg_structure['structures'].values())[0]
-                R_mat = torch.tensor(first_structure[0], dtype=torch.float32, device=X.device)
-                q = torch.tensor(first_structure[1], dtype=torch.float32, device=X.device)
-            
-            # Create frequencies array
-            frequencies_array = np.array(frequencies_list, dtype=object)
-            
-            # Count slower-frequency series
-            nQ = sum(1 for freq in frequencies_list 
-                    if FREQUENCY_HIERARCHY.get(freq, 3) > clock_hierarchy)
-            
-            # Compute i_idio (1 for clock frequency, 0 for slower frequencies)
-            i_idio = torch.tensor([1 if freq == clock else 0 for freq in frequencies_list], 
-                                 dtype=torch.float32, device=X.device)
-        else:
-            # Treat all series as clock frequency (unified frequency)
-            tent_weights_dict = self._legacy_tent_weights_dict
-            R_mat = None
-            q = None
-            frequencies_array = None
-            nQ = 0
-            i_idio = torch.ones(X.shape[1], dtype=torch.float32, device=X.device)
-        
-        # Convert frequencies to torch tensor
-        frequencies_tensor = None
-        if frequencies_array is not None:
-            frequencies_tensor = torch.tensor(
-                [_FREQ_TO_INT.get(f, 3) for f in frequencies_array], 
-                dtype=torch.int32, 
-                device=X.device
-            )
-        
-        # Store for reuse in EM steps
-        self._em_R_mat = R_mat
-        self._em_q = q
-        self._em_nQ = nQ
-        self._em_tent_weights_dict = tent_weights_dict
-        self._em_frequencies = frequencies_tensor
-        self._em_i_idio = i_idio
-        
-        # Idiosyncratic chain lengths (currently unused, set to zeros)
-        self._em_idio_chain_lengths = torch.zeros(X.shape[1], dtype=torch.int32, device=X.device)
-        
-        # Initialize parameters using EM algorithm
-        A, C, Q, R, Z_0, V_0 = self.em.initialize_parameters(
-            X,
-            r=self.r.to(X.device),
-            p=self.p,
-            blocks=self.blocks.to(X.device),
-            opt_nan=opt_nan,
-            R_mat=R_mat,
-            q=q,
-            nQ=nQ,
-            i_idio=i_idio,
-            clock=clock,
-            tent_weights_dict=tent_weights_dict,
-            frequencies=frequencies_tensor,
-            idio_chain_lengths=self._em_idio_chain_lengths,
-            config=self.config
-        )
-        
-        # Convert to Parameters
-        self.A = nn.Parameter(A)
-        self.C = nn.Parameter(C)
-        self.Q = nn.Parameter(Q)
-        self.R = nn.Parameter(R)
-        self.Z_0 = nn.Parameter(Z_0)
-        self.V_0 = nn.Parameter(V_0)
     
-    def training_step(self, batch: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]], batch_idx: int) -> torch.Tensor:
-        """Perform one EM iteration.
-        
-        For DFM, each "step" is actually one EM iteration. The batch contains
-        the full time series data.
-        
-        **Important**: If `fit_em()` has already completed training (in `on_train_start()`),
-        this method skips additional EM iterations to prevent double training and log-likelihood
-        deterioration. The model will use the results from `fit_em()` instead.
-        
-        Parameters
-        ----------
-        batch : torch.Tensor or tuple
-            Data tensor (T x N) or (data, target) tuple where data is (T x N) time series
-        batch_idx : int
-            Batch index (should be 0 for full sequence)
-            
-        Returns
-        -------
-        loss : torch.Tensor
-            Negative log-likelihood (to minimize)
-        """
-        # Skip if fit_em() already completed training
-        if self.training_state is not None:
-            # fit_em() has already run - use its results instead of doing more EM iterations
-            loglik = self.training_state.loglik
-            self.log('loglik', loglik, on_step=True, on_epoch=True, prog_bar=True)
-            self.log('em_iteration', float(self.training_state.num_iter), on_step=True, on_epoch=True)
-            # Return negative log-likelihood as loss (consistent with normal training_step)
-            device = next(self.parameters()).device if len(list(self.parameters())) > 0 else torch.device('cpu')
-            return -torch.tensor(loglik, device=device, dtype=torch.float32)
-        
-        # Handle both tuple and single tensor batches
-        if isinstance(batch, tuple):
-            data, _ = batch
-        else:
-            data = batch
-        # data is (batch_size, T, N) or (T, N) depending on DataLoader
-        if data.ndim == 3:
-            # Take first batch (should only be one for time series)
-            data = data[0]
-        
-        # Initialize parameters if not done yet
-        if self.A is None:
-            self.initialize_from_data(data)
-        
-        # Prepare data for EM step
-        # EM expects y as (N x T), but data is (T x N)
-        y = data.T  # (N x T)
-        
-        # Create EM step parameters using stored mixed frequency parameters
-        em_params = self._create_em_step_params(y, y.device, y.dtype)
-        
-        # Perform EM step - use self.em(...) instead of em_step(...)
-        C_new, R_new, A_new, Q_new, Z_0_new, V_0_new, loglik = self.em(em_params)
-        
-        # Update parameters (EM doesn't use gradients, so we update directly)
-        with torch.no_grad():
-            self.A.data = A_new
-            self.C.data = C_new
-            self.Q.data = Q_new
-            self.R.data = R_new
-            self.Z_0.data = Z_0_new
-            self.V_0.data = V_0_new
-        
-        # Log metrics
-        self.log('loglik', loglik, on_step=True, on_epoch=True, prog_bar=True)
-        self.log('em_iteration', float(self.current_epoch), on_step=True, on_epoch=True)
-        
-        # Return negative log-likelihood as loss (to minimize)
-        return -torch.tensor(loglik, device=data.device, dtype=data.dtype)
     
-    def on_train_epoch_end(self) -> None:
-        """Check convergence after each epoch (EM iteration)."""
-        if self.training_state is None:
-            return
-        
-        # Check convergence - use self.em.check_convergence() instead of em_converged()
-        converged, change = self.em.check_convergence(
-            self.training_state.loglik,
-            self.training_state.loglik,  # Previous loglik (would need to track)
-            self.threshold,
-            verbose=False
-        )
-        
-        if converged:
-            self.training_state.converged = True
-            # Only log convergence once, not on every training_step call
-            if not hasattr(self, '_convergence_logged'):
-                _logger.info(f"EM algorithm converged at iteration {self.training_state.num_iter}")
-                self._convergence_logged = True
     
-    def fit_em(
+    def _initialize_idiosyncratic_components(
         self,
-        X: torch.Tensor,
-        Mx: Optional[np.ndarray] = None,
-        Wx: Optional[np.ndarray] = None
-    ) -> DFMTrainingState:
-        """Run full EM algorithm until convergence.
+        res: np.ndarray,
+        data_with_nans: np.ndarray,
+        R: np.ndarray,
+        n_clock_freq: int,
+        n_slower_freq: int,
+        i_idio: Optional[np.ndarray],
+        T: int,
+        clock: str = 'm',
+        dtype: type = np.float32
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Initialize idiosyncratic transition matrices (clock frequency AR(1) and slower frequency tent kernel chain).
         
-        This method runs the complete EM algorithm outside of Lightning's
-        training loop, which is more natural for EM. Called by trainer during fit().
+        Returns
+        -------
+        BM, SM, BQ, SQ, initViM, initViQ
+        """
+        # Clock frequency: AR(1) for each series
+        n_idio_clock = n_clock_freq if i_idio is None else int(np.sum(i_idio))
+        BM = np.zeros((n_idio_clock, n_idio_clock), dtype=dtype)
+        SM = np.zeros((n_idio_clock, n_idio_clock), dtype=dtype)
+        
+        ii_idio = np.where(i_idio > 0)[0] if i_idio is not None else np.arange(n_clock_freq, dtype=np.int32)
+        
+        for i, idx in enumerate(ii_idio):
+            res_i = data_with_nans[:, idx]
+            non_nan_mask = ~np.isnan(res_i)
+            if np.sum(non_nan_mask) > 1:
+                first_non_nan = np.where(non_nan_mask)[0][0] if np.any(non_nan_mask) else 0
+                last_non_nan = np.where(non_nan_mask)[0][-1] if np.any(non_nan_mask) else T - 1
+                res_i_clean = res[first_non_nan:last_non_nan + 1, idx]
+                
+                # Default values (used as fallback)
+                default_ar_coef = _EM_CONFIG.quarterly_ar_coef
+                default_noise = _EM_CONFIG.default_process_noise
+                
+                if len(res_i_clean) > 1:
+                    try:
+                        y_ar = res_i_clean[1:]
+                        x_ar = res_i_clean[:-1].reshape(-1, 1)
+                        BM[i, i] = np.linalg.solve(
+                            x_ar.T @ x_ar + np.eye(1, dtype=dtype) * _EM_CONFIG.matrix_regularization,
+                            x_ar.T @ y_ar
+                        ).item()
+                        residuals_ar = y_ar - x_ar.squeeze() * BM[i, i]
+                        SM[i, i] = np.var(residuals_ar, ddof=0) if len(residuals_ar) > 1 else default_noise
+                    except (np.linalg.LinAlgError, ValueError):
+                        BM[i, i] = default_ar_coef
+                        SM[i, i] = default_noise
+                else:
+                    BM[i, i] = default_ar_coef
+                    SM[i, i] = default_noise
+            else:
+                BM[i, i] = _EM_CONFIG.quarterly_ar_coef
+                SM[i, i] = _EM_CONFIG.default_process_noise
+        
+        # Slower frequency: tent kernel size-state chain
+        from .functional.block import (
+            get_tent_kernel_size,
+            build_quarterly_idiosyncratic_chain
+        )
+        rho0 = _EM_CONFIG.quarterly_ar_coef
+        chain_size = get_tent_kernel_size(
+            R_mat=None,  # Not available in this context
+            tent_weights_dict=None,  # Not available in this context
+            default_size=_EM_CONFIG.tent_kernel_size
+        )
+        if n_slower_freq > 0:
+            sig_e = np.diag(R[n_clock_freq:, n_clock_freq:]) / _EM_CONFIG.quarterly_variance_denominator
+            sig_e = np.where(np.isfinite(sig_e), sig_e, _EM_CONFIG.default_observation_noise)
+            BQ, SQ, initViQ = build_quarterly_idiosyncratic_chain(
+                n_slower_freq, chain_size, rho0, sig_e, dtype
+            )
+        else:
+            empty_matrix = np.zeros((0, 0), dtype=dtype)
+            BQ = SQ = initViQ = empty_matrix
+        
+        # Clock frequency initial covariance
+        try:
+            eye_BM = np.eye(n_idio_clock, dtype=dtype)
+            BM_sq = BM ** 2
+            diag_inv = 1.0 / np.diag(eye_BM - BM_sq)
+            diag_inv = np.where(np.isfinite(diag_inv), diag_inv, np.ones_like(diag_inv))
+            initViM = np.diag(diag_inv) @ SM
+        except (np.linalg.LinAlgError, ValueError):
+            initViM = SM.copy()
+        
+        return BM, SM, BQ, SQ, initViM, initViQ
+    
+    def _initialize_parameters(
+        self,
+        x: np.ndarray,
+        r: np.ndarray,
+        p: int,
+        blocks: np.ndarray,
+        opt_nan: Dict[str, Any],
+        R_mat: Optional[np.ndarray] = None,
+        q: Optional[np.ndarray] = None,
+        n_slower_freq: int = 0,
+        i_idio: Optional[np.ndarray] = None,
+        clock: str = 'm',
+        tent_weights_dict: Optional[Dict[str, np.ndarray]] = None,
+        frequencies: Optional[np.ndarray] = None,
+        idio_chain_lengths: Optional[np.ndarray] = None,
+        config: Optional[Any] = None,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Initialize DFM parameters using pure NumPy (residual-based PCA approach).
+        
+        Implements MATLAB InitCond() approach:
+        1. Start with residuals = spline-interpolated data
+        2. For each block: compute PCA on residuals, extract factors, update residuals
+        3. Build transition matrices block-by-block
+        4. Handle idiosyncratic components (monthly AR(1) and quarterly 5-state chains)
         
         Parameters
         ----------
-        X : torch.Tensor
-            Standardized data (T x N)
+        x : np.ndarray
+            Standardized data matrix (T x N)
+        r : np.ndarray
+            Number of factors per block (n_blocks,)
+        p : int
+            AR lag order (typically 1)
+        blocks : np.ndarray
+            Block structure array (N x n_blocks)
+        opt_nan : dict
+            Missing data handling options {'method': int, 'k': int}
+        R_mat : np.ndarray, optional
+            Constraint matrix for tent kernel aggregation
+        q : np.ndarray, optional
+            Constraint vector for tent kernel aggregation
+        n_slower_freq : int
+            Number of slower-frequency series
+        i_idio : np.ndarray, optional
+            Indicator array (1 for clock frequency, 0 for slower frequencies)
+        clock : str
+            Clock frequency ('d', 'w', 'm', 'q', 'sa', 'a')
+        tent_weights_dict : dict, optional
+            Dictionary mapping frequency pairs to tent weights
+        frequencies : np.ndarray, optional
+            Array of frequencies for each series
+        idio_chain_lengths : np.ndarray, optional
+            Array of idiosyncratic chain lengths per series
+        config : Any, optional
+            Configuration object
+            
+        Returns
+        -------
+        A : np.ndarray
+            Initial transition matrix (m x m)
+        C : np.ndarray
+            Initial observation/loading matrix (N x m)
+        Q : np.ndarray
+            Initial process noise covariance (m x m)
+        R : np.ndarray
+            Initial observation noise covariance (N x N)
+        Z_0 : np.ndarray
+            Initial state vector (m,)
+        V_0 : np.ndarray
+            Initial state covariance (m x m)
+        """
+        from ..utils.data import rem_nans_spline
+        from ..encoder.pca import compute_principal_components
+        
+        T, N = x.shape
+        dtype = np.float32
+        
+        n_blocks = blocks.shape[1]
+        n_clock_freq = N - n_slower_freq  # Number of clock frequency series
+        
+        # Handle missing data for initialization
+        x_clean, indNaN = rem_nans_spline(x, method=opt_nan.get('method', 2), k=opt_nan.get('k', 3))
+        
+        # Remove any remaining NaN/inf
+        x_clean = np.where(np.isfinite(x_clean), x_clean, 0.0)
+        
+        # Initialize residuals: res = x_clean (spline-interpolated data)
+        res = x_clean.copy()  # T x N
+        data_with_nans = x_clean.copy()
+        data_with_nans[indNaN] = np.nan
+        
+        # Determine tent kernel size for slower-frequency aggregation
+        tent_kernel_size = _EM_CONFIG.tent_kernel_size
+        if R_mat is not None:
+            tent_kernel_size = R_mat.shape[1]
+        elif tent_weights_dict is not None:
+            # Get first slower frequency key from tent_weights_dict
+            slower_freq_keys = [k for k in tent_weights_dict.keys() if k != clock]
+            if slower_freq_keys:
+                tent_kernel_size = len(tent_weights_dict[slower_freq_keys[0]])
+        max_lag_size = max(p, tent_kernel_size)
+        
+        # Set first tent_kernel_size-1 observations as NaN for slower-to-clock frequency aggregation
+        if tent_kernel_size > 1:
+            data_with_nans[:tent_kernel_size-1, :] = np.nan
+        
+        # Initialize output matrices
+        C_list = []  # Will concatenate block loadings
+        A_list = []  # Will build block-diagonal transition matrix
+        Q_list = []  # Will build block-diagonal process noise
+        V_0_list = []  # Will build block-diagonal initial covariance
+        
+        # Process each block sequentially (residual-based approach)
+        for block_idx in range(n_blocks):
+            num_factors_block = int(r[block_idx])
+            
+            # Find series indices loading on this block
+            block_series_indices = np.where(blocks[:, block_idx] > 0)[0]
+            clock_freq_indices = block_series_indices[block_series_indices < n_clock_freq]
+            slower_freq_indices = block_series_indices[block_series_indices >= n_clock_freq]
+            
+            # Initialize loadings and extract factors
+            C_i, factors = initialize_block_loadings(
+                res, data_with_nans, clock_freq_indices, slower_freq_indices,
+                num_factors_block, tent_kernel_size, R_mat, q,
+                N, max_lag_size, _EM_CONFIG.matrix_regularization, dtype
+            )
+            
+            # Build lag matrix and update residuals
+            lag_matrix = build_lag_matrix(factors, T, num_factors_block, tent_kernel_size, p, dtype)
+            slower_freq_factors = lag_matrix[:, :num_factors_block * tent_kernel_size] if lag_matrix.shape[1] >= num_factors_block * tent_kernel_size else lag_matrix
+            
+            # Pad slower frequency factors
+            if tent_kernel_size > 1:
+                slower_freq_factors_padded = np.vstack([
+                    np.zeros((tent_kernel_size - 1, num_factors_block * tent_kernel_size), dtype=dtype),
+                    slower_freq_factors[:T - (tent_kernel_size - 1), :num_factors_block * tent_kernel_size] if T > (tent_kernel_size - 1) else slower_freq_factors[:, :num_factors_block * tent_kernel_size]
+                ])
+                if len(slower_freq_factors_padded) < T:
+                    slower_freq_factors_padded = np.vstack([
+                        slower_freq_factors_padded,
+                        np.zeros((T - len(slower_freq_factors_padded), num_factors_block * tent_kernel_size), dtype=dtype)
+                    ])
+                slower_freq_factors = slower_freq_factors_padded[:T, :]
+            
+            # Update residuals
+            if res.shape[0] != slower_freq_factors.shape[0]:
+                slower_freq_factors = slower_freq_factors[:res.shape[0], :] if res.shape[0] < slower_freq_factors.shape[0] else np.vstack([
+                    slower_freq_factors, np.zeros((res.shape[0] - slower_freq_factors.shape[0], slower_freq_factors.shape[1]), dtype=dtype)
+                ])
+            res = res - slower_freq_factors @ C_i[:, :num_factors_block * tent_kernel_size].T
+            data_with_nans = res.copy()
+            data_with_nans[indNaN] = np.nan
+            
+            C_list.append(C_i)
+            
+            # Initialize transition matrices for this block
+            A_i, Q_i, V_0_i = initialize_block_transition(
+                lag_matrix, factors, num_factors_block, max_lag_size, p, T,
+                _EM_CONFIG.regularization, _EM_CONFIG.default_transition_coef,
+                _EM_CONFIG.default_process_noise, _EM_CONFIG.matrix_regularization,
+                _EM_CONFIG.eigenval_floor, dtype
+            )
+            
+            A_list.append(A_i)
+            Q_list.append(Q_i)
+            V_0_list.append(V_0_i)
+        
+        # Concatenate C matrices
+        C = np.hstack(C_list) if C_list else np.zeros((N, 0), dtype=dtype)
+        
+        # Build block-diagonal A, Q, V_0
+        if A_list:
+            try:
+                A_factors = block_diag(*A_list)
+                Q_factors = block_diag(*Q_list)
+                V_0_factors = block_diag(*V_0_list)
+            except (ValueError, np.linalg.LinAlgError) as e:
+                _logger.error(f"block_diag failed: {e}")
+                raise
+        else:
+            empty_matrix = np.zeros((0, 0), dtype=dtype)
+            A_factors = Q_factors = V_0_factors = empty_matrix
+        
+        # === IDIOSYNCRATIC COMPONENTS ===
+        # Add identity matrix for clock frequency idiosyncratic series
+        if i_idio is not None:
+            eyeN = np.eye(N, dtype=dtype)
+            i_idio_bool = i_idio.astype(bool)
+            eyeN_idio = eyeN[:, i_idio_bool]  # N x n_idio
+            C = np.hstack([C, eyeN_idio])
+        else:
+            # Default: all clock frequency series have idiosyncratic components
+            eyeN_clock_freq = np.eye(N, dtype=dtype)[:, :n_clock_freq] if n_clock_freq > 0 else np.zeros((N, 0), dtype=dtype)
+            C = np.hstack([C, eyeN_clock_freq])
+        
+        # Add slower frequency idiosyncratic chains (tent_kernel_size-state chain)
+        if n_slower_freq > 0:
+            from .functional.block import (
+                get_tent_kernel_size,
+                get_quarterly_tent_weights,
+                build_quarterly_observation_matrix
+            )
+            tent_kernel_size = get_tent_kernel_size(
+                R_mat=R_mat,
+                tent_weights_dict=tent_weights_dict,
+                default_size=_EM_CONFIG.tent_kernel_size
+            )
+            tent_weights = get_quarterly_tent_weights(clock, tent_kernel_size, dtype)
+            C_slower_freq = build_quarterly_observation_matrix(N, n_clock_freq, n_slower_freq, tent_weights, dtype)
+            C = np.hstack([C, C_slower_freq])
+        
+        # Initialize R (observation noise covariance) from final residuals
+        if data_with_nans.ndim != 2:
+            data_with_nans = data_with_nans.reshape(-1, data_with_nans.shape[-1]) if data_with_nans.ndim > 2 else data_with_nans.reshape(1, -1)
+        
+        T_res, N_res = data_with_nans.shape
+        default_obs_noise = _EM_CONFIG.default_observation_noise
+        
+        if T_res <= 1:
+            var_res = np.full(N_res, default_obs_noise, dtype=dtype)
+        else:
+            var_res = np.array([
+                np.var(data_with_nans[:, i][np.isfinite(data_with_nans[:, i])], ddof=0) 
+                if np.sum(np.isfinite(data_with_nans[:, i])) > 1 else default_obs_noise
+                for i in range(N_res)
+            ], dtype=dtype)
+            var_res = np.where(np.isfinite(var_res), var_res, default_obs_noise)
+        
+        R = np.diag(var_res)
+        R = np.where(np.isfinite(R), R, default_obs_noise)
+        
+        # Set all variances to default observation noise
+        default_obs_noise = _EM_CONFIG.default_observation_noise
+        i_idio_indices = np.where(i_idio > 0)[0] if i_idio is not None else np.arange(n_clock_freq, dtype=np.int32)
+        all_indices = np.unique(np.concatenate([i_idio_indices, np.arange(n_clock_freq, N, dtype=np.int32)]))
+        for idx in all_indices:
+            R[idx, idx] = default_obs_noise
+        
+        # === IDIOSYNCRATIC TRANSITION MATRICES ===
+        BM, SM, BQ, SQ, initViM, initViQ = self._initialize_idiosyncratic_components(
+            res, data_with_nans, R, n_clock_freq, n_slower_freq, i_idio, T, clock=clock, dtype=dtype
+        )
+        
+        # Combine all transition matrices
+        try:
+            A = block_diag(A_factors, BM, BQ)
+            Q = block_diag(Q_factors, SM, SQ)
+            V_0 = block_diag(V_0_factors, initViM, initViQ)
+        except (ValueError, np.linalg.LinAlgError) as e:
+            _logger.error(f"block_diag failed: {e}")
+            raise
+        
+        # Initial state: Z_0 = zeros
+        m = int(A.shape[0]) if A.size > 0 and len(A.shape) > 0 else 0
+        Z_0 = np.zeros(m, dtype=dtype)
+        
+        # Ensure V_0 is positive definite
+        from .functional.em import ensure_covariance_stable
+        V_0 = ensure_covariance_stable(V_0, min_eigenval=_EM_CONFIG.eigenval_floor)
+        
+        return A.astype(np.float32), C.astype(np.float32), Q.astype(np.float32), R.astype(np.float32), Z_0.astype(np.float32), V_0.astype(np.float32)
+    
+    def fit(
+        self,
+        X: Union[np.ndarray, Any],
+        Mx: Optional[np.ndarray] = None,
+        Wx: Optional[np.ndarray] = None,
+        datamodule: Optional[Any] = None
+    ) -> DFMTrainingState:
+        """Fit model using EM algorithm (wrapper around pykalman).
+        
+        Uses pykalman for E-step (Kalman filter/smoother) and custom M-step
+        that preserves block structure and mixed-frequency constraints.
+        
+        Parameters
+        ----------
+        X : np.ndarray or torch.Tensor, optional
+            Standardized data (T x N). If datamodule is provided, X can be None.
         Mx : np.ndarray, optional
-            Mean values for unstandardization (N,)
+            Mean values for unstandardization (N,). If datamodule is provided, Mx can be None.
         Wx : np.ndarray, optional
-            Standard deviation values for unstandardization (N,)
+            Standard deviation values for unstandardization (N,). If datamodule is provided, Wx can be None.
+        datamodule : DFMDataModule, optional
+            Custom DFMDataModule instance. If provided, initialization parameters will be
+            extracted from the datamodule instead of computing them directly.
             
         Returns
         -------
         DFMTrainingState
             Final training state with parameters and convergence info
         """
+        # Use datamodule if provided
+        if datamodule is not None:
+            init_params = datamodule.get_initialization_params()
+            X_np = init_params['X']
+            Mx = init_params['Mx'] if Mx is None else Mx
+            Wx = init_params['Wx'] if Wx is None else Wx
+            R_mat = init_params['R_mat']
+            q = init_params['q']
+            n_slower_freq = init_params['n_slower_freq']
+            tent_weights_dict = init_params['tent_weights_dict']
+            frequencies_np = init_params['frequencies']
+            i_idio = init_params['i_idio']
+            idio_chain_lengths = init_params['idio_chain_lengths']
+            opt_nan = init_params['opt_nan']
+            clock = init_params['clock']
+        else:
+            # Convert to NumPy
+            if hasattr(X, 'cpu') and hasattr(X, 'numpy') and not isinstance(X, np.ndarray):
+                X_np = X.cpu().numpy()
+            else:
+                X_np = np.asarray(X, dtype=np.float32)
+            
+            # Setup mixed-frequency parameters (fallback if no datamodule)
+            from ..config.utils import get_agg_structure, get_tent_weights, FREQUENCY_HIERARCHY, TENT_WEIGHTS_LOOKUP
+            clock = getattr(self.config, 'clock', 'm')
+            
+            if not self.mixed_freq:
+                R_mat = None
+                q = None
+                n_slower_freq = 0
+                tent_weights_dict = None
+                frequencies_np = None
+                i_idio = np.ones(X_np.shape[1], dtype=np.float32)
+                idio_chain_lengths = np.zeros(X_np.shape[1], dtype=np.int32)
+            else:
+                agg_structure = get_agg_structure(self.config, clock=clock)
+                frequencies_list = [s.frequency for s in self.config.series]
+                frequencies_set = set(frequencies_list)
+                clock_hierarchy = FREQUENCY_HIERARCHY.get(clock, 3)
+                
+                missing_pairs = [
+                    (freq, clock) for freq in frequencies_set
+                    if FREQUENCY_HIERARCHY.get(freq, 3) > clock_hierarchy and get_tent_weights(freq, clock) is None
+                ]
+                if missing_pairs:
+                    raise ValueError(
+                        f"mixed_freq=True but the following frequency pairs are not in TENT_WEIGHTS_LOOKUP: {missing_pairs}. "
+                        f"Available pairs: {list(TENT_WEIGHTS_LOOKUP.keys())}. "
+                        f"Either add the missing pairs to TENT_WEIGHTS_LOOKUP or set mixed_freq=False."
+                    )
+                
+                tent_weights_dict = {k: np.array(v, dtype=np.float32) for k, v in agg_structure['tent_weights'].items()}
+                
+                R_mat = None
+                q = None
+                if agg_structure['structures']:
+                    first_structure = list(agg_structure['structures'].values())[0]
+                    R_mat = np.array(first_structure[0], dtype=np.float32)
+                    q = np.array(first_structure[1], dtype=np.float32)
+                
+                n_slower_freq = sum(1 for freq in frequencies_list if FREQUENCY_HIERARCHY.get(freq, 3) > clock_hierarchy)
+                i_idio = np.array([1 if freq == clock else 0 for freq in frequencies_list], dtype=np.float32)
+                frequencies_np = np.array([_FREQ_TO_INT.get(f, 3) for f in frequencies_list], dtype=np.int32)
+                idio_chain_lengths = np.zeros(X_np.shape[1], dtype=np.int32)
+            
+            opt_nan = {'method': self.nan_method, 'k': self.nan_k}
+        
         self.Mx = Mx
         self.Wx = Wx
+        self.data_processed = X_np
         
-        # Ensure data is on same device as model (Lightning handles this automatically)
-        X = X.to(self.device)
+        # Store for reuse in EM steps
+        self._constraint_matrix = R_mat
+        self._constraint_vector = q
+        self._n_slower_freq = n_slower_freq
+        self._tent_weights_dict = tent_weights_dict
+        self._frequencies = frequencies_np
+        self._i_idio = i_idio
+        self._idio_chain_lengths = idio_chain_lengths
         
-        device = X.device
-        dtype = X.dtype
+        # Initialize parameters
+        A_np, C_np, Q_np, R_np, Z_0_np, V_0_np = self._initialize_parameters(
+            X_np, self.r, self.p, self.blocks, opt_nan, R_mat, q, n_slower_freq, i_idio,
+            clock, tent_weights_dict, frequencies_np, idio_chain_lengths, self.config
+        )
+        self._update_parameters(A_np, C_np, Q_np, R_np, Z_0_np, V_0_np)
         
-        # Initialize parameters and impute missing data
-        self.initialize_from_data(X)
+        # Run EM algorithm (pykalman E-step + custom M-step)
+        max_iter_val = self.max_iter if self.max_iter is not None else 100
+        threshold_val = self.threshold if self.threshold is not None else 1e-4
         
-        # Impute missing data for EM loop
-        from dfm_python.utils.data import rem_nans_spline_torch
-        X_imputed, _ = rem_nans_spline_torch(X, method=self.nan_method, k=self.nan_k)
-        X_imputed = torch.where(torch.isfinite(X_imputed), X_imputed, torch.tensor(0.0, device=device, dtype=dtype))
+        if self.A is None or self.C is None or self.Q is None or self.R is None or self.Z_0 is None or self.V_0 is None:
+            raise RuntimeError("DFM fit failed: parameters not initialized.")
         
-        # Store imputed data
-        self.data_processed = X_imputed
+        initial_params: Dict[str, np.ndarray] = {
+            'A': self.A, 'C': self.C, 'Q': self.Q,
+            'R': self.R, 'Z_0': self.Z_0, 'V_0': self.V_0
+        }
         
-        # Prepare data for EM (use imputed data, not raw data)
-        y = X_imputed.T  # (N x T)
+        def get_params_fn() -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+            from typing import cast
+            return cast(Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+                       (self.A, self.C, self.Q, self.R, self.Z_0, self.V_0))
         
-        # Initialize state
-        previous_loglik = float('-inf')
-        best_loglik = float('-inf')
-        best_params = None
-        num_iter = 0
-        converged = False
-        
-        # Track parameter stability for diagnostics
-        previous_A_norm = None
-        previous_C_norm = None
-        
-        # EM loop
-        while num_iter < self.max_iter and not converged:
-            # Create EM step parameters using stored mixed frequency parameters
-            em_params = self._create_em_step_params(y, device, dtype)
-            
-            # Perform EM step - use self.em(...) instead of em_step(...)
-            C_new, R_new, A_new, Q_new, Z_0_new, V_0_new, loglik = self.em(em_params)
-            
-            # Check for NaN in parameters (early stopping)
-            has_nan = (
-                torch.any(torch.isnan(C_new)) or torch.any(torch.isnan(A_new)) or
-                torch.any(torch.isnan(Q_new)) or torch.any(torch.isnan(R_new)) or
-                torch.any(torch.isnan(Z_0_new)) or torch.any(torch.isnan(V_0_new)) or
-                (isinstance(loglik, float) and (np.isnan(loglik) or np.isinf(loglik)))
-            )
-            if has_nan:
-                _logger.error(f"EM algorithm: NaN/Inf detected at iteration {num_iter + 1}, stopping early")
-                break
-            
-            # Update parameters
-            with torch.no_grad():
-                self.A.data = A_new
-                self.C.data = C_new
-                self.Q.data = Q_new
-                self.R.data = R_new
-                self.Z_0.data = Z_0_new
-                self.V_0.data = V_0_new
-            
-            # Track parameter stability
-            try:
-                A_norm = torch.linalg.norm(A_new).item()
-                C_norm = torch.linalg.norm(C_new).item()
-                
-                if previous_A_norm is not None and previous_C_norm is not None and num_iter > 5:
-                    A_change = abs(A_norm - previous_A_norm) / max(previous_A_norm, 1e-10)
-                    C_change = abs(C_norm - previous_C_norm) / max(previous_C_norm, 1e-10)
-                    param_change = max(A_change, C_change)
-                    
-                    if param_change < 1e-6:
-                        _logger.debug(f"EM: Parameters stable (change={param_change:.2e}) at iter {num_iter + 1}")
-                    elif param_change > 10.0:
-                        _logger.warning(f"EM: Parameters changing significantly (change={param_change:.2e}) at iter {num_iter + 1}")
-                
-                previous_A_norm = A_norm
-                previous_C_norm = C_norm
-            except (RuntimeError, ValueError):
-                pass
-            
-            # Track best log-likelihood and parameters (for early stopping on divergence)
-            if loglik > best_loglik:
-                best_loglik = loglik
-                # Store best parameters in case we need to revert
-                best_params = {
-                    'A': self.A.data.clone(),
-                    'C': self.C.data.clone(),
-                    'Q': self.Q.data.clone(),
-                    'R': self.R.data.clone(),
-                    'Z_0': self.Z_0.data.clone(),
-                    'V_0': self.V_0.data.clone()
-                }
-            
-            # Check for log-likelihood deterioration
-            if num_iter > 10 and loglik < best_loglik - 1000:
-                _logger.warning(
-                    f"EM algorithm: Log-likelihood deteriorated significantly from best value. "
-                    f"Best: {best_loglik:.4f}, Current: {loglik:.4f}, Deterioration: {best_loglik - loglik:.4f}. "
-                    f"Stopping early at iteration {num_iter + 1} to prevent further divergence. "
-                    f"Reverting to best parameters from iteration {num_iter}."
-                )
-                # Revert to best parameters
-                if best_params is not None:
-                    with torch.no_grad():
-                        self.A.data = best_params['A']
-                        self.C.data = best_params['C']
-                        self.Q.data = best_params['Q']
-                        self.R.data = best_params['R']
-                        self.Z_0.data = best_params['Z_0']
-                        self.V_0.data = best_params['V_0']
-                # Use best log-likelihood for final state
-                loglik = best_loglik
-                break
-            
-            # Check convergence
-            if num_iter > 2:
-                converged, change = self.em.check_convergence(
-                    loglik, previous_loglik, self.threshold, verbose=(num_iter % 10 == 0)
-                )
-            else:
-                change = abs(loglik - previous_loglik) if previous_loglik != float('-inf') else 0.0
-            
-            previous_loglik = loglik
-            num_iter += 1
-            
-            # Log metrics using Lightning (enables TensorBoard, WandB, etc.)
-            # on_step=False because fit_em may be called from on_train_start
-            self.log('train/loglik', loglik, on_step=False, on_epoch=True)
-            self.log('train/em_iteration', float(num_iter), on_step=False, on_epoch=True)
-            self.log('train/loglik_change', change, on_step=False, on_epoch=True)
-            
-            # Log progress
-            if num_iter % 5 == 0 or num_iter == 1:
-                status = " ✓" if converged else ""
-                _logger.info(f"EM iteration {num_iter}/{self.max_iter}: loglik={loglik:.4f}, change={change:.2e}{status}")
-        
-        # Store final state
-        self.training_state = DFMTrainingState(
-            A=self.A.data.clone(),
-            C=self.C.data.clone(),
-            Q=self.Q.data.clone(),
-            R=self.R.data.clone(),
-            Z_0=self.Z_0.data.clone(),
-            V_0=self.V_0.data.clone(),
-            loglik=loglik,
-            num_iter=num_iter,
-            converged=converged
+        final_state = run_em_algorithm(
+            X=X_np,
+            initial_params=initial_params,
+            update_params_fn=self._update_parameters,
+            get_params_fn=get_params_fn,
+            max_iter=max_iter_val,
+            threshold=threshold_val,
+            config=_EM_CONFIG
         )
         
-        # Final status
-        if converged:
-            print(f"\n✓ EM converged after {num_iter} iterations (loglik: {loglik:.6f})")
-        else:
-            print(f"\n⚠ EM stopped after {num_iter} iterations (loglik: {loglik:.6f}, change: {change:.2e})")
-        
-        _logger.info(f"EM training completed: converged={converged}, iterations={num_iter}, loglik={loglik:.6f}")
+        self.training_state = DFMTrainingState(
+            A=final_state['A'], C=final_state['C'], Q=final_state['Q'],
+            R=final_state['R'], Z_0=final_state['Z_0'], V_0=final_state['V_0'],
+            loglik=final_state['loglik'], num_iter=final_state['num_iter'],
+            converged=final_state['converged']
+        )
         
         return self.training_state
+    
+    def _compute_smoothed_factors(self) -> np.ndarray:
+        """Compute smoothed factors using Kalman filter.
+        
+        Returns
+        -------
+        np.ndarray
+            Smoothed factors (T x m)
+        """
+        if self.training_state is None or self.data_processed is None:
+            raise RuntimeError("Model not fitted or data not available")
+        
+        kalman_final = DFMKalmanFilter(
+            transition_matrices=self.training_state.A,
+            observation_matrices=self.training_state.C,
+            transition_covariance=self.training_state.Q,
+            observation_covariance=self.training_state.R,
+            initial_state_mean=self.training_state.Z_0,
+            initial_state_covariance=self.training_state.V_0
+        )
+        
+        y_masked = np.ma.masked_invalid(self.data_processed)
+        smoothed_state_means, _ = kalman_final.smooth(y_masked)
+        return smoothed_state_means
     
     def get_result(self) -> DFMResult:
         """Extract DFMResult from trained model.
@@ -652,88 +750,38 @@ class DFM(BaseFactorModel):
             Estimation results with parameters, factors, and diagnostics
         """
         if self.training_state is None:
-            raise RuntimeError(
-                "DFM get_result failed: model has not been fitted yet. "
-                "Please call fit_em() first."
-            )
-        
+            raise RuntimeError("DFM get_result failed: model has not been fitted yet. Please call fit() first.")
         if self.data_processed is None:
-            raise RuntimeError(
-                "DFM get_result failed: data not available. "
-                "Please ensure fit_em() was called with data."
-            )
+            raise RuntimeError("DFM get_result failed: data not available. Please ensure fit() was called with data.")
         
-        # Get final smoothed factors using Kalman filter
-        y = self.data_processed.T  # (N x T)
+        # Compute smoothed factors
+        Z = self._compute_smoothed_factors()
         
-        # Run final Kalman smoothing with converged parameters - use self.kalman(...) instead of kalman_filter_smooth(...)
-        zsmooth, Vsmooth, _, _ = self.kalman(
-            y,
-            self.training_state.A,
-            self.training_state.C,
-            self.training_state.Q,
-            self.training_state.R,
-            self.training_state.Z_0,
-            self.training_state.V_0
-        )
-        
-        # zsmooth is (m x (T+1)), transpose to ((T+1) x m)
-        Zsmooth = zsmooth.T
-        Z = Zsmooth[1:, :].cpu().numpy()  # T x m (skip initial state)
-        
-        # Convert parameters to numpy
-        A = self.training_state.A.cpu().numpy()
-        C = self.training_state.C.cpu().numpy()
-        Q = self.training_state.Q.cpu().numpy()
-        R = self.training_state.R.cpu().numpy()
-        Z_0 = self.training_state.Z_0.cpu().numpy()
-        V_0 = self.training_state.V_0.cpu().numpy()
-        r = self.r.cpu().numpy()
+        # Get parameters
+        A = self.training_state.A
+        C = self.training_state.C
+        Q = self.training_state.Q
+        R = self.training_state.R
+        Z_0 = self.training_state.Z_0
+        V_0 = self.training_state.V_0
         
         # Compute smoothed data
-        x_sm = Z @ C.T  # T x N (standardized smoothed data)
-        
-        # Unstandardize
+        x_sm = Z @ C.T
         Wx_clean = np.where(np.isnan(self.Wx), 1.0, self.Wx) if self.Wx is not None else np.ones(C.shape[0])
         Mx_clean = np.where(np.isnan(self.Mx), 0.0, self.Mx) if self.Mx is not None else np.zeros(C.shape[0])
-        X_sm = x_sm * Wx_clean + Mx_clean  # T x N (unstandardized smoothed data)
+        X_sm = x_sm * Wx_clean + Mx_clean
         
-        # Create result object
-        result = DFMResult(
-            x_sm=x_sm,
-            X_sm=X_sm,
-            Z=Z,
-            C=C,
-            R=R,
-            A=A,
-            Q=Q,
+        return DFMResult(
+            x_sm=x_sm, X_sm=X_sm, Z=Z, C=C, R=R, A=A, Q=Q,
             Mx=self.Mx if self.Mx is not None else np.zeros(C.shape[0]),
             Wx=self.Wx if self.Wx is not None else np.ones(C.shape[0]),
-            Z_0=Z_0,
-            V_0=V_0,
-            r=r,
-            p=self.p,
+            Z_0=Z_0, V_0=V_0, r=self.r, p=self.p,
             converged=self.training_state.converged,
             num_iter=self.training_state.num_iter,
             loglik=self.training_state.loglik,
             series_ids=self.config.get_series_ids() if hasattr(self.config, 'get_series_ids') else None,
             block_names=getattr(self.config, 'block_names', None)
         )
-        
-        return result
-    
-    def configure_optimizers(self) -> List[torch.optim.Optimizer]:
-        """Configure optimizers.
-        
-        EM algorithm doesn't use standard optimizers, but Lightning requires
-        this method. Return empty list.
-        
-        Returns
-        -------
-        List[torch.optim.Optimizer]
-            Empty list (EM algorithm doesn't use optimizers)
-        """
-        return []
     
     
     def load_config(
@@ -761,28 +809,17 @@ class DFM(BaseFactorModel):
             override=override,
         )
         
-        # DFM-specific: Initialize r and blocks tensors
-        self.r = torch.tensor(
+        # DFM-specific: Initialize r and blocks arrays
+        self.r = np.array(
             new_config.factors_per_block if new_config.factors_per_block is not None
             else np.ones(new_config.get_blocks_array().shape[1]),
-            dtype=torch.float32
+            dtype=np.float32
         )
-        self.blocks = torch.tensor(new_config.get_blocks_array(), dtype=torch.float32)
+        self.blocks = np.array(new_config.get_blocks_array(), dtype=np.float32)
         
         return self
     
     
-    def on_train_start(self) -> None:
-        """Called when training starts. Run EM algorithm."""
-        # Get processed data and standardization params from DataModule
-        data_module = self._get_datamodule()
-        X_torch = data_module.get_processed_data()
-        Mx, Wx = data_module.get_std_params()
-        
-        # Run EM algorithm
-        self.fit_em(X_torch, Mx=Mx, Wx=Wx)
-        
-        super().on_train_start()
     
     def predict(
         self,
@@ -871,21 +908,10 @@ class DFM(BaseFactorModel):
         Mx = result.Mx
         p = getattr(result, 'p', 1)  # VAR order, default to 1 for DFM
         
-        # Update factor state with history if specified
-        if history is not None and history > 0:
-            Z_last_updated = self._update_factor_state_with_history(
-                history=history,
-                result=result,
-                kalman_filter=getattr(self, 'kalman', None)
-            )
-            if Z_last_updated is not None:
-                Z_last = Z_last_updated
-            else:
-                # Fallback to training state if update failed
-                Z_last = result.Z[-1, :]
-        else:
-            # Use training state (default behavior)
-            Z_last = result.Z[-1, :]
+        # Use training state for initial factor state
+        # For DFM, we use the last smoothed state from training
+        # History-based updates can be added later if needed
+        Z_last = result.Z[-1, :] if result.Z.shape[0] > 0 else np.zeros(result.A.shape[0], dtype=np.float32)
         
         # Validate factor state
         if np.any(np.isnan(Z_last)):
@@ -903,54 +929,8 @@ class DFM(BaseFactorModel):
                 "Check training convergence and data quality."
             )
         
-        # Determine target indices first (for optimization: only transform target series)
-        # If target is None, use target_series from DataModule (if available)
-        if target is None:
-            # Try to get target_series from DataModule
-            try:
-                data_module = self._get_datamodule()
-                target_series = getattr(data_module, 'target_series', None)
-                if target_series is not None and len(target_series) > 0:
-                    target = target_series
-            except (ValueError, AttributeError):
-                # DataModule not available or no target_series - raise error
-                target = None
-        
-        # Find target indices if target is specified
-        target_indices = None
-        if target is not None and len(target) > 0:
-            # Get series IDs from config
-            if self._config is not None:
-                series_ids = self._config.get_series_ids()
-            else:
-                series_ids = getattr(result, 'series_ids', None)
-                if series_ids is None:
-                    raise ValueError(
-                        "DFM prediction failed: target specified but cannot determine series IDs. "
-                        "Please ensure config is loaded or result contains series_ids."
-                    )
-            
-            # Find target indices
-            target_indices = []
-            for tgt_id in target:
-                if tgt_id in series_ids:
-                    target_indices.append(series_ids.index(tgt_id))
-                else:
-                    _logger.warning(
-                        f"DFM prediction: target series '{tgt_id}' not found in series_ids. "
-                        f"Available series: {series_ids}"
-                    )
-            
-            if len(target_indices) == 0:
-                raise ValueError(
-                    f"DFM prediction failed: none of the specified target series found. "
-                    f"Target: {target}, Available: {series_ids}"
-                )
-        elif target is None:
-            raise ValueError(
-                "DFM prediction failed: target is None but no target_series found in DataModule. "
-                "Please specify target=['series_id'] or ensure DataModule has target_series set."
-            )
+        # Resolve target indices
+        target_indices = self._resolve_target_indices(target, result)  # type: ignore[arg-type]
         
         # Forecast factors using VAR dynamics (common helper)
         Z_prev = result.Z[-2, :] if result.Z.shape[0] >= 2 and p == 2 else None
@@ -965,8 +945,9 @@ class DFM(BaseFactorModel):
         # Optimized: Transform only target series (not all series)
         # Use only target indices for C, Mx, Wx
         C_target = C[target_indices, :]  # (len(target) x m)
-        Mx_target = Mx[target_indices] if len(Mx) > max(target_indices) else Mx
-        Wx_target = Wx[target_indices] if len(Wx) > max(target_indices) else Wx
+        max_target_idx = max(target_indices) if target_indices and len(target_indices) > 0 else 0
+        Mx_target = Mx[target_indices] if Mx is not None and len(Mx) > max_target_idx else (Mx if Mx is not None else None)
+        Wx_target = Wx[target_indices] if Wx is not None and len(Wx) > max_target_idx else (Wx if Wx is not None else None)
         
         # Transform factors to target observations only
         X_forecast_std = Z_forecast @ C_target.T  # (horizon x len(target))
@@ -981,15 +962,15 @@ class DFM(BaseFactorModel):
                 f"Please check model parameters and data quality."
             )
         
-        # Convert to numpy (handles torch inputs)
-        X_forecast = np.asarray(
-            X_forecast.detach().cpu().numpy() if hasattr(X_forecast, "detach") else X_forecast
-        )
+        # Ensure X_forecast is numpy array (handles torch inputs if present)
+        if hasattr(X_forecast, "cpu") and hasattr(X_forecast, "numpy") and not isinstance(X_forecast, np.ndarray):
+            X_forecast = X_forecast.cpu().numpy()
+        X_forecast = np.asarray(X_forecast, dtype=np.float32)
         
         # Validate forecast values are within reasonable bounds (only for target series now)
         if Wx_target is not None and Mx_target is not None and len(Wx_target) > 0 and len(Mx_target) > 0:
             # Check each target series individually
-            extreme_threshold_std = 50.0  # Flag if forecast is > 50 std devs from mean
+            extreme_threshold_std = _EM_CONFIG.extreme_forecast_threshold
             for i in range(X_forecast.shape[1] if X_forecast.ndim > 1 else 1):
                 if i < len(Wx_target) and i < len(Mx_target) and Wx_target[i] > 0:
                     series_forecast = X_forecast[:, i] if X_forecast.ndim > 1 else X_forecast
@@ -1019,6 +1000,57 @@ class DFM(BaseFactorModel):
         if return_series:
             return X_forecast
         return Z_forecast
+    
+    def _update_factor_state_dfm(
+        self,
+        X_recent_std: np.ndarray,
+        result: DFMResult,
+        kalman_filter: Optional[Any] = None
+    ) -> np.ndarray:
+        """Update factor state using pykalman.
+        
+        Overrides base class method to use pykalman instead of PyTorch KalmanFilter.
+        
+        Parameters
+        ----------
+        X_recent_std : np.ndarray
+            Standardized recent data (T x N)
+        result : DFMResult
+            Model result containing parameters
+        kalman_filter : Any, optional
+            Ignored (kept for compatibility with base class signature)
+            
+        Returns
+        -------
+        np.ndarray
+            Updated last factor state (m,)
+        """
+        # Get parameters from result
+        A = result.A
+        C = result.C
+        Q = result.Q
+        R = result.R
+        Z_0 = result.Z_0
+        V_0 = result.V_0
+        
+        # Handle missing data
+        X_masked = np.ma.masked_invalid(X_recent_std)
+        
+        # Create DFM Kalman filter
+        kalman_update = DFMKalmanFilter(
+            transition_matrices=A,
+            observation_matrices=C,
+            transition_covariance=Q,
+            observation_covariance=R,
+            initial_state_mean=Z_0,
+            initial_state_covariance=V_0
+        )
+        
+        # Run Kalman smoother (expects T x N)
+        smoothed_state_means, _ = kalman_update.smooth(X_masked)
+        
+        # Return last smoothed state
+        return smoothed_state_means[-1, :]  # (m,)
     
     def update(
         self,
@@ -1100,7 +1132,7 @@ class DFM(BaseFactorModel):
         
         # Update factor state using Kalman filter directly on standardized data
         Z_last_updated = self._update_factor_state_dfm(
-            X_recent, result, kalman_filter or getattr(self, 'kalman', None)
+            X_recent, result, kalman_filter=None  # Use pykalman in override
         )
         
         # Update result.Z[-1, :] permanently
@@ -1114,6 +1146,96 @@ class DFM(BaseFactorModel):
             
         return self
     
+    def _resolve_target_indices(self, target: Optional[List[str]], result: Any) -> List[int]:
+        """Resolve target series names to indices.
+        
+        Returns
+        -------
+        List[int]
+            Target series indices
+        """
+        if target is None:
+            try:
+                data_module = self._get_datamodule()
+                target = getattr(data_module, 'target_series', None)
+            except (ValueError, AttributeError):
+                target = None
+        
+        if target is None or len(target) == 0:
+            raise ValueError(
+                "DFM prediction failed: target is None but no target_series found in DataModule. "
+                "Please specify target=['series_id'] or ensure DataModule has target_series set."
+            )
+        
+        series_ids = self._config.get_series_ids() if self._config is not None else getattr(result, 'series_ids', None)
+        if series_ids is None:
+            raise ValueError(
+                "DFM prediction failed: target specified but cannot determine series IDs. "
+                "Please ensure config is loaded or result contains series_ids."
+            )
+        
+        target_indices = []
+        for tgt_id in target:
+            if tgt_id in series_ids:
+                target_indices.append(series_ids.index(tgt_id))
+            else:
+                _logger.warning(f"DFM prediction: target series '{tgt_id}' not found in series_ids. Available: {series_ids}")
+        
+        if len(target_indices) == 0:
+            raise ValueError(f"DFM prediction failed: none of the specified target series found. Target: {target}, Available: {series_ids}")
+        
+        return target_indices
+    
+    def _validate_forecast(
+        self,
+        X_forecast: np.ndarray,
+        Z_forecast: np.ndarray,
+        Wx_target: Optional[np.ndarray],
+        Mx_target: Optional[np.ndarray],
+        return_factors: bool
+    ) -> np.ndarray:
+        """Validate forecast results and convert to NumPy array.
+        
+        Returns
+        -------
+        np.ndarray
+            Validated and converted forecast
+        """
+        if np.any(~np.isfinite(X_forecast)):
+            nan_count = np.sum(~np.isfinite(X_forecast))
+            raise ValueError(
+                f"DFM prediction failed: produced {nan_count} NaN/Inf values in forecast. "
+                f"Possible numerical instability. Please check model parameters and data quality."
+            )
+        
+        if hasattr(X_forecast, "cpu") and hasattr(X_forecast, "numpy") and not isinstance(X_forecast, np.ndarray):
+            X_forecast = X_forecast.cpu().numpy()
+        X_forecast = np.asarray(X_forecast, dtype=np.float32)
+        
+        # Check for extreme values
+        if Wx_target is not None and Mx_target is not None and len(Wx_target) > 0 and len(Mx_target) > 0:
+            extreme_threshold = _EM_CONFIG.extreme_forecast_threshold
+            for i in range(X_forecast.shape[1] if X_forecast.ndim > 1 else 1):
+                if i < len(Wx_target) and i < len(Mx_target) and Wx_target[i] > 0:
+                    series_forecast = X_forecast[:, i] if X_forecast.ndim > 1 else X_forecast
+                    abs_deviations = np.abs(series_forecast - Mx_target[i]) / Wx_target[i]
+                    max_deviation = np.max(abs_deviations) if len(abs_deviations) > 0 else 0.0
+                    if max_deviation > extreme_threshold:
+                        _logger.warning(
+                            f"DFM prediction: Extreme forecast for target series {i} "
+                            f"(max deviation: {max_deviation:.1f} std devs). Possible numerical instability."
+                        )
+        
+        if return_factors and np.any(~np.isfinite(Z_forecast)):
+            nan_count = np.sum(~np.isfinite(Z_forecast))
+            raise ValueError(
+                f"DFM prediction failed: produced {nan_count} NaN/Inf values in factor forecast. "
+                f"Possible numerical instability in factor dynamics. "
+                f"Please check model parameters and training convergence."
+            )
+        
+        return X_forecast
+    
     @property
     def result(self) -> DFMResult:
         """Get model result from training state.
@@ -1125,6 +1247,11 @@ class DFM(BaseFactorModel):
         """
         # Check if trained and extract result from training state if needed
         self._check_trained()
+        if self._result is None:
+            # Generate result from training state if not already computed
+            self._result = self.get_result()
+        if not isinstance(self._result, DFMResult):
+            raise RuntimeError(f"Expected DFMResult but got {type(self._result)}")
         return self._result
     
     
@@ -1133,5 +1260,4 @@ class DFM(BaseFactorModel):
         """Reset model state."""
         super().reset()
         return self
-
 

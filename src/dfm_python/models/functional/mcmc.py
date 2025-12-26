@@ -44,6 +44,45 @@ class DDFMMCMCTrainer:
         """
         self.model = model
     
+    def _check_finite(
+        self, 
+        arr: np.ndarray, 
+        name: str, 
+        context: Optional[str] = None,
+        fallback: Optional[np.ndarray] = None
+    ) -> np.ndarray:
+        """Check array for NaN/Inf values and apply fallback if needed.
+        
+        Parameters
+        ----------
+        arr : np.ndarray
+            Array to check
+        name : str
+            Name of array for error messages
+        context : str, optional
+            Additional context for error messages
+        fallback : np.ndarray, optional
+            Fallback array to use if NaN/Inf detected
+            
+        Returns
+        -------
+        np.ndarray
+            Cleaned array (or fallback if provided)
+        """
+        from ...utils.validation import check_finite_array
+        from ...config.constants import MAX_EIGENVALUE
+        
+        try:
+            return check_finite_array(arr, name, context, fallback)
+        except ValueError:
+            # Replace NaN/Inf with finite values as last resort
+            arr_clean = np.nan_to_num(arr, nan=0.0, posinf=MAX_EIGENVALUE, neginf=-MAX_EIGENVALUE)
+            context_str = f" {context}" if context else ""
+            _logger.warning(
+                f"DDFM MCMC numerical stability: replaced NaN/Inf in {name}{context_str} with finite values"
+            )
+            return arr_clean
+    
     def fit(
         self,
         X: torch.Tensor,
@@ -214,12 +253,12 @@ class DDFMMCMCTrainer:
         with torch.no_grad():
             factors_init = self.model.encoder(x_tensor).cpu().numpy()
             # Check for NaN/Inf in initial factors
-            factors_init = self.model._check_finite(factors_init, "initial factors", context="at iteration 0")
+            factors_init = self._check_finite(factors_init, "initial factors", context="at iteration 0")
             
             factors_tensor = torch.tensor(factors_init, device=device, dtype=dtype)
             prediction_iter = self.model.decoder(factors_tensor).cpu().numpy()
             # Check for NaN/Inf in initial prediction
-            prediction_iter = self.model._check_finite(prediction_iter, "initial prediction", context="at iteration 0")
+            prediction_iter = self._check_finite(prediction_iter, "initial prediction", context="at iteration 0")
         
         # Initialize factors
         factors = factors_init.copy()
@@ -232,7 +271,7 @@ class DDFMMCMCTrainer:
         # Initial residuals
         eps = data_mod_only_miss - prediction_iter
         # Check for NaN/Inf in initial residuals
-        eps = self.model._check_finite(eps, "initial residuals", context="at iteration 0")
+        eps = self._check_finite(eps, "initial residuals", context="at iteration 0")
         
         # MCMC loop
         iter_count = 0
@@ -266,8 +305,8 @@ class DDFMMCMCTrainer:
             if self.model.use_idiosyncratic:
                 A_eps, Q_eps = estimate_idio_dynamics(eps, missing_mask, self.model.min_obs_idio)
                 # Check for NaN/Inf in estimated dynamics
-                A_eps = self.model._check_finite(A_eps, f"idiosyncratic AR coefficients (A_eps)", context=f"at iteration {iter_count}")
-                Q_eps = self.model._check_finite(Q_eps, f"idiosyncratic innovation covariance (Q_eps)", context=f"at iteration {iter_count}")
+                A_eps = self._check_finite(A_eps, f"idiosyncratic AR coefficients (A_eps)", context=f"at iteration {iter_count}")
+                Q_eps = self._check_finite(Q_eps, f"idiosyncratic innovation covariance (Q_eps)", context=f"at iteration {iter_count}")
                 
                 # Convert to format expected by MCMC procedure
                 phi = A_eps if A_eps.ndim == 2 else np.diag(A_eps) if A_eps.ndim == 1 else np.eye(N)
@@ -281,7 +320,7 @@ class DDFMMCMCTrainer:
                 
                 # Ensure std_eps is finite and positive
                 std_eps = np.maximum(std_eps, 1e-8)  # Floor to prevent zero/negative
-                std_eps = self.model._check_finite(std_eps, f"idiosyncratic std (std_eps)", context=f"at iteration {iter_count}")
+                std_eps = self._check_finite(std_eps, f"idiosyncratic std (std_eps)", context=f"at iteration {iter_count}")
             else:
                 phi = np.zeros((N, N))
                 mu_eps = np.zeros(N)
@@ -302,7 +341,7 @@ class DDFMMCMCTrainer:
                         mu_eps, np.diag(std_eps), size=self.model.epochs_per_iter
                     )
                 # Check for NaN/Inf in MC samples
-                eps_draws = self.model._check_finite(eps_draws, f"MC samples (eps_draws)", context=f"at iteration {iter_count}")
+                eps_draws = self._check_finite(eps_draws, f"MC samples (eps_draws)", context=f"at iteration {iter_count}")
             except (ValueError, np.linalg.LinAlgError) as e:
                 _logger.warning(
                     f"{self.model.__class__.__name__} MCMC iteration {iter_count}: failed to generate MC samples: {e}. "
@@ -359,7 +398,7 @@ class DDFMMCMCTrainer:
                 with torch.no_grad():
                     factors_sample = self.model.encoder(x_sample_tensor).cpu().numpy()
                     # Check for NaN/Inf in factor sample
-                    factors_sample = self.model._check_finite(
+                    factors_sample = self._check_finite(
                         factors_sample, 
                         f"factor sample {i+1}/{self.model.epochs_per_iter}", 
                         context=f"at iteration {iter_count}"
@@ -369,7 +408,7 @@ class DDFMMCMCTrainer:
             # Update factors: average over all MC samples
             factors = np.mean(np.array(factors_samples), axis=0)  # T x num_factors
             # Check for NaN/Inf in averaged factors
-            factors = self.model._check_finite(factors, "averaged factors", context=f"at iteration {iter_count}", fallback=factors_init)
+            factors = self._check_finite(factors, "averaged factors", context=f"at iteration {iter_count}", fallback=factors_init)
             
             # Clip extreme factor values to prevent numerical instability
             # Use configurable clipping threshold (default: 10 standard deviations)
@@ -401,7 +440,7 @@ class DDFMMCMCTrainer:
                 factors_tensor = torch.tensor(factors, device=device, dtype=dtype)
                 prediction_iter = self.model.decoder(factors_tensor).cpu().numpy()
                 # Check for NaN/Inf in prediction
-                prediction_iter = self.model._check_finite(
+                prediction_iter = self._check_finite(
                     prediction_iter, 
                     "prediction_iter", 
                     context=f"at iteration {iter_count}",
@@ -462,7 +501,7 @@ class DDFMMCMCTrainer:
             # Update residuals
             eps = data_mod_only_miss - prediction_iter
             # Check for NaN/Inf in residuals before next iteration
-            eps = self.model._check_finite(eps, "residuals (eps)", context=f"at iteration {iter_count}")
+            eps = self._check_finite(eps, "residuals (eps)", context=f"at iteration {iter_count}")
         
         if not_converged:
             delta_str = f"{delta:.6f}" if iter_count > 1 else "N/A"

@@ -4,41 +4,28 @@ This module provides EMAlgorithm, a PyTorch nn.Module for the Expectation-Maximi
 algorithm.
 
 Algorithm Structure:
-    E-step: Uses PyTorch Kalman smoother (all matrix operations → GPU optimal)
+    E-step: Uses PyTorch Kalman smoother (all matrix operations)
     M-step: Closed-form OLS regression (no autograd needed, pure matrix ops)
     
     The EM algorithm uses closed-form updates, so PyTorch autograd is not needed.
-    All operations are matrix multiplications, inversions, and regressions that
-    benefit greatly from GPU acceleration.
+    All operations are matrix multiplications, inversions, and regressions.
 
 Numerical Stability:
-    All matrix inversions and solves use adaptive regularization based on condition
-    number to prevent singular matrix errors. This is critical for GPU stability, as
-    PyTorch can throw RuntimeError for near-singular matrices.
+    Matrix inversions and solves use basic regularization to prevent singular matrix errors.
+    CPU operations are more stable than GPU, so extensive fallbacks are not needed.
     
-    Root Cause of Divergence (Fixed):
-    - Fixed regularization (1e-6) was insufficient when condition number of sum_EZZ
-      (factor covariance) grows over iterations, leading to numerical instability in
-      C matrix solve operation
-    - Solution: Adaptive regularization scales up proportionally when condition number
-      exceeds 1e8, preventing ill-conditioned matrix inversions
+    Basic stability measures:
+    - Regularization for matrix inversions
+    - Spectral radius capping for stationarity
+    - Variance floors for covariance matrices
     
     Known Limitations:
     - Some target series may still exhibit numerical instability if data quality is
       poor (high collinearity, extreme missing data, small effective sample size)
-    - The package includes multiple stability measures (adaptive regularization,
-      matrix normalization, spectral radius capping, Q matrix floor), but some
-      data/model combinations may still fail due to inherent numerical properties
-      of the data structure
     - When EM algorithm fails for a specific target, consider:
       * Using DDFM (nonlinear encoder) as an alternative
       * Adjusting regularization_scale or other hyperparameters
       * Checking data quality (outliers, missing patterns, collinearity)
-
-Performance:
-    GPU acceleration provides significant speedup for large-scale problems.
-    The E-step (Kalman smoother) and M-step (matrix regressions) are both
-    highly parallelizable on GPU.
 """
 
 import torch
@@ -112,50 +99,28 @@ class EMAlgorithm(nn.Module):
         """Cap maximum eigenvalue of matrix to prevent numerical explosion."""
         return cap_max_eigenval(M, max_eigenval=max_eigenval, warn=False)
     
-    def _compute_adaptive_regularization(
+    def _compute_regularization(
         self, 
         M: torch.Tensor, 
-        matrix_name: str = "matrix",
-        min_reg: float = 1e-3
+        matrix_name: str = "matrix"
     ) -> float:
-        """Compute adaptive regularization based on condition number.
+        """Compute regularization for matrix operations.
+        
+        Uses fixed regularization for CPU operations (CPU BLAS handles edge cases better).
         
         Parameters
         ----------
         M : torch.Tensor
             Matrix to compute regularization for
         matrix_name : str
-            Name for logging
-        min_reg : float
-            Minimum regularization value
+            Name for logging (unused, kept for compatibility)
             
         Returns
         -------
         float
             Regularization scale
         """
-        base_reg = self.regularization_scale.item()
-        try:
-            eigenvals = torch.linalg.eigvalsh(M)
-            eigenvals = eigenvals[eigenvals > 1e-12]
-            if len(eigenvals) > 0:
-                max_eig = torch.max(eigenvals)
-                min_eig = torch.min(eigenvals)
-                cond_num = max_eig / min_eig if min_eig > 1e-12 else float('inf')
-                
-                if cond_num > 1e8:
-                    reg_scale = base_reg * (cond_num / 1e8)
-                    _logger.debug(f"EM: {matrix_name} ill-conditioned (cond={cond_num:.2e}), reg={reg_scale:.2e}")
-                else:
-                    reg_scale = base_reg
-            else:
-                reg_scale = max(base_reg * 100, min_reg)
-                _logger.warning(f"EM: {matrix_name} has no valid eigenvalues, using reg={reg_scale:.2e}")
-        except (RuntimeError, ValueError) as e:
-            reg_scale = max(base_reg * 10, min_reg)
-            _logger.warning(f"EM: Failed to compute condition number for {matrix_name} ({e}), using reg={reg_scale:.2e}")
-        
-        return reg_scale
+        return self.regularization_scale.item()
     
     def forward(
         self,
@@ -233,8 +198,8 @@ class EMAlgorithm(nn.Module):
                 # Compute XTY = sum_t X_t Y_t^T (vectorized: batch outer products)
                 XTY_A = torch.sum(X_A[:, :, None] * Y_A[:, None, :], dim=0)
                 
-                # Adaptive regularization based on condition number
-                reg_scale = self._compute_adaptive_regularization(XTX_A, "XTX_A", min_reg=1e-6)
+                # Regularization for numerical stability
+                reg_scale = self._compute_regularization(XTX_A, "XTX_A")
                 XTX_A_reg = XTX_A + torch.eye(m, device=device, dtype=dtype) * reg_scale
                 A_new = torch.linalg.solve(XTX_A_reg, XTY_A).T
                 
@@ -278,14 +243,11 @@ class EMAlgorithm(nn.Module):
             
             sum_EZZ = torch.sum(EZZ_clean, dim=0)
             
-            # Cap maximum eigenvalue to prevent condition number explosion
-            sum_EZZ = self._cap_max_eigenval(sum_EZZ, max_eigenval=1e6)
-            
-            # Adaptive regularization based on condition number
-            reg_scale = self._compute_adaptive_regularization(sum_EZZ, "sum_EZZ", min_reg=1e-3)
+            # Regularization for numerical stability
+            reg_scale = self._compute_regularization(sum_EZZ, "sum_EZZ")
             sum_EZZ_reg = sum_EZZ + torch.eye(m, device=device, dtype=dtype) * reg_scale
             
-            # Use pseudo-inverse as fallback when solve fails
+            # Solve for C matrix
             try:
                 C_new = torch.linalg.solve(sum_EZZ_reg.T, sum_yEZ.T).T
             except RuntimeError as e:
@@ -341,8 +303,8 @@ class EMAlgorithm(nn.Module):
             else:
                 Q_new = torch.cov(residuals_Q.T)
                 Q_new = ensure_symmetric(Q_new)
-            # Ensure positive definite with robust eigenvalue computation
-                Q_new = ensure_symmetric(Q_new)
+            
+            # Ensure positive definite
             try:
                 eigenvals_Q = torch.linalg.eigvalsh(Q_new)
                 min_eigenval = torch.min(eigenvals_Q)
@@ -438,13 +400,13 @@ class EMAlgorithm(nn.Module):
                 elif param_name == 'A':
                     A_new = torch.nan_to_num(A_new, nan=0.0)
                 elif param_name == 'Q':
-                    Q_new = torch.nan_to_num(Q_new, nan=params.Q.clone())
+                    Q_new = torch.where(torch.isnan(Q_new), params.Q.clone(), Q_new)
                 elif param_name == 'R':
-                    R_new = torch.nan_to_num(R_new, nan=params.R.clone())
+                    R_new = torch.where(torch.isnan(R_new), params.R.clone(), R_new)
                 elif param_name == 'Z_0':
-                    Z_0_new = torch.nan_to_num(Z_0_new, nan=params.Z_0.clone())
+                    Z_0_new = torch.where(torch.isnan(Z_0_new), params.Z_0.clone(), Z_0_new)
                 elif param_name == 'V_0':
-                    V_0_new = torch.nan_to_num(V_0_new, nan=params.V_0.clone())
+                    V_0_new = torch.where(torch.isnan(V_0_new), params.V_0.clone(), V_0_new)
         
         if nan_detected:
             _logger.error(
@@ -557,7 +519,7 @@ class EMAlgorithm(nn.Module):
         n_blocks = blocks.shape[1]
         nM = N - nQ  # Number of monthly series
         
-        # Handle missing data for initialization using GPU-accelerated PyTorch version
+        # Handle missing data for initialization using PyTorch version
         from ..utils.data import rem_nans_spline_torch
         x_clean, indNaN = rem_nans_spline_torch(x, method=opt_nan.get('method', 2), k=opt_nan.get('k', 3))
         

@@ -1,13 +1,11 @@
-"""State-space model (SSM) modules for PyTorch.
+"""State-space model (SSM) modules.
 
-This package provides PyTorch implementations of:
-- KalmanFilter: Kalman filtering and smoothing
-- EMAlgorithm: Expectation-Maximization algorithm for DFM
+This package provides:
+- DFMKalmanFilter: Kalman filtering for DFM using pykalman
 - Utilities: Numerical stability functions for SSM operations
 """
 
-from .kalman import KalmanFilter, KalmanFilterState
-from .em import EMAlgorithm, EMStepParams
+from .kalman import DFMKalmanFilter
 from .utils import (
     check_finite,
     ensure_real,
@@ -27,10 +25,7 @@ from .companion import CompanionSSM, MACompanionSSM, CompanionSSMBase
 
 __all__ = [
     # Main modules
-    'KalmanFilter',
-    'KalmanFilterState',
-    'EMAlgorithm',
-    'EMStepParams',
+    'DFMKalmanFilter',
     # Companion SSM modules
     'CompanionSSM',
     'MACompanionSSM',

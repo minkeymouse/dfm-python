@@ -53,7 +53,7 @@ from .utils import (
 )
 
 if TYPE_CHECKING:
-    from ..lightning import DFMDataModule
+    from ..datamodule import DFMDataModule
 
 _logger = get_logger(__name__)
 
@@ -72,14 +72,17 @@ class DDFMTrainingState:
 # ============================================================================
 
 if TYPE_CHECKING:
-    from ..lightning import DFMDataModule
+    from ..datamodule import DFMDataModule
 
-class DDFM(BaseFactorModel):
+import pytorch_lightning as pl
+
+
+class DDFM(BaseFactorModel, pl.LightningModule):
     """High-level API for Deep Dynamic Factor Model (PyTorch Lightning module).
     
     This class is a PyTorch Lightning module that can be used with standard
-    Lightning training patterns. It inherits from BaseFactorModel and implements
-    DDFM training using autoencoder and MCMC procedure.
+    Lightning training patterns. It inherits from both BaseFactorModel and
+    pl.LightningModule, and implements DDFM training using autoencoder and MCMC procedure.
     
     Note: Maximum supported VAR order for factor dynamics is VAR(2) (set via factor_order parameter).
     
@@ -215,7 +218,8 @@ class DDFM(BaseFactorModel):
         **kwargs
             Additional arguments passed to BaseFactorModel
         """
-        super().__init__(**kwargs)
+        BaseFactorModel.__init__(self)
+        pl.LightningModule.__init__(self)
         
         # Initialize config using consolidated helper method
         # DDFM does not use block structure
@@ -1199,7 +1203,7 @@ class DDFM(BaseFactorModel):
                 target_scaler=target_scaler,
             )
         
-        super().on_train_start()
+        pl.LightningModule.on_train_start(self)
     
     
     def load_config(

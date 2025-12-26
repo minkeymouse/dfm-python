@@ -346,81 +346,58 @@ class TestModelResults:
 class TestKDFM:
     """Test KDFM implementation."""
     
-    def test_kdfm_import(self):
-        """Test that KDFM can be imported."""
+    @pytest.fixture
+    def kdfm_model(self):
+        """Create KDFM model fixture."""
         try:
             from dfm_python.models import KDFM
-            assert KDFM is not None
+            return KDFM(ar_order=1, ma_order=0)
         except ImportError:
             pytest.skip("KDFM requires PyTorch")
     
-    def test_kdfm_initialization(self):
-        """Test KDFM initialization."""
-        try:
-            from dfm_python.models import KDFM
-            model = KDFM(ar_order=1, ma_order=0)
-            assert isinstance(model, BaseFactorModel)
-            assert model.config is not None
-            # Result property raises ValueError when accessed before training
-            with pytest.raises(ValueError, match=r".*model has not been trained yet.*"):
-                _ = model.result
-        except ImportError:
-            pytest.skip("KDFM requires PyTorch")
+    def test_kdfm_initialization(self, kdfm_model):
+        """Test KDFM initialization and interface."""
+        model = kdfm_model
+        assert isinstance(model, BaseFactorModel)
+        assert model.config is not None
+        # Result property raises ValueError when accessed before training
+        with pytest.raises(ValueError, match=r".*model has not been trained yet.*"):
+            _ = model.result
+        # Verify BaseFactorModel interface
+        assert hasattr(model, 'predict')
+        assert hasattr(model, 'update')
+        assert callable(getattr(model, 'update', None))
+        assert hasattr(model, 'training_step')
+        assert hasattr(model, 'forward')
     
-    def test_kdfm_interface(self):
-        """Test that KDFM implements BaseFactorModel interface."""
-        try:
-            from dfm_python.models import KDFM
-            model = KDFM(ar_order=1, ma_order=0)
-            assert isinstance(model, BaseFactorModel)
-            assert hasattr(model, 'predict')
-            assert hasattr(model, 'update')
-            assert callable(getattr(model, 'update', None))
-            assert hasattr(model, 'training_step')
-            assert hasattr(model, 'forward')
-        except ImportError:
-            pytest.skip("KDFM requires PyTorch")
-    
-    def test_kdfm_two_stage_structure(self):
+    def test_kdfm_two_stage_structure(self, kdfm_model):
         """Test KDFM two-stage VARMA architecture.
         
         KDFM uses:
         - Stage 1 (AR): h_{t+1} = A^AR h_t + B ε_t, z_t = C h_t
         - Stage 2 (MA): h'_{t+1} = A^MA h'_t + B' z_t, y_t = C' h'_t
         """
-        try:
-            from dfm_python.models import KDFM
-            model = KDFM(ar_order=1, ma_order=0)
-            # KDFM should have companion AR and MA SSMs
-            assert hasattr(model, 'companion_ar')
-            assert hasattr(model, 'companion_ma')
-            assert hasattr(model, 'structural_id')  # Correct attribute name
-        except ImportError:
-            pytest.skip("KDFM requires PyTorch")
+        model = kdfm_model
+        # KDFM should have companion AR and MA SSMs
+        assert hasattr(model, 'companion_ar')
+        assert hasattr(model, 'companion_ma')
+        assert hasattr(model, 'structural_id')
     
-    def test_kdfm_forward_pass(self):
+    def test_kdfm_forward_pass(self, kdfm_model):
         """Test KDFM forward pass with Krylov FFT."""
-        try:
-            from dfm_python.models import KDFM
-            import torch
-            
-            T, N = 50, 5
-            model = KDFM(ar_order=1, ma_order=0)
-            
-            # Initialize from dummy data
-            X = torch.randn(T, N)
-            model.initialize_from_data(X)
-            
-            # Forward pass should work
-            output = model.forward(X)
-            assert output is not None
-            # Output should be predictions (T x N)
-            assert output.shape == (T, N)
-        except ImportError:
-            pytest.skip("KDFM requires PyTorch")
-        except Exception as e:
-            # Forward pass may require trained model or specific initialization
-            pytest.skip(f"KDFM forward pass test skipped: {e}")
+        import torch
+        model = kdfm_model
+        T, N = 50, 5
+        
+        # Initialize from dummy data
+        X = torch.randn(T, N)
+        model.initialize_from_data(X)
+        
+        # Forward pass should work
+        output = model.forward(X)
+        assert output is not None
+        # Output should be predictions (T x N)
+        assert output.shape == (T, N)
     
     def test_kdfm_config_loading(self):
         """Test KDFM configuration loading."""
@@ -438,7 +415,6 @@ class TestKDFM:
             
             model = KDFM(config=config)
             assert model.config is not None
-            # Verify config is KDFMConfig
             assert isinstance(model.config, KDFMConfig)
             assert model.config.ar_order == 1
             assert model.config.ma_order == 0
@@ -477,25 +453,12 @@ class TestKDFM:
         except ImportError:
             pytest.skip("KDFM requires PyTorch")
     
-    def test_kdfm_structural_identification(self):
-        """Test KDFM structural identification methods."""
-        try:
-            from dfm_python.models import KDFM
-            
-            # Test different structural methods
-            for method in ['cholesky', 'full']:
-                model = KDFM(
-                    ar_order=1,
-                    ma_order=0,
-                    structural_method=method
-                )
-                # Verify config is KDFMConfig
-                assert isinstance(model.config, KDFMConfig)
-                # Check that structural_method is set (may be in config or as instance attribute)
-                assert model.config.structural_method == method or model.structural_method == method
-                assert hasattr(model, 'structural_id')
-        except ImportError:
-            pytest.skip("KDFM requires PyTorch")
+    def test_kdfm_structural_identification(self, kdfm_model):
+        """Test KDFM structural identification configuration."""
+        model = kdfm_model
+        # KDFM should have structural identification module
+        assert hasattr(model, 'structural_id')
+        # Structural identification is tested in detail in test_ssm.py::TestStructuralIdentification
     
     def test_kdfm_varma_orders(self):
         """Test KDFM VARMA order parameters."""
@@ -516,19 +479,30 @@ class TestKDFM:
         except ImportError:
             pytest.skip("KDFM requires PyTorch")
     
-    def test_kdfm_stochastic_factors(self):
-        """Test that KDFM models stochastic factors via structural shocks.
+    def test_kdfm_irf_computation(self, kdfm_model):
+        """Test KDFM IRF computation via get_result().
         
-        KDFM explicitly models stochastic factor evolution through structural
-        shocks ε_t in the AR stage: h_{t+1} = A^AR h_t + B ε_t
-        This distinguishes it from deterministic factor models.
+        IRFs are computed in get_result() method when all required parameters
+        are available. This test verifies that IRF computation works correctly.
         """
+        import torch
+        model = kdfm_model
+        T, N = 50, 5
+        
+        # Initialize from dummy data
+        X = torch.randn(T, N)
+        model.initialize_from_data(X)
+        
+        # get_result() computes IRFs if parameters are available
+        # Note: This may fail if model is not trained, which is expected
         try:
-            from dfm_python.models import KDFM
-            model = KDFM(ar_order=1, ma_order=0)
-            # KDFM should have structural identification for stochastic shocks
-            assert hasattr(model, 'structural_id')
-            # Structural identification will be initialized when data is provided
-        except ImportError:
-            pytest.skip("KDFM requires PyTorch")
+            result = model.get_result()
+            # If IRFs are computed, they should be in result
+            if hasattr(result, 'irf_reduced') and result.irf_reduced is not None:
+                assert result.irf_reduced.shape[0] > 0  # Should have horizon dimension
+            if hasattr(result, 'irf_structural') and result.irf_structural is not None:
+                assert result.irf_structural.shape[0] > 0  # Should have horizon dimension
+        except ValueError:
+            # Expected if model not trained - IRF computation requires trained model
+            pass
 

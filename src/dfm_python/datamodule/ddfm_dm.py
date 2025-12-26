@@ -134,7 +134,6 @@ class DDFMDataModule(lightning_pl.LightningDataModule):
         target_series: Optional[Union[str, List[str]]] = None,
         target_scaler: Optional[Union[str, Any]] = None,
         time_index: Optional[TimeIndex] = None,
-        time: Optional[TimeIndex] = None,  # Legacy parameter name (alias for time_index)
         time_index_column: Optional[Union[str, List[str]]] = None,
         window_size: int = 100,
         stride: int = 1,
@@ -160,8 +159,7 @@ class DDFMDataModule(lightning_pl.LightningDataModule):
         self.config = config
         self.data_path = Path(data_path) if data_path is not None else None
         self.data = data
-        # Support both time_index and time (legacy) parameter names
-        self.time_index = time_index if time_index is not None else time
+        self.time_index = time_index
         self.time_index_column = time_index_column
         
         # Target series handling

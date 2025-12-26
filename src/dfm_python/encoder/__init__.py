@@ -11,7 +11,6 @@ from .base import BaseEncoder
 from .pca import (
     PCAEncoder,
     compute_principal_components,
-    compute_principal_components_torch,
 )
 
 from .autoencoder import (
@@ -29,7 +28,6 @@ __all__ = [
     # PCA
     'PCAEncoder',
     'compute_principal_components',
-    'compute_principal_components_torch',
     # Autoencoder
     'Encoder',
     'AutoencoderEncoder',

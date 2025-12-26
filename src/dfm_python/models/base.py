@@ -2,19 +2,12 @@
 
 This module defines the common interface that all factor models (DFM, DDFM, etc.)
 must implement, ensuring consistent API across different model types.
-
-All factor models are PyTorch Lightning modules, enabling standard Lightning
-training patterns: trainer.fit(model, datamodule).
 """
 
-from abc import abstractmethod
-from typing import Optional, Union, Tuple, Any, Dict, List, TYPE_CHECKING
+from abc import ABC, abstractmethod
+from typing import Optional, Union, Tuple, Any, Dict, List
 from pathlib import Path
-from datetime import datetime
 import numpy as np
-import torch
-import pytorch_lightning as pl
-import pandas as pd
 
 from ..config import DFMConfig, make_config_source, ConfigSource, MergedConfigSource
 from ..config.results import BaseResult
@@ -24,13 +17,12 @@ from ..logger import get_logger
 _logger = get_logger(__name__)
 
 
-class BaseFactorModel(pl.LightningModule):
-    """Base class for all factor models (PyTorch Lightning module).
+class BaseFactorModel(ABC):
+    """Abstract base class for all factor models.
     
     This base class provides the common interface that all factor models
-    (DFM, DDFM, etc.) must implement. It inherits from pl.LightningModule,
-    ensuring all models can be used with standard Lightning training patterns:
-    trainer.fit(model, datamodule).
+    (DFM, DDFM, etc.) must implement. It is a pure abstract class without
+    any framework dependencies.
     
     Attributes
     ----------
@@ -42,9 +34,8 @@ class BaseFactorModel(pl.LightningModule):
         Training state (model-specific, e.g., DFMTrainingState or DDFMTrainingState)
     """
     
-    def __init__(self, **kwargs):
+    def __init__(self):
         """Initialize factor model instance."""
-        super().__init__(**kwargs)
         self._config: Optional[DFMConfig] = None
         self._result: Optional[BaseResult] = None
         self.training_state: Optional[Any] = None
@@ -67,7 +58,6 @@ class BaseFactorModel(pl.LightningModule):
             )
         return self._config
     
-    
     def _check_trained(self) -> None:
         """Check if model is trained, raise error if not.
         
@@ -87,58 +77,11 @@ class BaseFactorModel(pl.LightningModule):
                     pass
             
             raise ValueError(
-                f"{self.__class__.__name__} operation failed: model has not been trained yet. "
-                f"Please call trainer.fit(model, data_module) first"
+                f"{self.__class__.__name__} operation failed: model has not been trained yet."
             )
-    
-    def _check_finite(
-        self, 
-        arr: np.ndarray, 
-        name: str, 
-        context: Optional[str] = None,
-        fallback: Optional[np.ndarray] = None
-    ) -> np.ndarray:
-        """Check array for NaN/Inf values and apply fallback if needed.
-        
-        This is a shared utility method for numerical stability checks across all models.
-        Uses consolidated validation utility.
-        
-        Parameters
-        ----------
-        arr : np.ndarray
-            Array to check
-        name : str
-            Name of array for error messages
-        context : str, optional
-            Additional context for error messages (e.g., "at iteration 5", "during MCMC")
-        fallback : np.ndarray, optional
-            Fallback array to use if NaN/Inf detected. If None, replaces NaN/Inf with finite values.
-            
-        Returns
-        -------
-        np.ndarray
-            Cleaned array (or fallback if provided)
-        """
-        from ..utils.validation import check_finite_array
-        from ..config.constants import MAX_EIGENVALUE
-        
-        try:
-            return check_finite_array(arr, name, context, fallback)
-        except ValueError:
-            # Replace NaN/Inf with finite values as last resort
-            arr_clean = np.nan_to_num(arr, nan=0.0, posinf=MAX_EIGENVALUE, neginf=-MAX_EIGENVALUE)
-            context_str = f" {context}" if context else ""
-            _logger.warning(
-                f"{self.__class__.__name__} numerical stability check: replaced NaN/Inf in {name}{context_str} with finite values"
-            )
-            return arr_clean
     
     def _create_temp_config(self, block_name: Optional[str] = None) -> DFMConfig:
         """Create a temporary configuration for model initialization.
-        
-        This helper method creates a minimal default configuration when no config
-        is provided during model initialization. The temporary config will typically
-        be replaced later via load_config().
         
         Parameters
         ----------
@@ -161,10 +104,6 @@ class BaseFactorModel(pl.LightningModule):
     def _initialize_config(self, config: Optional[DFMConfig] = None) -> DFMConfig:
         """Initialize configuration with common pattern.
         
-        This helper method consolidates the common pattern of creating a temporary
-        config if none is provided and setting the internal config. Subclasses
-        should call this method in their __init__() before model-specific initialization.
-        
         Parameters
         ----------
         config : DFMConfig, optional
@@ -175,13 +114,10 @@ class BaseFactorModel(pl.LightningModule):
         DFMConfig
             Configuration object (either provided or created temporary config)
         """
-        # If config not provided, create a temporary config that will be replaced via load_config
         if config is None:
             config = self._create_temp_config()
         
-        # Set internal config (config property is read-only, accessed via property getter)
         self._config = config
-        
         return config
     
     def _get_datamodule(self):
@@ -273,8 +209,8 @@ class BaseFactorModel(pl.LightningModule):
         self,
         Z_forecast: np.ndarray,
         C: np.ndarray,
-        Wx: np.ndarray,
-        Mx: np.ndarray
+        Wx: Optional[np.ndarray],
+        Mx: Optional[np.ndarray]
     ) -> np.ndarray:
         """Transform forecasted factors to observed series.
         
@@ -284,9 +220,9 @@ class BaseFactorModel(pl.LightningModule):
             Forecasted factors (horizon x m)
         C : np.ndarray
             Loading matrix (N x m)
-        Wx : np.ndarray
+        Wx : np.ndarray, optional
             Standard deviation values for unstandardization (N,)
-        Mx : np.ndarray
+        Mx : np.ndarray, optional
             Mean values for unstandardization (N,)
             
         Returns
@@ -296,43 +232,27 @@ class BaseFactorModel(pl.LightningModule):
         """
         X_forecast_std = Z_forecast @ C.T  # (horizon x N)
         
-        # Ensure Wx and Mx match the number of series (C.shape[0])
         n_series = C.shape[0]
-        if Wx is not None:
-            if len(Wx) == n_series:
-                Wx_clean = Wx
-            else:
-                from ..logger import get_logger
-                _logger = get_logger(__name__)
-                _logger.warning(
-                    f"{self.__class__.__name__} _transform_factors_to_observations: Wx shape mismatch. "
-                    f"Expected {n_series}, got {len(Wx)}. Using first {n_series} values or padding."
-                )
-                if len(Wx) > n_series:
-                    Wx_clean = Wx[:n_series]
-                else:
-                    Wx_clean = np.ones(n_series)
-                    Wx_clean[:len(Wx)] = Wx
-        else:
-            Wx_clean = np.ones(n_series)
         
-        if Mx is not None:
-            if len(Mx) == n_series:
-                Mx_clean = Mx
+        # Handle Wx with shape validation
+        if Wx is not None and len(Wx) != n_series:
+            if len(Wx) > n_series:
+                Wx_clean = Wx[:n_series]
             else:
-                from ..logger import get_logger
-                _logger = get_logger(__name__)
-                _logger.warning(
-                    f"{self.__class__.__name__} _transform_factors_to_observations: Mx shape mismatch. "
-                    f"Expected {n_series}, got {len(Mx)}. Using first {n_series} values or padding."
-                )
-                if len(Mx) > n_series:
-                    Mx_clean = Mx[:n_series]
-                else:
-                    Mx_clean = np.zeros(n_series)
-                    Mx_clean[:len(Mx)] = Mx
+                Wx_clean = np.ones(n_series)
+                Wx_clean[:len(Wx)] = Wx
         else:
-            Mx_clean = np.zeros(n_series)
+            Wx_clean = Wx if Wx is not None else np.ones(n_series)
+        
+        # Handle Mx with shape validation
+        if Mx is not None and len(Mx) != n_series:
+            if len(Mx) > n_series:
+                Mx_clean = Mx[:n_series]
+            else:
+                Mx_clean = np.zeros(n_series)
+                Mx_clean[:len(Mx)] = Mx
+        else:
+            Mx_clean = Mx if Mx is not None else np.zeros(n_series)
         
         X_forecast = X_forecast_std * Wx_clean + Mx_clean
         return X_forecast
@@ -358,229 +278,6 @@ class BaseFactorModel(pl.LightningModule):
             return X
         Wx_safe = np.where(Wx == 0, 1.0, Wx)
         return (X - Mx) / Wx_safe
-    
-    def _update_factor_state_with_history(
-        self,
-        history: int,
-        result: 'BaseResult',
-        kalman_filter: Optional[Any] = None
-    ) -> Optional[np.ndarray]:
-        """Update factor state using recent N periods of data.
-        
-        Parameters
-        ----------
-        history : int
-            Number of recent periods to use for state update
-        result : BaseResult
-            Model result containing parameters
-        kalman_filter : Any, optional
-            Kalman filter instance
-            
-        Returns
-        -------
-        np.ndarray or None
-            Updated last factor state (m,), or None if update failed
-        """
-        try:
-            data_module = self._get_datamodule()
-            X_torch = data_module.get_processed_data()
-            X_data = X_torch.cpu().numpy() if isinstance(X_torch, torch.Tensor) else np.asarray(X_torch)
-            
-            # Slice to recent N periods
-            X_recent = X_data[-history:, :] if X_data.shape[0] > history else X_data
-            
-            # Standardize and handle NaN
-            X_recent_std = self._standardize_data(X_recent, result.Mx, result.Wx)
-            X_recent_std = np.where(np.isfinite(X_recent_std), X_recent_std, np.nan)
-            
-            # Model-specific state update
-            if hasattr(self, 'encoder') and self.encoder is not None:
-                return self._update_factor_state_ddfm(X_recent_std, result, kalman_filter)
-            else:
-                return self._update_factor_state_dfm(X_recent_std, result, kalman_filter)
-        except Exception as e:
-            _logger.warning(
-                f"{self.__class__.__name__} predict(): Failed to update factor state with history={history}, "
-                f"using training state instead. Error: {type(e).__name__}: {str(e)}"
-            )
-            return None
-    
-    def _get_kalman_filter(self, kalman_filter: Optional[Any] = None):
-        """Get or create Kalman filter instance."""
-        if kalman_filter is not None:
-            return kalman_filter
-        if hasattr(self, 'kalman') and self.kalman is not None:
-            return self.kalman
-        from ..ssm.kalman import KalmanFilter
-        return KalmanFilter(
-            min_eigenval=1e-8,
-            inv_regularization=1e-6,
-            cholesky_regularization=1e-8
-        )
-    
-    def _result_to_torch_params(self, result: 'BaseResult', C: Optional[np.ndarray] = None, R: Optional[np.ndarray] = None) -> Dict[str, torch.Tensor]:
-        """Convert result parameters to torch tensors.
-        
-        Parameters
-        ----------
-        result : BaseResult
-            Model result containing parameters
-        C : np.ndarray, optional
-            Override C matrix (for DDFM where C=I)
-        R : np.ndarray, optional
-            Override R matrix (for DDFM where R=small noise)
-            
-        Returns
-        -------
-        Dict[str, torch.Tensor]
-            Dictionary of torch tensors: A, C, Q, R, Z_0, V_0
-        """
-        # Ensure V_0 is always 2D (defensive check for edge cases)
-        V_0 = result.V_0
-        if isinstance(V_0, np.ndarray):
-            if V_0.ndim == 0:
-                V_0 = np.atleast_2d(V_0)
-            elif V_0.ndim == 1:
-                # If 1D, reshape to (m x m) - assume it's a single value for m=1 case
-                V_0 = np.atleast_2d(V_0).T if V_0.shape[0] == 1 else np.atleast_2d(V_0)
-        
-        return {
-            'A': torch.tensor(result.A, dtype=torch.float32),
-            'C': torch.tensor(C if C is not None else result.C, dtype=torch.float32),
-            'Q': torch.tensor(result.Q, dtype=torch.float32),
-            'R': torch.tensor(R if R is not None else result.R, dtype=torch.float32),
-            'Z_0': torch.tensor(result.Z_0, dtype=torch.float32),
-            'V_0': torch.tensor(V_0, dtype=torch.float32)
-        }
-    
-    def _update_factor_state_dfm(
-        self,
-        X_recent_std: np.ndarray,
-        result: 'BaseResult',
-        kalman_filter: Optional[Any] = None
-    ) -> np.ndarray:
-        """Update factor state for DFM using Kalman filter.
-        
-        Parameters
-        ----------
-        X_recent_std : np.ndarray
-            Standardized recent data (T x N)
-        result : BaseResult
-            Model result containing parameters
-        kalman_filter : Any, optional
-            Kalman filter instance
-            
-        Returns
-        -------
-        np.ndarray
-            Updated last factor state (m,)
-        """
-        # Convert to torch: (N x T) format for Kalman filter
-        Y = torch.tensor(X_recent_std.T, dtype=torch.float32)
-        params = self._result_to_torch_params(result)
-        
-        # Run Kalman smoother
-        kf = self._get_kalman_filter(kalman_filter)
-        zsmooth, _, _, _ = kf(Y, params['A'], params['C'], params['Q'],
-                              params['R'], params['Z_0'], params['V_0'])
-        
-        return zsmooth.T[-1, :].cpu().numpy()
-    
-    def _update_factor_state_ddfm(
-        self,
-        X_recent_std: np.ndarray,
-        result: 'BaseResult',
-        kalman_filter: Optional[Any] = None
-    ) -> Optional[np.ndarray]:
-        """Update factor state for DDFM using encoder and Kalman filter.
-        
-        Parameters
-        ----------
-        X_recent_std : np.ndarray
-            Standardized recent data (T x N)
-        result : BaseResult
-            Model result containing parameters
-        kalman_filter : Any, optional
-            Kalman filter instance
-            
-        Returns
-        -------
-        np.ndarray or None
-            Updated last factor state (m,), or None if encoder unavailable
-        """
-        if not hasattr(self, 'encoder') or self.encoder is None:
-            _logger.warning(
-                f"{self.__class__.__name__} update(): Encoder not available, "
-                "cannot update factor state"
-            )
-            return None
-        
-        try:
-            # Extract factors using encoder
-            # Get device from encoder (encoder should already be on correct device)
-            if hasattr(self.encoder, 'parameters'):
-                device = next(self.encoder.parameters()).device
-            else:
-                device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-            
-            self.encoder.eval()
-            X_tensor = torch.tensor(X_recent_std, device=device, dtype=torch.float32)
-            with torch.no_grad():
-                factors_raw = self.encoder(X_tensor).cpu().numpy()  # (T x m)
-            
-            # Validate factors shape
-            if factors_raw.ndim != 2 or factors_raw.shape[0] == 0:
-                _logger.warning(
-                    f"{self.__class__.__name__} update(): Invalid factors shape {factors_raw.shape}, "
-                    "cannot update factor state"
-                )
-                return None
-            
-            # For DDFM: C = I (identity), R = small noise
-            m = factors_raw.shape[1]
-            C = np.eye(m)
-            R = np.eye(m) * 1e-8
-            
-            # Convert to torch: (m x T) format for Kalman filter
-            # Use same device as encoder
-            Y = torch.tensor(factors_raw.T, dtype=torch.float32, device=device)
-            params = self._result_to_torch_params(result, C=C, R=R)
-            
-            # Move all parameters to same device as encoder
-            for key in params:
-                if isinstance(params[key], torch.Tensor):
-                    params[key] = params[key].to(device)
-            
-            # Run Kalman smoother
-            kf = self._get_kalman_filter(kalman_filter)
-            kf_result = kf(Y, params['A'], params['C'], params['Q'],
-                          params['R'], params['Z_0'], params['V_0'])
-            
-            # Handle return value - Kalman filter returns (zsmooth, Vsmooth, VVsmooth, loglik)
-            if isinstance(kf_result, tuple) and len(kf_result) >= 1:
-                zsmooth = kf_result[0]
-            else:
-                zsmooth = kf_result
-            
-            # zsmooth is (m x (T+1)), transpose to ((T+1) x m), then get last row
-            if not isinstance(zsmooth, torch.Tensor):
-                zsmooth = torch.tensor(zsmooth, dtype=torch.float32)
-            
-            zsmooth_T = zsmooth.T  # ((T+1) x m)
-            if zsmooth_T.ndim == 2 and zsmooth_T.shape[0] > 0:
-                return zsmooth_T[-1, :].cpu().numpy()
-            else:
-                _logger.warning(
-                    f"{self.__class__.__name__} update(): Invalid zsmooth shape {zsmooth_T.shape}, "
-                    "cannot extract last state"
-                )
-                return None
-                
-        except Exception as e:
-            _logger.warning(
-                f"{self.__class__.__name__} update(): Failed to update factor state: {e}"
-            )
-            return None
     
     @property
     def result(self) -> BaseResult:
@@ -632,13 +329,6 @@ class BaseFactorModel(pl.LightningModule):
             - If both return_series and return_factors are True: (X_forecast, Z_forecast)
             - If only return_series is True: X_forecast
             - If only return_factors is True: Z_forecast
-            
-        Notes
-        -----
-        When history is specified, the method uses only the most recent N periods for
-        Kalman filter update, improving computational efficiency. The initial state
-        (Z_0, V_0) is always estimated from full history (including any new data beyond
-        training period), ensuring accuracy while maintaining efficiency.
         """
         pass
     
@@ -678,49 +368,19 @@ class BaseFactorModel(pl.LightningModule):
         -------
         BaseFactorModel
             Self for method chaining
-            
-        Examples
-        --------
-        >>> # Update state with new data, then predict
-        >>> model.update(X_std).predict(horizon=1)
-        >>> # Or update with only recent 12 periods
-        >>> model.update(X_std, history=12)
-        >>> forecast = model.predict(horizon=6)
         """
         pass
     
+    @abstractmethod
     def get_result(self) -> BaseResult:
         """Extract result from trained model.
-        
-        This method should be implemented by subclasses to extract model-specific
-        results (DFMResult, DDFMResult, etc.) from the training state.
         
         Returns
         -------
         BaseResult
             Model-specific result object
         """
-        raise NotImplementedError("Subclasses must implement get_result()")
-    
-    def _create_dummy_optimizer(self, learning_rate: float = 0.001) -> torch.optim.Optimizer:
-        """Create a dummy optimizer for models not yet initialized.
-        
-        This helper method creates a placeholder optimizer when model components
-        are not yet initialized. Used by configure_optimizers() in subclasses.
-        
-        Parameters
-        ----------
-        learning_rate : float, default=0.001
-            Learning rate for the dummy optimizer
-            
-        Returns
-        -------
-        torch.optim.Optimizer
-            Adam optimizer with a single dummy parameter
-        """
-        import torch.nn as nn
-        dummy_param = nn.Parameter(torch.zeros(1))
-        return torch.optim.Adam([dummy_param], lr=learning_rate)
+        pass
     
     def _load_config_common(
         self,
@@ -733,11 +393,6 @@ class BaseFactorModel(pl.LightningModule):
         override: Optional[Union[str, Path, Dict[str, Any], ConfigSource]] = None,
     ) -> DFMConfig:
         """Common logic for loading configuration from various sources.
-        
-        This method handles the common pattern of creating a config source,
-        loading the configuration, updating the internal config, and computing
-        the number of factors. Subclasses should call this method and then
-        perform any model-specific initialization.
         
         Parameters
         ----------
@@ -787,22 +442,17 @@ class BaseFactorModel(pl.LightningModule):
         self._config = new_config
         
         # Recompute number of factors from new config
-        # DFM uses factors_per_block, DDFM uses num_factors
         if hasattr(new_config, 'factors_per_block') and new_config.factors_per_block:
-            # DFM: sum of factors per block
             self.num_factors = int(np.sum(new_config.factors_per_block))
         elif hasattr(new_config, 'num_factors') and new_config.num_factors is not None:
-            # DDFM: direct num_factors
             self.num_factors = new_config.num_factors
         elif hasattr(new_config, 'get_blocks_array'):
-            # DFM fallback: try to get from blocks array
             blocks = new_config.get_blocks_array()
             if blocks.shape[1] > 0:
                 self.num_factors = int(np.sum(blocks[:, 0]))
             else:
                 self.num_factors = 1
         else:
-            # Default fallback
             self.num_factors = 1
         
         return new_config
@@ -810,7 +460,7 @@ class BaseFactorModel(pl.LightningModule):
     def reset(self) -> 'BaseFactorModel':
         """Reset model state.
         
-        Clears configuration, data module, result, nowcast, and training state.
+        Clears configuration, data module, result, and training state.
         Returns self for method chaining.
         
         Returns
@@ -824,30 +474,3 @@ class BaseFactorModel(pl.LightningModule):
         if hasattr(self, 'training_state'):
             self.training_state = None
         return self
-    
-    def load_pickle(self, path: Union[str, Path], **kwargs) -> 'BaseFactorModel':
-        """Load a saved model from pickle file.
-        
-        Note: DataModule is not saved in pickle. Users must create a new DataModule
-        and call trainer.fit() with it after loading the model.
-        
-        Parameters
-        ----------
-        path : str or Path
-            Path to the pickle file to load
-        **kwargs
-            Additional keyword arguments (reserved for future use)
-            
-        Returns
-        -------
-        BaseFactorModel
-            Self for method chaining
-        """
-        import pickle  # Import locally to avoid unnecessary dependency
-        with open(path, 'rb') as f:
-            payload = pickle.load(f)
-        self._config = payload.get('config')
-        self._result = payload.get('result')
-        # Note: data_module is not loaded - users must provide it via trainer.fit()
-        return self
-

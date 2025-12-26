@@ -8,12 +8,9 @@ This module implements KDFM with two-stage VARMA architecture:
 """
 
 from dataclasses import dataclass
-from datetime import datetime
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
-import pandas as pd
 import torch
 import torch.nn as nn
 
@@ -31,7 +28,7 @@ from .functional.irf import compute_irf
 from .base import BaseFactorModel
 
 if TYPE_CHECKING:
-    from ..lightning import DFMDataModule
+    from ..datamodule import DFMDataModule
 
 _logger = get_logger(__name__)
 
@@ -47,7 +44,10 @@ class KDFMTrainingState:
     converged: bool
 
 
-class KDFM(BaseFactorModel):
+import pytorch_lightning as pl
+
+
+class KDFM(BaseFactorModel, pl.LightningModule):
     """High-level API for Kernelized Dynamic Factor Model (PyTorch Lightning module).
     
     This class implements KDFM with two-stage VARMA architecture:
@@ -62,7 +62,7 @@ class KDFM(BaseFactorModel):
         >>> import pandas as pd
         >>> 
         >>> # Step 1: Load and preprocess data
-        >>> df = pd.read_csv('data/macro.csv')
+        >>> df = pd.read_csv('data/your_data.csv')
         >>> df_processed = df[[col for col in df.columns if col != 'date']]
         >>> 
         >>> # Step 2: Create DataModule
@@ -122,7 +122,8 @@ class KDFM(BaseFactorModel):
         **kwargs
             Additional arguments passed to BaseFactorModel
         """
-        super().__init__(**kwargs)
+        BaseFactorModel.__init__(self)
+        pl.LightningModule.__init__(self)
         
         # Import constants for defaults (consolidated import)
         from ..config.constants import (
@@ -363,8 +364,15 @@ class KDFM(BaseFactorModel):
                 params.extend(component.parameters())
         return params
     
-    def configure_optimizers(self):
-        """Configure optimizer for KDFM training."""
+    def configure_optimizers(self) -> List[torch.optim.Optimizer]:
+        """Configure optimizer for KDFM training.
+        
+        Returns
+        -------
+        List[torch.optim.Optimizer]
+            List containing Adam optimizer with learning rate and weight decay.
+            Returns dummy optimizer if model parameters not yet initialized.
+        """
         params = self._collect_parameters()
         
         if not params:
@@ -396,16 +404,16 @@ class KDFM(BaseFactorModel):
                     _logger.debug(f"KDFM _check_trained: get_result() failed: {e}")
             
             # Fall back to base class check
-            super()._check_trained()
+            BaseFactorModel._check_trained(self)
     
-    def predict(
+    def predict(  # type: ignore[override]
         self,
         horizon: Optional[int] = None,
         *,
-        history: Optional[int] = None,
+        history: Optional[int] = None,  # Unused, kept for base class compatibility
         return_series: bool = True,
         return_factors: bool = True,
-        target: Optional[List[str]] = None
+        target: Optional[List[str]] = None  # Unused, kept for base class compatibility
     ) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
         """Predict future values.
         
@@ -413,14 +421,10 @@ class KDFM(BaseFactorModel):
         ----------
         horizon : int, optional
             Number of periods to forecast. If None, uses default.
-        history : int, optional
-            Number of historical periods to use (not used for KDFM, kept for compatibility)
         return_series : bool, default=True
             Whether to return forecasted series
         return_factors : bool, default=True
             Whether to return forecasted factors
-        target : List[str], optional
-            Target series IDs (not used for KDFM, kept for compatibility)
             
         Returns
         -------
@@ -438,13 +442,8 @@ class KDFM(BaseFactorModel):
         # Forecast using companion matrix structure
         # This is a simplified version - full implementation would use
         # companion matrix powers for forecasting
-        device = next(self.parameters()).device
-        
-        # Extract AR coefficients
         if self.companion_ar is None:
             raise ValueError("KDFM predict: Model not initialized. Train model first.")
-        ar_coeffs = self.companion_ar.extract_var_coefficients()
-        ar_coeffs_np = ar_coeffs.detach().cpu().numpy()
         
         # Forecast factors using VAR dynamics
         Z_forecast = self._forecast_var_factors(
@@ -470,13 +469,13 @@ class KDFM(BaseFactorModel):
         else:
             return Z_forecast
     
-    def update(
+    def update(  # type: ignore[override]
         self,
         X_std: np.ndarray,
         *,
-        history: Optional[int] = None,
-        kalman_filter: Optional[Any] = None,
-        scaler: Optional[Any] = None
+        history: Optional[int] = None,  # Unused, kept for base class compatibility
+        kalman_filter: Optional[Any] = None,  # Unused, kept for base class compatibility
+        scaler: Optional[Any] = None  # Unused, kept for base class compatibility
     ) -> 'KDFM':
         """Update model state with standardized data for nowcasting.
         
@@ -484,12 +483,6 @@ class KDFM(BaseFactorModel):
         ----------
         X_std : np.ndarray
             Standardized data (T_new x N)
-        history : int, optional
-            Number of recent periods to use (not used for KDFM, kept for compatibility)
-        kalman_filter : Any, optional
-            Kalman filter (not used for KDFM, kept for compatibility)
-        scaler : Any, optional
-            Scaler (not used for KDFM, kept for compatibility)
             
         Returns
         -------
@@ -508,7 +501,7 @@ class KDFM(BaseFactorModel):
         Parameters
         ----------
         block_name : str, optional
-            Block name (ignored for KDFM, kept for signature compatibility)
+            Block name (ignored for KDFM)
         
         Returns
         -------
@@ -611,20 +604,17 @@ class KDFM(BaseFactorModel):
         if self.companion_ar is None:
             raise ValueError("KDFM get_result: Model not initialized. Train model first.")
         
-        # Extract parameters
-        ar_coeffs = self.companion_ar.extract_var_coefficients()
-        ar_coeffs_np = ar_coeffs.detach().cpu().numpy()
+        # Extract parameters and convert to numpy
+        ar_coeffs_np = self.companion_ar.extract_coefficients().detach().cpu().numpy()
         
         ma_coeffs_np = None
         if self.companion_ma is not None:
-            ma_coeffs = self.companion_ma.extract_ma_coefficients()
-            ma_coeffs_np = ma_coeffs.detach().cpu().numpy()
+            ma_coeffs_np = self.companion_ma.extract_coefficients().detach().cpu().numpy()
         
         # Get structural matrix
         S_np = None
         if self.structural_id is not None:
-            S = self.structural_id.get_structural_matrix()
-            S_np = S.detach().cpu().numpy()
+            S_np = self.structural_id.get_structural_matrix().detach().cpu().numpy()
         
         # Extract companion matrices and parameters using helper method
         ar_transition, ar_input, ar_output = self._extract_companion_params(self.companion_ar)
@@ -651,10 +641,11 @@ class KDFM(BaseFactorModel):
         
         # Determine dimensions from extracted parameters
         n_vars = ar_coeffs_np.shape[1] if ar_coeffs_np is not None else 1
-        n_factors = ar_coeffs_np.shape[1] if ar_coeffs_np is not None else 1
+        n_factors = n_vars  # KDFM uses same dimension for factors and variables in AR stage
         
         # Create result with proper dimensions
-        # Note: KDFM doesn't use traditional factor model structure, so some fields are minimal
+        # KDFM uses a two-stage VARMA structure rather than traditional factor model,
+        # so some result fields (x_sm, X_sm, Z) are minimal placeholders
         result = KDFMResult(
             x_sm=np.zeros((1, n_vars)),
             X_sm=np.zeros((1, n_vars)),

@@ -28,7 +28,7 @@ Example (Standard Lightning Pattern):
     >>> import pandas as pd
     >>> 
     >>> # Step 1: Load and preprocess data
-    >>> df = pd.read_csv('data/sample_data.csv')
+    >>> df = pd.read_csv('data/your_data.csv')
     >>> df_processed = df[[col for col in df.columns if col != 'date']]
     >>> 
     >>> # Step 2: Create DataModule
@@ -88,8 +88,8 @@ from .config import (
     ConfigSource, YamlSource, HydraSource,
     make_config_source,
 )
-# Internal imports (for backward compatibility, but not recommended)
-from .config import DFMConfig, SeriesConfig  # Internal use only
+# Internal imports (internal use only)
+from .config import DFMConfig, SeriesConfig
 
 # Results
 from .config.results import DFMResult, DDFMResult, KDFMResult, BaseResult
@@ -98,16 +98,14 @@ from .config.results import DFMResult, DDFMResult, KDFMResult, BaseResult
 from .utils.diagnostics import diagnose_series, print_series_diagnosis
 from .utils.time import calculate_rmse
 
-# PyTorch Lightning modules (mandatory dependency)
+# DataModule classes (includes both Lightning and custom implementations)
 # Users can import these directly from dfm_python
-from .lightning import (
+from .datamodule import (
     DFMDataModule,
     DDFMDataModule,  # DDFM-specific DataModule
     KDFMDataModule,  # KDFM-specific DataModule
     DFMDataset,  # Dataset class (usually not needed directly)
     DDFMDataset,  # DDFM Dataset class (usually not needed directly)
-    KalmanFilter,  # Module class
-    EMAlgorithm,  # Module class
 )
 
 # Model implementations
@@ -151,8 +149,6 @@ __all__.extend([
     'KDFMDataModule',  # KDFM-specific DataModule
     'DFMDataset',  # Dataset class (usually not needed directly)
     'DDFMDataset',  # DDFM Dataset class (usually not needed directly)
-    'KalmanFilter',  # Module class
-    'EMAlgorithm',  # Module class
 ])
 
 # Trainer classes (mandatory dependency)

@@ -440,10 +440,6 @@ class CompanionSSM(CompanionSSMBase):
             coeff = self.a
         return self._extract_coeffs_reshaped(coeff)
     
-    def extract_var_coefficients(self, a: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """Extract VAR coefficients (alias for extract_coefficients)."""
-        return self.extract_coefficients(a)
-    
     def predict_from_var_coefficients(self, y_t: torch.Tensor, A_coeffs: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Predict using VAR coefficients.
         
@@ -573,10 +569,6 @@ class MACompanionSSM(CompanionSSMBase):
         if coeff is None:
             coeff = self.m
         return self._extract_coeffs_reshaped(coeff)
-    
-    def extract_ma_coefficients(self, m: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """Extract MA coefficients (alias for extract_coefficients)."""
-        return self.extract_coefficients(m)
     
     def _build_companion_from_coeffs(self, coeff: torch.Tensor) -> torch.Tensor:
         """Build companion matrix from MA coefficients.

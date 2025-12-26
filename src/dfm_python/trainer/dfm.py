@@ -33,8 +33,8 @@ class DFMTrainer(pl.Trainer):
         - enable_progress_bar: True
         - enable_model_summary: False (DFM modules are simple, usually not needed)
         - logger: True (uses CSVLogger, creates lightning_logs/dfm/ folder)
-        - accelerator: 'auto'
-        - devices: 'auto'
+        - accelerator: 'cpu' (CPU-only for numerical stability)
+        - devices: 1
         - precision: 32
     
     These defaults are optimized for DFM training with EM algorithm. The trainer
@@ -52,8 +52,8 @@ class DFMTrainer(pl.Trainer):
         Whether to use a logger. Can be False, True (uses CSVLogger), or a Logger instance
     callbacks : List[Callback], optional
         Additional callbacks beyond defaults
-    accelerator : str, default 'auto'
-        Accelerator type ('cpu', 'gpu', 'auto', etc.)
+    accelerator : str, default 'cpu'
+        Accelerator type ('cpu' recommended for numerical stability, 'gpu' for speed)
     devices : int or List[int], default 'auto'
         Device configuration
     precision : str or int, default 32
@@ -79,8 +79,8 @@ class DFMTrainer(pl.Trainer):
             enable_model_summary: bool = False,
             logger: Optional[Any] = True,
             callbacks: Optional[List[Any]] = None,
-            accelerator: str = 'auto',
-            devices: Any = 'auto',
+            accelerator: str = 'cpu',
+            devices: Any = 1,
             precision: Any = 32,
             **kwargs
     ):

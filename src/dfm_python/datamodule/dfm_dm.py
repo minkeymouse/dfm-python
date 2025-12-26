@@ -24,7 +24,6 @@ from .utils import (
     _get_scale,
     _compute_mx_wx,
     create_passthrough_transformer,
-    _is_pipeline_fitted,
 )
 
 _logger = get_logger(__name__)
@@ -35,6 +34,11 @@ class DFMDataModule(lightning_pl.LightningDataModule):
     
     This DataModule handles data loading for linear DFM models.
     Uses DFMDataset which returns full sequences (no windowing).
+    
+    **Note**: DFM uses NumPy for all calculations internally (via pykalman).
+    Data is converted from tensors to NumPy at the model boundary, then back to
+    tensors for Lightning logging/metrics. This provides better numerical stability
+    and allows using well-tested NumPy-based libraries.
     
     **Important**: DFM can handle missing data (NaN values) implicitly:
     - **DFM**: Uses Kalman filter's `handle_missing_data()` method to skip NaN observations
@@ -107,7 +111,6 @@ class DFMDataModule(lightning_pl.LightningDataModule):
         data: Optional[Union[np.ndarray, pd.DataFrame]] = None,
         preprocessed: bool = False,
         time_index: Optional[TimeIndex] = None,
-        time: Optional[TimeIndex] = None,  # Legacy parameter name (alias for time_index)
         time_index_column: Optional[Union[str, List[str]]] = None,
         batch_size: Optional[int] = None,
         num_workers: int = 0,
@@ -134,8 +137,7 @@ class DFMDataModule(lightning_pl.LightningDataModule):
         self.data_path = Path(data_path) if data_path is not None else None
         self.data = data
         self.preprocessed = preprocessed
-        # Support both time_index and time (legacy) parameter names
-        self.time_index = time_index if time_index is not None else time
+        self.time_index = time_index
         self.time_index_column = time_index_column
         self.batch_size = batch_size
         self.num_workers = num_workers
@@ -340,7 +342,7 @@ class DFMDataModule(lightning_pl.LightningDataModule):
             self.train_dataset,
             batch_size=self.batch_size,
             num_workers=self.num_workers,
-            pin_memory=torch.cuda.is_available()
+            pin_memory=False  # CPU-only: no need for pin_memory
         )
     
     def val_dataloader(self) -> Optional[DataLoader]:
@@ -352,7 +354,7 @@ class DFMDataModule(lightning_pl.LightningDataModule):
             self.val_dataset,
             batch_size=self.batch_size,
             num_workers=self.num_workers,
-            pin_memory=torch.cuda.is_available()
+            pin_memory=False  # CPU-only: no need for pin_memory
         )
     
     def get_std_params(self) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:

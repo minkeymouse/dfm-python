@@ -1,17 +1,12 @@
-"""PyTorch Lightning modules for Dynamic Factor Models.
+"""DataModule classes for Dynamic Factor Models.
 
-This package provides PyTorch Lightning implementations of DFM and DDFM.
+This package provides DataModule implementations for DFM, DDFM, and KDFM.
+Includes both PyTorch Lightning DataModules and custom implementations.
 """
 
-from ..ssm.kalman import (
-    KalmanFilter,  # Module class
-    KalmanFilterState,  # Dataclass
-)
-
-from ..ssm.em import (
-    EMAlgorithm,  # Module class
-    EMStepParams,  # Dataclass
-)
+# Note: KalmanFilter and KalmanFilterState were removed as DFM now uses pykalman.
+# If DDFM/KDFM need PyTorch-based Kalman filter, they should import it directly.
+# For now, these are not exported to avoid import errors.
 
 from .dfm_dm import DFMDataModule
 from .ddfm_dm import DDFMDataModule
@@ -31,12 +26,6 @@ from .utils import (
 from ..models.dfm import DFMTrainingState
 
 __all__ = [
-    # Kalman filter
-    'KalmanFilter',
-    'KalmanFilterState',
-    # EM algorithm
-    'EMAlgorithm',
-    'EMStepParams',
     # Data handling
     'DFMDataModule',
     'DDFMDataModule',

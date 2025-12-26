@@ -6,9 +6,7 @@ This module provides numerical stability utilities for PyTorch-based SSM operati
 - Safe matrix operations (inverse, determinant)
 - Numerical stability for Kalman filtering and EM algorithm
 
-These utilities are critical for GPU numerical stability, as PyTorch can throw
-RuntimeError for near-singular matrices (e.g., "cholesky_cpu: U(0,0) is zero" or
-"inverse_cuda: singular matrix").
+These utilities provide basic stability measures for CPU operations.
 """
 
 from typing import Optional, TYPE_CHECKING
@@ -23,8 +21,9 @@ from ..logger import get_logger
 _logger = get_logger(__name__)
 
 # Default numerical stability constants for PyTorch operations
-# Note: Similar constants exist in utils/statespace.py (MIN_EIGENVAL_CLEAN, MIN_DIAGONAL_VARIANCE)
-# for NumPy operations. They have the same values but are kept separate for context clarity.
+# Similar constants exist in utils/statespace.py (MIN_EIGENVAL_CLEAN, MIN_DIAGONAL_VARIANCE)
+# for NumPy operations. They have the same values but are kept separate for context clarity
+# (PyTorch vs NumPy tensor operations).
 DEFAULT_MIN_EIGENVAL = 1e-8
 DEFAULT_MIN_DIAGONAL_VARIANCE = 1e-6
 DEFAULT_INV_REGULARIZATION = 1e-6
@@ -307,15 +306,11 @@ def safe_inverse(
     regularization: float = DEFAULT_INV_REGULARIZATION,
     use_pinv_fallback: bool = True
 ) -> "torch.Tensor":
-    """Safely compute matrix inverse with robust error handling.
+    """Safely compute matrix inverse with basic error handling.
     
-    This function implements a progressive fallback strategy for matrix inversion:
-    1. Try standard torch.linalg.inv()
-    2. If that fails, try regularized inversion
-    3. If that fails, use pseudo-inverse (if enabled)
-    
-    This is critical for GPU numerical stability, as PyTorch can throw RuntimeError
-    for singular or near-singular matrices (e.g., "inverse_cuda: singular matrix").
+    This function implements a simple fallback strategy for matrix inversion:
+    1. Try regularized inversion (adds regularization to diagonal)
+    2. If that fails, use pseudo-inverse (if enabled)
     
     Parameters
     ----------
@@ -335,20 +330,16 @@ def safe_inverse(
     dtype = M.dtype
     
     try:
-        # First try: standard inversion (fastest)
-        return torch.linalg.inv(M)
+        # Try regularized inversion (more stable)
+        M_reg = M + torch.eye(M.shape[0], device=device, dtype=dtype) * regularization
+        return torch.linalg.inv(M_reg)
     except (RuntimeError, ValueError) as e:
-        # Second try: regularized inversion
-        try:
+        # Fallback: pseudo-inverse
+        if use_pinv_fallback:
             M_reg = M + torch.eye(M.shape[0], device=device, dtype=dtype) * regularization
-            return torch.linalg.inv(M_reg)
-        except (RuntimeError, ValueError):
-            # Third try: pseudo-inverse (most robust)
-            if use_pinv_fallback:
-                M_reg = M + torch.eye(M.shape[0], device=device, dtype=dtype) * regularization
-                return torch.linalg.pinv(M_reg)
-            else:
-                raise RuntimeError(f"Matrix inversion failed and pinv fallback disabled: {e}")
+            return torch.linalg.pinv(M_reg)
+        else:
+            raise RuntimeError(f"Matrix inversion failed and pinv fallback disabled: {e}")
 
 
 def safe_determinant(M: "torch.Tensor", use_logdet: bool = True) -> float:

@@ -251,7 +251,7 @@ def _validate_data(data_module: Optional[Any]) -> None:
     DFMDataError
         If data_module is None or not set up
     """
-    from ..lightning import DFMDataModule
+    from ..datamodule import DFMDataModule
     
     if data_module is None:
         raise DFMDataError("DataModule not provided. Provide a DFMDataModule instance via train().")
