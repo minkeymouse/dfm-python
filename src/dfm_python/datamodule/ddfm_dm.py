@@ -12,22 +12,18 @@ from typing import Optional, Union, Tuple, Any, List
 from pathlib import Path
 import pytorch_lightning as lightning_pl
 
+from .base import BaseDataModule
+from ..config.constants import DEFAULT_WINDOW_SIZE, DEFAULT_DDFM_BATCH_SIZE, DEFAULT_TORCH_DTYPE
 from ..config import DFMConfig
-from ..data.utils import load_data as _load_data
-from ..data.dataset import DDFMDataset
-from ..data.dataloader import create_ddfm_dataloader
-from ..utils.time import TimeIndex
+from ..dataset.dataset import DDFMDataset
+from ..dataset.dataloader import create_ddfm_dataloader
+from ..dataset.process import TimeIndex, _get_scaler
 from ..logger import get_logger
-from .utils import (
-    _get_scaler,
-    _get_mean,
-    _get_scale,
-)
 
 _logger = get_logger(__name__)
 
 
-class DDFMDataModule(lightning_pl.LightningDataModule):
+class DDFMDataModule(BaseDataModule, lightning_pl.LightningDataModule):
     """PyTorch Lightning DataModule for DDFM training.
     
     This DataModule handles data loading for Deep Dynamic Factor Models.
@@ -83,7 +79,7 @@ class DDFMDataModule(lightning_pl.LightningDataModule):
         Window size for DDFMDataset (number of time steps per window)
     stride : int, default 1
         Stride for windowing in DDFMDataset (1 = overlapping windows)
-    batch_size : int, default 100
+    batch_size : int, default DEFAULT_DDFM_BATCH_SIZE (100)
         Batch size for DataLoader (matches original DDFM)
     num_workers : int, default 0
         Number of worker processes for DataLoader
@@ -135,32 +131,26 @@ class DDFMDataModule(lightning_pl.LightningDataModule):
         target_scaler: Optional[Union[str, Any]] = None,
         time_index: Optional[TimeIndex] = None,
         time_index_column: Optional[Union[str, List[str]]] = None,
-        window_size: int = 100,
+        window_size: int = DEFAULT_WINDOW_SIZE,
         stride: int = 1,
-        batch_size: int = 100,
+        batch_size: int = DEFAULT_DDFM_BATCH_SIZE,
         num_workers: int = 0,
         val_split: Optional[float] = None,
         **kwargs
     ):
-        super().__init__()
-        
-        # Load config if config_path provided
-        if config is None and config_path is not None:
-            from ..config import YamlSource
-            source = YamlSource(config_path)
-            config = source.load()
-        
-        if config is None:
-            raise ValueError(
-                "DataModule initialization failed: either config or config_path must be provided. "
-                "Please provide a DFMConfig object or a path to a configuration file."
-            )
-        
-        self.config = config
-        self.data_path = Path(data_path) if data_path is not None else None
-        self.data = data
-        self.time_index = time_index
-        self.time_index_column = time_index_column
+        # Initialize LightningDataModule first (no arguments)
+        lightning_pl.LightningDataModule.__init__(self)
+        # Initialize BaseDataModule
+        BaseDataModule.__init__(
+            self,
+            config=config,
+            config_path=config_path,
+            data_path=data_path,
+            data=data,
+            time_index=time_index,
+            time_index_column=time_index_column,
+            **kwargs
+        )
         
         # Target series handling
         if target_series is None:
@@ -220,11 +210,8 @@ class DDFMDataModule(lightning_pl.LightningDataModule):
                     "Please provide a path to a data file or a data array/DataFrame."
                 )
             
-            # Load data from file
-            X, Time, Z = _load_data(
-                self.data_path,
-                self.config,
-            )
+            # Load data from file using base class method
+            X, Time, Z = self.load_data(self.data_path)
             self.data = X
             self.time_index = Time
         
@@ -263,7 +250,7 @@ class DDFMDataModule(lightning_pl.LightningDataModule):
             time_data = X_df[time_cols]
             
             # Create TimeIndex from the column(s)
-            from ..utils.time import parse_timestamp
+            from ..dataset.process import parse_timestamp
             if len(time_cols) == 1:
                 # Single column: convert to list of timestamps
                 time_list = [parse_timestamp(str(val)) for val in time_data.iloc[:, 0]]
@@ -290,48 +277,40 @@ class DDFMDataModule(lightning_pl.LightningDataModule):
         
         # Compute target Mx, Wx only (for inverse transformation in prediction)
         # Feature Mx, Wx are not needed since we only return target predictions
+        from ..dataset.process import _extract_mx_wx
+        from ..datamodule.base import _set_default_mx_wx
+        
         if target_cols:
+            target_values = np.asarray(X_df[target_cols].values)
+            
             if self.target_scaler_type is not None:
                 # Create scaler from string type
                 from sklearn.preprocessing import StandardScaler, RobustScaler
-                if self.target_scaler_type == 'standard':
-                    target_scaler_instance = StandardScaler()
-                else:  # 'robust'
-                    target_scaler_instance = RobustScaler()
-                # Fit on raw target data
+                scaler_map = {"standard": StandardScaler, "robust": RobustScaler}
+                scaler_class = scaler_map.get(self.target_scaler_type, StandardScaler)
+                target_scaler_instance = scaler_class()
                 target_scaler_instance.fit(X_df[target_cols])
-                target_values = np.asarray(X_df[target_cols].values)
-                self.Mx = _get_mean(target_scaler_instance, target_values)
-                self.Wx = _get_scale(target_scaler_instance, target_values)
-                self.target_scaler = target_scaler_instance  # Store for later use
+                self.target_scaler = target_scaler_instance
+                self.Mx, self.Wx = _extract_mx_wx(target_scaler_instance, target_values)
             elif self.target_scaler is not None:
-                # Scaler instance provided - should already be fitted
-                # Just extract statistics (no fit() call needed)
-                target_values = np.asarray(X_df[target_cols].values)
-                self.Mx = _get_mean(self.target_scaler, target_values)
-                self.Wx = _get_scale(self.target_scaler, target_values)
+                # Scaler instance provided - extract statistics
+                self.Mx, self.Wx = _extract_mx_wx(self.target_scaler, target_values)
             else:
-                # No target scaler: targets not preprocessed (Mx=0, Wx=1)
-                # Targets remain in raw form
-                self.Mx = np.zeros(len(target_cols))
-                self.Wx = np.ones(len(target_cols))
+                # No target scaler: use defaults
+                self.Mx, self.Wx = None, None
+            
+            # Set defaults if extraction failed
+            self.Mx, self.Wx = _set_default_mx_wx(self.Mx, self.Wx, len(target_cols), self.target_scaler, _logger)
         else:
             self.Mx = np.array([])
             self.Wx = np.array([])
         
-        # Convert to torch tensor
-        # Select only numeric columns (exclude datetime and other object types)
-        numeric_cols = X_transformed.select_dtypes(include=[np.number]).columns
-        if len(numeric_cols) < len(X_transformed.columns):
-            excluded_cols = [col for col in X_transformed.columns if col not in numeric_cols]
-            _logger.warning(
-                f"Excluding non-numeric columns from data: {excluded_cols}. "
-                f"These columns will not be used in model training."
-            )
-            X_transformed = X_transformed[numeric_cols]
+        # Convert to torch tensor - filter numeric columns
+        from ..datamodule.base import _filter_numeric_columns
+        X_transformed = _filter_numeric_columns(X_transformed, _logger)
         
         X_processed_np = X_transformed.to_numpy()
-        self.data_processed = torch.tensor(X_processed_np, dtype=torch.float32)
+        self.data_processed = torch.tensor(X_processed_np, dtype=DEFAULT_TORCH_DTYPE)
         
         # Create train/val splits if requested
         if self.val_split is not None and 0 < self.val_split < 1:
@@ -380,15 +359,12 @@ class DDFMDataModule(lightning_pl.LightningDataModule):
     
     def get_std_params(self) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
         """Get standardization parameters (Mx, Wx) if available."""
-        if self.data_processed is None:
-            raise RuntimeError(
-                "DataModule get_std_params failed: setup() must be called before get_std_params(). "
-                "Please call dm.setup() first to load and preprocess data."
-            )
+        self._check_setup('get_std_params')
         return self.Mx, self.Wx
     
     def get_processed_data(self) -> torch.Tensor:
         """Get processed data tensor."""
+        self._check_setup('get_processed_data')
         if self.data_processed is None:
             raise RuntimeError(
                 "DataModule get_processed_data failed: setup() must be called before get_processed_data(). "

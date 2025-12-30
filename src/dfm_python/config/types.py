@@ -1,0 +1,314 @@
+"""Comprehensive type definitions for dfm-python.
+
+This module provides unified type aliases and definitions used throughout
+the codebase for better type hinting, code clarity, and consistency.
+
+These types are designed to be compatible with both dfm-python and experiment code.
+"""
+
+from typing import Union, Tuple, Optional, List, Dict, Any, Sequence, Literal
+from pathlib import Path
+import numpy as np
+import torch
+from torch import Tensor
+
+# ============================================================================
+# Array Types
+# ============================================================================
+
+ArrayLike = Union[np.ndarray, Tensor]
+"""Union type for numpy arrays and torch tensors."""
+
+FloatArray = Union[np.ndarray, Tensor]
+"""Array containing floating-point values."""
+
+IntArray = Union[np.ndarray, Tensor]
+"""Array containing integer values."""
+
+BoolArray = Union[np.ndarray, Tensor]
+"""Array containing boolean values."""
+
+OptionalArray = Optional[ArrayLike]
+"""Optional array (numpy or torch)."""
+
+OptionalTensor = Optional[Tensor]
+"""Optional torch tensor."""
+
+OptionalArrayLike = Optional[ArrayLike]
+"""Optional array-like (numpy or torch)."""
+
+# ============================================================================
+# Model Types
+# ============================================================================
+
+FactorState = np.ndarray
+"""Factor state array (m,) or (T, m)."""
+
+ObservationState = np.ndarray
+"""Observation array (N,) or (T, N)."""
+
+ForecastResult = Union[
+    np.ndarray,
+    Tuple[np.ndarray, np.ndarray]
+]
+"""Forecast result: either series only or (series, factors)."""
+
+CoefficientMatrix = np.ndarray
+"""Coefficient matrix (e.g., VAR coefficients). Shape: (K, K) or (p, K, K)."""
+
+CovarianceMatrix = np.ndarray
+"""Covariance matrix (e.g., Q, R). Shape: (K, K) or (m, m)."""
+
+IRFArray = np.ndarray
+"""Impulse response function array. Shape: (horizon, n_vars, n_vars)."""
+
+CompanionMatrix = np.ndarray
+"""Companion matrix. Shape: (p*K, p*K) or (q*K, q*K)."""
+
+# ============================================================================
+# Configuration Types
+# ============================================================================
+
+ConfigSource = Union[str, Path, Dict[str, Any], Any]
+"""Configuration source: path, dict, or config object."""
+
+SeriesID = str
+"""Series identifier string."""
+
+Frequency = Literal['d', 'w', 'm', 'q', 'y', 'h']
+"""Time series frequency code."""
+
+DatasetName = str
+"""Dataset name identifier."""
+
+ModelName = Literal['var', 'vecm', 'dfm', 'kdfm', 'ddfm']
+"""Model name identifier."""
+
+# ============================================================================
+# Training Types
+# ============================================================================
+
+Batch = Union[Tensor, Tuple[Tensor, Tensor]]
+"""Training batch: data tensor or (data, target) tuple."""
+
+Loss = Tensor
+"""Training loss tensor."""
+
+Optimizer = torch.optim.Optimizer
+"""PyTorch optimizer type."""
+
+# ============================================================================
+# Result Types
+# ============================================================================
+
+ResultDict = Dict[str, Any]
+"""Generic result dictionary."""
+
+ForecastDict = Dict[str, Union[float, np.ndarray, Dict[str, Any]]]
+"""Forecast result dictionary."""
+
+MetricsDict = Dict[str, float]
+"""Metrics dictionary (RMSE, MAE, R², etc.)."""
+
+IRFResultDict = Dict[str, Union[List, np.ndarray, int, str, None]]
+"""IRF result dictionary."""
+
+CheckpointDict = Dict[str, Any]
+"""Model checkpoint dictionary."""
+
+ConfigDict = Dict[str, Any]
+"""Configuration dictionary."""
+
+# ============================================================================
+# Device Types
+# ============================================================================
+
+Device = Union[torch.device, str]
+"""PyTorch device specification."""
+
+# ============================================================================
+# Shape Types
+# ============================================================================
+
+Shape = Tuple[int, ...]
+"""Array shape tuple."""
+
+Shape2D = Tuple[int, int]
+"""2D shape tuple: (T, N) - time steps, variables."""
+
+Shape3D = Tuple[int, int, int]
+"""3D shape tuple: (T, N, N) or (H, N, N) - time/factor, variables, variables."""
+
+Shape4D = Tuple[int, int, int, int]
+"""4D shape tuple: (B, T, N, N) - batch, time, variables, variables."""
+
+# ============================================================================
+# Forecast and Analysis Types
+# ============================================================================
+
+ForecastHorizon = int
+"""Forecast horizon. Typically 1, 4, or 8."""
+
+IRFHorizon = int
+"""IRF horizon. Typically 20."""
+
+LagOrder = int
+"""Lag order (p for AR, q for MA)."""
+
+NumFactors = int
+"""Number of factors (r or m)."""
+
+NumVars = int
+"""Number of variables (K or N)."""
+
+# ============================================================================
+# Path Types
+# ============================================================================
+
+PathLike = Union[str, Path]
+"""Path-like object (string or Path)."""
+
+# ============================================================================
+# Validation Types
+# ============================================================================
+
+ValidationIssue = Dict[str, Any]
+"""Validation issue dictionary with type, severity, description, etc."""
+
+ValidationResult = Dict[str, Any]
+"""Validation result dictionary with issues, summary, etc."""
+
+# ============================================================================
+# Model Component Types
+# ============================================================================
+
+ModelComponent = Union[
+    'CompanionSSM',
+    'MACompanionSSM',
+    'StructuralIdentificationSSM'
+]
+"""Union type for model components (forward reference)."""
+
+# ============================================================================
+# Type Guards and Utilities
+# ============================================================================
+
+def is_numpy_array(obj: Any) -> bool:
+    """Check if object is a numpy array."""
+    return isinstance(obj, np.ndarray)
+
+
+def is_torch_tensor(obj: Any) -> bool:
+    """Check if object is a torch tensor."""
+    return isinstance(obj, Tensor)
+
+
+def is_array_like(obj: Any) -> bool:
+    """Check if object is array-like (numpy or torch)."""
+    return is_numpy_array(obj) or is_torch_tensor(obj)
+
+
+def get_array_shape(arr: ArrayLike) -> Shape:
+    """Get shape of array (works for both numpy and torch)."""
+    if is_numpy_array(arr):
+        return arr.shape
+    elif is_torch_tensor(arr):
+        return tuple(arr.shape)
+    else:
+        raise TypeError(f"Expected numpy array or torch tensor, got {type(arr)}")
+
+
+def to_numpy(arr: ArrayLike) -> np.ndarray:
+    """Convert array-like to numpy array.
+    
+    **Note**: For more flexible conversion (handles lists, tuples, scalars),
+    use `ensure_numpy()` from `utils.common` instead.
+    """
+    if is_numpy_array(arr):
+        return arr
+    elif is_torch_tensor(arr):
+        return arr.detach().cpu().numpy()
+    else:
+        raise TypeError(f"Cannot convert {type(arr)} to numpy array")
+
+
+def to_tensor(arr: ArrayLike, device: Optional[Device] = None) -> Tensor:
+    """Convert array-like to torch tensor."""
+    if is_torch_tensor(arr):
+        if device is not None:
+            return arr.to(device)
+        return arr
+    elif is_numpy_array(arr):
+        tensor = torch.from_numpy(arr)
+        if device is not None:
+            tensor = tensor.to(device)
+        return tensor
+    else:
+        raise TypeError(f"Cannot convert {type(arr)} to torch tensor")
+
+
+__all__ = [
+    # Array Types
+    'ArrayLike',
+    'FloatArray',
+    'IntArray',
+    'BoolArray',
+    'OptionalArray',
+    'OptionalTensor',
+    'OptionalArrayLike',
+    # Model Types
+    'FactorState',
+    'ObservationState',
+    'ForecastResult',
+    'CoefficientMatrix',
+    'CovarianceMatrix',
+    'IRFArray',
+    'CompanionMatrix',
+    # Configuration Types
+    'ConfigSource',
+    'SeriesID',
+    'Frequency',
+    'DatasetName',
+    'ModelName',
+    # Training Types
+    'Batch',
+    'Loss',
+    'Optimizer',
+    # Result Types
+    'ResultDict',
+    'ForecastDict',
+    'MetricsDict',
+    'IRFResultDict',
+    'CheckpointDict',
+    'ConfigDict',
+    # Device Types
+    'Device',
+    # Shape Types
+    'Shape',
+    'Shape2D',
+    'Shape3D',
+    'Shape4D',
+    # Forecast and Analysis Types
+    'ForecastHorizon',
+    'IRFHorizon',
+    'LagOrder',
+    'NumFactors',
+    'NumVars',
+    # Path Types
+    'PathLike',
+    # Validation Types
+    'ValidationIssue',
+    'ValidationResult',
+    # Model Component Types
+    'ModelComponent',
+    # Type Guards and Utilities
+    'is_numpy_array',
+    'is_torch_tensor',
+    'is_array_like',
+    'get_array_shape',
+    'to_numpy',
+    'to_tensor',
+    # Re-export Tensor for convenience
+    'Tensor',
+]
+

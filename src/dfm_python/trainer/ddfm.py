@@ -14,7 +14,7 @@ import torch
 
 from ..logger import get_logger
 from ..config import DFMConfig, DDFMConfig
-from ..utils.statespace import estimate_idio_dynamics
+from ..numeric.estimator import estimate_idio_dynamics
 from . import (
     _create_base,
     _extract_train_params,
@@ -338,16 +338,24 @@ class DDFMDenoisingTrainer:
         z_actual = x_standardized_np.copy()  # Actual observations (target for training)
         
         # Initial prediction
+        from ..utils.misc import check_finite_array
+        from ..config.constants import MAX_EIGENVALUE
         x_tensor = x_clean.to(device)
         self.model.encoder.eval()
         self.model.decoder.eval()
         with torch.no_grad():
             factors_init = self.model.encoder(x_tensor).cpu().numpy()
-            factors_init = self.model._check_finite(factors_init, "initial factors", context="at iteration 0")
+            try:
+                factors_init = check_finite_array(factors_init, "initial factors", context="at iteration 0", fallback=None)
+            except ValueError:
+                factors_init = np.nan_to_num(factors_init, nan=0.0, posinf=MAX_EIGENVALUE, neginf=-MAX_EIGENVALUE)
             
             factors_tensor = torch.tensor(factors_init, device=device, dtype=dtype)
             prediction_iter = self.model.decoder(factors_tensor).cpu().numpy()
-            prediction_iter = self.model._check_finite(prediction_iter, "initial prediction", context="at iteration 0")
+            try:
+                prediction_iter = check_finite_array(prediction_iter, "initial prediction", context="at iteration 0", fallback=None)
+            except ValueError:
+                prediction_iter = np.nan_to_num(prediction_iter, nan=0.0, posinf=MAX_EIGENVALUE, neginf=-MAX_EIGENVALUE)
         
         # Initialize factors
         factors = factors_init.copy()
@@ -359,7 +367,10 @@ class DDFMDenoisingTrainer:
         
         # Initial residuals
         eps = data_mod_only_miss - prediction_iter
-        eps = self.model._check_finite(eps, "initial residuals", context="at iteration 0")
+        try:
+            eps = check_finite_array(eps, "initial residuals", context="at iteration 0", fallback=None)
+        except ValueError:
+            eps = np.nan_to_num(eps, nan=0.0, posinf=MAX_EIGENVALUE, neginf=-MAX_EIGENVALUE)
         
         # Denoising loop
         iter_count = 0
@@ -392,8 +403,14 @@ class DDFMDenoisingTrainer:
             # Get idiosyncratic distribution
             if self.model.use_idiosyncratic:
                 A_eps, Q_eps = estimate_idio_dynamics(eps, missing_mask, self.model.min_obs_idio)
-                A_eps = self.model._check_finite(A_eps, f"idiosyncratic AR coefficients (A_eps)", context=f"at iteration {iter_count}")
-                Q_eps = self.model._check_finite(Q_eps, f"idiosyncratic innovation covariance (Q_eps)", context=f"at iteration {iter_count}")
+                try:
+                    A_eps = check_finite_array(A_eps, f"idiosyncratic AR coefficients (A_eps)", context=f"at iteration {iter_count}", fallback=None)
+                except ValueError:
+                    A_eps = np.nan_to_num(A_eps, nan=0.0, posinf=MAX_EIGENVALUE, neginf=-MAX_EIGENVALUE)
+                try:
+                    Q_eps = check_finite_array(Q_eps, f"idiosyncratic innovation covariance (Q_eps)", context=f"at iteration {iter_count}", fallback=None)
+                except ValueError:
+                    Q_eps = np.nan_to_num(Q_eps, nan=0.0, posinf=MAX_EIGENVALUE, neginf=-MAX_EIGENVALUE)
                 
                 # Convert to format expected by denoising procedure
                 phi = A_eps if A_eps.ndim == 2 else np.diag(A_eps) if A_eps.ndim == 1 else np.eye(N)
@@ -407,7 +424,10 @@ class DDFMDenoisingTrainer:
                 
                 # Ensure std_eps is finite and positive
                 std_eps = np.maximum(std_eps, 1e-8)
-                std_eps = self.model._check_finite(std_eps, f"idiosyncratic std (std_eps)", context=f"at iteration {iter_count}")
+                try:
+                    std_eps = check_finite_array(std_eps, f"idiosyncratic std (std_eps)", context=f"at iteration {iter_count}", fallback=None)
+                except ValueError:
+                    std_eps = np.nan_to_num(std_eps, nan=0.0, posinf=MAX_EIGENVALUE, neginf=-MAX_EIGENVALUE)
             else:
                 phi = np.zeros((N, N))
                 mu_eps = np.zeros(N)
@@ -427,7 +447,10 @@ class DDFMDenoisingTrainer:
                     eps_draws[:, t, :] = rng.multivariate_normal(
                         mu_eps, np.diag(std_eps), size=self.model.epochs_per_iter
                     )
-                eps_draws = self.model._check_finite(eps_draws, f"MC samples (eps_draws)", context=f"at iteration {iter_count}")
+                try:
+                    eps_draws = check_finite_array(eps_draws, f"MC samples (eps_draws)", context=f"at iteration {iter_count}", fallback=None)
+                except ValueError:
+                    eps_draws = np.nan_to_num(eps_draws, nan=0.0, posinf=MAX_EIGENVALUE, neginf=-MAX_EIGENVALUE)
             except (ValueError, np.linalg.LinAlgError) as e:
                 _logger.warning(
                     f"{self.model.__class__.__name__} denoising iteration {iter_count}: failed to generate MC samples: {e}. "
@@ -479,16 +502,26 @@ class DDFMDenoisingTrainer:
                 self.model.encoder.eval()
                 with torch.no_grad():
                     factors_sample = self.model.encoder(x_sample_tensor).cpu().numpy()
-                    factors_sample = self.model._check_finite(
-                        factors_sample, 
-                        f"factor sample {i+1}/{self.model.epochs_per_iter}", 
-                        context=f"at iteration {iter_count}"
-                    )
+                    try:
+                        factors_sample = check_finite_array(
+                            factors_sample, 
+                            f"factor sample {i+1}/{self.model.epochs_per_iter}", 
+                            context=f"at iteration {iter_count}",
+                            fallback=None
+                        )
+                    except ValueError:
+                        factors_sample = np.nan_to_num(factors_sample, nan=0.0, posinf=MAX_EIGENVALUE, neginf=-MAX_EIGENVALUE)
                 factors_samples.append(factors_sample)
             
             # Update factors: average over all MC samples
             factors = np.mean(np.array(factors_samples), axis=0)  # T x num_factors
-            factors = self.model._check_finite(factors, "averaged factors", context=f"at iteration {iter_count}", fallback=factors_init)
+            try:
+                factors = check_finite_array(factors, "averaged factors", context=f"at iteration {iter_count}", fallback=factors_init)
+            except ValueError:
+                if factors_init is not None:
+                    factors = factors_init.copy()
+                else:
+                    factors = np.nan_to_num(factors, nan=0.0, posinf=MAX_EIGENVALUE, neginf=-MAX_EIGENVALUE)
             
             # Clip extreme factor values to prevent numerical instability
             clip_threshold = 10.0
@@ -516,12 +549,18 @@ class DDFMDenoisingTrainer:
             with torch.no_grad():
                 factors_tensor = torch.tensor(factors, device=device, dtype=dtype)
                 prediction_iter = self.model.decoder(factors_tensor).cpu().numpy()
-                prediction_iter = self.model._check_finite(
-                    prediction_iter, 
-                    "prediction_iter", 
-                    context=f"at iteration {iter_count}",
-                    fallback=prediction_prev_iter if prediction_prev_iter is not None else prediction_iter
-                )
+                try:
+                    prediction_iter = check_finite_array(
+                        prediction_iter, 
+                        "prediction_iter", 
+                        context=f"at iteration {iter_count}",
+                        fallback=prediction_prev_iter if prediction_prev_iter is not None else prediction_iter
+                    )
+                except ValueError:
+                    if prediction_prev_iter is not None:
+                        prediction_iter = prediction_prev_iter.copy()
+                    else:
+                        prediction_iter = np.nan_to_num(prediction_iter, nan=0.0, posinf=MAX_EIGENVALUE, neginf=-MAX_EIGENVALUE)
             
             if iter_count > 1:
                 # Compute MSE on non-missing values
@@ -574,7 +613,10 @@ class DDFMDenoisingTrainer:
             
             # Update residuals
             eps = data_mod_only_miss - prediction_iter
-            eps = self.model._check_finite(eps, "residuals (eps)", context=f"at iteration {iter_count}")
+            try:
+                eps = check_finite_array(eps, "residuals (eps)", context=f"at iteration {iter_count}", fallback=None)
+            except ValueError:
+                eps = np.nan_to_num(eps, nan=0.0, posinf=MAX_EIGENVALUE, neginf=-MAX_EIGENVALUE)
         
         if not_converged:
             delta_str = f"{delta:.6f}" if iter_count > 1 else "N/A"

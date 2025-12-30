@@ -4,10 +4,19 @@ Implements companion form state-space models for VAR (AR) and VARMA (MA) stages.
 All companion features (base class, AR, MA) are in this single file.
 """
 
-from typing import Optional
+from typing import Optional, Literal, Tuple, Union, Any, cast
+import numpy as np
 import torch
 import torch.nn as nn
 from einops import rearrange
+
+from ..utils.errors import ConfigurationError, NumericalError, NumericalStabilityError
+from ..config.types import Tensor, Device, Shape2D, Shape3D, NumVars, LagOrder, OptionalTensor
+from ..numeric.validator import (
+    validate_eigenvalue_bounds,
+    validate_matrix_condition,
+    validate_no_nan_inf
+)
 
 
 class CompanionSSMBase(nn.Module):
@@ -28,13 +37,13 @@ class CompanionSSMBase(nn.Module):
         n_vars: int,
         order: int,
         n_kernels: int = 1,
-        kernel_init: str = 'normal',
+        kernel_init: Literal['normal', 'xavier'] = 'normal',
         norm_order: int = 1,
         init_scale: Optional[float] = None,
         kernel_init_scale: Optional[float] = None,
         min_norm: Optional[float] = None,
         eps: Optional[float] = None
-    ):
+    ) -> None:
         """Initialize base companion SSM.
         
         Parameters
@@ -110,7 +119,10 @@ class CompanionSSMBase(nn.Module):
             stdv = 1.0 / (size ** 0.5)
             return torch.empty(self.n_kernels, size).uniform_(-stdv, stdv)
         else:
-            raise ValueError(f"Unknown kernel_init: {self.kernel_init}")
+            raise ConfigurationError(
+                f"Unknown kernel_init: {self.kernel_init}. "
+                f"Must be 'normal' or 'xavier'."
+            )
     
     def _init_b_matrix(self) -> torch.Tensor:
         """Initialize B matrix with identity in first block.
@@ -165,25 +177,40 @@ class CompanionSSMBase(nn.Module):
     
     def get_kernel(
         self, 
-        u: torch.Tensor, 
-        c: Optional[torch.Tensor] = None, 
+        u: Tensor, 
+        c: Optional[Tensor] = None, 
         l: Optional[int] = None
-    ) -> torch.Tensor:
+    ) -> Tensor:
         """Get impulse response kernel using Krylov method.
+        
+        Computes the impulse response kernel K_h = C @ A^h @ B efficiently
+        using Krylov subspace methods with FFT convolution.
         
         Parameters
         ----------
         u : torch.Tensor
-            Input of shape (B, D, L) or (B, L, D)
+            Input of shape (B, D, L) or (B, L, D) where:
+            - B: batch size
+            - D: dimension (n_vars or latent_dim)
+            - L: sequence length
         c : torch.Tensor, optional
-            Output matrix C. If None, uses self.C[0]
+            Output matrix C of shape (n_vars, latent_dim).
+            If None, uses self.C[0] (first kernel's C matrix)
         l : int, optional
-            Kernel length. If None, uses u.shape[-1]
+            Kernel length (number of time steps).
+            If None, uses u.shape[-1] (sequence length)
             
         Returns
         -------
         kernel : torch.Tensor
-            Kernel of shape (K, l) or (l,)
+            Impulse response kernel of shape (K, l) or (l,) where:
+            - K: number of variables (if c provided) or latent_dim
+            - l: kernel length
+            
+        Raises
+        ------
+        NumericalError
+            If Krylov computation fails or produces invalid results
         """
         if l is None:
             l = u.shape[-1]
@@ -203,23 +230,70 @@ class CompanionSSMBase(nn.Module):
             A = A[0]  # Extract first kernel: (latent_dim, latent_dim)
         
         # Lazy import to avoid circular dependency
-        from ..models.functional.krylov import krylov
-        return krylov(l, A, b, c=c)
+        try:
+            from ..functional.krylov import krylov
+            kernel = krylov(l, A, b, c=c)
+            
+            # Validate kernel output
+            if torch.any(torch.isnan(kernel)) or torch.any(torch.isinf(kernel)):
+                raise NumericalError(
+                    "Krylov kernel computation produced NaN/Inf values.",
+                    details=(
+                        f"Kernel shape: {kernel.shape}, "
+                        f"A shape: {A.shape}, "
+                        f"b shape: {b.shape}, "
+                        f"c shape: {c.shape if c is not None else None}. "
+                        f"Consider: (1) Regularization, (2) Checking companion matrix stability, "
+                        f"(3) Lower initialization scale."
+                    )
+                )
+            
+            return kernel
+        except ImportError as e:
+            raise NumericalError(
+                "Krylov module not available. Cannot compute impulse response kernel.",
+                details=str(e)
+            ) from e
+        except Exception as e:
+            raise NumericalError(
+                "Failed to compute impulse response kernel using Krylov method.",
+                details=f"Error: {str(e)}, l={l}, A shape={A.shape if A is not None else None}"
+            ) from e
     
-    def fft_conv(self, u_input: torch.Tensor, v_kernel: torch.Tensor) -> torch.Tensor:
+    def fft_conv(self, u_input: Tensor, v_kernel: Tensor) -> Tensor:
         """Convolve u with v in O(n log n) time with FFT (n = len(u)).
+        
+        This method uses Fast Fourier Transform (FFT) to compute convolution
+        efficiently, achieving O(n log n) complexity instead of O(n²) for
+        direct convolution. This is a key efficiency advantage of KDFM.
         
         Parameters
         ----------
         u_input : torch.Tensor
-            Input of shape (B, H, L) or (B, L, H)
+            Input tensor of shape (B, H, L) or (B, L, H) where:
+            - B: Batch size
+            - H: Number of heads/kernels
+            - L: Sequence length
         v_kernel : torch.Tensor
-            Kernel of shape (H, L)
+            Kernel tensor of shape (H, L) where:
+            - H: Number of heads/kernels (must match u_input)
+            - L: Sequence length
             
         Returns
         -------
         y : torch.Tensor
-            Convolved output of shape (B, H, L)
+            Convolved output of shape (B, H, L) where:
+            - B: Batch size
+            - H: Number of heads/kernels
+            - L: Sequence length
+            
+        Examples
+        --------
+        >>> ssm = CompanionSSM(n_vars=5, lag_order=1)
+        >>> u = torch.randn(2, 1, 100)  # (B=2, H=1, L=100)
+        >>> v = torch.randn(1, 100)  # (H=1, L=100)
+        >>> y = ssm.fft_conv(u, v)
+        >>> assert y.shape == (2, 1, 100)
         """
         # Ensure u is (B, H, L)
         if u_input.dim() == 3 and u_input.shape[1] != v_kernel.shape[0]:
@@ -233,18 +307,40 @@ class CompanionSSMBase(nn.Module):
         y = torch.fft.irfft(y_f, n=2*L)[..., :L]
         return y
     
-    def forward(self, u: torch.Tensor) -> torch.Tensor:
+    def forward(self, u: Tensor) -> Tensor:
         """Forward pass through companion SSM.
+        
+        This method performs the forward pass through the companion SSM,
+        computing the output by convolving the input with the impulse response
+        kernel. The computation uses FFT for O(n log n) efficiency.
         
         Parameters
         ----------
         u : torch.Tensor
-            Input of shape (B, L, D)
+            Input tensor of shape (B, L, D) where:
+            - B: Batch size
+            - L: Sequence length
+            - D: Input dimension (number of variables)
             
         Returns
         -------
         y : torch.Tensor
-            Output of shape (B, L, D)
+            Output tensor of shape (B, L, D) where:
+            - B: Batch size
+            - L: Sequence length
+            - D: Output dimension (matches input dimension)
+            
+        Raises
+        ------
+        NumericalError
+            If kernel computation fails due to numerical instability
+            
+        Examples
+        --------
+        >>> ssm = CompanionSSM(n_vars=5, lag_order=1)
+        >>> u = torch.randn(2, 100, 5)  # (B=2, L=100, D=5)
+        >>> y = ssm(u)
+        >>> assert y.shape == (2, 100, 5)
         """
         # Rearrange to (B, D, L) for convolution
         u = rearrange(u, 'b l d -> b d l')
@@ -260,7 +356,7 @@ class CompanionSSMBase(nn.Module):
         
         return y
     
-    def get_coefficient_param(self) -> torch.Tensor:
+    def get_coefficient_param(self) -> Tensor:
         """Get coefficient parameter tensor.
         
         Subclasses must implement this to return the appropriate parameter
@@ -268,44 +364,84 @@ class CompanionSSMBase(nn.Module):
         
         Returns
         -------
-        coeff : torch.Tensor
+        coeff : Tensor
             Coefficient parameter tensor
         """
         raise NotImplementedError("Subclasses must implement get_coefficient_param")
     
-    def get_companion_matrix(self, coeff: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def get_companion_matrix(self, coeff: Optional[Tensor] = None) -> Tensor:
         """Construct companion matrix from coefficients.
         
         Subclasses must implement this to construct the companion matrix
-        from their specific coefficient parameter.
+        from their specific coefficient parameter. The companion matrix
+        enables direct IRF computation via matrix powers, which is KDFM's
+        PRIMARY CONTRIBUTION.
         
         Parameters
         ----------
-        coeff : torch.Tensor, optional
-            Coefficient tensor. If None, uses get_coefficient_param()
+        coeff : Tensor, optional
+            Coefficient tensor. If None, uses get_coefficient_param().
+            Shape depends on subclass implementation.
             
         Returns
         -------
-        A : torch.Tensor
-            Companion matrix of shape (n_kernels, latent_dim, latent_dim)
+        Tensor
+            Companion matrix of shape (n_kernels, latent_dim, latent_dim) where:
+            - n_kernels: Number of kernels/heads
+            - latent_dim: Latent dimension (order * n_vars)
+            The companion matrix structure enables direct IRF computation:
+            K_h = C (A^{AR})^h B for reduced-form IRF.
+            
+        Raises
+        ------
+        NotImplementedError
+            If subclass does not implement this method (abstract method).
+        NumericalError
+            If companion matrix construction fails or produces invalid values.
+            
+        Examples
+        --------
+        >>> ssm = CompanionSSM(n_vars=5, lag_order=1)
+        >>> A = ssm.get_companion_matrix()
+        >>> assert A.shape == (1, 5, 5)  # (n_kernels=1, latent_dim=5, latent_dim=5)
         """
         raise NotImplementedError("Subclasses must implement get_companion_matrix")
     
-    def extract_coefficients(self, coeff: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def extract_coefficients(self, coeff: Optional[Tensor] = None) -> Tensor:
         """Extract coefficients from learned parameters.
         
         Subclasses must implement this to extract their specific coefficients
-        (VAR coefficients for AR, MA coefficients for MA).
+        (VAR coefficients for AR, MA coefficients for MA). This enables
+        direct coefficient extraction for interpretability, which is one of
+        KDFM's key advantages.
         
         Parameters
         ----------
-        coeff : torch.Tensor, optional
-            Coefficient tensor. If None, uses get_coefficient_param()
+        coeff : Tensor, optional
+            Coefficient tensor. If None, uses get_coefficient_param().
+            Shape depends on subclass implementation.
             
         Returns
         -------
-        coeffs : torch.Tensor
-            Extracted coefficients of shape (order, n_vars, n_vars)
+        Tensor
+            Extracted coefficients of shape (order, n_vars, n_vars) where:
+            - order: Lag order (p for AR, q for MA)
+            - n_vars: Number of variables (K)
+            These coefficients can be directly interpreted as VAR/MA coefficients,
+            maintaining full interpretability (KDFM's explainability advantage).
+            
+        Raises
+        ------
+        NotImplementedError
+            If subclass does not implement this method (abstract method).
+        NumericalError
+            If coefficient extraction fails or produces invalid values.
+            
+        Examples
+        --------
+        >>> ssm = CompanionSSM(n_vars=5, lag_order=1)
+        >>> coeffs = ssm.extract_coefficients()
+        >>> assert coeffs.shape == (1, 5, 5)  # (order=1, n_vars=5, n_vars=5)
         """
         raise NotImplementedError("Subclasses must implement extract_coefficients")
 
@@ -323,10 +459,10 @@ class CompanionSSM(CompanionSSMBase):
         n_vars: int,
         lag_order: int,
         n_kernels: int = 1,
-        kernel_init: str = 'normal',
+        kernel_init: Literal['normal', 'xavier'] = 'normal',
         norm_order: int = 1,
-        **kwargs
-    ):
+        **kwargs: Any
+    ) -> None:
         """Initialize Companion SSM.
         
         Parameters
@@ -371,11 +507,23 @@ class CompanionSSM(CompanionSSMBase):
         self.register_parameter('B', nn.Parameter(b))
         self.register_parameter('C', nn.Parameter(c))
     
-    def get_coefficient_param(self) -> torch.Tensor:
-        """Get VAR coefficient parameter."""
+    def get_coefficient_param(self) -> Tensor:
+        """Get VAR coefficient parameter.
+        
+        Returns the learnable VAR coefficient parameter tensor a, which contains
+        the VAR coefficients A_1, ..., A_p in flattened form.
+        
+        Returns
+        -------
+        Tensor
+            VAR coefficient parameter of shape (n_kernels, p*K*K) where:
+            - n_kernels: Number of kernels/heads
+            - p: Lag order
+            - K: Number of variables
+        """
         return self.a
     
-    def _build_companion_from_coeffs(self, coeff: torch.Tensor) -> torch.Tensor:
+    def _build_companion_from_coeffs(self, coeff: Tensor) -> Tensor:
         """Build companion matrix from coefficient tensor (shared logic).
         
         Parameters
@@ -410,13 +558,137 @@ class CompanionSSM(CompanionSSMBase):
         A[:, :self.n_vars, :] = companion_top
         return A
     
-    def get_companion_matrix(self, coeff: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """Construct companion matrix from VAR coefficients."""
+    def get_companion_matrix(self, coeff: Optional[Tensor] = None) -> Tensor:
+        """Construct companion matrix from VAR coefficients.
+        
+        This method builds the companion matrix A from VAR coefficients A_1, ..., A_p.
+        The companion matrix has shape (pK, pK) where p is the VAR order and K is the
+        number of variables.
+        
+        **Stability Check**: The companion matrix should have all eigenvalues < 1.0 for
+        stability. If max eigenvalue >= 1.0, forecasts will explode.
+        
+        Parameters
+        ----------
+        coeff : Tensor, optional
+            VAR coefficient parameter. If None, uses self.a (learned parameters).
+            Shape: (n_kernels, p*K*K)
+            
+        Returns
+        -------
+        Tensor
+            Companion matrix A of shape (n_kernels, pK, pK)
+            
+        Examples
+        --------
+        >>> companion_ssm = CompanionSSM(n_vars=3, lag_order=2)
+        >>> A = companion_ssm.get_companion_matrix()
+        >>> A.shape  # (1, 6, 6) for p=2, K=3
+        torch.Size([1, 6, 6])
+        >>> eigenvals = torch.linalg.eigvals(A[0])
+        >>> max_eigenval = torch.max(torch.abs(eigenvals))
+        >>> assert max_eigenval < 1.0, "Companion matrix is unstable"
+        """
         if coeff is None:
             coeff = self.a
         return self._build_companion_from_coeffs(coeff)
     
-    def _extract_coeffs_reshaped(self, coeff: torch.Tensor) -> torch.Tensor:
+    def check_stability(self, coeff: Optional[Tensor] = None, threshold: float = 1.0) -> Tuple[bool, float]:
+        """Check if companion matrix is stable (all eigenvalues < threshold).
+        
+        This method computes the companion matrix and checks if its maximum eigenvalue
+        is below the stability threshold (default 1.0). For forecasting, eigenvalues
+        must be < 1.0 to prevent forecast explosion.
+        
+        Parameters
+        ----------
+        coeff : Tensor, optional
+            VAR coefficient parameter. If None, uses self.a.
+        threshold : float, default=1.0
+            Stability threshold. Matrix is stable if max eigenvalue < threshold.
+            Must be > 0.
+            
+        Returns
+        -------
+        tuple
+            (is_stable, max_eigenvalue)
+            - is_stable: bool, True if max eigenvalue < threshold
+            - max_eigenvalue: float, maximum absolute eigenvalue
+            
+        Raises
+        ------
+        NumericalError
+            If eigenvalue computation fails or matrix contains NaN/Inf
+        ConfigurationError
+            If threshold is invalid
+            
+        Examples
+        --------
+        >>> companion_ssm = CompanionSSM(n_vars=3, lag_order=2)
+        >>> is_stable, max_eig = companion_ssm.check_stability()
+        >>> if not is_stable:
+        ...     print(f"Warning: Companion matrix is unstable (max eigenvalue = {max_eig:.6f})")
+        """
+        if threshold <= 0:
+            raise ConfigurationError(
+                f"Stability threshold must be > 0, got {threshold}",
+                details="Threshold represents maximum allowed eigenvalue magnitude"
+            )
+        
+        try:
+            A = self.get_companion_matrix(coeff)
+            
+            # Validate matrix
+            if A is None:
+                raise NumericalError(
+                    "Cannot check stability: companion matrix is None",
+                    details="Ensure model has been properly initialized"
+                )
+            
+            # Get first kernel for eigenvalue computation
+            if A.ndim == 3:
+                A_np = A[0].detach().cpu().numpy()  # (latent_dim, latent_dim)
+            elif A.ndim == 2:
+                A_np = A.detach().cpu().numpy()
+            else:
+                raise NumericalError(
+                    f"Invalid companion matrix shape: {A.shape}",
+                    details="Expected 2D or 3D tensor"
+                )
+            
+            # Validate matrix content
+            validate_no_nan_inf(A_np, name="companion matrix")
+            
+            # Compute eigenvalues
+            try:
+                eigenvals = np.linalg.eigvals(A_np)
+            except (np.linalg.LinAlgError, ValueError) as e:
+                raise NumericalError(
+                    f"Eigenvalue computation failed: {e}",
+                    details=(
+                        f"Matrix shape: {A_np.shape}, "
+                        f"Matrix may be singular or ill-conditioned. "
+                        f"Consider regularization or checking initialization."
+                    )
+                ) from e
+            
+            # Validate eigenvalues
+            validate_no_nan_inf(eigenvals, name="eigenvalues")
+            
+            max_eigenval = float(np.max(np.abs(eigenvals)))
+            is_stable = max_eigenval < threshold
+            
+            return is_stable, max_eigenval
+            
+        except Exception as e:
+            if isinstance(e, (NumericalError, ConfigurationError)):
+                raise
+            raise NumericalError(
+                f"Stability check failed: {e}",
+                details="Check that model components are properly initialized"
+            ) from e
+    
+    def _extract_coeffs_reshaped(self, coeff: Tensor) -> Tensor:
         """Extract and reshape coefficients (shared logic).
         
         Parameters
@@ -434,30 +706,69 @@ class CompanionSSM(CompanionSSMBase):
             coeff_reshaped = self.norm(coeff_reshaped, ord=self.norm_order)
         return coeff_reshaped[0]  # (order, K, K)
     
-    def extract_coefficients(self, coeff: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """Extract VAR coefficients A_1, ..., A_p from learned parameters."""
+    def extract_coefficients(self, coeff: Optional[Tensor] = None) -> Tensor:
+        """Extract VAR coefficients A_1, ..., A_p from learned parameters.
+        
+        This method extracts the VAR coefficients from the learned parameter tensor a,
+        reshaping them into the standard form (p, K, K) where:
+        - p: Lag order
+        - K: Number of variables
+        - A_i: VAR coefficient matrix for lag i
+        
+        Parameters
+        ----------
+        coeff : Tensor, optional
+            Coefficient parameter tensor. If None, uses self.a (learned parameters).
+            Shape: (n_kernels, p*K*K)
+            
+        Returns
+        -------
+        Tensor
+            VAR coefficients of shape (p, K, K) where:
+            - A[i, :, :] = VAR coefficient matrix A_{i+1} for lag i+1
+            - Coefficients are normalized if norm_order > 0
+        """
         if coeff is None:
             coeff = self.a
         return self._extract_coeffs_reshaped(coeff)
     
-    def predict_from_var_coefficients(self, y_t: torch.Tensor, A_coeffs: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def predict_from_var_coefficients(self, y_t: Tensor, A_coeffs: Optional[Tensor] = None) -> Tensor:
         """Predict using VAR coefficients.
         
-        Computes: y_pred_t = A_1 y_{t-1} + A_2 y_{t-2} + ... + A_p y_{t-p}
-        Uses vectorized operations for efficiency.
+        This method computes VAR predictions using the standard VAR formula:
+        y_pred_t = A_1 y_{t-1} + A_2 y_{t-2} + ... + A_p y_{t-p}
+        
+        Uses vectorized operations (einsum) for efficiency, avoiding explicit loops.
+        This is useful for extracting VAR coefficients and computing residuals.
         
         Parameters
         ----------
-        y_t : torch.Tensor
-            Time series of shape (B, T, K)
-        A_coeffs : torch.Tensor, optional
-            VAR coefficients of shape (p, K, K). If None, extracts from learned a.
+        y_t : Tensor
+            Time series of shape (B, T, K) where:
+            - B: Batch size
+            - T: Sequence length
+            - K: Number of variables
+        A_coeffs : Tensor, optional
+            VAR coefficients of shape (p, K, K) where:
+            - p: Lag order
+            - A_coeffs[i, :, :] = VAR coefficient matrix A_{i+1} for lag i+1
+            If None, extracts from learned parameter a using extract_coefficients()
             
         Returns
         -------
-        y_pred : torch.Tensor
-            Predictions of shape (B, T, K)
-            First p time steps are zero-padded
+        Tensor
+            Predictions of shape (B, T, K) where:
+            - First p time steps are zero-padded (cannot predict without lags)
+            - Remaining time steps contain VAR predictions
+            - Predictions are in the same scale as input y_t
+            
+        Examples
+        --------
+        >>> companion_ssm = CompanionSSM(n_vars=3, lag_order=2)
+        >>> y_t = torch.randn(2, 100, 3)  # (B=2, T=100, K=3)
+        >>> y_pred = companion_ssm.predict_from_var_coefficients(y_t)
+        >>> assert y_pred.shape == (2, 100, 3)
+        >>> assert torch.allclose(y_pred[:, :2, :], torch.zeros(2, 2, 3))  # First 2 steps zero
         """
         if A_coeffs is None:
             A_coeffs = self.extract_coefficients()
@@ -485,8 +796,26 @@ class CompanionSSM(CompanionSSMBase):
         
         return y_pred
     
-    def compute_residuals_from_coefficients(self, y_t: torch.Tensor, A_coeffs: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """Compute reduced-form residuals from VAR coefficients."""
+    def compute_residuals_from_coefficients(self, y_t: Tensor, A_coeffs: Optional[Tensor] = None) -> Tensor:
+        """Compute reduced-form residuals from VAR coefficients.
+        
+        This method computes reduced-form residuals e_t = y_t - y_pred_t where
+        y_pred_t is computed from VAR coefficients. Residuals are used for structural
+        identification to obtain structural shocks ε_t.
+        
+        Parameters
+        ----------
+        y_t : Tensor
+            Time series of shape (B, T, K)
+        A_coeffs : Tensor, optional
+            VAR coefficients of shape (p, K, K). If None, extracts from learned a.
+            
+        Returns
+        -------
+        Tensor
+            Reduced-form residuals of shape (B, T-p, K)
+            First p time steps are skipped (cannot compute residuals without lags)
+        """
         if A_coeffs is None:
             A_coeffs = self.extract_coefficients()
         
@@ -497,8 +826,18 @@ class CompanionSSM(CompanionSSMBase):
 class MACompanionSSM(CompanionSSMBase):
     """MA Companion SSM for learnable moving average structure (MA stage).
     
-    Learns MA coefficients M_1, ..., M_q through companion matrix structure,
-    enabling VARMA(p,q) representation where residuals have MA dynamics.
+    This SSM learns MA coefficients M_1, ..., M_q through companion matrix structure,
+    enabling VARMA(p,q) representation where residuals have moving average dynamics.
+    
+    The MA stage processes AR stage output z_t through a companion SSM structure,
+    similar to the AR stage but for moving average components. This enables
+    flexible VARMA modeling where both autoregressive and moving average dynamics
+    are learnable through gradient descent.
+    
+    **Architecture**: The MA stage uses the same companion matrix structure as the
+    AR stage, but with MA coefficients instead of VAR coefficients. This maintains
+    the direct IRF computation capability: MA IRFs are computed as matrix powers
+    from the MA companion matrix.
     """
     
     def __init__(
@@ -506,7 +845,7 @@ class MACompanionSSM(CompanionSSMBase):
         n_vars: int,
         ma_order: int,
         n_kernels: int = 1,
-        kernel_init: str = 'normal',
+        kernel_init: Literal['normal', 'xavier'] = 'normal',
         norm_order: int = 1,
         **kwargs
     ):
@@ -554,23 +893,55 @@ class MACompanionSSM(CompanionSSMBase):
         self.register_parameter('B', nn.Parameter(b))
         self.register_parameter('C', nn.Parameter(c))
     
-    def get_coefficient_param(self) -> torch.Tensor:
-        """Get MA coefficient parameter."""
+    def get_coefficient_param(self) -> Tensor:
+        """Get MA coefficient parameter.
+        
+        Returns the learnable MA coefficient parameter tensor m, which contains
+        the MA coefficients M_1, ..., M_q in flattened form.
+        
+        Returns
+        -------
+        Tensor
+            MA coefficient parameter of shape (n_kernels, q*K*K) where:
+            - n_kernels: Number of kernels/heads
+            - q: MA order
+            - K: Number of variables
+        """
         return self.m
     
-    def get_companion_matrix(self, coeff: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def get_companion_matrix(self, coeff: Optional[Tensor] = None) -> Tensor:
         """Construct companion matrix from MA coefficients."""
         if coeff is None:
             coeff = self.m
         return self._build_companion_from_coeffs(coeff)
     
-    def extract_coefficients(self, coeff: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """Extract MA coefficients M_1, ..., M_q from learned parameters."""
+    def extract_coefficients(self, coeff: Optional[Tensor] = None) -> Tensor:
+        """Extract MA coefficients M_1, ..., M_q from learned parameters.
+        
+        This method extracts the MA coefficients from the learned parameter tensor m,
+        reshaping them into the standard form (q, K, K) where:
+        - q: MA order
+        - K: Number of variables
+        - M_i: MA coefficient matrix for lag i
+        
+        Parameters
+        ----------
+        coeff : Tensor, optional
+            Coefficient parameter tensor. If None, uses self.m (learned parameters).
+            Shape: (n_kernels, q*K*K)
+            
+        Returns
+        -------
+        Tensor
+            MA coefficients of shape (q, K, K) where:
+            - M[i, :, :] = MA coefficient matrix M_{i+1} for lag i+1
+            - Coefficients are normalized if norm_order > 0
+        """
         if coeff is None:
             coeff = self.m
         return self._extract_coeffs_reshaped(coeff)
     
-    def _build_companion_from_coeffs(self, coeff: torch.Tensor) -> torch.Tensor:
+    def _build_companion_from_coeffs(self, coeff: Tensor) -> Tensor:
         """Build companion matrix from MA coefficients.
         
         Same logic as CompanionSSM but for MA coefficients.
@@ -600,7 +971,7 @@ class MACompanionSSM(CompanionSSMBase):
         # This ensures get_kernel() works correctly
         return companion
     
-    def _extract_coeffs_reshaped(self, coeff: torch.Tensor) -> torch.Tensor:
+    def _extract_coeffs_reshaped(self, coeff: Tensor) -> Tensor:
         """Extract MA coefficients reshaped to (order, K, K).
         
         Same logic as CompanionSSM but for MA coefficients.

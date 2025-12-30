@@ -84,7 +84,7 @@ __version__ = "0.5.5"
 
 # Configuration (from config/ subpackage)
 from .config import (
-    DEFAULT_BLOCK_NAME,
+    # DEFAULT_BLOCK_NAME,  # Removed to avoid circular import - import directly from functional.dfm_block
     ConfigSource, YamlSource, HydraSource,
     make_config_source,
 )
@@ -92,11 +92,10 @@ from .config import (
 from .config import DFMConfig, SeriesConfig
 
 # Results
-from .config.results import DFMResult, DDFMResult, KDFMResult, BaseResult
+from .config import DFMResult, DDFMResult, KDFMResult, BaseResult
 
 # Utilities (from utils/ subpackage)
-from .utils.diagnostics import diagnose_series, print_series_diagnosis
-from .utils.time import calculate_rmse
+from .utils.metric import calculate_rmse
 
 # DataModule classes (includes both Lightning and custom implementations)
 # Users can import these directly from dfm_python
@@ -104,8 +103,8 @@ from .datamodule import (
     DFMDataModule,
     DDFMDataModule,  # DDFM-specific DataModule
     KDFMDataModule,  # KDFM-specific DataModule
-    DFMDataset,  # Dataset class (usually not needed directly)
     DDFMDataset,  # DDFM Dataset class (usually not needed directly)
+    KDFMDataset,  # KDFM Dataset class (usually not needed directly)
 )
 
 # Model implementations
@@ -123,13 +122,11 @@ __all__ = [
     'DFM',
     # Model base and implementations
     'BaseFactorModel',
-    # Constants
-    'DEFAULT_BLOCK_NAME',
     # Config sources
     'ConfigSource', 'YamlSource', 'HydraSource',
     'make_config_source',
     # Low-level API (functional interface - advanced usage)
-    'BaseResult', 'DFMResult', 'DDFMResult', 'KDFMResult', 'calculate_rmse', 'diagnose_series', 'print_series_diagnosis',
+    'BaseResult', 'DFMResult', 'DDFMResult', 'KDFMResult', 'calculate_rmse',
 ]
 
 # DDFM high-level API (PyTorch is mandatory)
@@ -147,8 +144,8 @@ __all__.extend([
     'DFMDataModule',
     'DDFMDataModule',  # DDFM-specific DataModule
     'KDFMDataModule',  # KDFM-specific DataModule
-    'DFMDataset',  # Dataset class (usually not needed directly)
     'DDFMDataset',  # DDFM Dataset class (usually not needed directly)
+    'KDFMDataset',  # KDFM Dataset class (usually not needed directly)
 ])
 
 # Trainer classes (mandatory dependency)

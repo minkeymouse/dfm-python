@@ -1,161 +1,121 @@
-"""PyTorch Lightning DataModule for DFM training.
+"""Custom DFM DataModule for initialization and data handling.
 
-This module provides DFMDataModule for linear DFM models.
+This module provides a custom DFMDataModule that doesn't inherit from PyTorch Lightning.
+It handles data loading, preprocessing, and parameter initialization for DFM models.
 """
 
-import torch
-from torch.utils.data import DataLoader
 import numpy as np
 import pandas as pd
-from typing import Optional, Union, Tuple, Any, List
+from typing import Optional, Union, Tuple, Dict, Any, List
 from pathlib import Path
-import pytorch_lightning as lightning_pl
 
+from .base import BaseDataModule
 from ..config import DFMConfig
-from ..data.utils import load_data as _load_data
-from ..data.dataset import DFMDataset
-from ..data.dataloader import create_dfm_dataloader
-from ..utils.time import TimeIndex
-from ..logger import get_logger
-from .utils import (
-    _check_sktime,
-    _get_scaler,
-    _get_mean,
-    _get_scale,
-    _compute_mx_wx,
-    create_passthrough_transformer,
+from ..numeric.tent import get_agg_structure, get_tent_weights
+from ..config.constants import (
+    FREQUENCY_HIERARCHY,
+    TENT_WEIGHTS_LOOKUP,
+    DEFAULT_NAN_METHOD,
+    DEFAULT_NAN_K,
+    DEFAULT_HIERARCHY_VALUE,
+    DEFAULT_CLOCK_FREQUENCY,
 )
+from ..utils.misc import get_clock_frequency
+from ..dataset.process import TimeIndex
+from ..logger import get_logger
 
 _logger = get_logger(__name__)
 
+# Import frequency hierarchy from constants
+from ..config.constants import FREQUENCY_HIERARCHY
 
-class DFMDataModule(lightning_pl.LightningDataModule):
-    """PyTorch Lightning DataModule for DFM training.
+
+class DFMDataModule(BaseDataModule):
+    """Custom DataModule for DFM (not inheriting from PyTorch Lightning).
     
-    This DataModule handles data loading for linear DFM models.
-    Uses DFMDataset which returns full sequences (no windowing).
+    This DataModule handles:
+    - Data loading (assumes data is preprocessed)
+    - Mixed-frequency parameter setup
+    - Parameter initialization preparation
     
-    **Note**: DFM uses NumPy for all calculations internally (via pykalman).
-    Data is converted from tensors to NumPy at the model boundary, then back to
-    tensors for Lightning logging/metrics. This provides better numerical stability
-    and allows using well-tested NumPy-based libraries.
-    
-    **Important**: DFM can handle missing data (NaN values) implicitly:
-    - **DFM**: Uses Kalman filter's `handle_missing_data()` method to skip NaN observations
-    
-    **Usage Pattern**:
-    - Data can contain NaN values - models will handle them implicitly
-    - If `pipeline=None`, a passthrough transformer is used by default (no-op)
-    - Users can optionally provide their preprocessing pipeline to extract statistics (Mx/Wx)
-    - For better performance, users can preprocess data (imputation, scaling) before passing,
-      but it's not required - models will handle missing data automatically
+    **Important**: 
+    - Data must be **preprocessed** before passing to this DataModule (imputation, scaling, etc.)
+    - Data is assumed to be standardized (mean=0, std=1) for all series
+    - Optional `scaler` parameter can be used to extract Mx/Wx for inverse transformation
+    - If no scaler provided, defaults to Mx=0, Wx=1 (assuming standardized data)
     
     Parameters
     ----------
     config : DFMConfig
         DFM configuration object
-    pipeline : Any, optional
-        sktime-compatible preprocessing pipeline (e.g., TransformerPipeline) used to extract statistics.
-        
-        **Purpose**: The pipeline is used to extract statistics (e.g., Mx/Wx from StandardScaler)
-        needed for forecasting and nowcasting operations. It is NOT used to preprocess data - data
-        must be preprocessed by the user before passing to this DataModule.
-        
-        **If None**: Uses passthrough transformer (no statistics extracted). Mx/Wx will be computed
-        from the data as fallback. This is the default.
-        
-        **If provided**: The pipeline will be fitted on the data to extract statistics (e.g., 
-        standardization parameters from StandardScaler). These statistics are used for transforming
-        predictions back to original scale during forecasting/nowcasting.
     data_path : str or Path, optional
-        Path to data file (CSV). If None, data must be provided.
+        Path to data file (CSV)
     data : np.ndarray or pd.DataFrame, optional
-        Data array or DataFrame. Can contain NaN values - DFM will handle them:
-        - DFM: Uses Kalman filter to implicitly handle missing data
-        - Standardized/scaled data (mean=0, std=1) is recommended for better performance
-        - Feature-engineered if needed
-        If None, data_path must be provided.
-    preprocessed : bool, default False
-        Whether data is already preprocessed.
-        
-        **If `True`**:
-        - Data is assumed to be already preprocessed (scaled/transformed)
-        - Pipeline is assumed to be already fitted (from preprocessing step)
-        - Pipeline is only used for statistics extraction (no fit/transform calls)
-        
-        **If `False`**:
-        - Pipeline will be used to preprocess data (fit_transform)
+        Preprocessed data array or DataFrame. Data must be preprocessed (imputation, scaling, etc.)
+        before passing to this DataModule.
+    scaler : Any, optional
+        Optional scaler for extracting Mx/Wx statistics. Can be:
+        - `None` (default): Assumes data is standardized (Mx=0, Wx=1)
+        - Scaler instance: Fitted scaler object (e.g., StandardScaler, RobustScaler)
+        - The scaler is only used to extract mean/scale statistics, not to transform data
     time_index : TimeIndex, optional
-        Time index for the data. If None and time_index_column is provided,
-        time index will be extracted from the data.
+        Time index for the data
     time_index_column : str or list of str, optional
-        Column name(s) in DataFrame to use as time index. If provided:
-        - The column(s) will be extracted from the DataFrame
-        - TimeIndex will be created from the column(s)
-        - The column(s) will be excluded from the data (not used as features)
-        - If multiple columns are provided, they will be combined
-    batch_size : int, optional
-        Batch size for DataLoader. For DFM, typically 1 (full sequence).
-    num_workers : int, default 0
-        Number of worker processes for DataLoader
-    val_split : float, optional
-        Validation split ratio (0.0 to 1.0). If None, no validation split.
+        Column name(s) in DataFrame to use as time index
+    mixed_freq : bool, default False
+        Whether to use mixed-frequency handling
+    nan_method : int, default 2
+        Missing data handling method (for internal use)
+    nan_k : int, default 3
+        Spline interpolation order (for internal use)
     """
     
     def __init__(
         self,
         config: Optional[DFMConfig] = None,
         config_path: Optional[Union[str, Path]] = None,
-        pipeline: Optional[Any] = None,
         data_path: Optional[Union[str, Path]] = None,
         data: Optional[Union[np.ndarray, pd.DataFrame]] = None,
-        preprocessed: bool = False,
+        scaler: Optional[Any] = None,
         time_index: Optional[TimeIndex] = None,
         time_index_column: Optional[Union[str, List[str]]] = None,
-        batch_size: Optional[int] = None,
-        num_workers: int = 0,
-        val_split: Optional[float] = None,
+        mixed_freq: bool = False,
+        nan_method: Optional[int] = None,
+        nan_k: Optional[int] = None,
         **kwargs
     ):
-        super().__init__()
-        _check_sktime()
+        # Initialize base class
+        super().__init__(
+            config=config,
+            config_path=config_path,
+            data_path=data_path,
+            data=data,
+            time_index=time_index,
+            time_index_column=time_index_column,
+            **kwargs
+        )
         
-        # Load config if config_path provided
-        if config is None and config_path is not None:
-            from ..config import YamlSource
-            source = YamlSource(config_path)
-            config = source.load()
-        
-        if config is None:
-            raise ValueError(
-                "DataModule initialization failed: either config or config_path must be provided. "
-                "Please provide a DFMConfig object or a path to a configuration file."
-            )
-        
-        self.config = config
-        self.pipeline = pipeline
-        self.data_path = Path(data_path) if data_path is not None else None
-        self.data = data
-        self.preprocessed = preprocessed
-        self.time_index = time_index
-        self.time_index_column = time_index_column
-        self.batch_size = batch_size
-        self.num_workers = num_workers
-        self.val_split = val_split
+        self.scaler = scaler
+        self.mixed_freq = mixed_freq
+        self.nan_method = nan_method if nan_method is not None else DEFAULT_NAN_METHOD
+        self.nan_k = nan_k if nan_k is not None else DEFAULT_NAN_K
         
         # Will be set in setup()
-        self.train_dataset: Optional[DFMDataset] = None
-        self.val_dataset: Optional[DFMDataset] = None
+        self.data_processed: Optional[np.ndarray] = None
         self.Mx: Optional[np.ndarray] = None
         self.Wx: Optional[np.ndarray] = None
-        self.data_processed: Optional[torch.Tensor] = None
+        
+        # Mixed frequency parameters (set during setup)
+        self._constraint_matrix: Optional[np.ndarray] = None
+        self._constraint_vector: Optional[np.ndarray] = None
+        self._n_slower_freq: int = 0
+        self._tent_weights_dict: Optional[Dict[str, np.ndarray]] = None
+        self._frequencies: Optional[np.ndarray] = None
+        self._idio_indicator: Optional[np.ndarray] = None
+        self._idio_chain_lengths: Optional[np.ndarray] = None
     
     def setup(self, stage: Optional[str] = None) -> None:
-        """Load and prepare data.
-        
-        This method is called by Lightning to set up the data module.
-        It loads preprocessed data and extracts statistics from the pipeline for forecasting/nowcasting.
-        """
+        """Load and prepare data, setup mixed-frequency parameters."""
         # Load data if not already provided
         if self.data is None:
             if self.data_path is None:
@@ -164,11 +124,8 @@ class DFMDataModule(lightning_pl.LightningDataModule):
                     "Please provide a path to a data file or a data array/DataFrame."
                 )
             
-            # Load data from file
-            X, Time, Z = _load_data(
-                self.data_path,
-                self.config,
-            )
+            # Load data from file using base class method
+            X, Time, Z = self.load_data(self.data_path)
             self.data = X
             self.time_index = Time
         
@@ -184,7 +141,7 @@ class DFMDataModule(lightning_pl.LightningDataModule):
                 f"Please provide data as numpy.ndarray or pandas.DataFrame."
             )
         
-        # Extract time index from column if specified (must be done before preprocessing)
+        # Extract time index from column if specified
         if self.time_index is None and self.time_index_column is not None:
             if not isinstance(X_df, pd.DataFrame):
                 raise ValueError(
@@ -192,10 +149,8 @@ class DFMDataModule(lightning_pl.LightningDataModule):
                     "Please provide data as pandas.DataFrame."
                 )
             
-            # Handle single string or list of strings
             time_cols = [self.time_index_column] if isinstance(self.time_index_column, str) else self.time_index_column
             
-            # Check if columns exist
             missing_cols = [col for col in time_cols if col not in X_df.columns]
             if missing_cols:
                 raise ValueError(
@@ -203,179 +158,155 @@ class DFMDataModule(lightning_pl.LightningDataModule):
                     f"Available columns: {list(X_df.columns)}"
                 )
             
-            # Extract time index column(s)
             time_data = X_df[time_cols]
             
-            # Create TimeIndex from the column(s)
-            from ..utils.time import parse_timestamp
+            from ..dataset.process import parse_timestamp
             if len(time_cols) == 1:
-                # Single column: convert to list of timestamps
                 time_list = [parse_timestamp(str(val)) for val in time_data.iloc[:, 0]]
             else:
-                # Multiple columns: combine them (e.g., year, month, day)
-                # For now, convert to string and parse
                 time_list = [parse_timestamp(' '.join(str(val) for val in row)) for row in time_data.values]
             
             self.time_index = TimeIndex(time_list)
-            
-            # Remove time index column(s) from data
             X_df = X_df.drop(columns=time_cols)
             _logger.info(f"Extracted time index from column(s): {time_cols}, removed from data")
         
-        # Determine pipeline to use
-        if self.pipeline is None:
-            pipeline_to_use = create_passthrough_transformer()
-        else:
-            pipeline_to_use = self.pipeline
+        # Data is assumed to be preprocessed - use as-is
+        X_transformed = X_df.copy()
         
-        # Set pandas output for sktime pipelines
-        try:
-            if hasattr(pipeline_to_use, 'set_output'):
-                pipeline_to_use.set_output(transform="pandas")
-        except (AttributeError, ValueError) as e:
-            _logger.debug(f"Could not set pandas output on pipeline: {e}")
-        
-        # Apply pipeline based on preprocessed flag
-        if self.preprocessed:
-            # Already preprocessed: use data as-is, extract statistics only
-            # Pipeline should already be fitted - just extract statistics
-            X_transformed = X_df.copy()
-            
-            # Pipeline is for statistics extraction only (already fitted, no fit/transform)
-            if pipeline_to_use is not None:
-                # Try to extract statistics from fitted pipeline
-                try:
-                    scaler = _get_scaler(pipeline_to_use)
-                    if scaler is not None:
-                        X_processed_np = X_transformed.to_numpy()
-                        self.Mx = _get_mean(scaler, X_processed_np)
-                        self.Wx = _get_scale(scaler, X_processed_np)
-                except (AttributeError, ImportError, Exception) as e:
-                    _logger.debug(f"Could not extract scaler from pipeline: {e}")
-        else:
-            # Not preprocessed: preprocess data using pipeline
-            try:
-                X_transformed = pipeline_to_use.fit_transform(X_df)
-            except Exception as e:
-                raise ValueError(
-                    f"DataModule setup failed: pipeline fit_transform error: {e}. "
-                    f"Ensure pipeline is sktime-compatible (e.g., TransformerPipeline with StandardScaler) "
-                    f"and supports pandas DataFrames."
-                ) from e
-        
-        # Ensure output is pandas DataFrame
-        if not isinstance(X_transformed, pd.DataFrame):
-            if isinstance(X_transformed, np.ndarray):
-                n_cols = X_transformed.shape[1] if len(X_transformed.shape) > 1 else 1
-                if n_cols == len(X_df.columns):
-                    X_transformed = pd.DataFrame(X_transformed, columns=pd.Index(X_df.columns))
-                else:
-                    X_transformed = pd.DataFrame(X_transformed, 
-                        columns=pd.Index([f'feature_{i}' for i in range(n_cols)]))
-                # Preserve index
-                if len(X_transformed) == len(X_df):
-                    X_transformed.index = X_df.index
-            else:
-                raise TypeError(
-                    f"DataModule setup failed: pipeline returned unsupported type {type(X_transformed)}. "
-                    f"Expected pandas.DataFrame or numpy.ndarray."
-                )
-        
-        # Convert transformed data to numpy
-        # Ensure all columns are numeric (exclude any remaining non-numeric columns like date)
-        numeric_cols = X_transformed.select_dtypes(include=[np.number]).columns
-        if len(numeric_cols) < len(X_transformed.columns):
-            non_numeric = [col for col in X_transformed.columns if col not in numeric_cols]
-            _logger.warning(f"Excluding non-numeric columns from data: {non_numeric}")
-            X_transformed = X_transformed[numeric_cols]
-        
+        # Extract Mx/Wx from scaler if provided
+        from ..dataset.process import _extract_mx_wx
         X_processed_np = X_transformed.to_numpy()
+        try:
+            self.Mx, self.Wx = _extract_mx_wx(self.scaler, X_processed_np)
+        except (AttributeError, ImportError) as e:
+            _logger.warning(
+                f"Could not extract Mx/Wx from scaler: {e}. "
+                f"Assuming data is standardized (Mx=0, Wx=1)."
+            )
+            self.Mx = None
+            self.Wx = None
         
-        # Extract standardization parameters if not already extracted
-        if not self.preprocessed:
-            # Try to extract standardization parameters if pipeline includes a scaler
-            try:
-                scaler = _get_scaler(pipeline_to_use)
-                if scaler is not None:
-                    self.Mx = _get_mean(scaler, X_processed_np)
-                    self.Wx = _get_scale(scaler, X_processed_np)
-            except (AttributeError, ImportError, Exception) as e:
-                _logger.debug(f"Could not extract scaler from pipeline: {e}")
-                pass
+        # Convert to numpy - filter numeric columns
+        from ..datamodule.base import _filter_numeric_columns
+        X_transformed = _filter_numeric_columns(X_transformed, _logger)
         
-        # Convert to torch tensor
-        self.data_processed = torch.tensor(X_processed_np, dtype=torch.float32)
+        X_processed_np = X_transformed.to_numpy().astype(np.float32)
+        self.data_processed = X_processed_np
         
-        # If Mx and Wx are still None, compute from processed data as fallback
-        if self.Mx is None or self.Wx is None:
-            mx_fallback, wx_fallback = _compute_mx_wx(X_processed_np)
-            if self.Mx is None:
-                self.Mx = mx_fallback
-            if self.Wx is None:
-                self.Wx = wx_fallback
+        # Set defaults if Mx/Wx not extracted from scaler
+        from ..datamodule.base import _set_default_mx_wx
+        self.Mx, self.Wx = _set_default_mx_wx(self.Mx, self.Wx, X_processed_np.shape[1], self.scaler, _logger)
         
-        # Create train/val splits if requested
-        if self.val_split is not None and 0 < self.val_split < 1:
-            T = self.data_processed.shape[0]
-            split_idx = int(T * (1 - self.val_split))
-            
-            train_data = self.data_processed[:split_idx, :]
-            val_data = self.data_processed[split_idx:, :]
-            
-            # For linear DFM, use full sequences (no windowing)
-            self.train_dataset = DFMDataset(train_data)
-            self.val_dataset = DFMDataset(val_data)
-        else:
-            # Use all data for training
-            self.train_dataset = DFMDataset(self.data_processed)
-            self.val_dataset = None
+        # Setup mixed-frequency parameters
+        if self.mixed_freq:
+            self._setup_mixed_frequency_params()
     
-    def train_dataloader(self) -> DataLoader:
-        """Create DataLoader for training."""
-        if self.train_dataset is None:
-            raise RuntimeError(
-                "DataModule train_dataloader failed: setup() must be called before train_dataloader(). "
-                "Please call dm.setup() first to load and preprocess data."
+    def _setup_mixed_frequency_params(self) -> None:
+        """Setup mixed-frequency parameters from config and data."""
+        self._check_setup('_setup_mixed_frequency_params')
+        
+        clock = get_clock_frequency(self.config)
+        
+        if not self.mixed_freq:
+            self._constraint_matrix = None
+            self._constraint_vector = None
+            self._n_slower_freq = 0
+            self._tent_weights_dict = None
+            self._frequencies = None
+            n_features = self.data_processed.shape[1] if self.data_processed is not None else 0
+            self._idio_indicator = np.ones(n_features, dtype=np.float32)
+            self._idio_chain_lengths = np.zeros(n_features, dtype=np.int32)
+            return
+        
+        agg_structure = get_agg_structure(self.config, clock=clock)
+        frequencies_list = [s.frequency for s in self.config.series]
+        frequencies_set = set(frequencies_list)
+        clock_hierarchy = FREQUENCY_HIERARCHY.get(clock, DEFAULT_HIERARCHY_VALUE)
+        
+        # Validate frequency pairs
+        missing_pairs = [
+            (freq, clock) for freq in frequencies_set
+                    if FREQUENCY_HIERARCHY.get(freq, DEFAULT_HIERARCHY_VALUE) > clock_hierarchy and get_tent_weights(freq, clock) is None
+        ]
+        if missing_pairs:
+            raise ValueError(
+                f"mixed_freq=True but the following frequency pairs are not in TENT_WEIGHTS_LOOKUP: {missing_pairs}. "
+                f"Available pairs: {list(TENT_WEIGHTS_LOOKUP.keys())}. "
+                f"Either add the missing pairs to TENT_WEIGHTS_LOOKUP or set mixed_freq=False."
             )
         
-        return create_dfm_dataloader(
-            self.train_dataset,
-            batch_size=self.batch_size,
-            num_workers=self.num_workers,
-            pin_memory=False  # CPU-only: no need for pin_memory
-        )
-    
-    def val_dataloader(self) -> Optional[DataLoader]:
-        """Create DataLoader for validation."""
-        if self.val_dataset is None:
-            return None
+        tent_weights_dict = {k: np.array(v, dtype=np.float32) for k, v in agg_structure['tent_weights'].items()}
         
-        return create_dfm_dataloader(
-            self.val_dataset,
-            batch_size=self.batch_size,
-            num_workers=self.num_workers,
-            pin_memory=False  # CPU-only: no need for pin_memory
-        )
+        R_mat = None
+        q = None
+        if agg_structure['structures']:
+            first_structure = list(agg_structure['structures'].values())[0]
+            R_mat = np.array(first_structure[0], dtype=np.float32)
+            q = np.array(first_structure[1], dtype=np.float32)
+        
+        n_slower_freq = sum(1 for freq in frequencies_list if FREQUENCY_HIERARCHY.get(freq, DEFAULT_HIERARCHY_VALUE) > clock_hierarchy)
+        idio_indicator = np.array([1 if freq == clock else 0 for freq in frequencies_list], dtype=np.float32)
+        # Map frequencies to hierarchy values (default to monthly=3 if not found)
+        frequencies_np = np.array([
+                    FREQUENCY_HIERARCHY.get(f, FREQUENCY_HIERARCHY.get(DEFAULT_CLOCK_FREQUENCY, DEFAULT_HIERARCHY_VALUE))
+            for f in frequencies_list
+        ], dtype=np.int32)
+        
+        self._constraint_matrix = R_mat
+        self._constraint_vector = q
+        self._n_slower_freq = n_slower_freq
+        self._tent_weights_dict = tent_weights_dict
+        self._frequencies = frequencies_np
+        self._idio_indicator = idio_indicator
+        n_features = self.data_processed.shape[1] if self.data_processed is not None else len(idio_indicator)
+        self._idio_chain_lengths = np.zeros(n_features, dtype=np.int32)
+    
+    def get_initialization_params(self) -> Dict[str, Any]:
+        """Get parameters needed for DFM initialization.
+        
+        Returns
+        -------
+        dict
+            Dictionary containing:
+            - 'X': processed data array
+            - 'Mx': mean values for unstandardization
+            - 'Wx': standard deviation values for unstandardization
+            - 'R_mat': constraint matrix (if mixed_freq)
+            - 'q': constraint vector (if mixed_freq)
+            - 'n_slower_freq': number of slower frequency series
+            - 'tent_weights_dict': tent weights dictionary
+            - 'frequencies': frequency array
+            - 'idio_indicator': idiosyncratic indicator array
+            - 'idio_chain_lengths': idiosyncratic chain lengths
+            - 'opt_nan': missing data handling options
+            - 'clock': clock frequency
+        """
+        self._check_setup('get_initialization_params')
+        
+        return {
+            'X': self.data_processed,
+            'Mx': self.Mx,
+            'Wx': self.Wx,
+            'R_mat': self._constraint_matrix,
+            'q': self._constraint_vector,
+            'n_slower_freq': self._n_slower_freq,
+            'tent_weights_dict': self._tent_weights_dict,
+            'frequencies': self._frequencies,
+            'idio_indicator': self._idio_indicator,
+            'idio_chain_lengths': self._idio_chain_lengths,
+            'opt_nan': {'method': self.nan_method, 'k': self.nan_k},
+            'clock': get_clock_frequency(self.config)
+        }
     
     def get_std_params(self) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
-        """Get standardization parameters (Mx, Wx) if available."""
-        if self.data_processed is None:
-            raise RuntimeError(
-                "DataModule get_std_params failed: setup() must be called before get_std_params(). "
-                "Please call dm.setup() first to load and preprocess data."
-            )
+        """Get standardization parameters (Mx, Wx)."""
+        self._check_setup('get_std_params')
         return self.Mx, self.Wx
     
-    def get_pipeline(self) -> Any:
-        """Get the preprocessing pipeline used for statistics extraction."""
-        return self.pipeline
-    
-    def get_processed_data(self) -> torch.Tensor:
-        """Get processed data tensor."""
+    def get_processed_data(self) -> np.ndarray:
+        """Get processed data array."""
+        self._check_setup('get_processed_data')
         if self.data_processed is None:
-            raise RuntimeError(
-                "DataModule get_processed_data failed: setup() must be called before get_processed_data(). "
-                "Please call dm.setup() first to load and preprocess data."
-            )
+            raise RuntimeError("DataModule setup() must be called before get_processed_data()")
         return self.data_processed
 

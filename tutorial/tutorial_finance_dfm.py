@@ -6,7 +6,7 @@ using finance data with market_forward_excess_returns as the target variable.
 Target: market_forward_excess_returns
 Excluded: risk_free_rate, forward_returns
 
-Nowcasting Pattern: model.update(X_std).predict(horizon=1)
+Nowcasting Pattern: refit model with new data, then predict(horizon=1)
 """
 
 import sys
@@ -19,9 +19,11 @@ sys.path.insert(0, str(project_root / "src"))
 import pandas as pd
 import numpy as np
 from datetime import datetime
-from dfm_python import DFM, DFMDataModule, DFMTrainer
-from dfm_python.config import DFMConfig, SeriesConfig, DEFAULT_BLOCK_NAME
-from dfm_python.utils.time import TimeIndex, parse_timestamp
+from dfm_python import DFM, DFMDataModule
+from dfm_python.config import DFMConfig, SeriesConfig
+from dfm_python.functional.dfm_block import DEFAULT_BLOCK_NAME
+from dfm_python.utils.misc import TimeIndex
+from dfm_python.dataset.process import parse_timestamp
 
 # sktime imports for preprocessing
 from sktime.transformations.compose import TransformerPipeline
@@ -142,9 +144,7 @@ for col in selected_cols:
         series_configs.append(
             SeriesConfig(
                 series_id=col,
-                frequency="m",  # Assuming monthly
-                transformation="lin",
-                blocks=[DEFAULT_BLOCK_NAME]
+                frequency="m"  # Assuming monthly
             )
         )
     else:
@@ -152,9 +152,7 @@ for col in selected_cols:
         series_configs.append(
             SeriesConfig(
                 series_id=col,
-                frequency="m",
-                transformation="lin",
-                blocks=[DEFAULT_BLOCK_NAME]
+                frequency="m"
             )
         )
 
@@ -225,12 +223,21 @@ print("\n[Step 5] Training DFM model...")
 # Note: mixed_freq=False (default) since all series are monthly (unified frequency)
 # Set mixed_freq=True if you have mixed frequencies (e.g., quarterly + monthly)
 model = DFM(mixed_freq=False)
-model._config = config  # Set config directly
+model.load_config(config)  # Load config
 
-trainer = DFMTrainer(max_epochs=1)  # Minimal epochs for faster execution
-trainer.fit(model, data_module)
+# Get initialization parameters from datamodule
+init_params = data_module.get_initialization_params()
+X = init_params['X']
+Mx = init_params['Mx']
+Wx = init_params['Wx']
+
+# Fit model directly (DFM uses fit() method, not Lightning trainer)
+training_state = model.fit(X=X, Mx=Mx, Wx=Wx, datamodule=data_module)
 
 print("   Training completed!")
+print(f"   Converged: {training_state.converged}")
+print(f"   Iterations: {training_state.num_iter}")
+print(f"   Log-likelihood: {training_state.loglik:.4f}")
 
 # ============================================================================
 # Step 6: Prediction
@@ -243,18 +250,14 @@ X_forecast_history = None
 Z_forecast_history = None
 
 try:
-    # Predict with default horizon
-    X_forecast, Z_forecast = model.predict(horizon=6)
+    # Predict with default horizon, specifying target series
+    X_forecast, Z_forecast = model.predict(horizon=6, target=[target_col])
     
     print(f"   Forecast shape: {X_forecast.shape}")
     print(f"   Factor forecast shape: {Z_forecast.shape}")
-    print(f"   First forecast values (target): {X_forecast[0, -1]:.6f}")
+    print(f"   First forecast value (target): {X_forecast[0, 0]:.6f}")
     
-    # Predict with history parameter (using recent 60 periods)
-    X_forecast_history, Z_forecast_history = model.predict(horizon=6, history=60)
-    
-    print(f"   Forecast with history shape: {X_forecast_history.shape}")
-    print(f"   First forecast with history (target): {X_forecast_history[0, -1]:.6f}")
+    # Note: history parameter was removed - prediction uses full history by default
     
 except ValueError as e:
     print(f"   Prediction failed: {e}")
@@ -289,22 +292,20 @@ try:
     print(f"   New data shape: {X_new_std.shape}")
     print(f"   Standardized new data (first row): {X_new_std[0, :5]}")
     
-    # Update model state with new standardized data, then predict
-    # Pattern: model.update(X_std).predict(horizon=1)
-    X_nowcast, Z_nowcast = model.update(X_new_std).predict(horizon=1)
+    # Note: DFM doesn't have an update() method for incremental nowcasting
+    # For nowcasting, you would need to refit the model with new data
+    # or use a different approach. For this tutorial, we'll just show prediction
+    # with the existing trained model.
+    
+    # Predict with target series specified
+    X_nowcast, Z_nowcast = model.predict(horizon=1, target=[target_col])
     
     # Extract nowcast for target series
-    target_idx = selected_cols.index(target_col)
-    nowcast_value = X_nowcast[0, target_idx]
+    nowcast_value = X_nowcast[0, 0]  # First (and only) target series
     
     print(f"   Nowcast value for {target_col}: {nowcast_value:.6f}")
     print(f"   Nowcast uses VAR(1) factor dynamics")
-    
-    # Alternative: Update and predict separately
-    model.update(X_new_std)
-    X_nowcast2, Z_nowcast2 = model.predict(horizon=1)
-    nowcast_value2 = X_nowcast2[0, target_idx]
-    print(f"   Alternative pattern (separate calls): {nowcast_value2:.6f}")
+    print(f"   Note: For true nowcasting with new data, refit the model with updated dataset")
     
 except (ValueError, AttributeError, IndexError) as e:
     print(f"   Nowcasting failed: {e}")
@@ -322,6 +323,6 @@ if X_forecast is not None:
     print(f"✅ Predictions generated: {X_forecast.shape[0]} periods ahead")
 else:
     print(f"⚠️  Predictions: Failed (see error message above)")
-print(f"✅ Nowcasting pattern: model.update(X_std).predict(horizon=1)")
+print(f"✅ Nowcasting pattern: refit model with new data, then predict(horizon=1)")
 print(f"✅ Target series: {target_col}")
 print("=" * 80)

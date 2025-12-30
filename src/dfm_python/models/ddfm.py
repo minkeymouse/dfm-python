@@ -12,7 +12,7 @@ DDFM is a PyTorch Lightning module that inherits from BaseFactorModel.
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union, Sequence
 
 # Third-party imports
 import numpy as np
@@ -27,29 +27,42 @@ from ..config import (
     MergedConfigSource,
     make_config_source,
 )
-from ..config.results import DDFMResult
-from ..config.utils import get_periods_per_year
+from ..config import DDFMResult
+from ..config.constants import DEFAULT_TORCH_DTYPE, DEFAULT_CLOCK_FREQUENCY
+from ..config import get_periods_per_year
 from ..encoder.autoencoder import Encoder, extract_decoder_params
 from ..decoder.linear import Decoder
 from ..decoder.mlp import MLPDecoder
 from ..logger import get_logger
-from ..utils.data import rem_nans_spline
-from ..utils.helpers import (
+from ..numeric.missing import rem_nans_spline
+from ..utils.misc import (
     get_clock_frequency,
 )
-from ..utils.statespace import (
+from ..numeric.estimator import (
     estimate_var1,
     estimate_var2,
 )
-from ..utils.time import (
+from ..utils.misc import (
     TimeIndex,
 )
 from .base import BaseFactorModel
-from .utils import (
-    estimate_var_ddfm,
-    validate_factors_ddfm,
-    validate_training_data_ddfm,
-    forecast_var_factors,
+from ..utils.errors import (
+    ModelNotTrainedError,
+    ModelNotInitializedError,
+    ConfigurationError,
+    DataError,
+    PredictionError,
+    NumericalError
+)
+from ..config.constants import (
+    MIN_EIGENVALUE,
+    MIN_FACTOR_VARIANCE,
+    DEFAULT_REGULARIZATION,
+    MAX_EIGENVALUE,
+    DEFAULT_MIN_OBS_VAR,
+    VAR_STABILITY_THRESHOLD,
+    DEFAULT_AR_COEF,
+    PERFECT_CORR_THRESHOLD,
 )
 
 if TYPE_CHECKING:
@@ -152,8 +165,8 @@ class DDFM(BaseFactorModel, pl.LightningModule):
         grad_clip_val: Optional[float] = None,
         decoder: str = "linear",
         decoder_layers: Optional[List[int]] = None,
-        **kwargs
-    ):
+        **kwargs: Any
+    ) -> None:
         """Initialize DDFM instance.
         
         Parameters
@@ -192,7 +205,6 @@ class DDFM(BaseFactorModel, pl.LightningModule):
             Minimum number of observations for pre-training without interpolation
         mult_epoch_pretrain : int, default 1
             Multiplier for number of epochs during pre-training
-            Display progress every 'disp' iterations
         loss_function : str, default 'mse'
             Loss function for training ('mse', 'huber'). 
             'mse': Mean squared error (default, matches original DDFM)
@@ -215,8 +227,20 @@ class DDFM(BaseFactorModel, pl.LightningModule):
             Default: [output_dim] (single hidden layer with same size as output).
         seed : int, optional
             Random seed for reproducibility
-        **kwargs
-            Additional arguments passed to BaseFactorModel
+        **kwargs : Any
+            Additional arguments passed to BaseFactorModel (for API consistency with KDFM/DFM)
+            
+        Returns
+        -------
+        None
+            Initializes DDFM instance in-place.
+            
+        Raises
+        ------
+        ConfigurationError
+            If config validation fails or required parameters are missing.
+        ValueError
+            If factor_order is not 1 or 2, or if invalid activation/decoder is specified.
         """
         BaseFactorModel.__init__(self)
         pl.LightningModule.__init__(self)
@@ -227,9 +251,9 @@ class DDFM(BaseFactorModel, pl.LightningModule):
         
         # Validate factor_order
         if factor_order not in [1, 2]:
-            raise ValueError(
-                f"DDFM initialization failed: factor_order must be 1 or 2, got {factor_order}. "
-                f"Maximum supported VAR order is VAR(2). Please provide factor_order=1 (VAR(1)) or factor_order=2 (VAR(2))"
+            raise ConfigurationError(
+                f"DDFM initialization failed: factor_order must be 1 or 2, got {factor_order}",
+                details="Maximum supported VAR order is VAR(2). Please provide factor_order=1 (VAR(1)) or factor_order=2 (VAR(2))"
             )
         
         # Import constants for defaults
@@ -247,33 +271,36 @@ class DDFM(BaseFactorModel, pl.LightningModule):
             DEFAULT_HUBER_DELTA, DEFAULT_WEIGHT_DECAY, DEFAULT_GRAD_CLIP_VAL
         )
         
-        self.learning_rate = learning_rate if learning_rate is not None else DEFAULT_DDFM_LEARNING_RATE
+        # Resolve parameters using consolidated helper
+        self.learning_rate = self._resolve_param(learning_rate, default=DEFAULT_DDFM_LEARNING_RATE)
         self.epochs_per_iter = epochs
-        self.batch_size = batch_size if batch_size is not None else DEFAULT_DDFM_BATCH_SIZE
+        self.batch_size = self._resolve_param(batch_size, default=DEFAULT_DDFM_BATCH_SIZE)
         self.factor_order = factor_order
         self.use_idiosyncratic = use_idiosyncratic
-        self.min_obs_idio = min_obs_idio if min_obs_idio is not None else DEFAULT_MIN_OBS_IDIO
-        self.max_iter = max_iter if max_iter is not None else DEFAULT_MAX_MCMC_ITER
-        self.tolerance = tolerance if tolerance is not None else DEFAULT_TOLERANCE
+        self.min_obs_idio = self._resolve_param(min_obs_idio, default=DEFAULT_MIN_OBS_IDIO)
+        self.max_iter = self._resolve_param(max_iter, default=DEFAULT_MAX_MCMC_ITER)
+        self.tolerance = self._resolve_param(tolerance, default=DEFAULT_TOLERANCE)
         self.disp = disp
         self.decay_learning_rate = decay_learning_rate
         self.min_obs_pretrain = min_obs_pretrain
         self.mult_epoch_pretrain = mult_epoch_pretrain
         self.loss_function = loss_function.lower()
-        self.huber_delta = huber_delta if huber_delta is not None else DEFAULT_HUBER_DELTA
-        self.weight_decay = weight_decay if weight_decay is not None else DEFAULT_WEIGHT_DECAY
-        self.grad_clip_val = grad_clip_val if grad_clip_val is not None else DEFAULT_GRAD_CLIP_VAL
+        self.huber_delta = self._resolve_param(huber_delta, default=DEFAULT_HUBER_DELTA)
+        self.weight_decay = self._resolve_param(weight_decay, default=DEFAULT_WEIGHT_DECAY)
+        self.grad_clip_val = self._resolve_param(grad_clip_val, default=DEFAULT_GRAD_CLIP_VAL)
         
         # Validate loss function
         if self.loss_function not in ['mse', 'huber']:
-            raise ValueError(
-                f"DDFM initialization failed: loss_function must be 'mse' or 'huber', got '{loss_function}'"
+            raise ConfigurationError(
+                f"DDFM initialization failed: loss_function must be 'mse' or 'huber', got '{loss_function}'",
+                details="Valid loss functions are 'mse' (mean squared error) or 'huber' (Huber loss)"
             )
         
         # Validate gradient clipping value
         if self.grad_clip_val < 0.0:
-            raise ValueError(
-                f"DDFM initialization failed: grad_clip_val must be >= 0.0, got {grad_clip_val}"
+            raise ConfigurationError(
+                f"DDFM initialization failed: grad_clip_val must be >= 0.0, got {grad_clip_val}",
+                details="Gradient clipping value must be non-negative (0.0 disables clipping)"
             )
         
         # Determine number of factors
@@ -305,7 +332,9 @@ class DDFM(BaseFactorModel, pl.LightningModule):
         self.mcmc_iteration: int = 0
         
         # Random number generator for MC sampling
-        self.rng = np.random.RandomState(seed if seed is not None else 3)
+        # Default seed for reproducibility (when not specified)
+        DEFAULT_SEED = 3
+        self.rng = np.random.RandomState(self._resolve_param(seed, default=DEFAULT_SEED))
     
     def setup(self, stage: Optional[str] = None) -> None:
         """Initialize encoder and decoder when data dimensions are known.
@@ -359,13 +388,9 @@ class DDFM(BaseFactorModel, pl.LightningModule):
                 use_batch_norm=self.use_batch_norm,
             )
         except (ValueError, RuntimeError, TypeError) as e:
-            raise RuntimeError(
-                f"DDFM encoder initialization failed: failed to initialize encoder: {type(e).__name__}: {str(e)}. "
-                f"Check encoder_layers={self.encoder_layers}, num_factors={self.num_factors}, "
-                f"input_dim={input_dim}. "
-                f"Suggestions: (1) Ensure input_dim > 0, (2) Reduce encoder_layers size if too large, "
-                f"(3) Ensure num_factors > 0 and num_factors <= input_dim, "
-                f"(4) Check that encoder_layers values are positive integers"
+            raise ModelNotInitializedError(
+                f"DDFM encoder initialization failed: failed to initialize encoder: {type(e).__name__}: {str(e)}",
+                details=f"Check encoder_layers={self.encoder_layers}, num_factors={self.num_factors}, input_dim={input_dim}. Suggestions: (1) Ensure input_dim > 0, (2) Reduce encoder_layers size if too large, (3) Ensure num_factors > 0 and num_factors <= input_dim, (4) Check that encoder_layers values are positive integers"
             ) from e
         
         try:
@@ -391,21 +416,17 @@ class DDFM(BaseFactorModel, pl.LightningModule):
                 # For MLP, check the first layer
                 decoder_weight = self.decoder.layers[0].weight.data.cpu().numpy()
             else:
-                raise ValueError(
-                    f"DDFM decoder initialization failed: decoder must be 'linear' or 'mlp', got '{self.decoder_type}'"
+                raise ConfigurationError(
+                    f"DDFM decoder initialization failed: decoder must be 'linear' or 'mlp', got '{self.decoder_type}'",
+                    details="Valid decoder types are 'linear' (LinearDecoder) or 'mlp' (MLPDecoder)"
                 )
             
             # Validate decoder weights are not all zeros (initialization check)
             from ..config.constants import MIN_EIGENVALUE
             if np.allclose(decoder_weight, 0.0, atol=MIN_EIGENVALUE):
-                raise RuntimeError(
-                    f"DDFM decoder initialization failed: decoder weights are all zeros after initialization. "
-                    f"This indicates a problem with decoder initialization. "
-                    f"Check: (1) Decoder class implementation, (2) Weight initialization method, "
-                    f"(3) PyTorch version compatibility. "
-                    f"Decoder weight shape: {decoder_weight.shape}, "
-                    f"weight mean: {np.mean(decoder_weight):.6f}, "
-                    f"weight std: {np.std(decoder_weight):.6f}"
+                raise ModelNotInitializedError(
+                    f"DDFM decoder initialization failed: decoder weights are all zeros after initialization",
+                    details=f"This indicates a problem with decoder initialization. Check: (1) Decoder class implementation, (2) Weight initialization method, (3) PyTorch version compatibility. Decoder weight shape: {decoder_weight.shape}, weight mean: {np.mean(decoder_weight):.6f}, weight std: {np.std(decoder_weight):.6f}"
                 )
             
             # Log decoder initialization statistics
@@ -418,18 +439,17 @@ class DDFM(BaseFactorModel, pl.LightningModule):
                 f"nonzero={decoder_weight_nonzero}/{decoder_weight.size}"
             )
         except (ValueError, RuntimeError, TypeError) as e:
-            raise RuntimeError(
-                f"DDFM decoder initialization failed: failed to initialize decoder: {type(e).__name__}: {str(e)}. "
-                f"Check num_factors={self.num_factors}, input_dim={input_dim}. "
-                f"Suggestions: (1) Ensure num_factors > 0, (2) Ensure input_dim > 0, "
-                f"(3) Check that num_factors <= input_dim"
+            raise ModelNotInitializedError(
+                f"DDFM decoder initialization failed: failed to initialize decoder: {type(e).__name__}: {str(e)}",
+                details=f"Check num_factors={self.num_factors}, input_dim={input_dim}. Suggestions: (1) Ensure num_factors > 0, (2) Ensure input_dim > 0, (3) Check that num_factors <= input_dim"
             ) from e
     
     def _check_networks_initialized(self):
         """Check if encoder and decoder are initialized."""
         if self.encoder is None or self.decoder is None:
-            raise RuntimeError(
-                f"{self.__class__.__name__}: encoder and decoder must be initialized. "
+            raise ModelNotInitializedError(
+                f"{self.__class__.__name__}: encoder and decoder must be initialized",
+                details="Please call _initialize_encoder_decoder() before using the model"
                 f"Ensure setup() or on_train_start() has been called."
             )
     
@@ -484,7 +504,7 @@ class DDFM(BaseFactorModel, pl.LightningModule):
         """
         # Handle both tuple and single tensor batches
         # DataLoader may return tuple, list, or single tensor
-        if isinstance(batch, (tuple, list)) and len(batch) == 2:
+        if isinstance(batch, Sequence) and not isinstance(batch, str) and len(batch) == 2:
             data, target = batch
         elif isinstance(batch, (tuple, list)) and len(batch) == 1:
             data = batch[0]
@@ -512,11 +532,19 @@ class DDFM(BaseFactorModel, pl.LightningModule):
         if not torch.all(torch.isfinite(reconstructed)):
             nan_count = torch.sum(torch.isnan(reconstructed)).item()
             inf_count = torch.sum(torch.isinf(reconstructed)).item()
-            _logger.error(f"DDFM training_step: Forward pass produced {nan_count} NaN and {inf_count} Inf values")
-            from ..config.constants import MAX_EIGENVALUE
-            loss = torch.tensor(float(MAX_EIGENVALUE), device=data.device, dtype=data.dtype, requires_grad=True)
-            self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True)
-            return loss
+            error_msg = (
+                f"DDFM training_step failed: Forward pass produced {nan_count} NaN and {inf_count} Inf values. "
+                f"This indicates numerical instability. Possible causes: (1) Learning rate too high, "
+                f"(2) Gradient explosion, (3) Invalid input data, (4) Model architecture mismatch."
+            )
+            _logger.error(error_msg)
+            from ..utils.errors import NumericalError
+            raise NumericalError(
+                error_msg,
+                details=f"NaN count: {nan_count}, Inf count: {inf_count}. "
+                       f"Consider: (1) Reducing learning rate, (2) Adding gradient clipping, "
+                       f"(3) Checking input data for NaN/Inf, (4) Verifying encoder/decoder dimensions."
+            )
         
         # Compute loss with missing data masking
         mask = torch.isfinite(target)
@@ -543,9 +571,20 @@ class DDFM(BaseFactorModel, pl.LightningModule):
         
         # Handle NaN/Inf in loss
         if not torch.isfinite(loss):
-            _logger.error(f"DDFM training_step: Loss is NaN/Inf")
-            from ..config.constants import MAX_EIGENVALUE
-            loss = torch.tensor(float(MAX_EIGENVALUE), device=loss.device, dtype=loss.dtype, requires_grad=True)
+            error_msg = (
+                f"DDFM training_step failed: Loss is NaN/Inf. "
+                f"This indicates numerical instability in the loss computation. "
+                f"Possible causes: (1) Division by zero in loss calculation, "
+                f"(2) Invalid target values, (3) Model output contains extreme values."
+            )
+            _logger.error(error_msg)
+            from ..utils.errors import NumericalError
+            raise NumericalError(
+                error_msg,
+                details="Loss computation produced NaN/Inf. Check: (1) Target data for NaN/Inf, "
+                       f"(2) Model output values, (3) Loss function implementation. "
+                       f"Current loss value: {loss.item() if hasattr(loss, 'item') else loss}."
+            )
         
         # Log metrics
         self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True)
@@ -559,14 +598,32 @@ class DDFM(BaseFactorModel, pl.LightningModule):
     def _validate_factors(self, factors: np.ndarray, operation: str = "operation") -> np.ndarray:
         """Validate and normalize factors shape and content quality.
         
-        This method delegates to validate_factors_ddfm() utility function.
-        See utils.py for detailed documentation.
+        Inlined from validate_factors_ddfm() utility function.
         """
-        return validate_factors_ddfm(
-            factors=factors,
-            num_factors=self.num_factors,
-            operation=operation,
-        )
+        factors = np.asarray(factors)
+        if factors.ndim == 0 or factors.size == 0:
+            raise DataError(
+                f"DDFM {operation} failed: factors is empty or invalid (shape: {factors.shape})",
+                details="This indicates training did not complete properly"
+            )
+        if factors.ndim == 1:
+            factors = factors.reshape(-1, self.num_factors) if factors.size > 0 else factors.reshape(0, self.num_factors)
+        if factors.ndim != 2:
+            raise DataError(
+                f"DDFM {operation} failed: factors must be 2D array (T x m), got shape {factors.shape}",
+                details="Factors should be a 2D array with shape (T, m) where T is time steps and m is number of factors"
+            )
+        
+        T, m = factors.shape
+        
+        if not np.all(np.isfinite(factors)):
+            nan_count = np.sum(~np.isfinite(factors))
+            raise NumericalError(
+                f"DDFM {operation} failed: factors contain {nan_count} NaN/Inf values",
+                details="This indicates numerical issues during training. Check training convergence and data quality"
+            )
+        
+        return factors
     
     def _validate_training_data(
         self,
@@ -575,17 +632,65 @@ class DDFM(BaseFactorModel, pl.LightningModule):
     ) -> None:
         """Validate data dimensions and model configuration before training starts.
         
-        This method delegates to validate_training_data_ddfm() utility function.
-        See utils.py for detailed documentation.
+        Inlined from validate_training_data_ddfm() utility function.
         """
-        validate_training_data_ddfm(
-            X_torch=X_torch,
-            num_factors=self.num_factors,
-            factor_order=self.factor_order,
-            encoder_layers=self.encoder_layers,
-            encoder=self.encoder,
-            operation=operation,
-        )
+        if X_torch is None:
+            raise DataError(
+                f"DDFM {operation} failed: X_torch is None",
+                details="Please provide training data"
+            )
+        
+        if not isinstance(X_torch, torch.Tensor):
+            raise DataError(
+                f"DDFM {operation} failed: X_torch must be torch.Tensor, got {type(X_torch)}",
+                details="Training data must be a torch.Tensor. Convert numpy arrays using torch.from_numpy()"
+            )
+        
+        if X_torch.ndim != 2:
+            raise DataError(
+                f"DDFM {operation} failed: X_torch must be 2D (T x N), got shape {X_torch.shape}",
+                details="Training data must be 2D with shape (T, N) where T is time steps and N is number of series"
+            )
+        
+        T, N = X_torch.shape
+        
+        if T < 2:
+            raise DataError(
+                f"DDFM {operation} failed: Need at least 2 time periods, got T={T}",
+                details="DDFM requires at least 2 time periods for training"
+            )
+        
+        if N < 1:
+            raise DataError(
+                f"DDFM {operation} failed: Need at least 1 series, got N={N}",
+                details="DDFM requires at least 1 series (variable) in the data"
+            )
+        
+        if self.num_factors is None or self.num_factors < 1:
+            raise ConfigurationError(
+                f"DDFM {operation} failed: num_factors must be >= 1, got {self.num_factors}",
+                details="Number of factors must be a positive integer"
+            )
+        
+        if self.num_factors > N:
+            raise ConfigurationError(
+                f"DDFM {operation} failed: num_factors ({self.num_factors}) cannot exceed number of series (N={N})",
+                details="Number of factors cannot exceed the number of input series"
+            )
+        
+        if self.encoder_layers is not None and len(self.encoder_layers) > 0:
+            if self.encoder_layers[0] != N:
+                _logger.warning(
+                    f"DDFM {operation}: encoder_layers[0] ({self.encoder_layers[0]}) does not match input dimension (N={N}). "
+                    "Encoder will be reinitialized with correct input dimension."
+                )
+        
+        if self.encoder is not None:
+            if hasattr(self.encoder, 'input_dim') and self.encoder.input_dim != N:
+                raise ConfigurationError(
+                    f"DDFM {operation} failed: encoder.input_dim ({self.encoder.input_dim}) must match input dimension (N={N})",
+                    details="Encoder input dimension must match the number of series in the data"
+                )
     
     
     def _estimate_var(
@@ -595,14 +700,105 @@ class DDFM(BaseFactorModel, pl.LightningModule):
     ) -> Tuple[np.ndarray, np.ndarray]:
         """Estimate VAR dynamics with comprehensive error handling and fallback.
         
-        This method delegates to estimate_var_ddfm() utility function.
-        See utils.py for detailed documentation.
+        Estimates VAR(p) coefficients from factor time series using OLS regression.
+        Includes fallback to identity matrix if estimation fails.
+        
+        Parameters
+        ----------
+        factors : np.ndarray
+            Factor time series of shape (T, m) where T is time steps and m is number of factors
+        factor_order : int
+            VAR order (1 or 2). Higher orders not supported.
+            
+        Returns
+        -------
+        A_f : np.ndarray
+            VAR transition matrix of shape (m, m) for VAR(1) or (m, 2*m) for VAR(2)
+        Q_f : np.ndarray
+            Innovation covariance matrix of shape (m, m), positive definite
+            
+        Raises
+        ------
+        ConfigurationError
+            If factor_order > 2 (not supported)
+        NumericalError
+            If estimation produces invalid results (handled internally with fallback)
+            
+        Notes
+        -----
+        - Uses OLS regression to estimate VAR coefficients
+        - Ensures Q_f is positive definite with minimum eigenvalue >= MIN_EIGENVALUE
+        - Falls back to identity matrix with small regularization if estimation fails
+        - Inlined from estimate_var_ddfm() utility function for better integration
         """
-        return estimate_var_ddfm(
-            factors=factors,
-            factor_order=factor_order,
-            num_factors=self.num_factors,
-        )
+        factors = np.asarray(factors)
+        if factors.ndim == 0 or factors.size == 0 or factors.ndim < 2 or factors.shape[0] < 2 or factors.shape[1] == 0:
+            m = self.num_factors if self.num_factors else 1
+            return np.eye(m), np.eye(m) * DEFAULT_REGULARIZATION
+        
+        T, m = factors.shape
+        
+        min_obs_required = factor_order + DEFAULT_MIN_OBS_VAR - 2
+        if T < min_obs_required:
+            from ..config.constants import MIN_STD
+            factor_var = np.var(factors, axis=0)
+            factor_var = np.maximum(factor_var, MIN_STD ** 2)
+            if factor_order == 1:
+                A_f = np.eye(m) * DEFAULT_AR_COEF
+            else:
+                A_f = np.hstack([np.eye(m) * DEFAULT_AR_COEF, np.zeros((m, m))])
+            Q_f = np.diag(factor_var)
+            return A_f, Q_f
+        
+        if not np.all(np.isfinite(factors)):
+            factors = np.nan_to_num(factors, nan=0.0, posinf=MAX_EIGENVALUE, neginf=-MAX_EIGENVALUE)
+        
+        try:
+            if factor_order == 1:
+                A_f, Q_f = estimate_var1(factors)
+            elif factor_order == 2:
+                A_f, Q_f = estimate_var2(factors)
+            else:
+                raise ConfigurationError(
+                    f"DDFM VAR estimation failed: factor_order must be 1 or 2, got {factor_order}",
+                    details="Maximum supported VAR order is VAR(2). Use factor_order=1 (VAR(1)) or factor_order=2 (VAR(2))"
+                )
+            
+            if Q_f.ndim == 0:
+                factor_var = np.var(factors, axis=0)
+                factor_var = np.maximum(factor_var, MIN_EIGENVALUE)
+                Q_f = np.diag(factor_var)
+            elif Q_f.ndim != 2:
+                if Q_f.size == m ** 2:
+                    Q_f = Q_f.reshape(m, m)
+                else:
+                    factor_var = np.var(factors, axis=0)
+                    factor_var = np.maximum(factor_var, MIN_EIGENVALUE)
+                    Q_f = np.diag(factor_var)
+            
+            Q_sym = (Q_f + Q_f.T) / 2
+            eigenvals_Q = np.linalg.eigvalsh(Q_sym)
+            min_eigenval_Q = np.min(eigenvals_Q)
+            if min_eigenval_Q < MIN_EIGENVALUE:
+                Q_f = Q_sym + np.eye(m) * (MIN_EIGENVALUE - min_eigenval_Q)
+            else:
+                Q_f = Q_sym
+            
+            return A_f, Q_f
+        except (ValueError, np.linalg.LinAlgError) as e:
+            # Log warning but continue with fallback - this is acceptable for robustness
+            _logger.warning(
+                f"DDFM VAR({factor_order}) estimation failed: {e}. Using fallback initialization. "
+                f"This may indicate insufficient data or numerical issues, but model will continue with identity matrix."
+            )
+            factor_var = np.var(factors, axis=0)
+            factor_var = np.maximum(factor_var, MIN_EIGENVALUE)
+            if factor_order == 1:
+                A_f = np.eye(m) * DEFAULT_AR_COEF
+            else:
+                A_f = np.hstack([np.eye(m) * DEFAULT_AR_COEF, np.zeros((m, m))])
+            Q_f = np.diag(factor_var)
+            return A_f, Q_f
     
     def configure_optimizers(self) -> Union[List[torch.optim.Optimizer], Dict[str, Any]]:
         """Configure optimizer and learning rate scheduler for autoencoder training.
@@ -771,8 +967,8 @@ class DDFM(BaseFactorModel, pl.LightningModule):
         oupt_pre_train = inpt_pre_train.copy()
         
         # Convert to torch tensors and ensure they're on the correct device
-        inpt_tensor = torch.tensor(inpt_pre_train, device=device, dtype=torch.float32)
-        oupt_tensor = torch.tensor(oupt_pre_train, device=device, dtype=torch.float32)
+        inpt_tensor = torch.tensor(inpt_pre_train, device=device, dtype=DEFAULT_TORCH_DTYPE)
+        oupt_tensor = torch.tensor(oupt_pre_train, device=device, dtype=DEFAULT_TORCH_DTYPE)
         
         # Ensure encoder and decoder are on the same device
         self.encoder = self.encoder.to(device)
@@ -939,9 +1135,9 @@ class DDFM(BaseFactorModel, pl.LightningModule):
             Estimation results with parameters, factors, and diagnostics
         """
         if self.training_state is None:
-            raise RuntimeError(
-                f"{self.__class__.__name__} get_result failed: model has not been fitted yet. "
-                f"Call fit_mcmc() first."
+            raise ModelNotTrainedError(
+                f"{self.__class__.__name__} get_result failed: model has not been fitted yet",
+                details="Please call fit_mcmc() first"
             )
         
         self._check_networks_initialized()
@@ -966,15 +1162,20 @@ class DDFM(BaseFactorModel, pl.LightningModule):
         if np.any(np.isnan(C)):
             nan_count = np.sum(np.isnan(C))
             nan_ratio = nan_count / C.size
-            _logger.error(
-                f"DDFM get_result: C matrix contains {nan_count}/{C.size} NaN values ({nan_ratio:.1%}) "
+            error_msg = (
+                f"DDFM get_result failed: C matrix contains {nan_count}/{C.size} NaN values ({nan_ratio:.1%}) "
                 f"after extraction. This indicates severe numerical instability. "
-                f"The model cannot be used for prediction. Consider: (1) reducing learning rate, "
-                f"(2) adding gradient clipping, (3) checking data quality, (4) reducing model complexity."
+                f"The model cannot be used for prediction."
             )
-            # Replace NaN with zeros as last resort (model will not work correctly)
-            C = np.nan_to_num(C, nan=0.0)
-            _logger.warning("Replaced NaN values in C matrix with zeros (model may not work correctly).")
+            from ..utils.errors import NumericalError
+            raise NumericalError(
+                error_msg,
+                details=(
+                    f"NaN count: {nan_count}, NaN ratio: {nan_ratio:.1%}. "
+                    f"Consider: (1) reducing learning rate, (2) adding gradient clipping, "
+                    f"(3) checking data quality, (4) reducing model complexity, (5) checking encoder/decoder initialization."
+                )
+            )
         
         # Get factors and prediction
         factors = self.training_state.factors  # T x num_factors
@@ -1030,8 +1231,9 @@ class DDFM(BaseFactorModel, pl.LightningModule):
         n_series = C.shape[0]
         
         # Initialize with defaults (already standardized: Mx=0, Wx=1)
-        Mx_clean = np.zeros(n_series)
-        Wx_clean = np.ones(n_series)
+        # Use consolidated helper for consistency
+        from ..config.constants import DEFAULT_DTYPE
+        Mx_clean, Wx_clean = self._clean_mx_wx(None, None, n_series, dtype=DEFAULT_DTYPE)
         
         # If target_scaler is available, extract Mx, Wx for target series only
         if self.target_scaler is not None:
@@ -1078,7 +1280,7 @@ class DDFM(BaseFactorModel, pl.LightningModule):
             converged=self.training_state.converged,
             num_iter=self.training_state.num_iter,
             loglik=None,  # DDFM doesn't compute loglik in same way
-            series_ids=self.config.get_series_ids() if hasattr(self.config, 'get_series_ids') else None,
+            series_ids=self.config.get_series_ids(),
             block_names=None,  # DDFM does not use block structure (DFM-specific)
             training_loss=self.training_state.training_loss,
             encoder_layers=self.encoder_layers,
@@ -1147,10 +1349,10 @@ class DDFM(BaseFactorModel, pl.LightningModule):
                     method=nan_method,
                     k=nan_k
                 )
-                x_clean_torch = torch.tensor(x_clean_np, dtype=torch.float32, device=X_torch.device)
+                x_clean_torch = torch.tensor(x_clean_np, dtype=DEFAULT_TORCH_DTYPE, device=X_torch.device)
             else:
                 # No NaN values - use data as-is
-                x_clean_torch = X_torch if isinstance(X_torch, torch.Tensor) else torch.tensor(X_torch, dtype=torch.float32, device=X_torch.device)
+                x_clean_torch = X_torch if isinstance(X_torch, torch.Tensor) else torch.tensor(X_torch, dtype=DEFAULT_TORCH_DTYPE, device=X_torch.device)
                 missing_mask = np.zeros(X_np.shape, dtype=bool)  # No missing data
             
             # Replace any remaining NaN/Inf with zeros (defensive check)
@@ -1266,7 +1468,10 @@ class DDFM(BaseFactorModel, pl.LightningModule):
         elif isinstance(data, torch.Tensor):
             return data.shape[1] if len(data.shape) > 1 else 1
         else:
-            raise ValueError(f"Unsupported data type: {type(data)}")
+            raise DataError(
+                f"Unsupported data type: {type(data)}",
+                details="Data must be pandas.DataFrame, numpy.ndarray, or torch.Tensor"
+            )
     
     @staticmethod
     def _infer_input_dim_from_checkpoint(state_dict: Dict[str, Any]) -> Optional[int]:
@@ -1432,9 +1637,9 @@ class DDFM(BaseFactorModel, pl.LightningModule):
             elif data is not None:
                 input_dim = cls._infer_input_dim_from_data(data, date_id_col)
             else:
-                raise ValueError(
-                    "Cannot determine input_dim. Please provide either 'data' or 'input_dim' parameter. "
-                    "input_dim is required to initialize encoder/decoder."
+                raise ConfigurationError(
+                    "Cannot determine input_dim. Please provide either 'data' or 'input_dim' parameter",
+                    details="input_dim is required to initialize encoder/decoder"
                 )
         
         # Infer model parameters from state_dict
@@ -1453,9 +1658,9 @@ class DDFM(BaseFactorModel, pl.LightningModule):
         # Initialize encoder/decoder if not already initialized
         if model.encoder is None or model.decoder is None:
             if input_dim is None:
-                raise ValueError(
-                    "Cannot initialize encoder/decoder: input_dim is required. "
-                    "Please provide either 'data' or 'input_dim' parameter."
+                raise ConfigurationError(
+                    "Cannot initialize encoder/decoder: input_dim is required",
+                    details="Please provide either 'data' or 'input_dim' parameter"
                 )
             model.initialize_networks(input_dim)
             # Reload state dict to get encoder/decoder weights
@@ -1467,7 +1672,6 @@ class DDFM(BaseFactorModel, pl.LightningModule):
         self,
         horizon: Optional[int] = None,
         *,
-        history: Optional[int] = None,
         return_series: bool = True,
         return_factors: bool = True,
         target: Optional[List[str]] = None
@@ -1482,11 +1686,6 @@ class DDFM(BaseFactorModel, pl.LightningModule):
         horizon : int, optional
             Number of periods ahead to forecast. If None, defaults to 1 year
             of periods based on clock frequency.
-        history : int, optional
-            Number of historical periods to use for Kalman filter update before prediction.
-            If None, uses full history (default). If specified (e.g., 60), uses only the most
-            recent N periods for efficiency. Initial state (Z_0, V_0) is always estimated from
-            full history (including any new data beyond training period).
         return_series : bool, optional
             Whether to return forecasted series (default: True)
         return_factors : bool, optional
@@ -1509,18 +1708,13 @@ class DDFM(BaseFactorModel, pl.LightningModule):
             
         Notes
         -----
-        When history is specified, the method uses only the most recent N periods for
-        Kalman filter update, improving computational efficiency. The initial state
-        (Z_0, V_0) is always estimated from full history (including any new data beyond
-        training period), ensuring accuracy while maintaining efficiency.
-        
         When target is specified, only the target series are unstandardized and returned.
         Feature series are not unstandardized (no inverse transform needed).
         """
         if self.training_state is None:
-            raise ValueError(
-                f"DDFM prediction failed: model has not been trained yet. "
-                f"Please call trainer.fit(model, data_module) first"
+            raise ModelNotTrainedError(
+                f"DDFM prediction failed: model has not been trained yet",
+                details="Please call trainer.fit(model, data_module) first"
             )
         
         # Convert training state to result format for prediction
@@ -1528,24 +1722,21 @@ class DDFM(BaseFactorModel, pl.LightningModule):
             self._result = self.get_result()
         
         if self._result is None:
-            raise ValueError(
-                f"DDFM prediction failed: model has not been fitted yet. "
-                f"Please call trainer.fit(model, data_module) first"
+            raise ModelNotTrainedError(
+                f"DDFM prediction failed: model has not been fitted yet",
+                details="Please call trainer.fit(model, data_module) first"
             )
         
-        # Compute default horizon
+        # Compute default horizon using consolidated helper
         if horizon is None:
-            if self._config is not None:
-                from ..config.utils import get_periods_per_year
-                from ..utils.helpers import get_clock_frequency
-                clock = get_clock_frequency(self._config, 'm')
-                horizon = get_periods_per_year(clock)
-            else:
-                horizon = 12  # Default to 12 periods if no config
+            horizon = self._compute_default_horizon(default=12)
         
         # Validate horizon
         if horizon <= 0:
-            raise ValueError(f"horizon must be positive, got {horizon}")
+            raise PredictionError(
+                f"horizon must be positive, got {horizon}",
+                details="Forecast horizon must be a positive integer"
+            )
         
         # Extract parameters
         A = self._result.A  # Factor dynamics (m x m) for VAR(1) or (m x 2m) for VAR(2)
@@ -1554,70 +1745,23 @@ class DDFM(BaseFactorModel, pl.LightningModule):
         Mx = self._result.Mx
         p = self._result.p  # VAR order
         
-        # Update factor state with history if specified
-        if history is not None and history > 0:
-            Z_last_updated = self._update_factor_state_with_history(
-                history=history,
-                result=self._result,
-                kalman_filter=None  # Will be created in _update_factor_state_ddfm if needed
+        # Use training state for initial factor state
+        Z_last = self._result.Z[-1, :]
+        
+        # Resolve target series using consolidated helper
+        series_ids = self._config.get_series_ids() if self._config is not None else getattr(self._result, 'series_ids', None)
+        target_series, target_indices = self._resolve_target_series(target, series_ids, self._result)
+        
+        if target_series is None or len(target_series) == 0:
+            raise PredictionError(
+                "DDFM prediction failed: target is None but no target_series found in DataModule",
+                details="Please specify target=['series_id'] or ensure DataModule has target_series set"
             )
-            if Z_last_updated is not None:
-                Z_last = Z_last_updated
-            else:
-                # Fallback to training state if update failed
-                Z_last = self._result.Z[-1, :]
-        else:
-            # Use training state (default behavior)
-            Z_last = self._result.Z[-1, :]
         
-        # Determine target indices first (for optimization: only transform target series)
-        # If target is None, use target_series from DataModule (if available)
-        if target is None:
-            # Try to get target_series from DataModule
-            try:
-                data_module = self._get_datamodule()
-                target_series = getattr(data_module, 'target_series', None)
-                if target_series is not None and len(target_series) > 0:
-                    target = target_series
-            except (ValueError, AttributeError):
-                # DataModule not available or no target_series - raise error
-                target = None
-        
-        # Find target indices if target is specified
-        target_indices = None
-        if target is not None and len(target) > 0:
-            # Get series IDs from config
-            if self._config is not None:
-                series_ids = self._config.get_series_ids()
-            else:
-                # Fallback: try to get from result
-                series_ids = getattr(self._result, 'series_ids', None)
-                if series_ids is None:
-                    raise ValueError(
-                        "DDFM prediction failed: target specified but cannot determine series IDs. "
-                        "Please ensure config is loaded or result contains series_ids."
-                    )
-            
-            # Find target indices
-            target_indices = []
-            for tgt_id in target:
-                if tgt_id in series_ids:
-                    target_indices.append(series_ids.index(tgt_id))
-                else:
-                    _logger.warning(
-                        f"DDFM prediction: target series '{tgt_id}' not found in series_ids. "
-                        f"Available series: {series_ids}"
-                    )
-            
-            if len(target_indices) == 0:
-                raise ValueError(
-                    f"DDFM prediction failed: none of the specified target series found. "
-                    f"Target: {target}, Available: {series_ids}"
-                )
-        elif target is None:
-            raise ValueError(
-                "DDFM prediction failed: target is None but no target_series found in DataModule. "
-                "Please specify target=['series_id'] or ensure DataModule has target_series set."
+        if target_indices is None or len(target_indices) == 0:
+            raise DataError(
+                f"DDFM prediction failed: none of the specified target series found. "
+                f"Target: {target_series}, Available: {series_ids}"
             )
         
         # Forecast factors using VAR dynamics (common helper)
@@ -1645,105 +1789,34 @@ class DDFM(BaseFactorModel, pl.LightningModule):
             X_forecast.detach().cpu().numpy() if hasattr(X_forecast, "detach") else X_forecast
         )
         
+        # Validate forecast results are finite
+        if np.any(~np.isfinite(X_forecast)):
+            nan_count = np.sum(~np.isfinite(X_forecast))
+            from ..utils.errors import PredictionError
+            raise PredictionError(
+                f"DDFM prediction failed: produced {nan_count} NaN/Inf values in forecast",
+                details="Possible numerical instability. Check model parameters, training convergence, and data quality."
+            )
+        
+        # Validate factor forecast if returning factors
+        if return_factors:
+            Z_forecast_np = np.asarray(
+                Z_forecast.detach().cpu().numpy() if hasattr(Z_forecast, "detach") else Z_forecast
+            )
+            if np.any(~np.isfinite(Z_forecast_np)):
+                nan_count = np.sum(~np.isfinite(Z_forecast_np))
+                from ..utils.errors import NumericalError
+                raise NumericalError(
+                    f"DDFM prediction failed: produced {nan_count} NaN/Inf values in factor forecast",
+                    details="Possible numerical instability in factor dynamics. Please check model parameters and training convergence"
+                )
+            Z_forecast = Z_forecast_np
+        
         if return_series and return_factors:
             return X_forecast, Z_forecast
         if return_series:
             return X_forecast
         return Z_forecast
-    
-    def update(
-        self,
-        X_std: np.ndarray,
-        *,
-        history: Optional[int] = None,
-        kalman_filter: Optional[Any] = None,
-        scaler: Optional[Any] = None
-    ) -> 'DDFM':
-        """Update factor state with standardized data.
-        
-        This method permanently updates the last factor state (result.Z[-1, :])
-        using the provided standardized data. Users should handle all preprocessing
-        (masking, imputation, standardization) before calling this method.
-        
-        Parameters
-        ----------
-        X_std : np.ndarray
-            Standardized data array (T x N), where T is number of time periods
-            and N is number of series. Data should already be standardized using
-            result.Mx and result.Wx.
-        history : int, optional
-            Number of recent periods to use for factor state update. If None, uses
-            all provided data (default). If specified (e.g., 60), uses only the most
-            recent N periods. Initial state (Z_0, V_0) is always estimated from
-            full training data, but the update uses only recent history for efficiency.
-        kalman_filter : Any, optional
-            Kalman filter instance. If None, uses default or model's kalman filter.
-            
-        Returns
-        -------
-        DDFM
-            Self for method chaining
-            
-        Examples
-        --------
-        >>> # Update state with new data, then predict
-        >>> model.update(X_std).predict(horizon=1)
-        >>> # Or update with only recent 12 periods
-        >>> model.update(X_std, history=12)
-        >>> forecast = model.predict(horizon=6)
-        """
-        self._check_trained()
-        
-        # Optionally replace scaler (e.g., if refit on new regime)
-        if scaler is not None:
-            self.scaler = scaler
-        
-        result = self.result  # Use property which ensures non-None after _check_trained()
-        
-        # Validate input shape
-        if not isinstance(X_std, np.ndarray):
-            X_std = np.asarray(X_std)
-        if X_std.ndim != 2:
-            raise ValueError(
-                f"DDFM update(): X_std must be 2D array (T x N), "
-                f"got shape {X_std.shape}"
-            )
-        
-        # Handle NaN/Inf values
-        X_std = np.where(np.isfinite(X_std), X_std, np.nan)
-        
-        # Filter to recent history if specified
-        # Note: Initial state (Z_0, V_0) from result is estimated from full training data,
-        # but we use only recent history for the update step
-        if history is not None and history > 0:
-            if X_std.shape[0] > history:
-                X_recent = X_std[-history:, :]
-                _logger.debug(
-                    f"DDFM update(): Using {history} most recent periods out of {X_std.shape[0]} total periods"
-                )
-            else:
-                X_recent = X_std
-                _logger.debug(
-                    f"DDFM update(): history={history} specified but data has only {X_std.shape[0]} periods, using all data"
-                )
-        else:
-            X_recent = X_std
-        
-        # Update factor state using encoder to extract factors, then Kalman filter
-        Z_last_updated = self._update_factor_state_ddfm(
-            X_recent, result, kalman_filter
-        )
-        
-        # Update result.Z[-1, :] permanently
-        if Z_last_updated is not None:
-            result.Z[-1, :] = Z_last_updated
-        else:
-            _logger.warning(
-                f"DDFM update(): Failed to update factor state, "
-                f"keeping current state"
-            )
-            
-        return self
     
     @property
     def result(self) -> DDFMResult:

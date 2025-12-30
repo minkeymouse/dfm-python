@@ -1,0 +1,2 @@
+epoch,pred_loss_epoch,step,struct_loss_epoch,train_loss_epoch
+0,inf,0,0.06363443285226822,inf

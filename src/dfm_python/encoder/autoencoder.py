@@ -28,6 +28,7 @@ except ImportError:
 
 from .base import BaseEncoder
 from ..logger import get_logger
+from ..config.constants import DEFAULT_TORCH_DTYPE
 
 _logger = get_logger(__name__)
 
@@ -230,7 +231,7 @@ if _has_torch:
             
             # Convert to tensor if needed
             if isinstance(X, np.ndarray):
-                X = torch.tensor(X, dtype=torch.float32)
+                X = torch.tensor(X, dtype=DEFAULT_TORCH_DTYPE)
             
             # Handle different input shapes
             original_shape = X.shape

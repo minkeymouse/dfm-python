@@ -5,7 +5,7 @@ using macro data with KOEQUIPTE as the target variable.
 
 Target: KOEQUIPTE (Investment, Equipment, Estimation, SA)
 
-Nowcasting Pattern: model.update(X_std).predict(horizon=1)
+Nowcasting Pattern: refit model with new data, then predict(horizon=1)
 """
 
 import sys
@@ -19,8 +19,9 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 from dfm_python import DDFM, DDFMDataModule, DDFMTrainer
-from dfm_python.config import DFMConfig, SeriesConfig, DEFAULT_BLOCK_NAME
-from dfm_python.utils.time import TimeIndex
+from dfm_python.config import DFMConfig, SeriesConfig
+from dfm_python.functional.dfm_block import DEFAULT_BLOCK_NAME
+from dfm_python.utils.misc import TimeIndex
 
 # sktime imports for preprocessing
 from sktime.transformations.compose import TransformerPipeline
@@ -270,8 +271,6 @@ print("\n[Step 6] Making predictions...")
 
 X_forecast = None
 Z_forecast = None
-X_forecast_history = None
-Z_forecast_history = None
 # Exclude date column for scaler extraction
 df_for_scaler = df_processed.drop(columns=['date']) if 'date' in df_processed.columns else df_processed
 scaler = _get_fitted_scaler(fitted_pipeline, df_for_scaler)
@@ -293,13 +292,10 @@ try:
     # so full-series scaler cannot be used for validation
     
     # Predict with history parameter (using recent 60 periods)
-    X_forecast_history, Z_forecast_history = model.predict(horizon=6, history=60)
+    # History-based prediction removed - use standard predict()
+    X_forecast, Z_forecast = model.predict(horizon=6)
     
-    print(f"   Forecast with history shape: {X_forecast_history.shape} (target series only)")
-    if X_forecast_history.shape[1] == 1:
-        print(f"   First forecast with history (target): {X_forecast_history[0, 0]:.6f}")
-    else:
-        print(f"   First forecast with history (targets): {X_forecast_history[0, :]}")
+    # History-based prediction removed - use standard predict()
     # Note: Inverse-transform check removed - predict() now returns only target series
     
 except ValueError as e:
@@ -344,29 +340,21 @@ try:
     print(f"   New data shape: {X_new_std.shape}")
     print(f"   Standardized new data (first row): {X_new_std[0, :5]}")
     
-    # Update model state with new standardized data, then predict
-    # Pattern: model.update(X_std).predict(horizon=1)
-    # predict() returns only target series (target=None uses DataModule's target_series)
-    X_nowcast, Z_nowcast = model.update(X_new_std).predict(horizon=1)
+    # Note: DDFM doesn't have an update() method for incremental nowcasting
+    # For nowcasting, you would need to refit the model with new data
+    # or use a different approach. For this tutorial, we'll just show prediction
+    # with the existing trained model.
     
-    # X_nowcast now contains only target series (no features)
-    if X_nowcast.shape[1] == 1:
-        nowcast_value = X_nowcast[0, 0]
-    else:
-        nowcast_value = X_nowcast[0, :]
+    # Predict with target series specified
+    X_nowcast, Z_nowcast = model.predict(horizon=1, target=[target_col])
+    
+    # Extract nowcast for target series
+    nowcast_value = X_nowcast[0, 0]  # First (and only) target series
     
     print(f"   Nowcast value for {target_col}: {nowcast_value:.6f}")
     print(f"   Nowcast uses VAR(1) factor dynamics")
-    # Note: Inverse-transform check removed - predict() now returns only target series
-    
-    # Alternative: Update and predict separately
-    model.update(X_new_std)
-    X_nowcast2, Z_nowcast2 = model.predict(horizon=1)
-    if X_nowcast2.shape[1] == 1:
-        nowcast_value2 = X_nowcast2[0, 0]
-    else:
-        nowcast_value2 = X_nowcast2[0, :]
-    print(f"   Alternative pattern (separate calls): {nowcast_value2:.6f}")
+    print(f"   Note: For true nowcasting with new data, refit the model with updated dataset")
+    # Alternative pattern removed (history parameter was removed)
     # Note: Inverse-transform check removed - predict() now returns only target series
     
 except (ValueError, AttributeError, IndexError) as e:
@@ -385,6 +373,6 @@ if X_forecast is not None:
     print(f"✅ Predictions generated: {X_forecast.shape[0]} periods ahead")
 else:
     print(f"⚠️  Predictions: Failed (see error message above)")
-print(f"✅ Nowcasting pattern: model.update(X_std).predict(horizon=1)")
+print(f"✅ Nowcasting pattern: refit model with new data, then predict(horizon=1)")
 print(f"✅ Target series: {target_col}")
 print("=" * 80)

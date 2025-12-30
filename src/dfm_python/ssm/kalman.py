@@ -2,23 +2,44 @@
 
 This module provides DFMKalmanFilter, a wrapper around pykalman for DFM models.
 All DFM-related Kalman filtering uses this class instead of PyTorch-based implementations.
+
+**Note**: This wrapper is used for the **E-step** (Kalman filter/smoother) only.
+We do NOT use pykalman's built-in `em()` method because it doesn't handle:
+- Block structure preservation
+- Mixed-frequency constraints (tent kernel aggregation)
+- Idiosyncratic component structure
+
+Instead, we use pykalman for E-step and implement custom M-step in `em.py`.
 """
 
-import numpy as np
 from typing import Tuple, Optional
+import numpy as np
 from pykalman import KalmanFilter as PyKalmanFilter
 from pykalman.standard import _filter, _smooth, _smooth_pair
 
 from ..logger import get_logger
+from ..utils.errors import ModelNotInitializedError
+from ..config.types import FloatArray
 
 _logger = get_logger(__name__)
 
 
 class DFMKalmanFilter:
-    """Kalman filter wrapper for DFM using pykalman.
+    """Kalman filter wrapper for DFM using pykalman (E-step only).
     
-    This class provides a clean interface to pykalman for DFM models,
-    handling parameter updates and providing filter/smooth operations.
+    This class provides a clean interface to pykalman for the **E-step** of EM algorithm.
+    It handles parameter updates and provides filter/smooth operations.
+    
+    **Why not use pykalman's `kf.em()` directly?**
+    
+    pykalman's built-in EM does unconstrained parameter updates that would:
+    1. Destroy block structure (factors organized in blocks)
+    2. Break mixed-frequency constraints (tent kernel aggregation for quarterly series)
+    3. Ignore idiosyncratic component structure
+    
+    **Our approach:**
+    - Use pykalman for E-step: `filter()`, `smooth()`, `filter_and_smooth()`
+    - Use custom M-step: `em.py` implements constrained updates that preserve structure
     
     Parameters
     ----------
@@ -38,13 +59,13 @@ class DFMKalmanFilter:
     
     def __init__(
         self,
-        transition_matrices: Optional[np.ndarray] = None,
-        observation_matrices: Optional[np.ndarray] = None,
-        transition_covariance: Optional[np.ndarray] = None,
-        observation_covariance: Optional[np.ndarray] = None,
-        initial_state_mean: Optional[np.ndarray] = None,
-        initial_state_covariance: Optional[np.ndarray] = None
-    ):
+        transition_matrices: Optional[FloatArray] = None,
+        observation_matrices: Optional[FloatArray] = None,
+        transition_covariance: Optional[FloatArray] = None,
+        observation_covariance: Optional[FloatArray] = None,
+        initial_state_mean: Optional[FloatArray] = None,
+        initial_state_covariance: Optional[FloatArray] = None
+    ) -> None:
         self._pykalman = None
         if all(p is not None for p in [
             transition_matrices, observation_matrices,
@@ -62,12 +83,12 @@ class DFMKalmanFilter:
     
     def update_parameters(
         self,
-        transition_matrices: np.ndarray,
-        observation_matrices: np.ndarray,
-        transition_covariance: np.ndarray,
-        observation_covariance: np.ndarray,
-        initial_state_mean: np.ndarray,
-        initial_state_covariance: np.ndarray
+        transition_matrices: FloatArray,
+        observation_matrices: FloatArray,
+        transition_covariance: FloatArray,
+        observation_covariance: FloatArray,
+        initial_state_mean: FloatArray,
+        initial_state_covariance: FloatArray
     ) -> None:
         """Update filter parameters.
         
@@ -103,7 +124,7 @@ class DFMKalmanFilter:
             self._pykalman.initial_state_mean = initial_state_mean
             self._pykalman.initial_state_covariance = initial_state_covariance
     
-    def filter(self, observations: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    def filter(self, observations: FloatArray) -> Tuple[FloatArray, FloatArray]:
         """Run Kalman filter (forward pass).
         
         Parameters
@@ -119,11 +140,14 @@ class DFMKalmanFilter:
             Filtered state covariances (T x m x m)
         """
         if self._pykalman is None:
-            raise ValueError("DFMKalmanFilter: Parameters not initialized. Call update_parameters() first.")
+            raise ModelNotInitializedError(
+                "DFMKalmanFilter parameters not initialized. "
+                "Call update_parameters() first."
+            )
         
         return self._pykalman.filter(observations)
     
-    def smooth(self, observations: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    def smooth(self, observations: FloatArray) -> Tuple[FloatArray, FloatArray]:
         """Run Kalman smoother.
         
         Parameters
@@ -139,11 +163,14 @@ class DFMKalmanFilter:
             Smoothed state covariances (T x m x m)
         """
         if self._pykalman is None:
-            raise ValueError("DFMKalmanFilter: Parameters not initialized. Call update_parameters() first.")
+            raise ModelNotInitializedError(
+                "DFMKalmanFilter parameters not initialized. "
+                "Call update_parameters() first."
+            )
         
         return self._pykalman.smooth(observations)
     
-    def loglikelihood(self, observations: np.ndarray) -> float:
+    def loglikelihood(self, observations: FloatArray) -> float:
         """Compute log-likelihood of observations.
         
         Parameters
@@ -157,14 +184,17 @@ class DFMKalmanFilter:
             Log-likelihood value
         """
         if self._pykalman is None:
-            raise ValueError("DFMKalmanFilter: Parameters not initialized. Call update_parameters() first.")
+            raise ModelNotInitializedError(
+                "DFMKalmanFilter parameters not initialized. "
+                "Call update_parameters() first."
+            )
         
         return self._pykalman.loglikelihood(observations)
     
     def filter_and_smooth(
         self,
-        observations: np.ndarray
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+        observations: FloatArray
+    ) -> Tuple[FloatArray, FloatArray, FloatArray, float]:
         """Run filter and smooth, returning all necessary outputs for EM step.
         
         Parameters
@@ -184,7 +214,10 @@ class DFMKalmanFilter:
             Log-likelihood value
         """
         if self._pykalman is None:
-            raise ValueError("DFMKalmanFilter: Parameters not initialized. Call update_parameters() first.")
+            raise ModelNotInitializedError(
+                "DFMKalmanFilter parameters not initialized. "
+                "Call update_parameters() first."
+            )
         
         # Get filtered states first (needed for smoother)
         transition_offsets = getattr(self._pykalman, 'transition_offsets', None)

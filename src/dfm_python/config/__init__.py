@@ -5,10 +5,11 @@ This subpackage provides:
 - IO (ConfigSource, YamlSource, etc.) in adapter.py
 """
 
-from .base import (
-    BaseModelConfig, SeriesConfig, BaseResult,
-    DEFAULT_BLOCK_NAME,
+from .schema import (
+    BaseModelConfig, SeriesConfig, DFMConfig, DDFMConfig, KDFMConfig,
+    BaseResult, DFMResult, DDFMResult, KDFMResult, FitParams,
 )
+# DEFAULT_BLOCK_NAME is imported lazily where needed to avoid circular imports
 from .constants import (
     DEFAULT_CONVERGENCE_THRESHOLD,
     DEFAULT_TOLERANCE,
@@ -16,14 +17,11 @@ from .constants import (
     DEFAULT_MAX_EPOCHS,
     DEFAULT_LEARNING_RATE,
     DEFAULT_BATCH_SIZE,
+    DEFAULT_CLOCK_FREQUENCY,
     MIN_EIGENVALUE,
     MIN_STD,
 )
-from .schema import (
-    DFMConfig, DDFMConfig, KDFMConfig,
-)
-from .results import DFMResult, DDFMResult, KDFMResult, FitParams
-from .utils import validate_frequency, validate_transformation
+from .schema.model import validate_frequency, validate_transformation
 from .adapter import (
     ConfigSource,
     YamlSource,
@@ -31,24 +29,83 @@ from .adapter import (
     HydraSource,
     MergedConfigSource,
     make_config_source,
+    parse_series_list,
+    detect_config_type,
 )
-from .utils import (
-    FREQUENCY_HIERARCHY,
-    PERIODS_PER_YEAR,
-    get_periods_per_year,
-    get_annual_factor,
-    compute_idio_lengths,
-    get_tent_weights,
-    generate_tent_weights,
-    generate_R_mat,
-    get_agg_structure,
-    group_by_freq,
+# Re-export types for convenience
+from .types import (
+    ArrayLike,
+    FloatArray,
+    IntArray,
+    BoolArray,
+    OptionalArray,
+    OptionalTensor,
+    OptionalArrayLike,
+    FactorState,
+    ObservationState,
+    ForecastResult,
+    CoefficientMatrix,
+    CovarianceMatrix,
+    IRFArray,
+    CompanionMatrix,
+    SeriesID,
+    Frequency,
+    DatasetName,
+    ModelName,
+    Batch,
+    Loss,
+    Optimizer,
+    ResultDict,
+    ForecastDict,
+    MetricsDict,
+    IRFResultDict,
+    CheckpointDict,
+    ConfigDict,
+    Device,
+    Shape,
+    Shape2D,
+    Shape3D,
+    Shape4D,
+    ForecastHorizon,
+    IRFHorizon,
+    LagOrder,
+    NumFactors,
+    NumVars,
+    PathLike,
+    ValidationIssue,
+    ValidationResult,
+    ModelComponent,
+    Tensor,
+    is_numpy_array,
+    is_torch_tensor,
+    is_array_like,
+    get_array_shape,
+    to_numpy,
+    to_tensor,
 )
+# Import lazily to avoid circular dependencies
+try:
+    from ..numeric.builder import compute_idio_lengths
+except ImportError:
+    compute_idio_lengths = None
+
+try:
+    from ..numeric.tent import get_tent_weights, get_agg_structure, group_by_freq
+except ImportError:
+    get_tent_weights = None
+    get_agg_structure = None
+    group_by_freq = None
+from .constants import FREQUENCY_HIERARCHY, PERIODS_PER_YEAR
+
+# Simple utility function
+def get_periods_per_year(frequency: str) -> int:
+    """Get number of periods per year for a given frequency."""
+    return PERIODS_PER_YEAR.get(frequency, PERIODS_PER_YEAR.get(DEFAULT_CLOCK_FREQUENCY, 12))
 
 __all__ = [
     # Base classes (from base.py)
     'BaseModelConfig', 'SeriesConfig', 'BaseResult',
-    'DEFAULT_BLOCK_NAME',
+    # 'DEFAULT_BLOCK_NAME',  # Removed to avoid circular import - import directly from functional.dfm_block
     # Model-specific configs (from schema.py)
     'DFMConfig', 'DDFMConfig', 'KDFMConfig',
     # Parameter overrides
@@ -60,16 +117,63 @@ __all__ = [
     # IO
     'ConfigSource', 'YamlSource', 'DictSource',
     'HydraSource', 'MergedConfigSource', 'make_config_source',
+    'parse_series_list', 'detect_config_type',
     # Frequency and aggregation utilities
     'FREQUENCY_HIERARCHY',
     'PERIODS_PER_YEAR',
     'get_periods_per_year',
-    'get_annual_factor',
     'compute_idio_lengths',
     'get_tent_weights',
-    'generate_tent_weights',
-    'generate_R_mat',
     'get_agg_structure',
     'group_by_freq',
+    # Type definitions (from types.py)
+    'ArrayLike',
+    'FloatArray',
+    'IntArray',
+    'BoolArray',
+    'OptionalArray',
+    'OptionalTensor',
+    'OptionalArrayLike',
+    'FactorState',
+    'ObservationState',
+    'ForecastResult',
+    'CoefficientMatrix',
+    'CovarianceMatrix',
+    'IRFArray',
+    'CompanionMatrix',
+    'SeriesID',
+    'Frequency',
+    'DatasetName',
+    'ModelName',
+    'Batch',
+    'Loss',
+    'Optimizer',
+    'ResultDict',
+    'ForecastDict',
+    'MetricsDict',
+    'IRFResultDict',
+    'CheckpointDict',
+    'ConfigDict',
+    'Device',
+    'Shape',
+    'Shape2D',
+    'Shape3D',
+    'Shape4D',
+    'ForecastHorizon',
+    'IRFHorizon',
+    'LagOrder',
+    'NumFactors',
+    'NumVars',
+    'PathLike',
+    'ValidationIssue',
+    'ValidationResult',
+    'ModelComponent',
+    'Tensor',
+    'is_numpy_array',
+    'is_torch_tensor',
+    'is_array_like',
+    'get_array_shape',
+    'to_numpy',
+    'to_tensor',
 ]
 
