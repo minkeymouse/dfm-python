@@ -59,13 +59,13 @@ Example (Standard Lightning Pattern):
     >>> trainer_ddfm.fit(ddfm_model, dm_ddfm)
     >>> Xf, Zf = ddfm_model.predict(horizon=6)
     
-Note: DFMConfig and SeriesConfig are internal implementation details.
+Note: DFMConfig uses frequency dict to specify series (column names -> frequencies).
     Users should use Hydra YAML configuration files instead.
 
 For detailed documentation, see the README.md file and the tutorial notebooks/scripts.
 """
 
-__version__ = "0.5.5"
+__version__ = "0.5.3"
 
 # ============================================================================
 # PUBLIC API DEFINITION
@@ -75,7 +75,7 @@ __version__ = "0.5.5"
 # Internal reorganization should not break these imports.
 #
 # Public API categories:
-# 1. Configuration: DFMConfig, SeriesConfig, config sources
+# 1. Configuration: DFMConfig, config sources
 # 2. High-level API: DFM, DDFM, module-level convenience functions
 # 3. Core utilities: TimeIndex, diagnostics
 # 4. Models: BaseFactorModel, DDFM (low-level)
@@ -85,11 +85,11 @@ __version__ = "0.5.5"
 # Configuration (from config/ subpackage)
 from .config import (
     # DEFAULT_BLOCK_NAME,  # Removed to avoid circular import - import directly from functional.dfm_block
-    ConfigSource, YamlSource, HydraSource,
+    ConfigSource, YamlSource,
     make_config_source,
 )
 # Internal imports (internal use only)
-from .config import DFMConfig, SeriesConfig
+from .config import DFMConfig
 
 # Results
 from .config import DFMResult, DDFMResult, KDFMResult, BaseResult
@@ -123,7 +123,7 @@ __all__ = [
     # Model base and implementations
     'BaseFactorModel',
     # Config sources
-    'ConfigSource', 'YamlSource', 'HydraSource',
+    'ConfigSource', 'YamlSource',
     'make_config_source',
     # Low-level API (functional interface - advanced usage)
     'BaseResult', 'DFMResult', 'DDFMResult', 'KDFMResult', 'calculate_rmse',
