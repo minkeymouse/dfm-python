@@ -74,7 +74,14 @@ if _has_torch:
             elif activation == 'sigmoid':
                 self.activation = nn.Sigmoid()
             else:
-                raise ValueError(f"Unknown activation: {activation}")
+                from ..utils.errors import ConfigurationError
+                raise ConfigurationError(
+                    f"Unknown activation: {activation}",
+                    details=f"Supported activations: 'relu', 'tanh', 'sigmoid'. Got: {activation}"
+                )
+            
+            # Import constants once at the start of initialization
+            from ..config.constants import DEFAULT_XAVIER_GAIN, DEFAULT_OUTPUT_LAYER_GAIN, DEFAULT_ZERO_VALUE
             
             # Build hidden layers
             prev_dim = input_dim
@@ -84,9 +91,9 @@ if _has_torch:
                 if activation == 'relu':
                     nn.init.kaiming_normal_(layer.weight, mode='fan_in', nonlinearity='relu')
                 else:
-                    nn.init.xavier_normal_(layer.weight, gain=1.0)
+                    nn.init.xavier_normal_(layer.weight, gain=DEFAULT_XAVIER_GAIN)
                 if layer.bias is not None:
-                    nn.init.constant_(layer.bias, 0.0)
+                    nn.init.constant_(layer.bias, DEFAULT_ZERO_VALUE)
                 self.layers.append(layer)
                 if use_batch_norm:
                     self.batch_norms.append(nn.BatchNorm1d(hidden_dim))
@@ -94,9 +101,9 @@ if _has_torch:
             
             # Output layer (linear, no activation)
             self.output_layer = nn.Linear(prev_dim, output_dim, bias=use_bias)
-            nn.init.xavier_normal_(self.output_layer.weight, gain=0.1)  # Smaller gain for output
+            nn.init.xavier_normal_(self.output_layer.weight, gain=DEFAULT_OUTPUT_LAYER_GAIN)  # Smaller gain for output
             if self.output_layer.bias is not None:
-                nn.init.constant_(self.output_layer.bias, 0.0)
+                nn.init.constant_(self.output_layer.bias, DEFAULT_ZERO_VALUE)
         
         def forward(self, f: "torch.Tensor") -> "torch.Tensor":
             """Forward pass through MLP decoder.

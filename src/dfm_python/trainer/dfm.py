@@ -5,11 +5,10 @@ with sensible defaults for EM algorithm training.
 """
 
 import pytorch_lightning as pl
-from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
-from pytorch_lightning.loggers import CSVLogger
 from typing import Optional, Dict, Any, List, Union
 from ..logger import get_logger
 from ..config import DFMConfig, DDFMConfig
+from ..config.constants import DEFAULT_MAX_EPOCHS
 from . import (
     _create_base,
     _extract_train_params,
@@ -29,7 +28,7 @@ class DFMTrainer(pl.Trainer):
     workflows or for any gradient-based components.
     
     Default Values:
-        - max_epochs: 100 (EM iterations)
+        - max_epochs: 100 (EM iterations)  # DEFAULT_MAX_EPOCHS
         - enable_progress_bar: True
         - enable_model_summary: False (DFM modules are simple, usually not needed)
         - logger: True (uses CSVLogger, creates lightning_logs/dfm/ folder)
@@ -42,7 +41,7 @@ class DFMTrainer(pl.Trainer):
     
     Parameters
     ----------
-    max_epochs : int, default 100
+    max_epochs : int, default 100  # DEFAULT_MAX_EPOCHS
         Maximum number of EM iterations/epochs
     enable_progress_bar : bool, default True
         Whether to show progress bar during training
@@ -74,7 +73,7 @@ class DFMTrainer(pl.Trainer):
     
     def __init__(
             self,
-            max_epochs: int = 100,
+            max_epochs: int = DEFAULT_MAX_EPOCHS,
             enable_progress_bar: bool = True,
             enable_model_summary: bool = False,
             logger: Optional[Any] = True,

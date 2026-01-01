@@ -8,6 +8,7 @@ import numpy as np
 from typing import Tuple, Optional, Dict, Any, TYPE_CHECKING
 
 from ..logger import get_logger
+from ..utils.errors import DataValidationError
 
 if TYPE_CHECKING:
     from ..config.schema import DFMConfig
@@ -62,7 +63,10 @@ def generate_tent_weights(n_periods: int, tent_type: str = 'symmetric') -> np.nd
         weights = np.exp(-np.abs(np.arange(n_periods) - center) / (n_periods / 4))
         weights = weights / weights.sum() * n_periods  # Normalize
     else:
-        raise ValueError(f"Unknown tent_type: {tent_type}. Must be 'symmetric', 'linear', or 'exponential'")
+        raise DataValidationError(
+            f"Unknown tent_type: {tent_type}. Must be 'symmetric', 'linear', or 'exponential'",
+            details=f"Invalid tent_type: {tent_type}"
+        )
     
     return weights.astype(int)
 
@@ -116,6 +120,42 @@ def get_tent_weights(slower_freq: str, faster_freq: str) -> Optional[np.ndarray]
     return TENT_WEIGHTS_LOOKUP.get((slower_freq, faster_freq))
 
 
+def get_slower_freq_tent_weights(
+    slower_freq: str, 
+    clock: str, 
+    tent_kernel_size: int, 
+    dtype: type = np.float32
+) -> np.ndarray:
+    """Get tent weights for slower-frequency idiosyncratic chain structure.
+    
+    This function attempts to get tent weights from the lookup table, and if not
+    available, falls back to generating symmetric tent weights.
+    
+    Parameters
+    ----------
+    slower_freq : str
+        Slower frequency ('q', 'sa', 'a', etc.)
+    clock : str
+        Clock frequency ('m', 'q', etc.)
+    tent_kernel_size : int
+        Expected tent kernel size (used for fallback generation)
+    dtype : type, default np.float32
+        Data type for output array
+        
+    Returns
+    -------
+    np.ndarray
+        Tent weights array (e.g., [1, 2, 3, 2, 1] for quarterly-monthly)
+    """
+    tent_weights = get_tent_weights(slower_freq, clock)
+    if tent_weights is None:
+        # Fallback: generate symmetric tent weights
+        tent_weights = generate_tent_weights(tent_kernel_size, 'symmetric').astype(dtype)
+    else:
+        tent_weights = tent_weights.astype(dtype)
+    return tent_weights
+
+
 def get_agg_structure(
     config: 'DFMConfig', 
     clock: Optional[str] = None
@@ -131,7 +171,7 @@ def get_agg_structure(
     config : DFMConfig
         Model configuration containing series frequencies and structure
     clock : str, optional
-        Base frequency (global clock) for nowcasting, by default 'm' (monthly).
+        Base frequency (global clock) for latent factors, by default 'm' (monthly).
         All latent factors will evolve at this frequency.
         
     Returns
@@ -147,9 +187,9 @@ def get_agg_structure(
         - 'clock': str
             The clock frequency used
     """
-    # Get frequencies from config
-    frequencies_list = [s.frequency for s in config.series]
-    frequencies = set(frequencies_list)
+    # Get frequencies from config (new API: frequency dict)
+    frequencies_list = config.get_frequencies()
+    frequencies = set(frequencies_list) if frequencies_list else set()
     structures = {}
     tent_weights = {}
     n_periods_map = {}
@@ -234,10 +274,11 @@ def group_by_freq(
     
     # Validate: faster frequencies are not supported
     if len(faster_indices) > 0:
-        raise ValueError(
+        raise DataValidationError(
             f"Higher frequencies (daily, weekly) are not supported. "
             f"Found {len(faster_indices)} series with frequency faster than clock '{clock}'. "
-            f"Please use monthly, quarterly, semi-annual, or annual frequencies only."
+            f"Please use monthly, quarterly, semi-annual, or annual frequencies only.",
+            details=f"Faster indices: {faster_indices}, clock: {clock}"
         )
     
     # Convert lists to numpy arrays
@@ -248,6 +289,7 @@ __all__ = [
     'generate_tent_weights',
     'generate_R_mat',
     'get_tent_weights',
+    'get_slower_freq_tent_weights',
     'get_agg_structure',
     'group_by_freq',
 ]

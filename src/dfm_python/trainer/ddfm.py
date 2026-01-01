@@ -13,7 +13,11 @@ import numpy as np
 import torch
 
 from ..logger import get_logger
+from ..utils.common import ensure_numpy, sanitize_array
+from ..utils.errors import DataValidationError, NumericalError
 from ..config import DFMConfig, DDFMConfig
+from ..config.constants import DEFAULT_GRAD_CLIP_VAL, DEFAULT_CLIP_THRESHOLD, DEFAULT_ZERO_VALUE, DEFAULT_MIN_DELTA, DEFAULT_IDENTITY_SCALE, DEFAULT_EPSILON, MAX_EIGENVALUE, DEFAULT_MAX_EPOCHS, MIN_DDFM_DATASET_SIZE_WARNING, MIN_ITER_FOR_DELTA_COMPUTATION, MIN_EPS_SHAPE_FOR_IDIO, DEFAULT_IDIO_STD
+from ..numeric.stability import create_scaled_identity
 from ..numeric.estimator import estimate_idio_dynamics
 from . import (
     _create_base,
@@ -43,7 +47,7 @@ class DDFMTrainer(pl.Trainer):
         - accelerator: 'auto'
         - devices: 'auto'
         - precision: 32
-        - gradient_clip_val: 1.0 (default, for numerical stability)
+        - gradient_clip_val: DEFAULT_GRAD_CLIP_VAL (default, for numerical stability)
         - accumulate_grad_batches: 1
     
     These defaults are optimized for DDFM neural network training. The trainer
@@ -68,8 +72,8 @@ class DDFMTrainer(pl.Trainer):
         Device configuration
     precision : str or int, default 32
         Training precision (16, 32, 'bf16', etc.)
-    gradient_clip_val : float, optional, default 1.0
-        Gradient clipping value for numerical stability. Default 1.0 helps prevent
+    gradient_clip_val : float, optional, default DEFAULT_GRAD_CLIP_VAL
+        Gradient clipping value for numerical stability. Default DEFAULT_GRAD_CLIP_VAL helps prevent
         gradient explosion that can cause NaN values during training.
     accumulate_grad_batches : int, default 1
         Number of batches to accumulate gradients before optimizer step
@@ -83,13 +87,13 @@ class DDFMTrainer(pl.Trainer):
     >>> 
     >>> model = DDFM(encoder_layers=[64, 32], num_factors=2)
     >>> dm = DDFMDataModule(config_path='config.yaml', data=df)
-    >>> trainer = DDFMTrainer(max_epochs=100, enable_progress_bar=True)
+    >>> trainer = DDFMTrainer(max_epochs=100, enable_progress_bar=True)  # max_epochs=DEFAULT_MAX_EPOCHS
     >>> trainer.fit(model, dm)
     """
     
     def __init__(
             self,
-            max_epochs: int = 100,
+            max_epochs: int = DEFAULT_MAX_EPOCHS,
             enable_progress_bar: bool = True,
             enable_model_summary: bool = True,
             logger: Optional[Any] = True,
@@ -97,7 +101,7 @@ class DDFMTrainer(pl.Trainer):
             accelerator: str = 'auto',
             devices: Any = 'auto',
             precision: Any = 32,
-            gradient_clip_val: Optional[float] = 1.0,  # Default: 1.0 for numerical stability
+            gradient_clip_val: Optional[float] = DEFAULT_GRAD_CLIP_VAL,  # Default: DEFAULT_GRAD_CLIP_VAL for numerical stability
             accumulate_grad_batches: int = 1,
             **kwargs
     ):
@@ -122,7 +126,7 @@ class DDFMTrainer(pl.Trainer):
             devices=devices,
             precision=precision,
             early_stopping_patience=20,  # More patience for neural network training
-            early_stopping_min_delta=1e-6,  # Minimum change for improvement
+            early_stopping_min_delta=DEFAULT_MIN_DELTA,  # Minimum change for improvement
             early_stopping_monitor='train_loss',  # DDFM uses 'train_loss' metric
             logger_type='tensorboard',  # DDFM uses TensorBoard logger
             logger_name='ddfm',
@@ -297,18 +301,20 @@ class DDFMDenoisingTrainer:
         
         # Validate shape consistency between X, x_clean, and missing_mask
         if x_clean.shape != X.shape:
-            raise ValueError(
+            raise DataValidationError(
                 f"{self.model.__class__.__name__} fit_mcmc failed: shape mismatch between X ({X.shape}) and x_clean ({x_clean.shape}). "
                 f"Both X and x_clean must have the same shape (T x N). "
                 f"This indicates data preprocessing inconsistency. "
-                f"Please ensure x_clean is created from the same data as X."
+                f"Please ensure x_clean is created from the same data as X.",
+                details="X and x_clean must have identical shapes (T x N) for denoising training"
             )
         if missing_mask.shape != (T, N):
-            raise ValueError(
+            raise DataValidationError(
                 f"{self.model.__class__.__name__} fit_mcmc failed: shape mismatch between X ({X.shape}) and missing_mask ({missing_mask.shape}). "
                 f"missing_mask must have shape (T x N) matching X. "
                 f"This indicates missing_mask was created from data with different shape. "
-                f"Please ensure missing_mask is created from the same data passed as X parameter."
+                f"Please ensure missing_mask is created from the same data passed as X parameter.",
+                details="missing_mask must have shape (T x N) matching X for denoising training"
             )
         
         # Use instance attributes if not provided
@@ -328,8 +334,8 @@ class DDFMDenoisingTrainer:
         rng = np.random.RandomState(seed if seed is not None else (self.model.rng.randint(0, 2**31) if hasattr(self.model.rng, 'randint') else 3))
         
         # Convert to numpy for denoising procedure
-        x_standardized_np = X.cpu().numpy()
-        x_clean_np = x_clean.cpu().numpy()
+        x_standardized_np = ensure_numpy(X)
+        x_clean_np = ensure_numpy(x_clean)
         bool_no_miss = ~missing_mask
         
         # Initialize data structures
@@ -338,24 +344,23 @@ class DDFMDenoisingTrainer:
         z_actual = x_standardized_np.copy()  # Actual observations (target for training)
         
         # Initial prediction
-        from ..utils.misc import check_finite_array
-        from ..config.constants import MAX_EIGENVALUE
+        from ..utils.helper import validate_finite_array
         x_tensor = x_clean.to(device)
         self.model.encoder.eval()
         self.model.decoder.eval()
         with torch.no_grad():
-            factors_init = self.model.encoder(x_tensor).cpu().numpy()
+            factors_init = ensure_numpy(self.model.encoder(x_tensor))
             try:
-                factors_init = check_finite_array(factors_init, "initial factors", context="at iteration 0", fallback=None)
-            except ValueError:
-                factors_init = np.nan_to_num(factors_init, nan=0.0, posinf=MAX_EIGENVALUE, neginf=-MAX_EIGENVALUE)
+                factors_init = validate_finite_array(factors_init, "initial factors", context="at iteration 0", fallback=None)
+            except NumericalError:
+                factors_init = sanitize_array(factors_init)
             
             factors_tensor = torch.tensor(factors_init, device=device, dtype=dtype)
-            prediction_iter = self.model.decoder(factors_tensor).cpu().numpy()
+            prediction_iter = ensure_numpy(self.model.decoder(factors_tensor))
             try:
-                prediction_iter = check_finite_array(prediction_iter, "initial prediction", context="at iteration 0", fallback=None)
-            except ValueError:
-                prediction_iter = np.nan_to_num(prediction_iter, nan=0.0, posinf=MAX_EIGENVALUE, neginf=-MAX_EIGENVALUE)
+                prediction_iter = validate_finite_array(prediction_iter, "initial prediction", context="at iteration 0", fallback=None)
+            except NumericalError:
+                prediction_iter = sanitize_array(prediction_iter)
         
         # Initialize factors
         factors = factors_init.copy()
@@ -368,9 +373,9 @@ class DDFMDenoisingTrainer:
         # Initial residuals
         eps = data_mod_only_miss - prediction_iter
         try:
-            eps = check_finite_array(eps, "initial residuals", context="at iteration 0", fallback=None)
-        except ValueError:
-            eps = np.nan_to_num(eps, nan=0.0, posinf=MAX_EIGENVALUE, neginf=-MAX_EIGENVALUE)
+            eps = validate_finite_array(eps, "initial residuals", context="at iteration 0", fallback=None)
+        except NumericalError:
+            eps = sanitize_array(eps)
         
         # Denoising loop
         iter_count = 0
@@ -380,9 +385,9 @@ class DDFMDenoisingTrainer:
         loss_now = float('inf')
         
         # Check for very small dataset and warn about potential instability
-        if T < 10:
+        if T < MIN_DDFM_DATASET_SIZE_WARNING:
             _logger.warning(
-                f"{self.model.__class__.__name__} denoising training: very small dataset (T={T} < 10) may cause unstable sampling. "
+                f"{self.model.__class__.__name__} denoising training: very small dataset (T={T} < {MIN_DDFM_DATASET_SIZE_WARNING}) may cause unstable sampling. "
                 f"With only {T} time periods, encoder/decoder training per iteration may have high variance. "
                 f"Factor extraction and VAR estimation will use fallback strategies. Results may be less reliable. "
                 f"Monitor convergence carefully. Consider reducing num_factors or using smaller encoder_layers for better stability"
@@ -404,37 +409,42 @@ class DDFMDenoisingTrainer:
             if self.model.use_idiosyncratic:
                 A_eps, Q_eps = estimate_idio_dynamics(eps, missing_mask, self.model.min_obs_idio)
                 try:
-                    A_eps = check_finite_array(A_eps, f"idiosyncratic AR coefficients (A_eps)", context=f"at iteration {iter_count}", fallback=None)
-                except ValueError:
-                    A_eps = np.nan_to_num(A_eps, nan=0.0, posinf=MAX_EIGENVALUE, neginf=-MAX_EIGENVALUE)
+                    A_eps = validate_finite_array(A_eps, f"idiosyncratic AR coefficients (A_eps)", context=f"at iteration {iter_count}", fallback=None)
+                except NumericalError:
+                    A_eps = sanitize_array(A_eps)
                 try:
-                    Q_eps = check_finite_array(Q_eps, f"idiosyncratic innovation covariance (Q_eps)", context=f"at iteration {iter_count}", fallback=None)
-                except ValueError:
-                    Q_eps = np.nan_to_num(Q_eps, nan=0.0, posinf=MAX_EIGENVALUE, neginf=-MAX_EIGENVALUE)
+                    Q_eps = validate_finite_array(Q_eps, f"idiosyncratic innovation covariance (Q_eps)", context=f"at iteration {iter_count}", fallback=None)
+                except NumericalError:
+                    Q_eps = sanitize_array(Q_eps)
                 
                 # Convert to format expected by denoising procedure
-                phi = A_eps if A_eps.ndim == 2 else np.diag(A_eps) if A_eps.ndim == 1 else np.eye(N)
+                phi = A_eps if A_eps.ndim == 2 else np.diag(A_eps) if A_eps.ndim == 1 else create_scaled_identity(N, DEFAULT_IDENTITY_SCALE)
                 mu_eps = np.zeros(N)
                 if Q_eps.ndim == 2:
                     std_eps = np.sqrt(np.diag(Q_eps))
                 elif Q_eps.ndim == 1:
                     std_eps = np.sqrt(Q_eps)
                 else:
-                    std_eps = np.ones(N) * 0.1
+                    # Fallback: Use default idiosyncratic standard deviation when Q_eps has invalid dimensions
+                    # DEFAULT_IDIO_STD (0.1) represents an actual standard deviation value for the idiosyncratic component
+                    std_eps = np.ones(N) * DEFAULT_IDIO_STD
                 
                 # Ensure std_eps is finite and positive
-                std_eps = np.maximum(std_eps, 1e-8)
+                std_eps = np.maximum(std_eps, DEFAULT_EPSILON)
                 try:
-                    std_eps = check_finite_array(std_eps, f"idiosyncratic std (std_eps)", context=f"at iteration {iter_count}", fallback=None)
-                except ValueError:
-                    std_eps = np.nan_to_num(std_eps, nan=0.0, posinf=MAX_EIGENVALUE, neginf=-MAX_EIGENVALUE)
+                    std_eps = validate_finite_array(std_eps, f"idiosyncratic std (std_eps)", context=f"at iteration {iter_count}", fallback=None)
+                except NumericalError:
+                    std_eps = sanitize_array(std_eps)
             else:
+                # When use_idiosyncratic is False, set std_eps to numerical epsilon (not actual std)
+                # DEFAULT_EPSILON (1e-8) is a numerical stability constant, not a standard deviation value
+                # This ensures std_eps is positive for numerical stability, but the component is effectively disabled
                 phi = np.zeros((N, N))
                 mu_eps = np.zeros(N)
-                std_eps = np.ones(N) * 1e-8
+                std_eps = np.ones(N) * DEFAULT_EPSILON
             
             # Subtract conditional AR-idio mean from x
-            if self.model.use_idiosyncratic and eps.shape[0] > 1:
+            if self.model.use_idiosyncratic and eps.shape[0] > MIN_EPS_SHAPE_FOR_IDIO:
                 data_mod[1:] = data_mod_only_miss[1:] - eps[:-1, :] @ phi
                 data_mod[:1] = data_mod_only_miss[:1]
             else:
@@ -448,10 +458,10 @@ class DDFMDenoisingTrainer:
                         mu_eps, np.diag(std_eps), size=self.model.epochs_per_iter
                     )
                 try:
-                    eps_draws = check_finite_array(eps_draws, f"MC samples (eps_draws)", context=f"at iteration {iter_count}", fallback=None)
-                except ValueError:
-                    eps_draws = np.nan_to_num(eps_draws, nan=0.0, posinf=MAX_EIGENVALUE, neginf=-MAX_EIGENVALUE)
-            except (ValueError, np.linalg.LinAlgError) as e:
+                    eps_draws = validate_finite_array(eps_draws, f"MC samples (eps_draws)", context=f"at iteration {iter_count}", fallback=None)
+                except NumericalError:
+                    eps_draws = sanitize_array(eps_draws)
+            except (ValueError, np.linalg.LinAlgError, NumericalError) as e:
                 _logger.warning(
                     f"{self.model.__class__.__name__} denoising iteration {iter_count}: failed to generate MC samples: {e}. "
                     f"Using zero samples as fallback"
@@ -488,10 +498,10 @@ class DDFMDenoisingTrainer:
                     target_clean = torch.where(torch.isnan(batch_target), torch.zeros_like(batch_target), batch_target)
                     reconstructed_masked = reconstructed * mask
                     squared_diff = (target_clean - reconstructed_masked) ** 2
-                    loss = torch.sum(squared_diff) / (torch.sum(mask) + 1e-8)
+                    loss = torch.sum(squared_diff) / (torch.sum(mask) + DEFAULT_EPSILON)
                     loss.backward()
                     # Gradient clipping to prevent NaN and improve stability
-                    if self.model.grad_clip_val > 0.0:
+                    if self.model.grad_clip_val > DEFAULT_ZERO_VALUE:
                         torch.nn.utils.clip_grad_norm_(
                             list(self.model.encoder.parameters()) + list(self.model.decoder.parameters()),
                             max_norm=self.model.grad_clip_val
@@ -501,33 +511,33 @@ class DDFMDenoisingTrainer:
                 x_sample_tensor = torch.tensor(x_sim_den[i, :, :], device=device, dtype=dtype)
                 self.model.encoder.eval()
                 with torch.no_grad():
-                    factors_sample = self.model.encoder(x_sample_tensor).cpu().numpy()
+                    factors_sample = ensure_numpy(self.model.encoder(x_sample_tensor))
                     try:
-                        factors_sample = check_finite_array(
+                        factors_sample = validate_finite_array(
                             factors_sample, 
                             f"factor sample {i+1}/{self.model.epochs_per_iter}", 
                             context=f"at iteration {iter_count}",
                             fallback=None
                         )
-                    except ValueError:
-                        factors_sample = np.nan_to_num(factors_sample, nan=0.0, posinf=MAX_EIGENVALUE, neginf=-MAX_EIGENVALUE)
+                    except NumericalError:
+                        factors_sample = sanitize_array(factors_sample)
                 factors_samples.append(factors_sample)
             
             # Update factors: average over all MC samples
             factors = np.mean(np.array(factors_samples), axis=0)  # T x num_factors
             try:
-                factors = check_finite_array(factors, "averaged factors", context=f"at iteration {iter_count}", fallback=factors_init)
-            except ValueError:
+                factors = validate_finite_array(factors, "averaged factors", context=f"at iteration {iter_count}", fallback=factors_init)
+            except NumericalError:
                 if factors_init is not None:
                     factors = factors_init.copy()
                 else:
-                    factors = np.nan_to_num(factors, nan=0.0, posinf=MAX_EIGENVALUE, neginf=-MAX_EIGENVALUE)
+                    factors = sanitize_array(factors)
             
             # Clip extreme factor values to prevent numerical instability
-            clip_threshold = 10.0
+            clip_threshold = DEFAULT_CLIP_THRESHOLD
             factor_mean = np.mean(factors, axis=0)
             factor_std = np.std(factors, axis=0)
-            factor_std = np.maximum(factor_std, 1e-8)
+            factor_std = np.maximum(factor_std, DEFAULT_EPSILON)
             
             clipped_count = 0
             for i in range(factors.shape[1]):
@@ -537,7 +547,7 @@ class DDFMDenoisingTrainer:
                 factors[:, i] = np.clip(factors[:, i], lower_bound, upper_bound)
                 clipped_count += np.sum((before_clip != factors[:, i]))
             
-            if clipped_count > 0:
+            if clipped_count > DEFAULT_ZERO_VALUE:
                 _logger.warning(
                     f"{self.model.__class__.__name__} denoising iteration {iter_count}: clipped {clipped_count} extreme factor values (>{clip_threshold} std devs). "
                     f"This prevents numerical instability in encoder/decoder forward passes. "
@@ -548,21 +558,21 @@ class DDFMDenoisingTrainer:
             self.model.decoder.eval()
             with torch.no_grad():
                 factors_tensor = torch.tensor(factors, device=device, dtype=dtype)
-                prediction_iter = self.model.decoder(factors_tensor).cpu().numpy()
+                prediction_iter = ensure_numpy(self.model.decoder(factors_tensor))
                 try:
-                    prediction_iter = check_finite_array(
+                    prediction_iter = validate_finite_array(
                         prediction_iter, 
                         "prediction_iter", 
                         context=f"at iteration {iter_count}",
                         fallback=prediction_prev_iter if prediction_prev_iter is not None else prediction_iter
                     )
-                except ValueError:
+                except NumericalError:
                     if prediction_prev_iter is not None:
                         prediction_iter = prediction_prev_iter.copy()
                     else:
-                        prediction_iter = np.nan_to_num(prediction_iter, nan=0.0, posinf=MAX_EIGENVALUE, neginf=-MAX_EIGENVALUE)
+                        prediction_iter = sanitize_array(prediction_iter)
             
-            if iter_count > 1:
+            if iter_count > MIN_ITER_FOR_DELTA_COMPUTATION:
                 # Compute MSE on non-missing values
                 mask = ~np.isnan(data_mod_only_miss)
                 if np.sum(mask) > 0:
@@ -614,12 +624,12 @@ class DDFMDenoisingTrainer:
             # Update residuals
             eps = data_mod_only_miss - prediction_iter
             try:
-                eps = check_finite_array(eps, "residuals (eps)", context=f"at iteration {iter_count}", fallback=None)
-            except ValueError:
-                eps = np.nan_to_num(eps, nan=0.0, posinf=MAX_EIGENVALUE, neginf=-MAX_EIGENVALUE)
+                eps = validate_finite_array(eps, "residuals (eps)", context=f"at iteration {iter_count}", fallback=None)
+            except NumericalError:
+                eps = sanitize_array(eps)
         
         if not_converged:
-            delta_str = f"{delta:.6f}" if iter_count > 1 else "N/A"
+            delta_str = f"{delta:.6f}" if iter_count > MIN_ITER_FOR_DELTA_COMPUTATION else "N/A"
             _logger.warning(
                 f"{self.model.__class__.__name__} denoising training: convergence not achieved within {max_iter} iterations. "
                 f"Final delta: {delta_str}"

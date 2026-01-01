@@ -8,6 +8,10 @@ import numpy as np
 from typing import Tuple, Optional, Union, TYPE_CHECKING
 from .base import BaseEncoder
 from ..logger import get_logger
+from ..numeric.stability import create_scaled_identity
+from ..utils.common import ensure_numpy
+from ..utils.errors import ModelNotTrainedError
+from ..config.constants import DEFAULT_IDENTITY_SCALE
 
 if TYPE_CHECKING:
     import torch
@@ -42,13 +46,11 @@ def compute_principal_components(
         Eigenvectors (N x n_components)
     """
     # Convert to NumPy if needed
-    if hasattr(cov_matrix, 'cpu'):
-        cov_matrix = cov_matrix.cpu().numpy()
-    cov_matrix = np.asarray(cov_matrix)
+    cov_matrix = ensure_numpy(cov_matrix)
     
     if cov_matrix.size == 1:
-        eigenvector = np.array([[1.0]])
-        eigenvalue = cov_matrix[0, 0] if np.isfinite(cov_matrix[0, 0]) else 1.0
+        eigenvector = np.array([[DEFAULT_IDENTITY_SCALE]])
+        eigenvalue = cov_matrix[0, 0] if np.isfinite(cov_matrix[0, 0]) else DEFAULT_IDENTITY_SCALE
         return np.array([eigenvalue]), eigenvector
     
     n_series = cov_matrix.shape[0]
@@ -70,7 +72,7 @@ def compute_principal_components(
             _logger.warning(
                 f"PCA: Eigendecomposition failed, using identity matrix as fallback. Error: {type(e).__name__}"
             )
-        eigenvectors = np.eye(n_series)[:, :n_components]
+        eigenvectors = create_scaled_identity(n_series, DEFAULT_IDENTITY_SCALE)[:, :n_components]
         eigenvalues = np.ones(n_components)
         return eigenvalues, eigenvectors
 
@@ -139,15 +141,10 @@ class PCAEncoder(BaseEncoder):
                 cov_matrix, self.n_components, block_idx=self.block_idx
             )
             # Store as NumPy array
-            if hasattr(cov_matrix, 'cpu'):
-                self.cov_matrix = cov_matrix.cpu().numpy()
-            else:
-                self.cov_matrix = np.asarray(cov_matrix)
+            self.cov_matrix = ensure_numpy(cov_matrix)
         else:
             # Convert to NumPy if needed
-            if hasattr(X, 'cpu'):
-                X = X.cpu().numpy()
-            X = np.asarray(X)
+            X = ensure_numpy(X)
             
             # Center the data
             self.mean_ = np.mean(X, axis=0, keepdims=True)
@@ -200,12 +197,13 @@ class PCAEncoder(BaseEncoder):
             Extracted factors (T x n_components)
         """
         if self.eigenvectors is None:
-            raise RuntimeError("PCAEncoder must be fitted before encoding. Call fit() first.")
+            raise ModelNotTrainedError(
+                "PCAEncoder must be fitted before encoding. Call fit() first.",
+                details="The encoder has not been fitted with training data yet."
+            )
         
         # Convert to NumPy if needed
-        if hasattr(X, 'cpu'):
-            X = X.cpu().numpy()
-        X = np.asarray(X)
+        X = ensure_numpy(X)
         
         # Center the data
         if self.mean_ is not None:

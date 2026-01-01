@@ -9,6 +9,8 @@ from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint, Learning
 from pytorch_lightning.loggers import CSVLogger, TensorBoardLogger
 from typing import Optional, List, Any, Dict, Union, Tuple
 from ..logger import get_logger
+from ..utils.errors import ConfigurationError
+from ..config.constants import DEFAULT_MIN_DELTA, DEFAULT_MAX_EPOCHS
 
 _logger = get_logger(__name__)
 
@@ -19,17 +21,20 @@ _logger = get_logger(__name__)
 
 # DFM Trainer Defaults
 DFM_TRAINER_DEFAULTS = {
-    'max_epochs': 100,
+    'max_epochs': DEFAULT_MAX_EPOCHS,
     'enable_progress_bar': True,
     'enable_model_summary': False
 }
 
-# DDFM Trainer Defaults
+# DDFM/KDFM Trainer Defaults (shared for neural network models)
 DDFM_TRAINER_DEFAULTS = {
-    'max_epochs': 100,
+    'max_epochs': DEFAULT_MAX_EPOCHS,
     'enable_progress_bar': True,
     'enable_model_summary': True
 }
+
+# KDFM Trainer Defaults (same as DDFM, but kept for clarity)
+KDFM_TRAINER_DEFAULTS = DDFM_TRAINER_DEFAULTS
 
 
 # ============================================================================
@@ -52,7 +57,7 @@ def _setup_early_stopping(
     patience : int, default 10
         Number of epochs to wait before stopping (10 for DFM, 20 for DDFM)
     min_delta : float, optional
-        Minimum change to qualify as improvement (None for DFM, 1e-6 for DDFM)
+        Minimum change to qualify as improvement (None for DFM, DEFAULT_MIN_DELTA for DDFM)
     monitor : str, default 'train_loss'
         Metric to monitor for early stopping. Use 'loglik' for DFM, 'train_loss' for DDFM.
     mode : str, default 'min'
@@ -108,7 +113,7 @@ def _setup_logger(
         if logger_type == 'tensorboard':
             try:
                 return TensorBoardLogger(save_dir='lightning_logs', name=name)
-            except Exception:
+            except (ValueError, RuntimeError, AttributeError, OSError, ImportError):
                 _logger.warning(
                     "Trainer logger setup failed: TensorBoard not available, using CSVLogger. "
                     "Please install tensorboard if you need TensorBoard logging."
@@ -199,15 +204,15 @@ def _normalize_accel(accelerator: Any) -> str:
     --------
     >>> _normalize_accel('cpu')
     'cpu'
-    >>> _normalize_accelerator('CPU')
+    >>> _normalize_accel('CPU')
     'cpu'
-    >>> _normalize_accelerator('auto')
+    >>> _normalize_accel('auto')
     'auto'
     >>> # Handles Lightning-normalized values
-    >>> _normalize_accelerator('CPU')  # Lightning might store as uppercase
+    >>> _normalize_accel('CPU')  # Lightning might store as uppercase
     'cpu'
     >>> # Handles accelerator objects
-    >>> _normalize_accelerator(CPUAccelerator())  # Lightning accelerator object
+    >>> _normalize_accel(CPUAccelerator())  # Lightning accelerator object
     'cpu'
     """
     if accelerator is None:
@@ -270,13 +275,13 @@ def _normalize_prec(precision: Any) -> Union[str, int]:
     --------
     >>> _normalize_prec(32)
     32
-    >>> _normalize_precision('32')
+    >>> _normalize_prec('32')
     32
-    >>> _normalize_precision('32-true')  # Lightning might store as '32-true'
+    >>> _normalize_prec('32-true')  # Lightning might store as '32-true'
     32  # Extracts numeric part for simple comparison
-    >>> _normalize_precision('bf16')
+    >>> _normalize_prec('bf16')
     'bf16'
-    >>> _normalize_precision('16-mixed')
+    >>> _normalize_prec('16-mixed')
     '16-mixed'
     """
     if precision is None:
@@ -354,9 +359,9 @@ def _validate_device(
     --------
     >>> _validate_device('cpu', 1)
     ('cpu', 1)
-    >>> _validate_device_config('gpu', [0, 1])
+    >>> _validate_device('gpu', [0, 1])
     ('gpu', [0, 1])
-    >>> _validate_device_config('auto', 'auto')
+    >>> _validate_device('auto', 'auto')
     ('auto', 'auto')
     """
     # Normalize accelerator
@@ -415,9 +420,10 @@ def _validate_config(
         If config is not the expected type
     """
     if config is None:
-        raise ValueError(
+        raise ConfigurationError(
             f"{trainer_name}.from_config() requires a valid config object, "
-            f"but received None. Please provide a DFMConfig or DDFMConfig instance."
+            f"but received None. Please provide a DFMConfig or DDFMConfig instance.",
+            details="Config must be a valid DFMConfig or DDFMConfig instance, not None"
         )
     
     # Log warning if config doesn't have expected attributes
@@ -425,7 +431,7 @@ def _validate_config(
     if not hasattr(config, 'max_iter') and not hasattr(config, 'epochs') and not hasattr(config, 'ddfm_epochs'):
         _logger.warning(
             f"{trainer_name}.from_config() received config without max_iter/epochs attributes. "
-            f"Using default max_epochs=100. If this is unexpected, please check your config."
+            f"Using default max_epochs={DEFAULT_MAX_EPOCHS}. If this is unexpected, please check your config."
         )
 
 
@@ -446,7 +452,7 @@ def _extract_max_epochs(
     2. config.epochs (DDFM config attribute)
     3. config.ddfm_epochs (alternative DDFM config attribute)
     4. config.max_iter (DFM config attribute, only if use_max_iter=True)
-    5. defaults['max_epochs'] (default value, typically 100)
+    5. defaults['max_epochs'] (default value, DEFAULT_MAX_EPOCHS)
     
     Parameters
     ----------
@@ -475,84 +481,11 @@ def _extract_max_epochs(
         # Only use max_iter for DFM configs (not DDFM)
         return getattr(config, 'max_iter')
     else:
-        return defaults.get('max_epochs', 100)
+        return defaults.get('max_epochs', DEFAULT_MAX_EPOCHS)
 
 
-def _extract_bool(
-    param_name: str,
-    config: Any,
-    kwargs: Dict[str, Any],
-    defaults: Dict[str, Any]
-) -> bool:
-    """Extract boolean parameter with fallback chain.
-    
-    Fallback order (highest to lowest priority):
-    1. kwargs[param_name] (explicit override)
-    2. config.param_name (config object attribute)
-    3. defaults[param_name] (default value)
-    
-    Parameters
-    ----------
-    param_name : str
-        Name of the boolean parameter to extract
-    config : Any
-        Configuration object (DFMConfig, DDFMConfig, or any object with attributes)
-    kwargs : Dict[str, Any]
-        Keyword arguments that may contain the parameter
-    defaults : Dict[str, Any]
-        Default values dictionary
-        
-    Returns
-    -------
-    bool
-        Extracted boolean parameter value
-    """
-    if param_name in kwargs:
-        return kwargs.pop(param_name)
-    elif hasattr(config, param_name):
-        return getattr(config, param_name)
-    else:
-        return defaults.get(param_name, False)
-
-
-def _extract_opt(
-    param_name: str,
-    config: Any,
-    kwargs: Dict[str, Any],
-    defaults: Optional[Dict[str, Any]] = None
-) -> Optional[Any]:
-    """Extract optional parameter with fallback chain.
-    
-    Fallback order (highest to lowest priority):
-    1. kwargs[param_name] (explicit override)
-    2. config.param_name (config object attribute)
-    3. defaults[param_name] (if defaults provided)
-    4. None (if not found)
-    
-    Parameters
-    ----------
-    param_name : str
-        Name of the optional parameter to extract
-    config : Any
-        Configuration object (DFMConfig, DDFMConfig, or any object with attributes)
-    kwargs : Dict[str, Any]
-        Keyword arguments that may contain the parameter
-    defaults : Optional[Dict[str, Any]], default None
-        Default values dictionary (optional)
-        
-    Returns
-    -------
-    Optional[Any]
-        Extracted parameter value, or None if not found
-    """
-    if param_name in kwargs:
-        return kwargs.pop(param_name)
-    elif hasattr(config, param_name):
-        return getattr(config, param_name)
-    elif defaults and param_name in defaults:
-        return defaults[param_name]
-    else:
-        return None
+# Import unified parameter extraction helpers
+from ..utils.misc import extract_bool_param, extract_opt_param
 
 
 def _extract_train_params(
@@ -590,15 +523,15 @@ def _extract_train_params(
     params['max_epochs'] = _extract_max_epochs(config, kwargs, defaults, use_max_iter)
     
     # Extract boolean parameters using helper function
-    params['enable_progress_bar'] = _extract_bool(
+    params['enable_progress_bar'] = extract_bool_param(
         'enable_progress_bar', config, kwargs, defaults
     )
-    params['enable_model_summary'] = _extract_bool(
+    params['enable_model_summary'] = extract_bool_param(
         'enable_model_summary', config, kwargs, defaults
     )
     
     # Extract optional parameters using helper function
-    gradient_clip_val = _extract_opt('gradient_clip_val', config, kwargs, defaults)
+    gradient_clip_val = extract_opt_param('gradient_clip_val', config, kwargs, defaults)
     if gradient_clip_val is not None:
         params['gradient_clip_val'] = gradient_clip_val
     
@@ -745,5 +678,6 @@ __all__ = [
     'KDFMTrainer',
     'DFM_TRAINER_DEFAULTS',
     'DDFM_TRAINER_DEFAULTS',
+    'KDFM_TRAINER_DEFAULTS',
 ]
 

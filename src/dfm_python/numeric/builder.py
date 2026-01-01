@@ -8,114 +8,29 @@ import numpy as np
 from typing import Optional, Tuple, Dict, Any
 
 from ..logger import get_logger
+from ..utils.errors import ConfigurationError
 from ..config.constants import (
-    AR_CLIP_MIN,
-    AR_CLIP_MAX,
     DEFAULT_HIERARCHY_VALUE,
+    DEFAULT_IDENTITY_SCALE,
 )
-from .stability import ensure_positive_definite
+from .stability import ensure_positive_definite, compute_cov_safe, create_scaled_identity
 
 _logger = get_logger(__name__)
 
 
-def clip_ar(
-    A: np.ndarray,
-    min_val: float = AR_CLIP_MIN,
-    max_val: float = AR_CLIP_MAX,
-    warn: bool = True
-) -> Tuple[np.ndarray, Dict[str, Any]]:
-    """Clip AR coefficients to stability bounds.
-    
-    Parameters
-    ----------
-    A : np.ndarray
-        AR coefficients to clip
-    min_val : float, default AR_CLIP_MIN
-        Minimum allowed value
-    max_val : float, default AR_CLIP_MAX
-        Maximum allowed value
-    warn : bool, default True
-        Whether to log warnings
-        
-    Returns
-    -------
-    A_clipped : np.ndarray
-        Clipped AR coefficients
-    stats : dict
-        Statistics about clipping
-    """
-    A_flat = A.flatten()
-    n_total = len(A_flat)
-    below_min = A_flat < min_val
-    above_max = A_flat > max_val
-    needs_clip = below_min | above_max
-    n_clipped = np.sum(needs_clip)
-    A_clipped = np.clip(A, min_val, max_val)
-    stats = {
-        'n_clipped': int(n_clipped),
-        'n_total': int(n_total),
-        'clipped_indices': np.where(needs_clip)[0].tolist() if n_clipped > 0 else [],
-        'min_violations': int(np.sum(below_min)),
-        'max_violations': int(np.sum(above_max))
-    }
-    if warn and n_clipped > 0:
-        pct_clipped = 100.0 * n_clipped / n_total if n_total > 0 else 0.0
-        _logger.warning(
-            f"AR coefficient clipping applied: {n_clipped}/{n_total} ({pct_clipped:.1f}%) "
-            f"coefficients clipped to [{min_val}, {max_val}]."
-        )
-    return A_clipped, stats
-
-
-def apply_ar_clipping(
-    A: np.ndarray,
-    config: Optional[Any] = None
-) -> Tuple[np.ndarray, Dict[str, Any]]:
-    """Apply AR coefficient clipping based on configuration.
-    
-    Parameters
-    ----------
-    A : np.ndarray
-        AR coefficients
-    config : object, optional
-        Configuration object with clipping parameters
-        
-    Returns
-    -------
-    A_clipped : np.ndarray
-        Clipped AR coefficients
-    stats : dict
-        Statistics about clipping
-    """
-    if config is None:
-        return clip_ar(A, AR_CLIP_MIN, AR_CLIP_MAX, True)
-    
-    clip_enabled = getattr(config, 'clip_ar_coefficients', True) if config is not None else True
-    if not clip_enabled:
-        return A, {'n_clipped': 0, 'n_total': A.size, 'clipped_indices': []}
-    
-    min_val = getattr(config, 'ar_clip_min', AR_CLIP_MIN) if config is not None else AR_CLIP_MIN
-    max_val = getattr(config, 'ar_clip_max', AR_CLIP_MAX) if config is not None else AR_CLIP_MAX
-    warn = getattr(config, 'warn_on_ar_clip', True) if config is not None else True
-    return clip_ar(A, min_val, max_val, warn)
-
-
-
-
-def build_observation_matrix(C: np.ndarray, factor_order: int, N: int) -> np.ndarray:
+def build_observation_matrix(C: np.ndarray, factor_order: int = 1, N: int = 0) -> np.ndarray:
     """Build observation matrix H including idiosyncratic components.
     
-    Constructs the observation matrix H = [C, I] for VAR(1) or
-    H = [C, 0, I] for VAR(2), where C loads on factors and I on idio.
+    Constructs the observation matrix H = [C, I] for AR(1), where C loads on factors and I on idio.
     
     Parameters
     ----------
     C : np.ndarray
         Loading matrix (N x m) from decoder
-    factor_order : int
-        VAR lag order (1 or 2)
-    N : int
-        Number of series
+    factor_order : int, default 1
+        AR lag order (always 1)
+    N : int, default 0
+        Number of series (unused parameter)
         
     Returns
     -------
@@ -124,14 +39,8 @@ def build_observation_matrix(C: np.ndarray, factor_order: int, N: int) -> np.nda
     """
     N_series, m = C.shape
     
-    if factor_order == 1:
-        # H = [C, I] where C loads on f_t, I loads on eps_t
-        H = np.hstack([C, np.eye(N_series)])
-    elif factor_order == 2:
-        # H = [C, 0, I] where C loads on f_t, 0 on f_{t-1}, I on eps_t
-        H = np.hstack([C, np.zeros((N_series, m)), np.eye(N_series)])
-    else:
-        raise ValueError(f"factor_order must be 1 or 2, got {factor_order}")
+    # H = [C, I] where C loads on f_t, I loads on eps_t
+    H = np.hstack([C, create_scaled_identity(N_series, DEFAULT_IDENTITY_SCALE)])
     
     return H
 
@@ -142,7 +51,7 @@ def build_state_space(
     Q_f: np.ndarray,
     A_eps: np.ndarray,
     Q_eps: np.ndarray,
-    factor_order: int,
+    factor_order: int = 1,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Build state-space model with companion form.
     
@@ -154,15 +63,15 @@ def build_state_space(
     factors : np.ndarray
         Extracted factors (T x m)
     A_f : np.ndarray
-        Factor transition matrix (m x m) for VAR(1) or (m x 2m) for VAR(2)
+        Factor transition matrix (m x m) for AR(1)
     Q_f : np.ndarray
         Factor innovation covariance (m x m)
     A_eps : np.ndarray
         Idiosyncratic AR(1) coefficients (N x N), diagonal
     Q_eps : np.ndarray
         Idiosyncratic innovation covariance (N x N), diagonal
-    factor_order : int
-        VAR lag order (1 or 2)
+    factor_order : int, default 1
+        AR lag order (always 1)
         
     Returns
     -------
@@ -178,68 +87,29 @@ def build_state_space(
     T, m = factors.shape
     N = A_eps.shape[0]
     
-    if factor_order == 1:
-        # State: [f_t, eps_t]
-        # Transition: f_t = A_f @ f_{t-1} + v_f, eps_t = A_eps @ eps_{t-1} + v_eps
-        # Block diagonal structure
-        A = np.block([
-            [A_f, np.zeros((m, N))],
-            [np.zeros((N, m)), A_eps]
-        ])
-        
-        Q = np.block([
-            [Q_f, np.zeros((m, N))],
-            [np.zeros((N, m)), Q_eps]
-        ])
-        
-        # Initial state: [f_0, eps_0]
-        Z_0 = np.concatenate([factors[0, :], np.zeros(N)])
-        
-        # Initial covariance: block diagonal
-        V_f = np.cov(factors.T)
-        V_eps = np.diag(np.diag(Q_eps))  # Use Q_eps as initial idio covariance
-        V_0 = np.block([
-            [V_f, np.zeros((m, N))],
-            [np.zeros((N, m)), V_eps]
-        ])
-        
-    elif factor_order == 2:
-        # State: [f_t, f_{t-1}, eps_t]
-        # Transition: f_t = A1 @ f_{t-1} + A2 @ f_{t-2} + v_f
-        #            f_{t-1} = f_{t-1} (identity)
-        #            eps_t = A_eps @ eps_{t-1} + v_eps
-        A1 = A_f[:, :m]
-        A2 = A_f[:, m:]
-        
-        A = np.block([
-            [A1, A2, np.zeros((m, N))],
-            [np.eye(m), np.zeros((m, m)), np.zeros((m, N))],
-            [np.zeros((N, m)), np.zeros((N, m)), A_eps]
-        ])
-        
-        Q = np.block([
-            [Q_f, np.zeros((m, m)), np.zeros((m, N))],
-            [np.zeros((m, m)), np.zeros((m, m)), np.zeros((m, N))],
-            [np.zeros((N, m)), np.zeros((N, m)), Q_eps]
-        ])
-        
-        # Initial state: [f_0, f_{-1}, eps_0]
-        # Use f_0 for both f_0 and f_{-1} (or use first two if available)
-        if T >= 2:
-            Z_0 = np.concatenate([factors[0, :], factors[0, :], np.zeros(N)])
-        else:
-            Z_0 = np.concatenate([factors[0, :], factors[0, :], np.zeros(N)])
-        
-        # Initial covariance: block diagonal
-        V_f = np.cov(factors.T)
-        V_eps = np.diag(np.diag(Q_eps))
-        V_0 = np.block([
-            [V_f, V_f, np.zeros((m, N))],
-            [V_f, V_f, np.zeros((m, N))],
-            [np.zeros((N, m)), np.zeros((N, m)), V_eps]
-        ])
-    else:
-        raise ValueError(f"factor_order must be 1 or 2, got {factor_order}")
+    # State: [f_t, eps_t]
+    # Transition: f_t = A_f @ f_{t-1} + v_f, eps_t = A_eps @ eps_{t-1} + v_eps
+    # Block diagonal structure
+    A = np.block([
+        [A_f, np.zeros((m, N))],
+        [np.zeros((N, m)), A_eps]
+    ])
+    
+    Q = np.block([
+        [Q_f, np.zeros((m, N))],
+        [np.zeros((N, m)), Q_eps]
+    ])
+    
+    # Initial state: [f_0, eps_0]
+    Z_0 = np.concatenate([factors[0, :], np.zeros(N)])
+    
+    # Initial covariance: block diagonal
+    V_f = compute_cov_safe(factors.T, rowvar=True, pairwise_complete=False)
+    V_eps = np.diag(np.diag(Q_eps))  # Use Q_eps as initial idio covariance
+    V_0 = np.block([
+        [V_f, np.zeros((m, N))],
+        [np.zeros((N, m)), V_eps]
+    ])
     
     return A, Q, Z_0, V_0
 
@@ -278,12 +148,14 @@ def compute_idio_lengths(
     from ..config.constants import FREQUENCY_HIERARCHY
     from .tent import get_agg_structure
     
+    # Get frequencies using new API
+    frequencies = config.get_frequencies()
+    if not frequencies:
+        return np.zeros(0, dtype=int)
+    
     if not config.augment_idio:
         # Feature disabled: all zeros
-        return np.zeros(len(config.series), dtype=int)
-    
-    # Get frequencies for each series
-    frequencies = [s.frequency for s in config.series]
+        return np.zeros(len(frequencies), dtype=int)
     clock_hierarchy = FREQUENCY_HIERARCHY.get(clock, DEFAULT_HIERARCHY_VALUE)
     
     # Get tent weights if not provided
@@ -291,7 +163,7 @@ def compute_idio_lengths(
         agg_structure = get_agg_structure(config, clock=clock)
         tent_weights_dict = agg_structure.get('tent_weights', {})
     
-    lengths = np.zeros(len(config.series), dtype=int)
+    lengths = np.zeros(len(frequencies), dtype=int)
     
     for i, freq in enumerate(frequencies):
         freq_hierarchy = FREQUENCY_HIERARCHY.get(freq, DEFAULT_HIERARCHY_VALUE)
@@ -312,8 +184,6 @@ def compute_idio_lengths(
 
 
 __all__ = [
-    'clip_ar',
-    'apply_ar_clipping',
     'build_observation_matrix',
     'build_state_space',
     'compute_idio_lengths',

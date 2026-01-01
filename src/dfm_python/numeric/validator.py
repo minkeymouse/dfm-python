@@ -26,7 +26,9 @@ from ..utils.errors import (
     PredictionError,
     ConfigurationError
 )
+from ..utils.common import ensure_numpy
 from ..config.types import ArrayLike
+from ..config.constants import DEFAULT_MIN_DELTA
 from ..logger import get_logger
 
 _logger = get_logger(__name__)
@@ -128,10 +130,7 @@ def validate_companion_stability(
     display_name = name if name is not None else f"{model_name} companion matrix"
     
     # Convert to numpy if needed
-    if isinstance(companion_matrix, Tensor):
-        matrix_np = companion_matrix.detach().cpu().numpy()
-    else:
-        matrix_np = np.asarray(companion_matrix)
+    matrix_np = ensure_numpy(companion_matrix)
     
     # Check for NaN/Inf
     if np.any(np.isnan(matrix_np)) or np.any(np.isinf(matrix_np)):
@@ -146,9 +145,10 @@ def validate_companion_stability(
         if matrix_np.ndim == 3:
             matrix_np = matrix_np[0]
         else:
-            raise ValueError(
+            raise DataValidationError(
                 f"{display_name} must be 2D or 3D (with kernel dimension), "
-                f"got shape {matrix_np.shape}"
+                f"got shape {matrix_np.shape}",
+                details="Companion matrix validation requires 2D or 3D array (3D for batched validation)"
             )
     
     # Compute eigenvalues
@@ -285,10 +285,7 @@ def validate_prediction_inputs(
     validated_last_obs = None
     if last_observation is not None:
         # Convert to numpy
-        if isinstance(last_observation, Tensor):
-            last_obs_np = last_observation.detach().cpu().numpy()
-        else:
-            last_obs_np = last_observation
+        last_obs_np = ensure_numpy(last_observation)
         
         # Handle shape: (K,) or (1, K) -> (K,)
         if last_obs_np.ndim == 2:
@@ -349,10 +346,7 @@ def validate_forecast_inputs(
     
     if last_observation is not None and n_vars is not None:
         # Normalize to numpy for shape checking
-        if isinstance(last_observation, Tensor):
-            last_obs_np = last_observation.detach().cpu().numpy()
-        else:
-            last_obs_np = np.asarray(last_observation)
+        last_obs_np = ensure_numpy(last_observation)
         
         # Check shape: should be (1, n_vars) or (n_vars,)
         if last_obs_np.ndim == 1:
@@ -494,8 +488,23 @@ def validate_ma_order(ma_order: int, min_order: int = 0, max_order: int = 10) ->
     return ma_order
 
 
-def validate_learning_rate(learning_rate: float, min_lr: float = 1e-6, max_lr: float = 1.0) -> float:
-    """Validate learning rate."""
+def validate_learning_rate(learning_rate: float, min_lr: float = DEFAULT_MIN_DELTA, max_lr: float = 1.0) -> float:
+    """Validate learning rate.
+    
+    Parameters
+    ----------
+    learning_rate : float
+        Learning rate to validate
+    min_lr : float, default DEFAULT_MIN_DELTA
+        Minimum learning rate threshold (uses DEFAULT_MIN_DELTA constant)
+    max_lr : float, default 1.0
+        Maximum learning rate threshold
+        
+    Returns
+    -------
+    float
+        Validated learning rate
+    """
     if not isinstance(learning_rate, (int, float)):
         raise ConfigurationError(f"learning_rate must be a number, got {type(learning_rate).__name__}")
     learning_rate = float(learning_rate)
@@ -559,26 +568,67 @@ def validate_no_nan_inf(data: Union[np.ndarray, Tensor], name: str = "data") -> 
         raise DataValidationError(f"{name} contains Inf values. Please check data preprocessing.")
 
 
+def _validate_integer_range(
+    value: int,
+    min_val: int,
+    max_val: int,
+    name: str,
+    warning_msg: str
+) -> int:
+    """Helper function to validate integer range with consistent error handling.
+    
+    Parameters
+    ----------
+    value : int
+        Value to validate
+    min_val : int
+        Minimum allowed value
+    max_val : int
+        Maximum allowed value (warning issued if exceeded)
+    name : str
+        Name of the parameter for error messages
+    warning_msg : str
+        Warning message to log if value exceeds max_val
+        
+    Returns
+    -------
+    int
+        Validated value
+        
+    Raises
+    ------
+    ConfigurationError
+        If value is not an integer or is less than min_val
+    """
+    if not isinstance(value, int):
+        raise ConfigurationError(f"{name} must be an integer, got {type(value).__name__}")
+    if value < min_val:
+        raise ConfigurationError(f"{name} must be >= {min_val}, got {value}")
+    if value > max_val:
+        _logger.warning(warning_msg)
+    return value
+
+
 def validate_horizon(horizon: int, min_horizon: int = 1, max_horizon: int = 100) -> int:
     """Validate forecast horizon."""
-    if not isinstance(horizon, int):
-        raise ConfigurationError(f"horizon must be an integer, got {type(horizon).__name__}")
-    if horizon < min_horizon:
-        raise ConfigurationError(f"horizon must be >= {min_horizon}, got {horizon}")
-    if horizon > max_horizon:
-        _logger.warning(f"horizon {horizon} is very large (> {max_horizon}). Forecast accuracy may degrade significantly.")
-    return horizon
+    return _validate_integer_range(
+        horizon,
+        min_horizon,
+        max_horizon,
+        "horizon",
+        f"horizon {horizon} is very large (> {max_horizon}). Forecast accuracy may degrade significantly."
+    )
 
 
 def validate_irf_horizon(horizon: int, min_horizon: int = 1, max_horizon: int = 200) -> int:
     """Validate IRF computation horizon."""
-    if not isinstance(horizon, int):
-        raise ConfigurationError(f"IRF horizon must be an integer, got {type(horizon).__name__}")
-    if horizon < min_horizon:
-        raise ConfigurationError(f"IRF horizon must be >= {min_horizon}, got {horizon}")
-    if horizon > max_horizon:
-        _logger.warning(f"IRF horizon {horizon} is very large (> {max_horizon}). Computation may be slow and IRF magnitudes may decay to near-zero.")
-    return horizon
+    return _validate_integer_range(
+        horizon,
+        min_horizon,
+        max_horizon,
+        "IRF horizon",
+        f"IRF horizon {horizon} is very large (> {max_horizon}). Computation may be slow and IRF magnitudes may decay to near-zero."
+    )
 
 
 def validate_eigenvalue_bounds(
@@ -607,10 +657,7 @@ def validate_matrix_condition(
     name: str = "matrix"
 ) -> None:
     """Validate matrix condition number."""
-    if isinstance(matrix, Tensor):
-        matrix_np = matrix.detach().cpu().numpy()
-    else:
-        matrix_np = matrix
+    matrix_np = ensure_numpy(matrix)
     
     if matrix_np.size == 0:
         return
@@ -626,6 +673,174 @@ def validate_matrix_condition(
     except (np.linalg.LinAlgError, ValueError):
         # Matrix may be singular or not square - skip condition check
         pass
+
+
+def validate_update_data_shape(
+    data: np.ndarray,
+    training_data: Optional[np.ndarray],
+    model_name: str = "model"
+) -> None:
+    """Validate that new data shape matches training data for update() or predict().
+    
+    This function validates that:
+    1. Model has been trained (training_data is not None)
+    2. Data is 2D array with shape (T_new x N) where:
+       - T_new: Number of new time steps (can be any positive integer)
+       - N: Number of series (must match training data)
+    3. Number of series (N) matches training data
+    
+    Parameters
+    ----------
+    data : np.ndarray
+        New data to validate (must be 2D: T_new x N)
+        - T_new: Number of new time steps (any positive integer)
+        - N: Number of series (must match training data)
+    training_data : np.ndarray, optional
+        Training data array (T_train x N) for shape comparison.
+        If None, raises ModelNotTrainedError.
+    model_name : str, default="model"
+        Model name for error messages
+        
+    Raises
+    ------
+    ModelNotTrainedError
+        If model has not been trained yet (training_data is None)
+    DataValidationError
+        If data shape doesn't match training data (N must match)
+    """
+    # Validate model is trained
+    if training_data is None:
+        raise ModelNotTrainedError(
+            f"{model_name} must be trained before validating data shape",
+            details="Please call fit() method first"
+        )
+    
+    # Validate data is 2D
+    if data.ndim != 2:
+        raise DataValidationError(
+            f"{model_name} data must be 2D array (T_new x N), got {data.ndim}D array",
+            details=f"Shape: {data.shape}. Expected 2D array with shape (T_new, N) where T_new is number of time steps and N is number of series."
+        )
+    
+    # Validate number of series (N) matches training data
+    expected_N = training_data.shape[1]
+    actual_N = data.shape[1]
+    
+    if actual_N != expected_N:
+        raise DataValidationError(
+            f"{model_name} new data has {actual_N} series but training data has {expected_N} series. "
+            f"Number of series (N) must match.",
+            details=f"Expected shape: (T_new, {expected_N}), got: {data.shape}. "
+                    f"Note: T_new can be any positive integer, but N must match training data."
+        )
+
+
+def validate_ndarray_ndim(
+    arr: Any,
+    name: str,
+    expected_ndim: int
+) -> None:
+    """Validate a numpy array has expected number of dimensions.
+    
+    Parameters
+    ----------
+    arr : Any
+        Array to validate
+    name : str
+        Name of the array for error messages
+    expected_ndim : int
+        Expected number of dimensions
+        
+    Raises
+    ------
+    DataValidationError
+        If array is not a numpy array or has wrong number of dimensions
+    """
+    if not isinstance(arr, np.ndarray) or arr.ndim != expected_ndim:
+        raise DataValidationError(
+            f"{name} must be {expected_ndim}D numpy array, got shape {arr.shape if isinstance(arr, np.ndarray) else 'not array'}"
+        )
+
+
+def validate_parameters_initialized(
+    parameters: Dict[str, Optional[Any]],
+    model_name: str = "model"
+) -> None:
+    """Validate that model parameters are initialized.
+    
+    Parameters
+    ----------
+    parameters : dict
+        Dictionary mapping parameter names to values (None indicates uninitialized)
+    model_name : str, default="model"
+        Model name for error messages
+        
+    Raises
+    ------
+    ModelNotInitializedError
+        If any required parameter is None
+    """
+    missing_params = [name for name, value in parameters.items() if value is None]
+    if missing_params:
+        raise ModelNotInitializedError(
+            f"{model_name}: Model parameters not initialized",
+            details=f"Parameters {missing_params} are required but are None. Please call fit() first to initialize parameters"
+        )
+
+
+def validate_and_convert_update_data(
+    data: Union[np.ndarray, Any],
+    training_data: Optional[np.ndarray],
+    dtype: type = np.float64,
+    model_name: str = "model"
+) -> np.ndarray:
+    """Validate and convert data for update() or predict() methods.
+    
+    Users must preprocess data themselves (same preprocessing as training).
+    This function only validates shape and converts to numpy.
+    
+    **Data Shape**: The input data must be 2D with shape (T_new x N) where:
+    - T_new: Number of new time steps (can be any positive integer)
+    - N: Number of series (must match training data)
+    
+    **Supported Types**:
+    - numpy.ndarray: (T_new x N) array
+    - pandas.DataFrame: DataFrame with N columns, T_new rows
+    - polars.DataFrame: DataFrame with N columns, T_new rows
+    
+    Parameters
+    ----------
+    data : np.ndarray, pandas.DataFrame, or polars.DataFrame
+        Preprocessed observations with shape (T_new x N) where:
+        - T_new: Number of new time steps (any positive integer)
+        - N: Number of series (must match training data)
+    training_data : np.ndarray, optional
+        Training data array (T_train x N) for shape comparison.
+        If None, raises ModelNotTrainedError.
+    dtype : type, default=np.float64
+        Data type for converted array
+    model_name : str, default="model"
+        Model name for error messages
+        
+    Returns
+    -------
+    np.ndarray
+        Data as numpy array with shape (T_new x N)
+        
+    Raises
+    ------
+    ModelNotTrainedError
+        If model has not been trained yet
+    DataValidationError
+        If data shape doesn't match training data (N must match)
+    """
+    # Convert to NumPy (handles pandas, polars, torch, numpy)
+    data_np = ensure_numpy(data, dtype=dtype)
+    
+    # Validate shape matches training data
+    validate_update_data_shape(data_np, training_data, model_name=model_name)
+    
+    return data_np
 
 
 __all__ = [
@@ -648,5 +863,12 @@ __all__ = [
     'validate_irf_horizon',
     'validate_eigenvalue_bounds',
     'validate_matrix_condition',
+    # Update/predict data validation
+    'validate_update_data_shape',
+    'validate_and_convert_update_data',
+    # Array validation
+    'validate_ndarray_ndim',
+    # Parameter validation
+    'validate_parameters_initialized',
 ]
 

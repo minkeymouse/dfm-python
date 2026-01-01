@@ -1,0 +1,63 @@
+# DDFM Configuration for Macroeconomic Datasets
+# Based on Korean economic indicators (KO* series)
+# Data: 101 series, mixed weekly/monthly frequency (1985-04-05 to 2025-11-21)
+# Clock: Weekly (w) - base frequency for latent factors
+# Target: KOEQUIPTE (Investment, Equipment, Estimation, SA)
+
+# Neural Network Architecture
+encoder_layers:
+  - 64
+  - 32
+num_factors: 2  # Number of factors (DDFM does not use block structure)
+activation: relu  # Activation function: 'tanh', 'relu', 'sigmoid'
+use_batch_norm: true
+
+# Training Parameters
+learning_rate: 0.001
+epochs: 100
+batch_size: 100  # DDFM-specific default batch size
+factor_order: 1  # VAR lag order for factor dynamics (1 or 2)
+
+# Idiosyncratic Components
+use_idiosyncratic: true
+min_obs_idio: 5  # Minimum observations for idio AR(1) estimation
+
+# MCMC/Iterative Parameters
+max_iter: 200  # Maximum MCMC iterations for iterative factor extraction
+tolerance: 0.0005  # Convergence tolerance for MCMC iterations
+disp: 10  # Display frequency for training progress
+
+# Data Handling
+clock: w  # Weekly clock frequency (base frequency for latent factors)
+target_scaler: standard  # Scaler for target series only: 'standard', 'robust', 'minmax', 'maxabs', 'quantile', or null (no scaling)
+# Note: nan_method and nan_k are internal constants (not user-configurable)
+
+# Frequency mapping for mixed-frequency macro data
+# Clock is weekly (w), so monthly series are slower frequency
+# All frequencies must be explicitly specified
+# Reduced set for faster testing (~50% reduction: 12 monthly series kept from original ~24)
+frequency:
+  # Monthly series (slower than weekly clock) - typically end-of-month observations
+  # Essential series for testing
+  KOEMPTOTO: m  # Total employment (monthly)
+  KOHWRWEMP: m  # Hours worked (monthly)
+  KOIMPCONA: m  # Investment, Construction (monthly)
+  KOWRCCNSE: m  # Consumption (monthly)
+  KOCONPRCF: m  # Production (monthly)
+  KOCPCOREF: m  # Consumer prices (monthly)
+  KOCPEXFEF: m  # Export prices (monthly)
+  KOCREU..A: m  # Credit (monthly)
+  KOLRLTHH: m  # Interest rates (monthly)
+  KOBSIHAPR: m  # Business survey (monthly)
+  KOCNFCONR: m  # Confidence (monthly)
+  # Target series
+  KOEQUIPTE: m  # Investment, Equipment (monthly, target series)
+  # Weekly series (same as clock frequency)
+  KORFBEV: w  # Retail, Food & Beverages (weekly)
+  KORWHLS: w  # Retail, Wholesale (weekly)
+  KORMCMP: w  # Retail, Miscellaneous & Comparison (weekly)
+  KORELEC: w  # Retail, Electronics (weekly)
+  KORCNST: w  # Retail, Construction (weekly)
+  KORMACH: w  # Retail, Machinery (weekly)
+  KOROCOINF: w  # Retail, Other Consumer & Information (weekly)
+

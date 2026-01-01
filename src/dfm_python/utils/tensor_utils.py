@@ -19,6 +19,7 @@ import torch
 from torch import Tensor
 
 from ..logger import get_logger
+from .errors import DataValidationError
 
 _logger = get_logger(__name__)
 
@@ -64,8 +65,9 @@ def extract_tensor_value(tensor: Union[Tensor, np.ndarray, float, int]) -> Union
         from .common import ensure_numpy
         return ensure_numpy(tensor)
     else:
-        raise TypeError(
-            f"Expected Tensor, np.ndarray, float, or int, got {type(tensor).__name__}"
+        raise DataValidationError(
+            f"Expected Tensor, np.ndarray, float, or int, got {type(tensor).__name__}",
+            details=f"Input type: {type(tensor).__name__}, value: {tensor}"
         )
 
 
@@ -116,9 +118,10 @@ def normalize_tensor_shape(
                 tensor = np.expand_dims(tensor, axis=0)
         return tensor
     else:
-        raise ValueError(
+        raise DataValidationError(
             f"{name} has {current_ndim} dimensions, but expected at most {expected_ndim}. "
-            f"Shape: {tensor.shape}"
+            f"Shape: {tensor.shape}",
+            details=f"Dimension mismatch: current={current_ndim}, expected_max={expected_ndim}"
         )
 
 
@@ -144,12 +147,16 @@ def validate_tensor_device(
         If tensor is not on expected device
     """
     if not isinstance(tensor, Tensor):
-        raise TypeError(f"{name} must be a Tensor, got {type(tensor).__name__}")
+        raise DataValidationError(
+            f"{name} must be a Tensor, got {type(tensor).__name__}",
+            details=f"Input type: {type(tensor).__name__}, value shape: {getattr(tensor, 'shape', 'N/A')}"
+        )
     
     if expected_device is not None:
         if tensor.device != expected_device:
-            raise ValueError(
-                f"{name} is on device {tensor.device}, but expected {expected_device}"
+            raise DataValidationError(
+                f"{name} is on device {tensor.device}, but expected {expected_device}",
+                details=f"Device mismatch: actual={tensor.device}, expected={expected_device}"
             )
 
 

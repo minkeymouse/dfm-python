@@ -1,0 +1,35 @@
+# Neural Network Architecture
+encoder_layers:
+  - 64
+  - 32
+num_factors: 2  # Number of factors (DDFM does not use block structure)
+activation: relu  # Activation function: 'tanh', 'relu', 'sigmoid'
+use_batch_norm: true
+
+# Training Parameters
+learning_rate: 0.001
+epochs: 100
+batch_size: 100  # DDFM-specific default batch size
+factor_order: 1  # VAR lag order for factor dynamics (1 or 2)
+
+# Idiosyncratic Components
+use_idiosyncratic: true
+min_obs_idio: 5  # Minimum observations for idio AR(1) estimation
+
+# MCMC/Iterative Parameters
+max_iter: 200  # Maximum MCMC iterations for iterative factor extraction
+tolerance: 0.0005  # Convergence tolerance for MCMC iterations
+disp: 10  # Display frequency for training progress
+
+# Data Handling
+clock: m  # Global clock frequency
+target_scaler: standard  # Scaler for target series only: 'standard', 'robust', 'minmax', 'maxabs', 'quantile', or null (no scaling)
+# Note: nan_method and nan_k are internal constants (not user-configurable)
+
+# Frequency mapping (optional)
+# If not specified, all series use clock frequency
+# Format: {"series_name": "frequency_code"}
+# frequency:
+#   gdp: q
+#   unemployment: m
+#   interest_rate: m

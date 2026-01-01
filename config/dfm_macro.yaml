@@ -1,0 +1,84 @@
+# DFM Configuration for Macroeconomic Datasets
+# Based on Korean economic indicators (KO* series)
+# Data: 101 series, mixed weekly/monthly frequency (1985-04-05 to 2025-11-21)
+# Clock: Weekly (w) - base frequency for latent factors
+# Target: KOEQUIPTE (Investment, Equipment, Estimation, SA)
+
+# EM Algorithm Parameters
+ar_lag: 1  # Global AR lag order (applies to all blocks)
+threshold: 1.0e-05  # EM convergence threshold
+max_iter: 5000  # Maximum EM iterations
+
+# Numerical Stability Parameters
+clip_ar_coefficients: true
+ar_clip_min: -0.99
+ar_clip_max: 0.99
+use_regularization: true
+regularization_scale: 1.0e-05
+
+# Idiosyncratic Component Parameters
+augment_idio: true
+augment_idio_slow: true  # Important for mixed-frequency macro data (weekly clock, monthly indicators)
+idio_rho0: 0.1
+idio_min_var: 1.0e-08
+
+# Data Handling
+clock: w  # Weekly clock frequency (base frequency for latent factors)
+# target_scaler: Pass sklearn scaler object directly (e.g., StandardScaler(), RobustScaler())
+# Example in Python:
+#   from sklearn.preprocessing import StandardScaler
+#   config.target_scaler = StandardScaler()
+# Note: nan_method and nan_k are internal constants (not user-configurable)
+
+# Block Structure for Macroeconomic Data
+# Simplified for faster testing - reduced to 2 blocks with essential series
+# Series can appear in multiple blocks to capture different factor structures
+blocks:
+  Block_Real:
+    num_factors: 2  # Real economy factors (production, employment, consumption, investment)
+    series:
+      - KOCONPRCF  # Production
+      - KOEMPTOTO  # Total employment
+      - KOHWRWEMP  # Hours worked
+      - KOWRCCNSE  # Consumption
+      - KOIMPCONA  # Investment
+  Block_Prices_Financial:
+    num_factors: 2  # Price, financial, and survey factors (combined for testing)
+    series:
+      - KOCPCOREF  # Consumer prices
+      - KOCPEXFEF  # Export prices
+      - KOWRCCNSE  # Consumption (overlap with Block_Real)
+      - KOCREU..A  # Credit
+      - KOLRLTHH  # Interest rates
+      - KOBSIHAPR  # Business survey
+      - KOCNFCONR  # Confidence
+
+# Frequency mapping for mixed-frequency macro data
+# Clock is weekly (w), so monthly series are slower frequency
+# All frequencies must be explicitly specified
+# Reduced set for faster testing (~50% reduction: 18 monthly series kept from original ~36)
+frequency:
+  # Monthly series (slower than weekly clock) - typically end-of-month observations
+  # Block_Real series
+  KOEMPTOTO: m  # Total employment (monthly)
+  KOHWRWEMP: m  # Hours worked (monthly)
+  KOIMPCONA: m  # Investment, Construction (monthly)
+  KOWRCCNSE: m  # Consumption (monthly)
+  KOCONPRCF: m  # Production (monthly)
+  # Block_Prices_Financial series
+  KOCPCOREF: m  # Consumer prices (monthly)
+  KOCPEXFEF: m  # Export prices (monthly)
+  KOCREU..A: m  # Credit (monthly)
+  KOLRLTHH: m  # Interest rates (monthly)
+  KOBSIHAPR: m  # Business survey (monthly)
+  KOCNFCONR: m  # Confidence (monthly)
+  # Target series
+  KOEQUIPTE: m  # Investment, Equipment (monthly, target series)
+  # Weekly series (same as clock frequency)
+  KORFBEV: w  # Retail, Food & Beverages (weekly)
+  KORWHLS: w  # Retail, Wholesale (weekly)
+  KORMCMP: w  # Retail, Miscellaneous & Comparison (weekly)
+  KORELEC: w  # Retail, Electronics (weekly)
+  KORCNST: w  # Retail, Construction (weekly)
+  KORMACH: w  # Retail, Machinery (weekly)
+  KOROCOINF: w  # Retail, Other Consumer & Information (weekly)

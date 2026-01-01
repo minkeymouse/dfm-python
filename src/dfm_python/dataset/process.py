@@ -1,9 +1,20 @@
 """Data preprocessing utilities for Dynamic Factor Models.
 
-This module provides preprocessing-related functions and classes:
-- Scaler extraction and attribute access (_get_scaler, _extract_mx_wx, etc.)
-- Standardization parameter extraction from scalers
-- Time index handling (TimeIndex class)
+This module provides utilities for working with sklearn scalers for inverse 
+transformation of forecasts. Use scaler.inverse_transform() directly instead 
+of extracting Mx/Wx arrays.
+
+**Purpose**: Helper functions for finding and working with sklearn scalers in
+transformer pipelines. Use the scaler object's inverse_transform() method
+directly for unstandardization.
+
+**Key Functions**:
+- `_get_scaler()`: Recursively find scaler in transformer pipelines
+- `_get_scaler_attr()`: Extract specific attributes from scalers (for validation)
+- `TimeIndex`: Time index abstraction for datetime handling
+
+**Note**: sklearn is required for these functions to work with StandardScaler,
+RobustScaler, and other sklearn scalers.
 """
 
 import warnings
@@ -12,6 +23,9 @@ from datetime import datetime
 
 import numpy as np
 import pandas as pd
+from ..utils.common import ensure_numpy
+from ..utils.errors import DataValidationError, ConfigurationError
+from ..config.constants import DEFAULT_IDENTITY_SCALE, DEFAULT_ZERO_VALUE
 
 try:
     import sklearn
@@ -105,10 +119,10 @@ def _normalize_wx(wx: np.ndarray) -> np.ndarray:
     Returns
     -------
     np.ndarray
-        Normalized scale values with zeros and NaN replaced by 1.0
+        Normalized scale values with zeros and NaN replaced by DEFAULT_IDENTITY_SCALE
     """
-    # Replace both zero and NaN with 1.0
-    return np.where((wx == 0) | np.isnan(wx), 1.0, wx)
+    # Replace both zero and NaN with DEFAULT_IDENTITY_SCALE
+    return np.where((wx == 0) | np.isnan(wx), DEFAULT_IDENTITY_SCALE, wx)
 
 
 def _get_scaler_attr(scaler: Any, attr_name: str, data: np.ndarray, default_value: Optional[float] = None, normalize: bool = False) -> Optional[np.ndarray]:
@@ -127,9 +141,9 @@ def _get_scaler_attr(scaler: Any, attr_name: str, data: np.ndarray, default_valu
     data : np.ndarray
         Processed data array (T x N) for fallback computation
     default_value : float, optional
-        Default value if attribute is disabled (0.0 for mean, 1.0 for scale)
+        Default value if attribute is disabled (DEFAULT_ZERO_VALUE for mean, DEFAULT_IDENTITY_SCALE for scale)
     normalize : bool, default False
-        Whether to normalize the result (for scale, replaces zeros with 1.0)
+        Whether to normalize the result (for scale, replaces zeros with DEFAULT_IDENTITY_SCALE)
         
     Returns
     -------
@@ -157,7 +171,7 @@ def _get_scaler_attr(scaler: Any, attr_name: str, data: np.ndarray, default_valu
                 attr_val = getattr(scaler, try_attr_name)
                 if attr_val is not None:
                     if not isinstance(attr_val, np.ndarray):
-                        attr_val = np.asarray(attr_val)
+                        attr_val = ensure_numpy(attr_val)
                     if normalize:
                         attr_val = _normalize_wx(attr_val)
                     return attr_val
@@ -177,49 +191,19 @@ def _get_scaler_attr(scaler: Any, attr_name: str, data: np.ndarray, default_valu
     return None
 
 
-def _extract_mx_wx(scaler: Optional[Any], data: np.ndarray) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
-    """Extract Mx (mean) and Wx (scale) from scaler.
-    
-    Parameters
-    ----------
-    scaler : Any, optional
-        Scaler instance (StandardScaler, RobustScaler, etc.) or None
-    data : np.ndarray
-        Data array for fallback computation
-        
-    Returns
-    -------
-    Tuple[Optional[np.ndarray], Optional[np.ndarray]]
-        (Mx, Wx) tuple, both None if scaler is None or extraction fails
-    """
-    if scaler is None:
-        return None, None
-    
-    mx = _get_scaler_attr(scaler, 'mean_', data, default_value=0.0) or _get_scaler_attr(scaler, 'center_', data, default_value=0.0)
-    wx = _get_scaler_attr(scaler, 'scale_', data, default_value=1.0, normalize=True)
-    return mx, wx
+# Legacy Mx/Wx extraction functions removed - use scaler.inverse_transform() directly
+# The following functions were removed as they extract Mx/Wx arrays:
+# - _extract_mx_wx()
+# - _get_mean()
+# - _get_scale()
+# 
+# Instead, use the scaler object directly:
+#   if target_scaler is not None and hasattr(target_scaler, 'inverse_transform'):
+#       X_original = target_scaler.inverse_transform(X_standardized)
 
 
-def _get_mean(scaler: Any, data: np.ndarray) -> Optional[np.ndarray]:
-    """Extract mean (Mx) from any scaler with fallbacks.
-    
-    Supports StandardScaler (mean_), MinMaxScaler (center_), RobustScaler (center_),
-    and other scalers with mean or center attributes.
-    """
-    # Try 'mean_' first (StandardScaler), then 'center_' (MinMaxScaler, RobustScaler, etc.)
-    result = _get_scaler_attr(scaler, 'mean_', data, default_value=0.0)
-    if result is not None:
-        return result
-    # Fallback to 'center_' for scalers that use that attribute name
-    return _get_scaler_attr(scaler, 'center_', data, default_value=0.0)
-
-
-def _get_scale(scaler: Any, data: np.ndarray) -> Optional[np.ndarray]:
-    """Extract scale (Wx) from StandardScaler with fallbacks."""
-    return _get_scaler_attr(scaler, 'scale_', data, default_value=1.0, normalize=True)
-
-
-# create_passthrough_transformer removed - no longer needed after removing sktime pipeline dependency
+# create_passthrough_transformer removed - no longer needed
+# create_default_preprocessing_pipeline removed - tutorials now create sklearn Pipeline explicitly
 
 
 # ============================================================================
@@ -247,7 +231,10 @@ class TimeIndex:
                 try:
                     data = pd.to_datetime(data)
                 except (TypeError, ValueError) as e:
-                    raise ValueError(f"Cannot convert Series with dtype {data.dtype} to datetime: {e}")
+                    raise DataValidationError(
+                        f"Cannot convert Series with dtype {data.dtype} to datetime: {e}",
+                        details="TimeIndex requires datetime-compatible data types"
+                    )
             self._series = data
         elif isinstance(data, TimeIndex):
             self._series = data._series.copy()
@@ -256,7 +243,10 @@ class TimeIndex:
             try:
                 self._series = pd.Series(pd.to_datetime(data), name="time")
             except (TypeError, ValueError) as e:
-                raise ValueError(f"Cannot create TimeIndex from {type(data)}: {e}")
+                raise DataValidationError(
+                    f"Cannot create TimeIndex from {type(data)}: {e}",
+                    details="TimeIndex requires datetime-compatible input (Series, list, array, or TimeIndex)"
+                )
     
     @property
     def series(self) -> pd.Series:
@@ -287,7 +277,10 @@ class TimeIndex:
                 key = pd.Series(key, index=self._series.index)
             return TimeIndex(self._series[key])
         else:
-            raise TypeError(f"Unsupported index type: {type(key)}")
+            raise DataValidationError(
+                f"Unsupported index type: {type(key)}",
+                details="TimeIndex indexing supports int, slice, list, array, or Series types"
+            )
     
     def __iter__(self):
         """Iterate over time index."""
@@ -330,7 +323,10 @@ class TimeIndex:
         elif isinstance(other, TimeIndex):
             return self._series >= other._series
         else:
-            raise TypeError(f"Cannot compare TimeIndex with {type(other)}")
+            raise DataValidationError(
+                f"Cannot compare TimeIndex with {type(other)}",
+                details="TimeIndex comparison supports datetime or TimeIndex types"
+            )
     
     def __le__(self, other: Union[datetime, 'TimeIndex']) -> pd.Series:
         """Less than or equal comparison."""
@@ -339,7 +335,10 @@ class TimeIndex:
         elif isinstance(other, TimeIndex):
             return self._series >= other._series
         else:
-            raise TypeError(f"Cannot compare TimeIndex with {type(other)}")
+            raise DataValidationError(
+                f"Cannot compare TimeIndex with {type(other)}",
+                details="TimeIndex comparison supports datetime or TimeIndex types"
+            )
     
     def __gt__(self, other: Union[datetime, 'TimeIndex']) -> pd.Series:
         """Greater than comparison."""
@@ -348,7 +347,10 @@ class TimeIndex:
         elif isinstance(other, TimeIndex):
             return self._series > other._series
         else:
-            raise TypeError(f"Cannot compare TimeIndex with {type(other)}")
+            raise DataValidationError(
+                f"Cannot compare TimeIndex with {type(other)}",
+                details="TimeIndex comparison supports datetime or TimeIndex types"
+            )
     
     def __lt__(self, other: Union[datetime, 'TimeIndex']) -> pd.Series:
         """Less than comparison."""
@@ -357,7 +359,10 @@ class TimeIndex:
         elif isinstance(other, TimeIndex):
             return self._series < other._series
         else:
-            raise TypeError(f"Cannot compare TimeIndex with {type(other)}")
+            raise DataValidationError(
+                f"Cannot compare TimeIndex with {type(other)}",
+                details="TimeIndex comparison supports datetime or TimeIndex types"
+            )
     
     def __eq__(self, other: Any) -> Union[pd.Series, bool]:
         """Equality comparison."""
@@ -400,12 +405,18 @@ def parse_timestamp(value: Union[str, datetime, int, float]) -> datetime:
                     return datetime.strptime(value, fmt)
                 except ValueError:
                     continue
-            raise ValueError(f"Cannot parse datetime string: {value}")
+            raise DataValidationError(
+                f"Cannot parse datetime string: {value}",
+                details="String must match one of the supported datetime formats: %Y-%m-%d, %Y-%m-%d %H:%M:%S, %Y/%m/%d, %m/%d/%Y"
+            )
     elif isinstance(value, (int, float)):
         # Unix timestamp
         return datetime.fromtimestamp(value)
     else:
-        raise ValueError(f"Cannot parse {type(value)} to datetime")
+        raise DataValidationError(
+            f"Cannot parse {type(value)} to datetime",
+            details="parse_timestamp supports datetime, str, int, float, or None types"
+        )
 
 
 __all__ = [

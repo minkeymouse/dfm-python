@@ -287,7 +287,7 @@ class StructuralIdentificationSSM(nn.Module):
                     f"Consider: (1) Checking matrix dimensions, (2) Verifying device compatibility."
                 )
             ) from e
-        except Exception as e:
+        except (ValueError, RuntimeError, AttributeError, ImportError) as e:
             raise NumericalError(
                 "Structural identification matrix inversion failed (unexpected error).",
                 details=(

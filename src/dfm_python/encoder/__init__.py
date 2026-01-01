@@ -13,7 +13,7 @@ from .pca import (
     compute_principal_components,
 )
 
-from .autoencoder import (
+from .simple_encoder import (
     Encoder,
     AutoencoderEncoder,
     extract_decoder_params,

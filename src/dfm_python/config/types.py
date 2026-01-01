@@ -69,14 +69,12 @@ CompanionMatrix = np.ndarray
 # Configuration Types
 # ============================================================================
 
-ConfigSource = Union[str, Path, Dict[str, Any], Any]
-"""Configuration source: path, dict, or config object."""
 
 SeriesID = str
 """Series identifier string."""
 
-Frequency = Literal['d', 'w', 'm', 'q', 'y', 'h']
-"""Time series frequency code."""
+Frequency = Literal['d', 'w', 'm', 'q', 'sa', 'a']
+"""Time series frequency code. Matches VALID_FREQUENCIES in constants.py."""
 
 DatasetName = str
 """Dataset name identifier."""
@@ -178,16 +176,6 @@ ValidationIssue = Dict[str, Any]
 ValidationResult = Dict[str, Any]
 """Validation result dictionary with issues, summary, etc."""
 
-# ============================================================================
-# Model Component Types
-# ============================================================================
-
-ModelComponent = Union[
-    'CompanionSSM',
-    'MACompanionSSM',
-    'StructuralIdentificationSSM'
-]
-"""Union type for model components (forward reference)."""
 
 # ============================================================================
 # Type Guards and Utilities
@@ -215,7 +203,10 @@ def get_array_shape(arr: ArrayLike) -> Shape:
     elif is_torch_tensor(arr):
         return tuple(arr.shape)
     else:
-        raise TypeError(f"Expected numpy array or torch tensor, got {type(arr)}")
+        raise DataValidationError(
+            f"Expected numpy array or torch tensor, got {type(arr)}",
+            details=f"Input type: {type(arr).__name__}, value shape: {getattr(arr, 'shape', 'N/A')}"
+        )
 
 
 def to_numpy(arr: ArrayLike) -> np.ndarray:
@@ -227,9 +218,16 @@ def to_numpy(arr: ArrayLike) -> np.ndarray:
     if is_numpy_array(arr):
         return arr
     elif is_torch_tensor(arr):
-        return arr.detach().cpu().numpy()
+        # Use local import to avoid circular dependency with utils.common
+        from ..utils.common import ensure_numpy
+        return ensure_numpy(arr)
     else:
-        raise TypeError(f"Cannot convert {type(arr)} to numpy array")
+        # Use local import to avoid circular dependency
+        from ..utils.errors import DataValidationError
+        raise DataValidationError(
+            f"Cannot convert {type(arr)} to numpy array",
+            details=f"Input type: {type(arr).__name__}, value shape: {getattr(arr, 'shape', 'N/A')}"
+        )
 
 
 def to_tensor(arr: ArrayLike, device: Optional[Device] = None) -> Tensor:
@@ -244,7 +242,12 @@ def to_tensor(arr: ArrayLike, device: Optional[Device] = None) -> Tensor:
             tensor = tensor.to(device)
         return tensor
     else:
-        raise TypeError(f"Cannot convert {type(arr)} to torch tensor")
+        # Use local import to avoid circular dependency
+        from ..utils.errors import DataValidationError
+        raise DataValidationError(
+            f"Cannot convert {type(arr)} to torch tensor",
+            details=f"Input type: {type(arr).__name__}, value shape: {getattr(arr, 'shape', 'N/A')}"
+        )
 
 
 __all__ = [
@@ -265,7 +268,6 @@ __all__ = [
     'IRFArray',
     'CompanionMatrix',
     # Configuration Types
-    'ConfigSource',
     'SeriesID',
     'Frequency',
     'DatasetName',
@@ -299,8 +301,6 @@ __all__ = [
     # Validation Types
     'ValidationIssue',
     'ValidationResult',
-    # Model Component Types
-    'ModelComponent',
     # Type Guards and Utilities
     'is_numpy_array',
     'is_torch_tensor',

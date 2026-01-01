@@ -1,0 +1,2 @@
+"""Tests for config package."""
+

@@ -12,19 +12,18 @@ The configuration hierarchy:
 - DDFMConfig: Adds neural network parameters (epochs, learning_rate, encoder_layers) - NO blocks
 - KDFMConfig: Adds VARMA parameters (ar_order, ma_order, structural_method) - NO blocks
 
-Note: SeriesConfig is in schema/series.py, result classes are in schema/results.py
+Note: Series are specified via frequency dict mapping column names to frequencies. Result classes are in schema/results.py
 
 Blocks are DFM-specific and defined as Dict[str, Dict[str, Any]] where each block is a dict with:
-- factors: int (number of factors)
-- ar_lag: int (AR lag order)
-- clock: str (block clock frequency)
+- num_factors: int (number of factors)
+- series: List[str] (list of series names/column names in this block)
 
 For loading configurations from files (YAML) or other sources,
 see the config.adapter module which provides source adapters.
 """
 
 import numpy as np
-from typing import List, Optional, Dict, Any, Union
+from typing import List, Optional, Dict, Any, Union, TYPE_CHECKING
 from dataclasses import dataclass, field
 
 try:
@@ -32,12 +31,17 @@ try:
 except ImportError:
     from typing_extensions import Protocol
 
-# Import base classes and utilities
-from .series import SeriesConfig
+if TYPE_CHECKING:
+    try:
+        from sklearn.preprocessing import StandardScaler, RobustScaler
+        ScalerType = Union[StandardScaler, RobustScaler, Any]
+    except ImportError:
+        ScalerType = Any
+else:
+    ScalerType = Any
+
 # Import ConfigurationError and DataError lazily to avoid circular imports
 # They are only used in methods, not at module level
-# Import parse_series_list and detect_config_type lazily to avoid circular imports
-# They are only used in class methods, not at module level
 from ..constants import (
     DEFAULT_LEARNING_RATE,
     DEFAULT_MAX_EPOCHS,
@@ -47,16 +51,27 @@ from ..constants import (
     DEFAULT_REGULARIZATION_SCALE,
     DEFAULT_STRUCTURAL_REG_WEIGHT,
     DEFAULT_CONVERGENCE_THRESHOLD,
+    DEFAULT_EM_THRESHOLD,
+    DEFAULT_EM_MAX_ITER,
     DEFAULT_MAX_ITER,
     DEFAULT_MAX_MCMC_ITER,
     DEFAULT_TOLERANCE,
     DEFAULT_DATA_CLIP_THRESHOLD,
+    DEFAULT_MIN_OBS_IDIO,
+    DEFAULT_DISP,
+    DEFAULT_IDIO_RHO0,
+    AR_CLIP_MIN,
+    AR_CLIP_MAX,
     MIN_EIGENVALUE,
     MAX_EIGENVALUE,
     MIN_DIAGONAL_VARIANCE,
     DEFAULT_NAN_METHOD,
     DEFAULT_NAN_K,
     DEFAULT_CLOCK_FREQUENCY,
+    DEFAULT_KDFM_AR_ORDER,
+    DEFAULT_KDFM_MA_ORDER,
+    FREQUENCY_HIERARCHY,
+    DEFAULT_HIERARCHY_VALUE,
 )
 
 
@@ -71,35 +86,57 @@ class BaseModelConfig:
     
     This base class contains the model structure that is common to all
     factor models (DFM, DDFM, KDFM):
-    - Series definitions
-    - Clock frequency
+    - Series definitions (via frequency dict mapping column names to frequencies)
+    - Clock frequency (required, base frequency for latent factors)
     - Data preprocessing (missing data handling)
+    
+    Series Configuration:
+    - Provide `frequency` dict: {'column_name': 'frequency_code'} to specify per-series frequencies
+    - If `frequency` is None, all columns will use `clock` frequency
+    - If a column is missing from `frequency` dict, it will use `clock` frequency
+    - When data is loaded, missing columns in `frequency` dict are automatically added with `clock` frequency
     
     Note: Blocks are DFM-specific and are NOT included in BaseModelConfig.
     DFMConfig adds block structure, while DDFMConfig and KDFMConfig do not use blocks.
     
     Subclasses (DFMConfig, DDFMConfig, KDFMConfig) add model-specific training parameters.
+    
+    Examples
+    --------
+    >>> # With explicit frequency mapping
+    >>> config = DFMConfig(
+    ...     frequency={'gdp': 'q', 'unemployment': 'm', 'interest_rate': 'm'},
+    ...     clock='m',
+    ...     blocks={...}
+    ... )
+    >>> 
+    >>> # Without frequency (all use clock)
+    >>> config = DFMConfig(
+    ...     frequency=None,  # or omit it
+    ...     clock='m',
+    ...     blocks={...}
+    ... )
+    >>> # Series will be built from data columns using clock='m' when data is loaded
     """
     # ========================================================================
     # Model Structure (WHAT - defines the model)
     # ========================================================================
-    series: List[SeriesConfig]  # Series specifications
+    frequency: Optional[Dict[str, str]] = None  # Optional: Maps column names to frequencies {'column_name': 'frequency'}
+    # If None, all series use clock frequency (data is assumed aligned with clock)
     
     # ========================================================================
     # Shared Data Handling Parameters
     # ========================================================================
-    nan_method: int = 2  # Missing data handling method (1-5). Preprocessing step before Kalman Filter-based handling
-    nan_k: int = 3  # Spline parameter for NaN interpolation (cubic spline)
-    clock: str = 'm'  # Base frequency for nowcasting (global clock): 'd', 'w', 'm', 'q', 'sa', 'a' (defaults to 'm' for monthly)
-    scaler: Optional[str] = 'standard'  # Unified scaler type for all series: 'standard', 'robust', 'minmax', 'maxabs', 'quantile', or None (no scaling). Default: 'standard' for unified scaling.
+    clock: str = 'm'  # Required: Base frequency for latent factors (global clock): 'd', 'w', 'm', 'q', 'sa', 'a' (defaults to 'm' for monthly)
+    target_scaler: Optional[ScalerType] = None  # Fitted sklearn scaler instance (StandardScaler, RobustScaler, etc.) for target series only. Must be a fitted scaler object (call .fit() on target data first). Pass scaler object directly, not string. Feature series are assumed to be manually preprocessed. If None, target series are assumed to be already in the desired scale.
+    # Note: nan_method and nan_k are internal constants (DEFAULT_NAN_METHOD, DEFAULT_NAN_K) used during initialization only
     
     def __post_init__(self):
         """Validate basic model structure.
         
         This method performs basic validation of the model configuration:
-        - Ensures at least one series is specified
         - Validates clock frequency
-        - Auto-generates series_id if not provided
+        - Validates frequency dict if provided
         
         Raises
         ------
@@ -107,43 +144,88 @@ class BaseModelConfig:
             If any validation check fails, with a descriptive error message
             indicating what needs to be fixed.
         """
-        # Import frequency hierarchy and validation for validation
-        from ...config.constants import FREQUENCY_HIERARCHY
-        from ...utils.errors import ConfigurationError
+        from ...config.adapter import _raise_config_error, _is_dict_like
         
-        if not self.series:
-            raise ConfigurationError(
-                "Model configuration must contain at least one series. "
-                "Please add series definitions to your configuration."
-            )
-        
-        # Validate global clock
+        # Validate global clock (required)
         self.clock = validate_frequency(self.clock)
         
-        # Auto-generate series_id if not provided
-        for i, s in enumerate(self.series):
-            if s.series_id is None:
-                s.series_id = f"series_{i}"
-            if s.series_name is None:
-                s.series_name = s.series_id
+        # Validate frequency dict if provided
+        if self.frequency is not None:
+            if not _is_dict_like(self.frequency):
+                _raise_config_error(
+                    f"frequency must be a dict mapping column names to frequencies, got {type(self.frequency)}"
+                )
+            
+            # Empty frequency dict is allowed (will be filled from columns later with clock frequency)
+            
+            # Validate all frequencies in the dict
+            for col_name, freq in self.frequency.items():
+                if not isinstance(col_name, str):
+                    _raise_config_error(f"frequency dict keys must be strings (column names), got {type(col_name)}")
+                validate_frequency(freq)
     
-    # ========================================================================
-    # Helper Methods (snake_case - recommended)
-    # ========================================================================
+    def get_frequencies(self, columns: Optional[List[str]] = None) -> List[str]:
+        """Get frequencies. Auto-creates dict from columns if None, defaults to clock for missing."""
+        if columns is not None:
+            # Auto-create frequency dict if None
+            if self.frequency is None:
+                self.frequency = {col: self.clock for col in columns}
+            # Return frequencies, defaulting to clock for missing columns
+            return [self.frequency.get(col, self.clock) for col in columns]
+        
+        # No columns provided - return from existing dict
+        if self.frequency is None:
+            return []
+        return list(self.frequency.values())
     
-    def get_series_ids(self) -> List[str]:
-        """Get list of series IDs (snake_case - recommended)."""
-        return [s.series_id if s.series_id is not None else f"series_{i}" 
-                for i, s in enumerate(self.series)]
+    def get_series_ids(self, columns: Optional[List[str]] = None) -> List[str]:
+        """Get series IDs. Auto-creates frequency dict from columns if None."""
+        if columns is not None:
+            # Auto-create frequency dict if None
+            if self.frequency is None:
+                self.frequency = {col: self.clock for col in columns}
+            return columns
+        
+        # No columns provided - return from existing dict
+        if self.frequency is None:
+            return []
+        return list(self.frequency.keys())
     
-    def get_series_names(self) -> List[str]:
-        """Get list of series names (snake_case - recommended)."""
-        return [s.series_name if s.series_name is not None else (s.series_id or f"series_{i}")
-                for i, s in enumerate(self.series)]
+    @classmethod
+    def _extract_base(cls, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract shared base parameters from config dict."""
+        from ...config.adapter import _convert_series_to_frequency_dict
+        
+        base_params = {
+            'clock': data.get('clock', DEFAULT_CLOCK_FREQUENCY),
+            'target_scaler': data.get('target_scaler', None),
+        }
+        
+        # Handle frequency dict (new API) or legacy series list/dict
+        from ...config.adapter import _extract_frequency_dict
+        frequency_dict = _extract_frequency_dict(data, base_params['clock'])
+        if frequency_dict is not None:
+            base_params['frequency'] = frequency_dict
+        
+        return base_params
     
-    def get_frequencies(self) -> List[str]:
-        """Get list of frequencies."""
-        return [s.frequency for s in self.series]
+    @classmethod
+    def _extract_params(cls, data: Dict[str, Any], param_map: Dict[str, Any]) -> Dict[str, Any]:
+        """Generic parameter extraction helper.
+        
+        Parameters
+        ----------
+        data : Dict[str, Any]
+            Source data dictionary
+        param_map : Dict[str, Any]
+            Mapping of parameter names to default values
+            
+        Returns
+        -------
+        Dict[str, Any]
+            Extracted parameters with defaults applied
+        """
+        return {key: data.get(key, default) for key, default in param_map.items()}
 
 
 # ============================================================================
@@ -162,13 +244,13 @@ class DFMConfig(BaseModelConfig):
     
     The configuration can be built from:
     - Main settings (estimation parameters) from config/default.yaml
-    - Series definitions from config/series/default.yaml or CSV
+    - Series definitions via frequency dict (column names -> frequencies)
     - Block definitions from config/blocks/default.yaml
     """
     # ========================================================================
     # Block Structure (DFM-specific)
     # ========================================================================
-    blocks: Dict[str, Dict[str, Any]] = field(default_factory=dict)  # Block configurations (block_name -> {factors, ar_lag, clock, notes})
+    blocks: Dict[str, Dict[str, Any]] = field(default_factory=dict)  # Block configurations: {"block_name": {"num_factors": int, "series": [str]}}
     block_names: List[str] = field(init=False)  # Block names in order (derived from blocks dict)
     factors_per_block: List[int] = field(init=False)  # Number of factors per block (derived from blocks)
     _cached_blocks: Optional[np.ndarray] = field(default=None, init=False, repr=False)  # Internal cache
@@ -176,154 +258,226 @@ class DFMConfig(BaseModelConfig):
     # ========================================================================
     # EM Algorithm Parameters (HOW - controls the algorithm)
     # ========================================================================
-    ar_lag: int = 1  # Number of lags in AR transition equation (lookback window). Must be 1 or 2 (maximum supported order is VAR(2))
-    threshold: float = 1e-5  # EM convergence threshold
-    max_iter: int = 5000  # Maximum EM iterations
+    # Note: ar_lag removed - factors always use AR(1) dynamics (simplified)
+    threshold: float = DEFAULT_EM_THRESHOLD  # EM convergence threshold
+    max_iter: int = DEFAULT_EM_MAX_ITER  # Maximum EM iterations
     
     # ========================================================================
     # Numerical Stability Parameters (transparent and configurable)
     # ========================================================================
-    # AR Coefficient Clipping
-    clip_ar_coefficients: bool = True  # Enable AR coefficient clipping for stationarity
-    ar_clip_min: float = -0.99  # Minimum AR coefficient (must be > -1 for stationarity)
-    ar_clip_max: float = 0.99   # Maximum AR coefficient (must be < 1 for stationarity)
-    warn_on_ar_clip: bool = True  # Warn when AR coefficients are clipped (indicates near-unit root)
+    # AR Coefficient Clipping: If provided (not None), automatically enables clipping and always warns
+    ar_clip: Optional[Dict[str, float]] = None  # {"min": float, "max": float} - AR coefficient clipping bounds. If None, no clipping. If provided, clipping enabled and warnings always shown.
     
-    # Data Value Clipping
-    clip_data_values: bool = True  # Enable clipping of extreme data values
-    data_clip_threshold: float = 100.0  # Clip values beyond this many standard deviations
-    warn_on_data_clip: bool = True  # Warn when data values are clipped (indicates outliers)
+    # Data Value Clipping: If provided (not None), automatically enables clipping and always warns
+    data_clip: Optional[float] = None  # Clip values beyond this many standard deviations. If None, no clipping. If provided, clipping enabled and warnings always shown.
     
-    # Regularization
-    use_regularization: bool = True  # Enable regularization for numerical stability
-    regularization_scale: float = 1e-5  # Scale factor for ridge regularization (relative to trace, default 1e-5)
-    min_eigenvalue: float = 1e-8  # Minimum eigenvalue for positive definite matrices
-    max_eigenvalue: float = 1e6   # Maximum eigenvalue cap to prevent explosion
-    warn_on_regularization: bool = True  # Warn when regularization is applied
+    # Regularization: If provided (not None), automatically enables regularization and always warns
+    regularization: Optional[Dict[str, float]] = None  # {"scale": float, "min_eigenvalue": float, "max_eigenvalue": float} - Regularization parameters. If None, no regularization. If provided, regularization enabled and warnings always shown.
     
-    # Damped Updates
-    use_damped_updates: bool = True  # Enable damped updates when likelihood decreases
-    damping_factor: float = 0.8  # Damping factor (0.8 = 80% new, 20% old)
-    warn_on_damped_update: bool = True  # Warn when damped updates are used
+    # Damped Updates: If provided (not None), automatically enables damping and always warns
+    damping_factor: Optional[float] = None  # Damping factor (0.8 = 80% new, 20% old). If None, no damping. If provided, damping enabled and warnings always shown.
     
-    # Idiosyncratic Component Augmentation
-    augment_idio: bool = True  # Enable state augmentation with idiosyncratic components (default: True)
-    augment_idio_slow: bool = True  # Enable tent-length chains for slower-frequency series (default: True)
-    idio_rho0: float = 0.1  # Initial AR coefficient for idiosyncratic components (default: 0.1)
-    idio_min_var: float = 1e-8  # Minimum variance for idiosyncratic innovation covariance (default: 1e-8)
+    # Idiosyncratic Component Parameters (auto-detected from frequencies)
+    idio_rho0: float = DEFAULT_IDIO_RHO0  # Initial AR coefficient for idiosyncratic components (default: 0.1)
+    idio_min_var: float = MIN_DIAGONAL_VARIANCE  # Minimum variance for idiosyncratic innovation covariance (defaults to MIN_DIAGONAL_VARIANCE)
+    # Note: augment_idio and augment_idio_slow are auto-detected from frequency configuration
+    # - If all series use clock frequency: augment_idio=False, augment_idio_slow=False
+    # - If mixed frequencies detected: augment_idio=True, augment_idio_slow=True (auto-enabled)
     
     def __post_init__(self):
         """Validate blocks structure and derive block properties."""
         super().__post_init__()
         
-        from ...config.constants import FREQUENCY_HIERARCHY
-        from ...utils.errors import ConfigurationError
-        # validate_frequency is now defined in this module
+        from ...config.adapter import _raise_config_error
+        from ..constants import FREQUENCY_HIERARCHY, DEFAULT_HIERARCHY_VALUE
         
         if not self.blocks:
-            raise ConfigurationError("DFM configuration must contain at least one block.")
+            _raise_config_error("DFM configuration must contain at least one block.")
         
         # Derive block_names and factors_per_block
-        from ...functional.dfm_block import DEFAULT_BLOCK_NAME
         block_names_list = list(self.blocks.keys())
-        global_block_name = block_names_list[0] if block_names_list else DEFAULT_BLOCK_NAME
-        
-        other_blocks = [name for name in block_names_list if name != global_block_name]
-        # Use object.__setattr__ for init=False fields (required by dataclass)
-        object.__setattr__(self, 'block_names', [global_block_name] + other_blocks)
+        object.__setattr__(self, 'block_names', block_names_list)
         object.__setattr__(self, 'factors_per_block', 
-                         [self.blocks[name].get('factors', 1) for name in self.block_names])
+                         [self.blocks[name].get('num_factors', 1) for name in self.block_names])
         
         # Validate blocks
-        from ...config.constants import DEFAULT_HIERARCHY_VALUE
-        global_clock_hierarchy = FREQUENCY_HIERARCHY.get(self.clock, DEFAULT_HIERARCHY_VALUE)
         for block_name, block_cfg in self.blocks.items():
-            factors = block_cfg.get('factors', 1)
-            ar_lag = block_cfg.get('ar_lag', 1)
-            block_clock = validate_frequency(block_cfg.get('clock', self.clock))
+            num_factors = block_cfg.get('num_factors', 1)
+            series_list = block_cfg.get('series', [])
             
-            if factors < 1:
-                from ...utils.errors import ConfigurationError
-                raise ConfigurationError(f"Block '{block_name}' must have factors >= 1, got {factors}")
-            if not (1 <= ar_lag <= 2):
-                from ...utils.errors import ConfigurationError
-                raise ConfigurationError(f"Block '{block_name}' must have ar_lag in [1, 2], got {ar_lag}")
-            if FREQUENCY_HIERARCHY.get(block_clock, DEFAULT_HIERARCHY_VALUE) < global_clock_hierarchy:
-                from ...utils.errors import ConfigurationError
-                raise ConfigurationError(
-                    f"Block '{block_name}' clock '{block_clock}' is faster than global clock '{self.clock}'"
-                )
+            from ...config.adapter import _raise_config_error
+            if num_factors < 1:
+                _raise_config_error(f"Block '{block_name}' must have num_factors >= 1, got {num_factors}")
+            
+            if not isinstance(series_list, list):
+                _raise_config_error(f"Block '{block_name}' must have 'series' as a list, got {type(series_list)}")
+            
+            # Validate series exist in frequency dict if available
+            if self.frequency is not None:
+                for series_name in series_list:
+                    if series_name not in self.frequency:
+                        # Auto-add missing series with clock frequency
+                        self.frequency[series_name] = self.clock
         
-        # Validate series frequencies against block clocks
-        for s in self.series:
-            series_freq_hierarchy = FREQUENCY_HIERARCHY.get(s.frequency, DEFAULT_HIERARCHY_VALUE)
-            for block_name, block_cfg in self.blocks.items():
-                block_clock = block_cfg.get('clock', self.clock)
-                if series_freq_hierarchy < FREQUENCY_HIERARCHY.get(block_clock, DEFAULT_HIERARCHY_VALUE):
-                    from ...utils.errors import ConfigurationError
-                    raise ConfigurationError(
-                        f"Series '{s.series_id}' frequency '{s.frequency}' is faster than "
-                        f"block '{block_name}' clock '{block_clock}'"
-                    )
-        
+        from ...config.adapter import _raise_config_error
         if any(f < 1 for f in self.factors_per_block):
-            from ...utils.errors import ConfigurationError
-            raise ConfigurationError("factors_per_block must contain positive integers >= 1")
-    
-    def get_blocks_array(self) -> np.ndarray:
-        """Get blocks as numpy array (snake_case - recommended, cached).
+            _raise_config_error("factors_per_block must contain positive integers >= 1")
         
-        Note: SeriesConfig no longer contains blocks information.
-        By default, all series load on all blocks (all 1s).
-        Custom series-to-block mapping can be provided via series_to_blocks attribute.
+        # Auto-detect mixed frequencies and set augment_idio/augment_idio_slow
+        # If frequency dict exists, check if all frequencies match clock
+        if self.frequency is not None and len(self.frequency) > 0:
+            frequencies = list(self.frequency.values())
+            clock_hierarchy = FREQUENCY_HIERARCHY.get(self.clock, DEFAULT_HIERARCHY_VALUE)
+            is_mixed_freq = any(
+                FREQUENCY_HIERARCHY.get(freq, DEFAULT_HIERARCHY_VALUE) != clock_hierarchy
+                for freq in frequencies
+            )
+            # Auto-set augment_idio and augment_idio_slow based on frequency detection
+            # Store as internal attributes (not in __init__ signature)
+            object.__setattr__(self, '_augment_idio', is_mixed_freq)
+            object.__setattr__(self, '_augment_idio_slow', is_mixed_freq)
+        else:
+            # No frequency info yet - will be auto-detected when data is loaded
+            object.__setattr__(self, '_augment_idio', False)
+            object.__setattr__(self, '_augment_idio_slow', False)
+    
+    @property
+    def augment_idio(self) -> bool:
+        """Auto-detected: True if mixed frequencies detected, False if single frequency."""
+        return getattr(self, '_augment_idio', False)
+    
+    @property
+    def augment_idio_slow(self) -> bool:
+        """Auto-detected: True if mixed frequencies detected, False if single frequency."""
+        return getattr(self, '_augment_idio_slow', False)
+    
+    def _update_idio_flags_from_frequencies(self, frequencies: List[str]) -> None:
+        """Update augment_idio flags based on detected frequencies (called when data is loaded)."""
+        from ..constants import FREQUENCY_HIERARCHY, DEFAULT_HIERARCHY_VALUE
+        clock_hierarchy = FREQUENCY_HIERARCHY.get(self.clock, DEFAULT_HIERARCHY_VALUE)
+        is_mixed_freq = any(
+            FREQUENCY_HIERARCHY.get(freq, DEFAULT_HIERARCHY_VALUE) != clock_hierarchy
+            for freq in frequencies
+        )
+        object.__setattr__(self, '_augment_idio', is_mixed_freq)
+        object.__setattr__(self, '_augment_idio_slow', is_mixed_freq)
+    
+    def to_em_config(self) -> 'EMConfig':
+        """Create EMConfig from DFMConfig consolidated parameters."""
+        from ...functional.em import EMConfig
+        from ..constants import DEFAULT_REGULARIZATION, VAR_STABILITY_THRESHOLD
+        
+        # Extract regularization parameters directly from dict
+        if self.regularization is not None and isinstance(self.regularization, dict):
+            reg_scale = self.regularization.get('scale', DEFAULT_REGULARIZATION_SCALE)
+            min_eigenval = self.regularization.get('min_eigenvalue', MIN_EIGENVALUE)
+            max_eigenval = self.regularization.get('max_eigenvalue', VAR_STABILITY_THRESHOLD)
+        else:
+            reg_scale = DEFAULT_REGULARIZATION
+            min_eigenval = MIN_EIGENVALUE
+            max_eigenval = VAR_STABILITY_THRESHOLD
+        
+        return EMConfig(
+            regularization=reg_scale,
+            min_norm=min_eigenval,
+            max_eigenval=max_eigenval,
+            # Other parameters use defaults from EMConfig
+        )
+    
+    def get_blocks_array(self, columns: Optional[List[str]] = None) -> np.ndarray:
+        """Get blocks as numpy array (N x B) where N is number of series and B is number of blocks.
+        
+        Returns 1 if series is in block, 0 otherwise.
         """
         if self._cached_blocks is None:
-            n_series = len(self.series)
-            n_blocks = len(self.block_names)
-            # Default: all series load on all blocks (all 1s)
-            # Custom mapping can be provided via series_to_blocks attribute if needed
-            if hasattr(self, 'series_to_blocks') and self.series_to_blocks is not None:
-                blocks_list = []
-                for s in self.series:
-                    series_blocks = self.series_to_blocks.get(s.series_id, [1] * n_blocks)
-                    blocks_list.append(series_blocks)
-                self._cached_blocks = np.array(blocks_list, dtype=int)
-            else:
-                # Default: all series load on all blocks
-                self._cached_blocks = np.ones((n_series, n_blocks), dtype=int)
+            # Auto-create frequency dict if needed
+            if self.frequency is None:
+                if columns is None:
+                    from ...config.adapter import _raise_config_error
+                    _raise_config_error("frequency dict or columns required")
+                self.frequency = {col: self.clock for col in columns}
+            
+            series_ids = list(self.frequency.keys()) if columns is None else columns
+            
+            # Build blocks array from block series lists (N x B matrix)
+            block_series_sets = {
+                name: set(self.blocks[name].get('series', []))
+                for name in self.block_names
+            }
+            blocks_list = [
+                [1 if series_id in block_series_sets[name] else 0 for name in self.block_names]
+                for series_id in series_ids
+            ]
+            
+            self._cached_blocks = np.array(blocks_list, dtype=int)
         return self._cached_blocks
     
     @classmethod
-    def _extract_base(cls, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Extract shared base parameters from config dict."""
-        return {
-            'nan_method': data.get('nan_method', 2),
-            'nan_k': data.get('nan_k', 3),
-            'clock': data.get('clock', DEFAULT_CLOCK_FREQUENCY),
-            'scaler': data.get('scaler', 'standard'),
+    def _extract_dfm_params(cls, data: Dict[str, Any], base_params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Extract DFM-specific parameters from config dict.
+        
+        Parameters
+        ----------
+        data : Dict[str, Any]
+            Config dictionary
+        base_params : Dict[str, Any], optional
+            Pre-extracted base parameters. If provided, avoids duplicate extraction.
+            If None, extracts base params internally.
+        """
+        if base_params is None:
+            base_params = cls._extract_base(data)
+        
+        # Extract consolidated parameters (new format only)
+        dfm_params = {
+            'threshold': data.get('threshold', DEFAULT_EM_THRESHOLD),
+            'max_iter': data.get('max_iter', DEFAULT_EM_MAX_ITER),
+            'idio_rho0': data.get('idio_rho0', DEFAULT_IDIO_RHO0),
+            'idio_min_var': data.get('idio_min_var', MIN_DIAGONAL_VARIANCE),
+            'ar_clip': data.get('ar_clip', None),
+            'data_clip': data.get('data_clip', None),
+            'regularization': data.get('regularization', None),
+            'damping_factor': data.get('damping_factor', None),
         }
+        
+        result = base_params.copy()
+        result.update(dfm_params)
+        return result
     
     @classmethod
-    def _extract_dfm_params(cls, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Extract DFM-specific parameters from config dict."""
+    def from_dict(cls, data: Dict[str, Any]) -> Union['DFMConfig', 'DDFMConfig', 'KDFMConfig']:
+        """Create DFMConfig, DDFMConfig, or KDFMConfig from dictionary.
+        
+        Expected format: {'frequency': {'column_name': 'frequency'}, 'blocks': {...}, ...}
+        
+        Also accepts estimation parameters: threshold, max_iter, etc.
+        """
+        from ...config.adapter import detect_config_type, MODEL_TYPE_DDFM, MODEL_TYPE_KDFM, _normalize_blocks_dict
+        from ...utils.errors import ConfigurationError
+        
+        # Extract base params (handles frequency conversion from series if needed)
         base_params = cls._extract_base(data)
-        base_params.update({
-            'ar_lag': data.get('ar_lag', 1),
-            'threshold': data.get('threshold', 1e-5),
-            'max_iter': data.get('max_iter', 5000),
-            'clip_ar_coefficients': data.get('clip_ar_coefficients', True),
-            'ar_clip_min': data.get('ar_clip_min', -0.99),
-            'ar_clip_max': data.get('ar_clip_max', 0.99),
-            'use_regularization': data.get('use_regularization', True),
-            'regularization_scale': data.get('regularization_scale', 1e-5),
-            'min_eigenvalue': data.get('min_eigenvalue', MIN_EIGENVALUE),
-            'max_eigenvalue': data.get('max_eigenvalue', MAX_EIGENVALUE),
-            'augment_idio': data.get('augment_idio', True),
-            'augment_idio_slow': data.get('augment_idio_slow', True),
-            'idio_rho0': data.get('idio_rho0', 0.1),
-            'idio_min_var': data.get('idio_min_var', MIN_DIAGONAL_VARIANCE),
-        })
-        return base_params
+        
+        # Determine config type
+        config_type = detect_config_type(data)
+        
+        if config_type == MODEL_TYPE_DDFM:
+            return DDFMConfig(**base_params, **DDFMConfig._extract_ddfm(data))
+        
+        if config_type == MODEL_TYPE_KDFM:
+            return KDFMConfig(**base_params, **KDFMConfig._extract_kdfm(data))
+        
+        # Handle blocks for DFM
+        from ...config.adapter import _raise_config_error, _is_dict_like
+        blocks_dict = data.get('blocks', {})
+        if not blocks_dict:
+            _raise_config_error("blocks dict is required for DFM config")
+        if not _is_dict_like(blocks_dict):
+            _raise_config_error(f"blocks must be a dict, got {type(blocks_dict)}")
+        
+        blocks_dict_normalized = _normalize_blocks_dict(blocks_dict)
+        # Pass base_params to _extract_dfm_params to avoid duplicate extraction
+        dfm_params = DFMConfig._extract_dfm_params(data, base_params=base_params)
+        return DFMConfig(blocks=blocks_dict_normalized, **dfm_params)
 
 
 @dataclass
@@ -338,7 +492,7 @@ class DDFMConfig(BaseModelConfig):
     
     The configuration can be built from:
     - Main settings (training parameters) from config/default.yaml
-    - Series definitions from config/series/default.yaml or CSV
+    - Series definitions via frequency dict (column names -> frequencies)
     """
     # ========================================================================
     # Neural Network Training Parameters
@@ -350,7 +504,7 @@ class DDFMConfig(BaseModelConfig):
     learning_rate: float = 0.001  # Learning rate for Adam optimizer (default: 0.001)
     epochs: int = 100  # Number of training epochs (default: 100)
     batch_size: int = 100  # Batch size for training (default: 100 to match original DDFM)
-    factor_order: int = 1  # VAR lag order for factor dynamics. Must be 1 or 2 (maximum supported order is VAR(2), default: 1)
+    # Note: factor_order removed - factors always use AR(1) dynamics (simplified)
     use_idiosyncratic: bool = True  # Model idio components with AR(1) dynamics (default: True)
     min_obs_idio: int = 5  # Minimum observations for idio AR(1) estimation (default: 5)
     
@@ -362,208 +516,42 @@ class DDFMConfig(BaseModelConfig):
     
     
     # ========================================================================
-    # Factory Methods (shared base methods)
+    # Factory Methods
     # ========================================================================
-    
-    @classmethod
-    def _extract_base(cls, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Extract shared base parameters from config dict (delegates to DFMConfig)."""
-        return DFMConfig._extract_base(data)
-    
-    @classmethod
-    def _extract_dfm_params(cls, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Extract DFM-specific parameters from config dict (delegates to DFMConfig)."""
-        return DFMConfig._extract_dfm_params(data)
     
     @classmethod
     def _extract_ddfm(cls, data: Dict[str, Any]) -> Dict[str, Any]:
         """Extract DDFM-specific parameters from config dict."""
-        base_params = cls._extract_base(data)
-        # Handle both direct keys and ddfm_ prefix format
-        base_params.update({
-            'encoder_layers': data.get('encoder_layers') or data.get('ddfm_encoder_layers', None),
-            'num_factors': data.get('num_factors') or data.get('ddfm_num_factors', None),
-            'activation': data.get('activation') or data.get('ddfm_activation', 'relu'),
-            'use_batch_norm': data.get('use_batch_norm', data.get('ddfm_use_batch_norm', True)),
-            'learning_rate': data.get('learning_rate', data.get('ddfm_learning_rate', 0.001)),
-            'epochs': data.get('epochs', data.get('ddfm_epochs', 100)),
-            'batch_size': data.get('batch_size', data.get('ddfm_batch_size', 100)),
-            'factor_order': data.get('factor_order', data.get('ddfm_factor_order', 1)),
-            'use_idiosyncratic': data.get('use_idiosyncratic', data.get('ddfm_use_idiosyncratic', True)),
-            'min_obs_idio': data.get('min_obs_idio', data.get('ddfm_min_obs_idio', 5)),
-            'max_iter': data.get('max_iter', DEFAULT_MAX_MCMC_ITER),
-            'tolerance': data.get('tolerance', DEFAULT_TOLERANCE),
-            'disp': data.get('disp', 10),
-            'seed': data.get('seed', None),
+        # Don't extract base params here - they're already in base_params from from_dict
+        ddfm_params = cls._extract_params(data, {
+            'encoder_layers': None,
+            'num_factors': None,
+            'activation': 'relu',
+            'use_batch_norm': True,
+            'learning_rate': DEFAULT_LEARNING_RATE,
+            'epochs': DEFAULT_MAX_EPOCHS,
+            'batch_size': DEFAULT_DDFM_BATCH_SIZE,
+            'use_idiosyncratic': True,
+            'min_obs_idio': DEFAULT_MIN_OBS_IDIO,
+            'max_iter': DEFAULT_MAX_MCMC_ITER,
+            'tolerance': DEFAULT_TOLERANCE,
+            'disp': DEFAULT_DISP,
+            'seed': None,
         })
-        return base_params
+        return ddfm_params
     
     @classmethod
-    def _from_hydra_dict(cls, data: Dict[str, Any]) -> Union['DFMConfig', 'DDFMConfig']:
-        """Convert Hydra format (series as dict) to new format."""
-        # Get block_names first (required for series processing)
-        blocks_dict = data.get('blocks', {})
-        if isinstance(blocks_dict, dict) and blocks_dict:
-            block_names = list(blocks_dict.keys())
-            factors_per_block = [
-                blocks_dict[bn].get('factors', 1) if isinstance(blocks_dict[bn], dict) else blocks_dict[bn]
-                for bn in block_names
-            ]
-        else:
-            block_names = data.get('block_names', [])
-            factors_per_block = data.get('factors_per_block', None)
-        
-        # Note: SeriesConfig no longer contains blocks information.
-        # Blocks must be defined in DFMConfig, not inferred from series.
-        # If block_names is still empty, create default block
-        from ...functional.dfm_block import DEFAULT_BLOCK_NAME
-        if not block_names:
-            block_names = [DEFAULT_BLOCK_NAME]
-            factors_per_block = [1]
-            blocks_dict = {DEFAULT_BLOCK_NAME: {'factors': 1, 'ar_lag': 1, 'clock': data.get('clock', DEFAULT_CLOCK_FREQUENCY)}}
-        
-        # Parse series dict: {series_id: {frequency: ..., ...}}
-        # Note: transformation is handled by preprocessing pipeline, not in SeriesConfig
-        # Note: blocks are defined in DFMConfig, not in SeriesConfig
-        series_list = []
-        for series_id, series_cfg in data['series'].items():
-            if isinstance(series_cfg, dict):
-                series_list.append(SeriesConfig(
-                    series_id=series_id,
-                    series_name=series_cfg.get('series_name', series_id),
-                    frequency=series_cfg.get('frequency', DEFAULT_CLOCK_FREQUENCY),
-                    # transformation removed - handled by preprocessing pipeline
-                    # blocks removed - defined in DFMConfig
-                    units=series_cfg.get('units', None),  # Optional, for display only
-                    release_date=series_cfg.get('release_date', None)  # Optional, for nowcasting
-                ))
-        
-        # Convert blocks_dict to dict of block properties
-        blocks_dict_final = {}
-        if isinstance(blocks_dict, dict) and blocks_dict:
-            # Already have blocks dict from input
-            for block_name, block_data in blocks_dict.items():
-                if isinstance(block_data, dict):
-                    blocks_dict_final[block_name] = {
-                        'factors': block_data.get('factors', 1),
-                        'ar_lag': block_data.get('ar_lag', 1),
-                        'clock': block_data.get('clock', DEFAULT_CLOCK_FREQUENCY),
-                        'notes': block_data.get('notes', None)
-                    }
-                else:
-                    blocks_dict_final[block_name] = {'factors': 1, 'ar_lag': 1, 'clock': DEFAULT_CLOCK_FREQUENCY}
-        elif block_names:
-            # Create blocks dict from block_names (fallback)
-            for i, block_name in enumerate(block_names):
-                factors = factors_per_block[i] if factors_per_block and i < len(factors_per_block) else 1
-                blocks_dict_final[block_name] = {'factors': factors, 'ar_lag': 1, 'clock': DEFAULT_CLOCK_FREQUENCY}
-        else:
-            # Default: create default block if no blocks specified
-            from ...functional.dfm_block import DEFAULT_BLOCK_NAME
-            blocks_dict_final[DEFAULT_BLOCK_NAME] = {'factors': 1, 'ar_lag': 1, 'clock': DEFAULT_CLOCK_FREQUENCY}
-        
-        # Determine config type using helper function
-        from ...config.adapter import detect_config_type
-        config_type = detect_config_type(data)
-        
-        if config_type == 'ddfm':
-            # DDFM does not use block structure - no blocks needed
-            return DDFMConfig(
-                series=series_list,
-                **DDFMConfig._extract_ddfm(data)
-            )
-        else:
-            return DFMConfig(
-                series=series_list,
-                blocks=blocks_dict_final,
-                **DDFMConfig._extract_dfm_params(data)
-            )
-    
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> Union['DFMConfig', 'DDFMConfig']:
-        """Create DFMConfig from dictionary.
-        
-        Handles multiple formats:
-        1. New format (list): {'series': [{'series_id': ..., ...}], 'block_names': [...]}
-        2. New format (Hydra): {'series': {'series_id': {...}}, 'blocks': {'block_name': {'factors': N}}}
-        
-        Also accepts estimation parameters: ar_lag, threshold, max_iter, nan_method, nan_k
-        """
-        # New Hydra format: series is a dict
-        if 'series' in data and isinstance(data['series'], dict):
-            return cls._from_hydra_dict(data)
-        
-        # New format with series list
-        if 'series' in data and isinstance(data['series'], list):
-            # Parse series list using helper
-            from ...config.adapter import parse_series_list, detect_config_type
-            from ...functional.dfm_block import parse_blocks_dict, infer_blocks
-            series_list = parse_series_list(data['series'])
-            
-            # Handle blocks: dict of block properties
-            if 'blocks' in data:
-                blocks_data = data['blocks']
-                if isinstance(blocks_data, dict):
-                    blocks_dict = parse_blocks_dict(blocks_data)
-                else:
-                    from ...utils.errors import ConfigurationError
-                    raise ConfigurationError(f"blocks must be a dict, got {type(blocks_data)}")
-            else:
-                # If no blocks provided, infer from series using helper
-                blocks_dict = infer_blocks(series_list, data)
-            
-            # Determine config type using helper function
-            config_type = detect_config_type(data)
-            
-            if config_type == 'ddfm':
-                # DDFM does not use block structure - no blocks needed
-                return DDFMConfig(
-                    series=series_list,
-                    **DDFMConfig._extract_ddfm(data)
-                )
-            else:
-                return DFMConfig(
-                    series=series_list,
-                    blocks=blocks_dict,
-                    **DFMConfig._extract_dfm_params(data)
-                )
-        
-        # Direct instantiation (shouldn't happen often, but handle it)
-        # Try to determine type from instance
-        if isinstance(cls, type) and issubclass(cls, DDFMConfig):
-            return cls(**data)
-        elif isinstance(cls, type) and issubclass(cls, DFMConfig):
-            return cls(**data)
-        else:
-            # Default to DFMConfig
-            return DFMConfig(**data)
+    def from_dict(cls, data: Dict[str, Any]) -> 'DDFMConfig':
+        """Create DDFMConfig from dictionary (delegates to DFMConfig.from_dict for type detection)."""
+        result = DFMConfig.from_dict(data)
+        if isinstance(result, DDFMConfig):
+            return result
+        from ..utils.errors import ConfigurationError
+        raise ConfigurationError(
+            "Expected DDFMConfig but got DFMConfig",
+            details=f"Result type: {type(result).__name__}, expected: DDFMConfig"
+        )
 
-    @classmethod
-    def from_hydra(cls, cfg: Any) -> Union['DFMConfig', 'DDFMConfig']:
-        """Create config from a Hydra DictConfig or plain dict.
-        
-        Parameters
-        ----------
-        cfg : DictConfig | dict
-            Hydra DictConfig (or dict) that contains the composed configuration.
-        
-        Returns
-        -------
-        DFMConfig or DDFMConfig
-            Validated configuration instance (type determined automatically).
-        """
-        try:
-            from omegaconf import DictConfig, OmegaConf  # type: ignore
-            if isinstance(cfg, DictConfig):
-                cfg = OmegaConf.to_container(cfg, resolve=True)
-        except Exception:
-            # OmegaConf not available or not a DictConfig; assume dict
-            pass
-        if not isinstance(cfg, dict):
-            from ...utils.errors import ConfigurationError
-            raise ConfigurationError("from_hydra expects a DictConfig or dict.")
-        # Use DFMConfig.from_dict which handles type detection (defined on DFMConfig, not BaseModelConfig)
-        return DFMConfig.from_dict(cfg)
 
 @dataclass
 class KDFMConfig(BaseModelConfig):
@@ -571,10 +559,12 @@ class KDFMConfig(BaseModelConfig):
     
     This dataclass contains all configuration parameters for the KDFM model.
     It inherits from BaseModelConfig and adds KDFM-specific parameters.
+    
+    Note: KDFM does not use blocks structure (unlike DFM). Only frequency dict is needed.
     """
     # VARMA parameters
-    ar_order: int = 1  # VAR order p
-    ma_order: int = 0  # MA order q (0 = pure VAR)
+    ar_order: int = DEFAULT_KDFM_AR_ORDER  # VAR order p
+    ma_order: int = DEFAULT_KDFM_MA_ORDER  # MA order q (0 = pure VAR)
     
     # Structural identification
     structural_method: str = 'cholesky'  # 'cholesky', 'full', 'low_rank'
@@ -591,23 +581,42 @@ class KDFMConfig(BaseModelConfig):
     structural_reg_weight: float = DEFAULT_STRUCTURAL_REG_WEIGHT  # Weight for structural loss
     use_regularization: bool = True
     regularization_scale: float = DEFAULT_REGULARIZATION_SCALE
-
-# Add factory methods to DFMConfig class
-# These methods handle auto-detection of config type (DFM vs DDFM vs KDFM)
-# Note: Using classmethod assignment (not monkey patching) - these are proper class methods
-def _dfm_from_dict(cls, data: Dict[str, Any]) -> Union['DFMConfig', 'DDFMConfig']:
-    """Create DFMConfig or DDFMConfig from dictionary (auto-detects type)."""
-    # Delegate to DDFMConfig.from_dict which has the detection logic
-    return DDFMConfig.from_dict(data)
-
-def _dfm_from_hydra(cls, cfg: Any) -> Union['DFMConfig', 'DDFMConfig']:
-    """Create config from Hydra DictConfig (auto-detects DFM/DDFM)."""
-    # Delegate to DDFMConfig.from_hydra which has the detection logic
-    return DDFMConfig.from_hydra(cfg)
-
-# Assign class methods to DFMConfig (proper class method assignment)
-DFMConfig.from_dict = classmethod(_dfm_from_dict)
-DFMConfig.from_hydra = classmethod(_dfm_from_hydra)
+    
+    # ========================================================================
+    # Factory Methods
+    # ========================================================================
+    
+    @classmethod
+    def _extract_kdfm(cls, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract KDFM-specific parameters from config dict."""
+        # Don't extract base params here - they're already in base_params from from_dict
+        kdfm_params = cls._extract_params(data, {
+            'ar_order': DEFAULT_KDFM_AR_ORDER,
+            'ma_order': DEFAULT_KDFM_MA_ORDER,
+            'structural_method': 'cholesky',
+            'structural_rank': None,
+            'learning_rate': DEFAULT_LEARNING_RATE,
+            'max_epochs': DEFAULT_MAX_EPOCHS,
+            'batch_size': DEFAULT_BATCH_SIZE,
+            'weight_decay': DEFAULT_REGULARIZATION_SCALE,
+            'grad_clip_val': DEFAULT_GRAD_CLIP_VAL,
+            'structural_reg_weight': DEFAULT_STRUCTURAL_REG_WEIGHT,
+            'use_regularization': True,
+            'regularization_scale': DEFAULT_REGULARIZATION_SCALE,
+        })
+        return kdfm_params
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'KDFMConfig':
+        """Create KDFMConfig from dictionary (delegates to DFMConfig.from_dict for type detection)."""
+        result = DFMConfig.from_dict(data)
+        if isinstance(result, KDFMConfig):
+            return result
+        from ..utils.errors import ConfigurationError
+        raise ConfigurationError(
+            f"Expected KDFMConfig but got {type(result).__name__}",
+            details=f"Result type: {type(result).__name__}, expected: KDFMConfig"
+        )
 
 
 # ============================================================================
@@ -648,42 +657,4 @@ def validate_frequency(frequency: str) -> str:
         )
     
     return frequency
-
-
-def validate_transformation(transformation: str) -> str:
-    """Validate transformation code.
-    
-    Parameters
-    ----------
-    transformation : str
-        Transformation code to validate
-        
-    Returns
-    -------
-    str
-        Validated transformation code (may issue warning if unknown)
-        
-    Note
-    ----
-    Unknown transformation codes are allowed but will issue a warning.
-    The transformation is handled by the preprocessing pipeline.
-    """
-    import warnings
-    from ..constants import VALID_TRANSFORMATIONS
-    
-    if not isinstance(transformation, str):
-        warnings.warn(
-            f"Transformation must be a string, got {type(transformation).__name__}. "
-            f"Will use untransformed data."
-        )
-        return 'none'
-    
-    if transformation not in VALID_TRANSFORMATIONS:
-        warnings.warn(
-            f"Unknown transformation code: '{transformation}'. "
-            f"Valid codes: {VALID_TRANSFORMATIONS}. "
-            f"Will use untransformed data."
-        )
-    
-    return transformation
 

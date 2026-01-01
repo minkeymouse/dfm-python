@@ -25,17 +25,17 @@ from .model import DFMConfig
 class BaseResult(ABC):
     """Base class for all factor model result structures.
     
-    This abstract base class defines the common interface and fields
-    shared by all factor model results (DFM, DDFM, KDFM, etc.).
+    This abstract base class defines the core model outputs shared by all
+    factor model results (DFM, DDFM, KDFM, etc.). Only essential model parameters
+    and outputs are included - no user-specific metadata.
     
     Attributes
     ----------
     x_sm : np.ndarray
         Standardized smoothed data matrix (T x N), where T is time periods
         and N is number of series. Data is standardized (zero mean, unit variance).
-    X_sm : np.ndarray
-        Unstandardized smoothed data matrix (T x N). This is the original-scale
-        version of x_sm, computed as X_sm = x_sm * Wx + Mx.
+        This is the internal representation used by the model.
+        To get unstandardized data: use get_x_sm_original_scale(target_scaler) method.
     Z : np.ndarray
         Smoothed factor estimates (T x m), where m is the state dimension.
         Columns represent different factors (common factors and idiosyncratic components).
@@ -51,10 +51,10 @@ class BaseResult(ABC):
     Q : np.ndarray
         Covariance matrix for transition equation residuals (m x m).
         Describes the covariance of factor innovations.
-    Mx : np.ndarray
-        Series means (N,). Used for standardization: x = (X - Mx) / Wx.
-    Wx : np.ndarray
-        Series standard deviations (N,). Used for standardization.
+    target_scaler : Any, optional
+        Sklearn scaler instance (StandardScaler, RobustScaler, etc.) for target series only.
+        Used for unstandardization: X = scaler.inverse_transform(x).
+        If None, assumes data is already in original scale.
     Z_0 : np.ndarray
         Initial state vector (m,). Starting values for factors at t=0.
     V_0 : np.ndarray
@@ -64,51 +64,30 @@ class BaseResult(ABC):
         how many factors are in each block structure.
     p : int
         Number of lags in the autoregressive structure of factors. Typically p=1.
-    converged : bool, optional
+    converged : bool
         Whether estimation algorithm converged.
-    num_iter : int, optional
+    num_iter : int
         Number of iterations performed.
-    loglik : float, optional
+    loglik : float
         Final log-likelihood value.
-    rmse : float, optional
-        Overall RMSE on original scale (averaged across all series).
-    rmse_per_series : np.ndarray, optional
-        RMSE per series on original scale (N,).
-    rmse_std : float, optional
-        Overall RMSE on standardized scale (averaged across all series).
-    rmse_std_per_series : np.ndarray, optional
-        RMSE per series on standardized scale (N,).
-    series_ids : List[str], optional
-        Series identifiers for metadata.
-    block_names : List[str], optional
-        Block names for metadata.
-    time_index : object, optional
-        Time index for data (typically a TimeIndex).
     """
+    # Core state-space model parameters (required fields)
     x_sm: np.ndarray      # Standardized smoothed data (T x N)
-    X_sm: np.ndarray      # Unstandardized smoothed data (T x N)
     Z: np.ndarray         # Smoothed factors (T x m)
     C: np.ndarray         # Observation matrix (N x m)
     R: np.ndarray         # Covariance for observation residuals (N x N)
     A: np.ndarray         # Transition matrix (m x m)
     Q: np.ndarray         # Covariance for transition residuals (m x m)
-    Mx: np.ndarray        # Series means (N,)
-    Wx: np.ndarray        # Series standard deviations (N,)
     Z_0: np.ndarray       # Initial state (m,)
     V_0: np.ndarray       # Initial covariance (m x m)
     r: np.ndarray         # Number of factors per block
     p: int                # Number of lags
+    # Optional fields (must come after required fields)
+    target_scaler: Optional[Any] = None  # Sklearn scaler for target series unstandardization
+    # Training diagnostics
     converged: bool = False  # Whether algorithm converged
     num_iter: int = 0     # Number of iterations completed
     loglik: float = -np.inf  # Final log-likelihood
-    rmse: Optional[float] = None  # Overall RMSE (original scale)
-    rmse_per_series: Optional[np.ndarray] = None  # RMSE per series (original scale)
-    rmse_std: Optional[float] = None  # Overall RMSE (standardized scale)
-    rmse_std_per_series: Optional[np.ndarray] = None  # RMSE per series (standardized scale)
-    # Optional metadata for object-oriented access
-    series_ids: Optional[List[str]] = None
-    block_names: Optional[List[str]] = None
-    time_index: Optional[object] = None  # Typically a TimeIndex
 
     # ----------------------------
     # Convenience methods (OOP)
@@ -129,8 +108,28 @@ class BaseResult(ABC):
         """Return number of primary factors (sum of r)."""
         try:
             return int(np.sum(self.r))
-        except Exception:
+        except (ValueError, AttributeError, TypeError):
             return self.num_state()
+    
+    def get_x_sm_original_scale(self, target_scaler: Optional[Any] = None) -> np.ndarray:
+        """Get unstandardized smoothed data using target scaler.
+        
+        Parameters
+        ----------
+        target_scaler : Any, optional
+            Sklearn scaler instance. If None, uses self.target_scaler.
+            If both are None, returns x_sm as-is (assumes already in original scale).
+        
+        Returns
+        -------
+        np.ndarray
+            Unstandardized smoothed data (T x N)
+        """
+        scaler = target_scaler if target_scaler is not None else self.target_scaler
+        if scaler is not None and hasattr(scaler, 'inverse_transform'):
+            return scaler.inverse_transform(self.x_sm)
+        # No scaler - assume already in original scale
+        return self.x_sm
     
     def to_pandas_factors(self, time_index: Optional[object] = None, factor_names: Optional[List[str]] = None):
         """Return factors as pandas DataFrame."""
@@ -138,27 +137,78 @@ class BaseResult(ABC):
             import pandas as pd
             cols = factor_names or [f"F{i+1}" for i in range(self.num_state())]
             df_dict = {col: self.Z[:, i] for i, col in enumerate(cols)}
-            if time_index is not None or self.time_index is not None:
-                time_to_use = time_index if time_index is not None else self.time_index
-                if hasattr(time_to_use, '__iter__') and not isinstance(time_to_use, (str, bytes)):
-                    df_dict['time'] = list(time_to_use)
+            if time_index is not None:
+                if hasattr(time_index, '__iter__') and not isinstance(time_index, (str, bytes)):
+                    df_dict['time'] = list(time_index)
             return pd.DataFrame(df_dict)
         except ImportError:
             return self.Z
     
-    def to_pandas_smoothed(self, time_index: Optional[object] = None, series_ids: Optional[List[str]] = None):
+    def to_pandas_smoothed(self, time_index: Optional[object] = None, series_ids: Optional[List[str]] = None, target_scaler: Optional[Any] = None):
         """Return smoothed data as pandas DataFrame."""
         try:
             import pandas as pd
-            cols = series_ids or self.series_ids or [f"S{i+1}" for i in range(self.num_series())]
-            df_dict = {col: self.X_sm[:, i] for i, col in enumerate(cols)}
-            if time_index is not None or self.time_index is not None:
-                time_to_use = time_index if time_index is not None else self.time_index
-                if hasattr(time_to_use, '__iter__') and not isinstance(time_to_use, (str, bytes)):
-                    df_dict['time'] = list(time_to_use)
+            x_sm_original = self.get_x_sm_original_scale(target_scaler)
+            cols = series_ids or [f"S{i+1}" for i in range(self.num_series())]
+            df_dict = {col: x_sm_original[:, i] for i, col in enumerate(cols)}
+            if time_index is not None:
+                if hasattr(time_index, '__iter__') and not isinstance(time_index, (str, bytes)):
+                    df_dict['time'] = list(time_index)
             return pd.DataFrame(df_dict)
         except ImportError:
-            return self.X_sm
+            return self.get_x_sm_original_scale(target_scaler)
+    
+    def summary(self) -> str:
+        """Return a formatted summary of the model results.
+        
+        Returns
+        -------
+        str
+            Formatted string containing model summary including:
+            - Model type and structure
+            - Data dimensions (series, factors, periods)
+            - Training diagnostics (convergence, iterations, log-likelihood)
+            - Factor structure (AR order, factors per block)
+        """
+        # Determine model type from class name
+        model_type = self.__class__.__name__.replace('Result', '')
+        
+        # Build summary lines
+        lines = []
+        lines.append("=" * 80)
+        lines.append(f"{model_type} Model Summary")
+        lines.append("=" * 80)
+        lines.append("")
+        
+        # Data dimensions
+        lines.append("Data Dimensions:")
+        lines.append(f"  Series: {self.num_series()}")
+        lines.append(f"  Factors: {self.num_factors()} (total state dimension: {self.num_state()})")
+        lines.append(f"  Time periods: {self.num_periods()}")
+        lines.append("")
+        
+        # Factor structure
+        lines.append("Factor Structure:")
+        if hasattr(self.r, '__len__') and len(self.r) > 0:
+            if len(self.r) == 1:
+                lines.append(f"  Factors per block: {self.r[0]}")
+            else:
+                lines.append(f"  Factors per block: {self.r}")
+        else:
+            lines.append(f"  Total factors: {self.num_factors()}")
+        lines.append(f"  AR order: {self.p}")
+        lines.append("")
+        
+        # Training diagnostics
+        lines.append("Training Diagnostics:")
+        lines.append(f"  Converged: {self.converged}")
+        lines.append(f"  Iterations: {self.num_iter}")
+        lines.append(f"  Log-likelihood: {self.loglik:.4f}")
+        lines.append("")
+        
+        lines.append("=" * 80)
+        
+        return "\n".join(lines)
 
 
 
@@ -198,6 +248,10 @@ class DFMResult(BaseResult):
     """
     # All fields inherited from BaseResult
     # converged and num_iter have specific meaning for EM algorithm
+    
+    def summary(self) -> str:
+        """Return a formatted summary of the DFM results."""
+        return super().summary()
 
 
 @dataclass
@@ -238,6 +292,22 @@ class DDFMResult(BaseResult):
     training_loss: Optional[float] = None  # Final training loss
     encoder_layers: Optional[List[int]] = None  # Encoder architecture
     use_idiosyncratic: Optional[bool] = None  # Whether idio components were used
+    
+    def summary(self) -> str:
+        """Return a formatted summary of the DDFM results."""
+        summary_text = super().summary()
+        lines = summary_text.split("\n")
+        
+        # Insert DDFM-specific information before the final separator
+        insert_idx = len(lines) - 1
+        if self.training_loss is not None:
+            lines.insert(insert_idx, "")
+            lines.insert(insert_idx, "Neural Network Training:")
+            lines.insert(insert_idx + 1, f"  Final training loss: {self.training_loss:.4f}")
+            if self.encoder_layers is not None:
+                lines.insert(insert_idx + 2, f"  Encoder architecture: {self.encoder_layers}")
+        
+        return "\n".join(lines)
 
 @dataclass
 class KDFMResult(BaseResult):
@@ -271,6 +341,34 @@ class KDFMResult(BaseResult):
     irf_structural: Optional[np.ndarray] = None  # Structural IRFs
     ar_coeffs: Optional[np.ndarray] = None  # Extracted VAR coefficients
     ma_coeffs: Optional[np.ndarray] = None  # Extracted MA coefficients (if q > 0)
+    
+    def summary(self) -> str:
+        """Return a formatted summary of the KDFM results."""
+        summary_text = super().summary()
+        lines = summary_text.split("\n")
+        
+        # Insert KDFM-specific information before the final separator
+        insert_idx = len(lines) - 1
+        kdfm_info = []
+        
+        if self.ar_coeffs is not None:
+            ar_order = self.ar_coeffs.shape[0] if self.ar_coeffs.ndim > 0 else 0
+            kdfm_info.append(f"  VAR order: {ar_order}")
+        if self.ma_coeffs is not None:
+            ma_order = self.ma_coeffs.shape[0] if self.ma_coeffs.ndim > 0 else 0
+            kdfm_info.append(f"  MA order: {ma_order}")
+        if self.irf_reduced is not None:
+            kdfm_info.append("  IRFs computed: Reduced-form")
+        if self.irf_structural is not None:
+            kdfm_info.append("  IRFs computed: Structural")
+        
+        if kdfm_info:
+            lines.insert(insert_idx, "")
+            lines.insert(insert_idx, "KDFM-Specific:")
+            for info in kdfm_info:
+                lines.insert(insert_idx + 1, info)
+        
+        return "\n".join(lines)
 
 
 # ============================================================================

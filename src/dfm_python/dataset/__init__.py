@@ -33,8 +33,14 @@ from .process import (
     TimeIndex,
     _get_scaler,
 )
-from .data_utils import sort_data_by_config
-# Nowcast data classes moved to src.nowcasting in main project
+# sort_data_by_config moved to datamodule.base._sort_data_by_config
+# Re-export for backward compatibility
+def sort_data_by_config(Z, series_ids, config):
+    """Re-export of BaseDataModule._sort_data_by_config for backward compatibility."""
+    from ..datamodule.base import BaseDataModule
+    # Create minimal instance just for the method call
+    dm = BaseDataModule(config=config)
+    return dm._sort_data_by_config(Z, series_ids)
 
 __all__ = [
     # Datasets

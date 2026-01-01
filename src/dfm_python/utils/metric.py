@@ -17,6 +17,8 @@ from typing import Optional, Tuple
 import numpy as np
 import pandas as pd
 
+from ..utils.errors import DataValidationError
+
 try:
     import sktime
     from sktime.performance_metrics.forecasting import (
@@ -89,9 +91,10 @@ def calculate_rmse(
     
     # Ensure arrays are the same shape
     if actual.shape != predicted.shape:
-        raise ValueError(
+        raise DataValidationError(
             f"actual and predicted must have same shape, "
-            f"got {actual.shape} and {predicted.shape}"
+            f"got {actual.shape} and {predicted.shape}",
+            details=f"Shape mismatch: actual.shape={actual.shape}, predicted.shape={predicted.shape}"
         )
     
     # Create mask for valid values
@@ -204,9 +207,10 @@ def calculate_mae(
     
     # Ensure arrays are the same shape
     if actual.shape != predicted.shape:
-        raise ValueError(
+        raise DataValidationError(
             f"actual and predicted must have same shape, "
-            f"got {actual.shape} and {predicted.shape}"
+            f"got {actual.shape} and {predicted.shape}",
+            details=f"Shape mismatch: actual.shape={actual.shape}, predicted.shape={predicted.shape}"
         )
     
     # Create mask for valid values
@@ -313,9 +317,10 @@ def calculate_mape(
     
     # Ensure arrays are the same shape
     if actual.shape != predicted.shape:
-        raise ValueError(
+        raise DataValidationError(
             f"actual and predicted must have same shape, "
-            f"got {actual.shape} and {predicted.shape}"
+            f"got {actual.shape} and {predicted.shape}",
+            details=f"Shape mismatch: actual.shape={actual.shape}, predicted.shape={predicted.shape}"
         )
     
     # Create mask for valid values
@@ -395,9 +400,10 @@ def calculate_r2(
     
     # Ensure arrays are the same shape
     if actual.shape != predicted.shape:
-        raise ValueError(
+        raise DataValidationError(
             f"actual and predicted must have same shape, "
-            f"got {actual.shape} and {predicted.shape}"
+            f"got {actual.shape} and {predicted.shape}",
+            details=f"Shape mismatch: actual.shape={actual.shape}, predicted.shape={predicted.shape}"
         )
     
     # Create mask for valid values

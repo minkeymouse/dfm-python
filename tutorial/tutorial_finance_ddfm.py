@@ -1,12 +1,11 @@
 """Tutorial: DDFM for Finance Data
 
-This tutorial demonstrates the complete workflow for training, prediction, and nowcasting
+This tutorial demonstrates the complete workflow for training, prediction
 using finance data with market_forward_excess_returns as the target variable.
 
 Target: market_forward_excess_returns
 Excluded: risk_free_rate, forward_returns
 
-Nowcasting Pattern: refit model with new data, then predict(horizon=1)
 """
 
 import sys
@@ -20,15 +19,16 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 from dfm_python import DDFM, DDFMDataModule, DDFMTrainer
-from dfm_python.config import DFMConfig, SeriesConfig
-from dfm_python.functional.dfm_block import DEFAULT_BLOCK_NAME
+from dfm_python.config import DDFMConfig
+from dfm_python.config.constants import TUTORIAL_MAX_PERIODS, DEFAULT_LEARNING_RATE, DEFAULT_BATCH_SIZE, DEFAULT_DDFM_LEARNING_RATE
 from dfm_python.utils.misc import TimeIndex
+from dfm_python.utils.common import select_columns_by_prefix
 from dfm_python.dataset.process import parse_timestamp
-
-# sktime imports for preprocessing
-from sktime.transformations.compose import TransformerPipeline
-from sktime.transformations.series.impute import Imputer
+from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
+from sktime.transformations.series.impute import Imputer
+
+# Preprocessing pipeline helper (uses sktime internally)
 
 print("=" * 80)
 print("DDFM Tutorial: Finance Data")
@@ -55,12 +55,7 @@ exclude_cols = ["risk_free_rate", "forward_returns", "date_id"]
 
 # Select a subset of series for faster execution
 # Use first 2 series from each category: D, E, I, M, P, S, V (balanced for speed)
-selected_cols = []
-for prefix in ["D", "E", "I", "M", "P", "S", "V"]:
-    for i in range(1, 3):  # Use first 2 from each category
-        col = f"{prefix}{i}"
-        if col in df.columns:
-            selected_cols.append(col)
+selected_cols = select_columns_by_prefix(df, ["D", "E", "I", "M", "P", "S", "V"], count_per_prefix=2)
 
 # Add target to selected columns
 if target_col not in selected_cols:
@@ -75,11 +70,10 @@ print(f"   Excluded: {exclude_cols}")
 df_processed = df_processed.dropna(how='all')
 
 # Use only recent data for faster execution and to avoid date overflow
-# Take last 100 periods (further reduced for faster execution)
-max_periods = 100
-if len(df_processed) > max_periods:
-    df_processed = df_processed.iloc[-max_periods:]
-    print(f"   Using last {max_periods} periods for faster execution")
+# Take last TUTORIAL_MAX_PERIODS periods (reduced for faster execution)
+if len(df_processed) > TUTORIAL_MAX_PERIODS:
+    df_processed = df_processed.iloc[-TUTORIAL_MAX_PERIODS:]
+    print(f"   Using last {TUTORIAL_MAX_PERIODS} periods for faster execution")
 
 print(f"   Data shape after cleaning: {df_processed.shape}")
 
@@ -88,29 +82,49 @@ missing_before = df_processed.isnull().sum().sum()
 print(f"   Missing values before preprocessing: {missing_before}")
 
 # ============================================================================
-# Step 2.5: Create Preprocessing Pipeline with sktime
+# Step 2.5: Create Preprocessing Pipeline
 # ============================================================================
-print("\n[Step 2.5] Creating preprocessing pipeline with sktime...")
+print("\n[Step 2.5] Creating preprocessing pipeline...")
 
-# Create preprocessing pipeline: Imputation → Scaling
-# This pipeline will be fitted and used to preprocess feature data
-# Target series will be handled separately (not preprocessed by this pipeline)
-preprocessing_pipeline = TransformerPipeline(
+# Separate X (features) and y (target)
+X_cols = [col for col in selected_cols if col != target_col]
+y_col = target_col
+
+X = df_processed[X_cols].copy()
+y = df_processed[[y_col]].copy()  # Keep y raw (no preprocessing)
+
+print("   Separating features (X) and target (y)...")
+print(f"   X (features): {len(X_cols)} series - will be preprocessed")
+print(f"   y (target): 1 series ({y_col}) - kept raw (no preprocessing pipeline, no differencing)")
+
+# Create preprocessing pipeline for X (features): Imputation → Scaling
+X_pipeline = Pipeline(
     steps=[
-        ('impute_ffill', Imputer(method="ffill")),  # Forward fill missing values
-        ('impute_bfill', Imputer(method="bfill")),  # Backward fill remaining NaNs
-        ('scaler', StandardScaler())  # Unified scaling for all series
+        ('impute_ffill', Imputer(method="ffill")),
+        ('impute_bfill', Imputer(method="bfill")),
+        ('scaler', StandardScaler())
     ]
 )
 
-print("   Pipeline: Imputer(ffill) → Imputer(bfill) → StandardScaler")
-print("   Applying preprocessing pipeline...")
-print(f"   Note: Target series '{target_col}' will be handled separately in DataModule")
+print("   Pipeline for X: Imputer(ffill) → Imputer(bfill) → StandardScaler")
+print("   y (target): Raw series (no preprocessing pipeline)")
+print("   Applying preprocessing pipeline to X only...")
 
-# Apply preprocessing (fit and transform)
-# Data will be preprocessed before passing to DataModule
-# In DDFMDataModule, target series will be excluded from preprocessing
-df_preprocessed = preprocessing_pipeline.fit_transform(df_processed)
+# Fit and transform X (features)
+X_pipeline.fit(X)
+X_preprocessed = X_pipeline.transform(X)
+
+# Create scaler for y (target) - fit but don't transform
+# This scaler will be used for inverse transformation during prediction
+y_scaler = StandardScaler()
+y_scaler.fit(y)
+
+# Ensure X output is DataFrame
+if isinstance(X_preprocessed, np.ndarray):
+    X_preprocessed = pd.DataFrame(X_preprocessed, columns=X_cols, index=X.index)
+
+# Combine X (preprocessed) and y (raw) back together
+df_preprocessed = pd.concat([X_preprocessed, y], axis=1)
 
 # Ensure output is DataFrame
 if isinstance(df_preprocessed, np.ndarray):
@@ -138,35 +152,27 @@ df_processed = df_preprocessed
 # ============================================================================
 print("\n[Step 3] Creating configuration...")
 
-# Create series configs
-series_configs = []
-for col in selected_cols:
-    # SeriesConfig only needs frequency (transformation and blocks removed)
-    series_configs.append(
-        SeriesConfig(
-            series_id=col,
-            frequency="m"  # Assuming monthly
-        )
-    )
+# Create frequency dict (maps column names to frequencies)
+# All series are monthly, so use 'm' for all
+frequency_dict = {col: "m" for col in selected_cols}
 
-# Create blocks config - VAR(1) only
-blocks_config = {
-    DEFAULT_BLOCK_NAME: {
-        "factors": 1,  # Reduced to 1 for faster execution
-        "ar_lag": 1,   # VAR(1) - first-order autoregressive
-        "clock": "m"
-    }
-}
-
-# Create DFM config
-config = DFMConfig(
-    series=series_configs,
-    blocks=blocks_config
+# Create DDFM config (DDFM does not use blocks structure)
+# DDFM uses num_factors directly, not blocks
+config = DDFMConfig(
+    frequency=frequency_dict,
+    clock="m",  # Monthly clock frequency
+    num_factors=1,  # Reduced to 1 for faster execution
+    factor_order=1,  # VAR(1) - first-order autoregressive
+    encoder_layers=[32, 16],  # Reduced for faster execution
+    epochs=10,  # Reduced for faster execution
+    learning_rate=DEFAULT_LEARNING_RATE,
+    batch_size=DEFAULT_BATCH_SIZE,
+    target_scaler=y_scaler  # Fitted scaler for target series inverse transformation
 )
 
-print(f"   Number of series: {len(series_configs)}")
-print(f"   Number of factors: 1 (DDFM uses num_factors parameter)")
-print(f"   Factor dynamics: VAR(1) (ar_lag=1)")
+print(f"   Number of series: {len(selected_cols)}")
+print(f"   Number of factors: {config.num_factors} (DDFM uses num_factors parameter)")
+print(f"   Factor dynamics: VAR(1) (factor_order=1)")
 print(f"   Target series: {target_col}")
 
 # ============================================================================
@@ -215,8 +221,8 @@ model = DDFM(
     factor_order=1,  # VAR(1) - first-order factor dynamics
     epochs=10,  # Reduced for faster execution
     max_iter=3,  # Reduced for faster execution
-    batch_size=32,  # Reduced for faster execution
-    learning_rate=0.005
+    batch_size=DEFAULT_BATCH_SIZE,  # Reduced for faster execution
+    learning_rate=DEFAULT_DDFM_LEARNING_RATE
 )
 model._config = config  # Set config directly
 
@@ -230,100 +236,24 @@ print("   Training completed!")
 # ============================================================================
 print("\n[Step 6] Making predictions...")
 
-X_forecast = None
-Z_forecast = None
-X_forecast_history = None
-Z_forecast_history = None
+# Predict with horizon=6 (uses target_series from DataModule)
+X_forecast, Z_forecast = model.predict(horizon=6)
 
-try:
-    # Predict with default horizon (target=None uses DataModule's target_series)
-    X_forecast, Z_forecast = model.predict(horizon=6)
-    
-    print(f"   Forecast shape: {X_forecast.shape} (target series only)")
-    print(f"   Factor forecast shape: {Z_forecast.shape}")
-    # X_forecast now contains only target series (no features)
-    if X_forecast.shape[1] == 1:
-        print(f"   First forecast value (target): {X_forecast[0, 0]:.6f}")
-    else:
-        print(f"   First forecast values (targets): {X_forecast[0, :]}")
-    
-    # Predict with history parameter (using recent 60 periods)
-    # Note: history parameter was removed - prediction uses full history by default
-    
-    # Note: history parameter was removed - prediction uses full history by default
-    if X_forecast_history is not None:
-        print(f"   Forecast with history shape: {X_forecast_history.shape} (target series only)")
-        if X_forecast_history.shape[1] == 1:
-            print(f"   First forecast with history (target): {X_forecast_history[0, 0]:.6f}")
-        else:
-            print(f"   First forecast with history (targets): {X_forecast_history[0, :]}")
-    else:
-        print(f"   Forecast with history: Not available (history parameter was removed)")
-    
-except ValueError as e:
-    print(f"   Prediction failed: {e}")
-    print("   Note: This may indicate numerical instability. Try:")
-    print("   - Using more training iterations")
-    print("   - Adjusting data transformations")
-    print("   - Using different factor configurations")
+print(f"   Forecast shape: {X_forecast.shape}")
+print(f"   Factor forecast shape: {Z_forecast.shape}")
+print(f"   First forecast value (target): {X_forecast[0, 0]:.6f}")
 
 # ============================================================================
-# Step 7: Nowcasting with update().predict() pattern
-# ============================================================================
-print("\n[Step 7] Nowcasting using update().predict() pattern...")
-
-try:
-    # Get the trained model's result for standardization parameters
-    result = model.result
-    Mx = result.Mx  # Mean for standardization
-    Wx = result.Wx  # Standard deviation for standardization
-    
-    # Simulate new data for nowcasting (in practice, this would be real-time data)
-    # Use the last few periods of training data as "new" data
-    n_new_periods = 5
-    X_new_raw = df_processed.iloc[-n_new_periods:].values
-    
-    # Standardize new data using the same parameters from training
-    # Standardization: (X - Mx) / Wx
-    X_new_std = (X_new_raw - Mx) / Wx
-    
-    # Handle any NaN values (missing data in new observations)
-    X_new_std = np.where(np.isfinite(X_new_std), X_new_std, np.nan)
-    
-    print(f"   New data shape: {X_new_std.shape}")
-    print(f"   Standardized new data (first row): {X_new_std[0, :5]}")
-    
-    # Note: DDFM doesn't have an update() method for incremental nowcasting
-    # For nowcasting, you would need to refit the model with new data
-    # or use a different approach. For this tutorial, we'll just show prediction
-    # with the existing trained model.
-    
-    # Predict with target series specified
-    X_nowcast, Z_nowcast = model.predict(horizon=1, target=[target_col])
-    
-    # Extract nowcast for target series
-    nowcast_value = X_nowcast[0, 0]  # First (and only) target series
-    
-    print(f"   Nowcast value for {target_col}: {nowcast_value:.6f}")
-    print(f"   Nowcast uses VAR(1) factor dynamics")
-    print(f"   Note: For true nowcasting with new data, refit the model with updated dataset")
-    
-except (ValueError, AttributeError, IndexError) as e:
-    print(f"   Nowcasting failed: {e}")
-    print("   Note: Ensure model is trained and data is properly standardized")
-
-# ============================================================================
-# Step 8: Summary
+# Step 7: Summary
 # ============================================================================
 print("\n" + "=" * 80)
 print("Tutorial Summary")
 print("=" * 80)
 print(f"✅ Data loaded: {df.shape[0]} rows, {len(selected_cols)} series")
-print(f"✅ Model trained: {len(series_configs)} series, 1 factor, VAR(1) dynamics")
+print(f"✅ Model trained: {len(selected_cols)} series, 1 factor, VAR(1) dynamics")
 if X_forecast is not None:
     print(f"✅ Predictions generated: {X_forecast.shape[0]} periods ahead")
 else:
     print(f"⚠️  Predictions: Failed (see error message above)")
-print(f"✅ Nowcasting pattern: refit model with new data, then predict(horizon=1)")
 print(f"✅ Target series: {target_col}")
 print("=" * 80)

@@ -9,78 +9,24 @@ This module provides functions for initializing DFM blocks, including:
 
 import numpy as np
 from typing import Optional, Tuple, Dict, Any, List
-from ..numeric.tent import get_tent_weights
-from ..numeric.tent import generate_tent_weights
+from ..numeric.tent import get_tent_weights, generate_tent_weights
+from ..numeric.stability import create_scaled_identity
 from ..config.constants import (
     DEFAULT_REGULARIZATION,
     DEFAULT_CLOCK_FREQUENCY,
     DEFAULT_TRANSITION_COEF,
     DEFAULT_PROCESS_NOISE,
     MIN_EIGENVALUE,
+    DEFAULT_IDENTITY_SCALE,
 )
 from ..numeric.stability import ensure_covariance_stable
+from ..numeric.estimator import (
+    estimate_var_unified,
+    estimate_constrained_ols_unified,
+)
+from ..logger import get_logger
 
-# Import DEFAULT_BLOCK_NAME from constants
-from ..config.constants import DEFAULT_BLOCK_NAME
-
-
-def get_tent_kernel_size(
-    R_mat: Optional[np.ndarray] = None,
-    tent_weights_dict: Optional[Dict[str, np.ndarray]] = None,
-    default_size: int = 5
-) -> int:
-    """Determine tent kernel size from available information.
-    
-    Parameters
-    ----------
-    R_mat : np.ndarray, optional
-        Constraint matrix. If provided, size is inferred from R_mat.shape[1]
-    tent_weights_dict : dict, optional
-        Dictionary mapping frequency strings to tent weight arrays.
-        Uses first available entry if multiple exist.
-    default_size : int, default 5
-        Default tent kernel size
-        
-    Returns
-    -------
-    int
-        Tent kernel size
-    """
-    if R_mat is not None:
-        return R_mat.shape[1]
-    if tent_weights_dict:
-        # Use first available tent weights
-        first_weights = next(iter(tent_weights_dict.values()))
-        return len(first_weights)
-    return default_size
-
-
-def get_slower_freq_tent_weights(slower_freq: str, clock: str, tent_kernel_size: int, dtype: type = np.float32) -> np.ndarray:
-    """Get tent weights for slower-frequency idiosyncratic chain structure.
-    
-    Parameters
-    ----------
-    slower_freq : str
-        Slower frequency ('q', 'sa', 'a', etc.)
-    clock : str
-        Clock frequency ('m', 'q', etc.)
-    tent_kernel_size : int
-        Expected tent kernel size
-    dtype : type, default np.float32
-        Data type for output array
-        
-    Returns
-    -------
-    np.ndarray
-        Tent weights array (e.g., [1, 2, 3, 2, 1] for quarterly-monthly)
-    """
-    tent_weights = get_tent_weights(slower_freq, clock)
-    if tent_weights is None:
-        # Fallback: generate symmetric tent weights
-        tent_weights = generate_tent_weights(tent_kernel_size, 'symmetric').astype(dtype)
-    else:
-        tent_weights = tent_weights.astype(dtype)
-    return tent_weights
+_logger = get_logger(__name__)
 
 
 def build_slower_freq_observation_matrix(
@@ -112,7 +58,7 @@ def build_slower_freq_observation_matrix(
     """
     tent_kernel_size = len(tent_weights)
     C_slower_freq = np.zeros((N, tent_kernel_size * n_slower_freq), dtype=dtype)
-    C_slower_freq[n_clock_freq:, :] = np.kron(np.eye(n_slower_freq, dtype=dtype), tent_weights.reshape(1, -1))
+    C_slower_freq[n_clock_freq:, :] = np.kron(create_scaled_identity(n_slower_freq, DEFAULT_IDENTITY_SCALE, dtype=dtype), tent_weights.reshape(1, -1))
     return C_slower_freq
 
 
@@ -161,20 +107,12 @@ def build_slower_freq_idiosyncratic_chain(
     
     BQ_block = np.zeros((chain_size, chain_size), dtype=dtype)
     BQ_block[0, 0] = rho0
-    BQ_block[1:, :chain_size-1] = np.eye(chain_size-1, dtype=dtype)
-    BQ = np.kron(np.eye(n_slower_freq, dtype=dtype), BQ_block)
+    BQ_block[1:, :chain_size-1] = create_scaled_identity(chain_size-1, DEFAULT_IDENTITY_SCALE, dtype=dtype)
+    BQ = np.kron(create_scaled_identity(n_slower_freq, DEFAULT_IDENTITY_SCALE, dtype=dtype), BQ_block)
     
     # Compute initial covariance: solve (I - BQ ⊗ BQ) vec(V_0) = vec(SQ)
-    try:
-        kron_BQBQ = np.kron(BQ, BQ)
-        eye_kron = np.eye((chain_size * n_slower_freq) ** 2, dtype=dtype)
-        initViQ_flat = np.linalg.solve(
-            eye_kron - kron_BQBQ + eye_kron * DEFAULT_REGULARIZATION,
-            SQ.flatten()
-        )
-        initViQ = initViQ_flat.reshape(chain_size * n_slower_freq, chain_size * n_slower_freq)
-    except (np.linalg.LinAlgError, ValueError):
-        initViQ = SQ.copy()
+    from ..numeric.estimator import compute_initial_covariance_from_transition
+    initViQ = compute_initial_covariance_from_transition(BQ, SQ, regularization=DEFAULT_REGULARIZATION, dtype=dtype)
     
     return BQ, SQ, initViQ
 
@@ -212,13 +150,15 @@ def build_lag_matrix(
     num_lags = max(p + 1, tent_kernel_size)
     lag_matrix = np.zeros((T, num_factors * num_lags), dtype=dtype)
     
+    # Vectorized implementation: build all lags at once
     for lag_idx in range(num_lags):
         start_idx = max(0, tent_kernel_size - lag_idx)
         end_idx = T - lag_idx
         if start_idx < end_idx:
             col_start = lag_idx * num_factors
             col_end = col_start + num_factors
-            lag_matrix[start_idx:end_idx, col_start:col_end] = factors[start_idx:end_idx, :num_factors]
+            # Use advanced indexing for better performance
+            lag_matrix[start_idx:end_idx, col_start:col_end] = factors[start_idx:end_idx, :num_factors].copy()
     
     return lag_matrix
 
@@ -293,7 +233,7 @@ def initialize_block_loadings(
         
         # Compute covariance matrix
         if clock_freq_data_centered.shape[0] <= 1:
-            cov_data = np.eye(len(clock_freq_indices), dtype=dtype)
+            cov_data = create_scaled_identity(len(clock_freq_indices), DEFAULT_IDENTITY_SCALE, dtype=dtype)
         elif len(clock_freq_indices) == 1:
             cov_data = np.atleast_2d(np.var(clock_freq_data_centered, axis=0, ddof=0))
         else:
@@ -306,14 +246,14 @@ def initialize_block_loadings(
             # Ensure positive sign convention
             loadings = np.where(np.sum(loadings, axis=0) < 0, -loadings, loadings)
         except (RuntimeError, ValueError):
-            loadings = np.eye(len(clock_freq_indices), dtype=dtype)[:, :num_factors]
+            loadings = create_scaled_identity(len(clock_freq_indices), DEFAULT_IDENTITY_SCALE, dtype=dtype)[:, :num_factors]
         
         C_i[clock_freq_indices, :num_factors] = loadings
         factors = data_for_extraction[:, clock_freq_indices] @ loadings
     
     # Slower frequency series: constrained least squares
     if R_mat is not None and q is not None and len(slower_freq_indices) > 0:
-        constraint_matrix_block = np.kron(R_mat, np.eye(num_factors, dtype=dtype))
+        constraint_matrix_block = np.kron(R_mat, create_scaled_identity(num_factors, DEFAULT_IDENTITY_SCALE, dtype=dtype))
         constraint_vector_block = np.kron(q, np.zeros(num_factors, dtype=dtype))
         
         lag_matrix = build_lag_matrix(factors, T, num_factors, tent_kernel_size, 1, dtype)
@@ -339,18 +279,20 @@ def initialize_block_loadings(
                 continue
             
             try:
-                factors_cov_inv = np.linalg.pinv(slower_freq_factors_clean.T @ slower_freq_factors_clean)
-                loadings_unconstrained = factors_cov_inv @ slower_freq_factors_clean.T @ series_data_clean
-                
-                # Apply constraints
-                constraint_cov_T = constraint_matrix_block @ factors_cov_inv @ constraint_matrix_block.T
+                # Use unified constrained OLS estimation
                 reg = matrix_regularization or DEFAULT_REGULARIZATION
-                reg_matrix = constraint_cov_T + np.eye(constraint_cov_T.shape[0], dtype=dtype) * reg
-                constraint_rhs = constraint_matrix_block @ loadings_unconstrained - constraint_vector_block
-                loadings_constrained = loadings_unconstrained - factors_cov_inv @ constraint_matrix_block.T @ np.linalg.solve(reg_matrix, constraint_rhs)
+                loadings_constrained = estimate_constrained_ols_unified(
+                    y=series_data_clean,
+                    X=slower_freq_factors_clean,
+                    R=constraint_matrix_block,
+                    q=constraint_vector_block,
+                    V_smooth=None,  # Raw data mode
+                    regularization=reg,
+                    dtype=dtype
+                )
                 C_i[series_idx_int, :num_factors * tent_kernel_size] = loadings_constrained
-            except (np.linalg.LinAlgError, ValueError):
-                pass
+            except (np.linalg.LinAlgError, ValueError) as e:
+                _logger.warning(f"Failed to compute constrained loadings for series {series_idx_int}: {e}. Skipping.")
     
     return C_i, factors
 
@@ -417,54 +359,48 @@ def initialize_block_transition(
     lagged_state = lag_matrix[:, num_factors:lag_cols] if lag_cols > num_factors else np.zeros((T, num_factors * p), dtype=dtype)
     
     # Initialize transition matrix
-    default_A_block = np.eye(num_factors, dtype=dtype) * default_transition_coef
+    default_A_block = create_scaled_identity(num_factors, default_transition_coef, dtype)
     shift_size = num_factors * (max_lag_size - 1)
-    default_shift = np.eye(shift_size, dtype=dtype) if shift_size > 0 else np.zeros((0, 0), dtype=dtype)
+    default_shift = create_scaled_identity(shift_size, DEFAULT_IDENTITY_SCALE, dtype=dtype) if shift_size > 0 else np.zeros((0, 0), dtype=dtype)
     
-    # Estimate transition coefficients from data
+    # Estimate transition coefficients using unified VAR estimation
     if T > p and lagged_state.shape[1] > 0:
         try:
-            lagged_cov = lagged_state.T @ lagged_state
-            lagged_cov_reg = lagged_cov + np.eye(lagged_cov.shape[0], dtype=dtype) * regularization
-            lagged_current_cov = lagged_state.T @ current_state
-            transition_coef = np.linalg.solve(lagged_cov_reg, lagged_current_cov).T
+            # Use unified VAR estimation (raw data mode)
+            A_transition, Q_transition = estimate_var_unified(
+                y=current_state[p:, :],  # Current state (T-p x num_factors)
+                x=lagged_state[p:, :],   # Lagged state (T-p x num_factors*p)
+                V_smooth=None,  # Raw data mode
+                VVsmooth=None,
+                regularization=regularization,
+                min_variance=eigenval_floor,
+                dtype=dtype
+            )
             
             # Ensure correct shape
             expected_shape = (num_factors, num_factors * p)
-            if transition_coef.shape != expected_shape:
+            if A_transition.shape != expected_shape:
                 transition_coef_new = np.zeros(expected_shape, dtype=dtype)
-                min_rows = min(transition_coef.shape[0], num_factors)
-                min_cols = min(transition_coef.shape[1], num_factors * p)
-                transition_coef_new[:min_rows, :min_cols] = transition_coef[:min_rows, :min_cols]
-                transition_coef = transition_coef_new
+                min_rows = min(A_transition.shape[0], num_factors)
+                min_cols = min(A_transition.shape[1], num_factors * p)
+                transition_coef_new[:min_rows, :min_cols] = A_transition[:min_rows, :min_cols]
+                A_transition = transition_coef_new
             
-            A_i[:num_factors, :num_factors * p] = transition_coef
+            A_i[:num_factors, :num_factors * p] = A_transition
+            Q_i = np.zeros((block_size, block_size), dtype=dtype)
+            Q_i[:num_factors, :num_factors] = Q_transition
         except (np.linalg.LinAlgError, ValueError):
             A_i[:num_factors, :num_factors] = default_A_block
+            Q_i = np.zeros((block_size, block_size), dtype=dtype)
+            Q_i[:num_factors, :num_factors] = create_scaled_identity(num_factors, default_process_noise, dtype)
+    else:
+        A_i[:num_factors, :num_factors] = default_A_block
+        Q_i = np.zeros((block_size, block_size), dtype=dtype)
+        Q_i[:num_factors, :num_factors] = create_scaled_identity(num_factors, default_process_noise, dtype=dtype)
     
     # Add shift matrix for lag structure
     if shift_size > 0:
         A_i[num_factors:, :shift_size] = default_shift
-    
-    # Initialize process noise from residuals
-    default_Q_block = np.eye(num_factors, dtype=dtype) * default_process_noise
-    Q_i = np.zeros((block_size, block_size), dtype=dtype)
-    
-    if T > p and lagged_state.shape[1] > 0:
-        try:
-            residuals = current_state[p:, :] - (lagged_state[p:, :] @ A_i[:num_factors, :num_factors * p].T)
-            if residuals.shape[0] > 1:
-                if residuals.shape[1] == 1:
-                    Q_i[:num_factors, :num_factors] = np.atleast_2d(np.var(residuals, axis=0, ddof=0))
-                else:
-                    Q_i[:num_factors, :num_factors] = np.cov(residuals.T, ddof=0)
-                    Q_i[:num_factors, :num_factors] = (Q_i[:num_factors, :num_factors] + Q_i[:num_factors, :num_factors].T) / 2
-            else:
-                Q_i[:num_factors, :num_factors] = default_Q_block
-        except (np.linalg.LinAlgError, ValueError):
-            Q_i[:num_factors, :num_factors] = default_Q_block
-    else:
-        Q_i[:num_factors, :num_factors] = default_Q_block
     
     # Ensure Q_i is positive definite
     Q_i[:num_factors, :num_factors] = ensure_covariance_stable(
@@ -472,86 +408,12 @@ def initialize_block_transition(
     )
     
     # Initial covariance: solve (I - A ⊗ A) vec(V_0) = vec(Q)
+    from ..numeric.estimator import compute_initial_covariance_from_transition
     A_i_block = A_i[:block_size, :block_size]
     Q_i_block = Q_i[:block_size, :block_size]
-    try:
-        kron_AA = np.kron(A_i_block, A_i_block)
-        eye_kron = np.eye(block_size ** 2, dtype=dtype)
-        reg = matrix_regularization or DEFAULT_REGULARIZATION
-        initV_i_flat = np.linalg.solve(
-            eye_kron - kron_AA + eye_kron * reg,
-            Q_i_block.flatten()
-        )
-        V_0_i = initV_i_flat.reshape(block_size, block_size)
-    except (np.linalg.LinAlgError, ValueError):
-        V_0_i = Q_i_block.copy()
+    reg = matrix_regularization or DEFAULT_REGULARIZATION
+    V_0_i = compute_initial_covariance_from_transition(A_i_block, Q_i_block, regularization=reg, dtype=dtype)
     
     return A_i, Q_i, V_0_i
 
 
-# ============================================================================
-# Block Structure Parsing and Inference
-# ============================================================================
-
-def parse_blocks_dict(blocks_data: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
-    """Parse blocks from dict format.
-    
-    Parameters
-    ----------
-    blocks_data : Dict[str, Any]
-        Dictionary mapping block names to block configurations
-        
-    Returns
-    -------
-    Dict[str, Dict[str, Any]]
-        Dictionary mapping block names to block config dicts
-        
-    Raises
-    ------
-    ValueError
-        If block config is not a dict
-    """
-    blocks_dict = {}
-    for block_name, block_cfg in blocks_data.items():
-        if isinstance(block_cfg, dict):
-            blocks_dict[block_name] = block_cfg
-        else:
-            raise ValueError(f"Invalid block config for {block_name}: {block_cfg}. Must be a dict.")
-    return blocks_dict
-
-
-def infer_blocks(
-    series_list: List[Any],
-    data: Dict[str, Any]
-) -> Dict[str, Dict[str, Any]]:
-    """Infer blocks from configuration data when blocks not explicitly provided.
-    
-    Note: SeriesConfig no longer contains blocks information.
-    Blocks are defined in DFMConfig, not in SeriesConfig.
-    
-    Parameters
-    ----------
-    series_list : List[SeriesConfig]
-        List of series configurations (blocks information not used)
-    data : Dict[str, Any]
-        Configuration data (for clock default and block_names)
-        
-    Returns
-    -------
-    Dict[str, Dict[str, Any]]
-        Dictionary mapping block names to block config dicts
-    """
-    blocks_dict = {}
-    
-    # Try to get block_names from data
-    if 'block_names' in data:
-        block_names_list = data['block_names']
-        clock = data.get('clock', DEFAULT_CLOCK_FREQUENCY)
-        for block_name in block_names_list:
-            blocks_dict[block_name] = {'factors': 1, 'ar_lag': 1, 'clock': clock}
-    else:
-        # Default: create default block if no blocks specified
-        clock = data.get('clock', DEFAULT_CLOCK_FREQUENCY)
-        blocks_dict[DEFAULT_BLOCK_NAME] = {'factors': 1, 'ar_lag': 1, 'clock': clock}
-    
-    return blocks_dict

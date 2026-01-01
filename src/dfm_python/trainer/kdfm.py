@@ -5,15 +5,15 @@ with sensible defaults for gradient descent training.
 """
 
 import pytorch_lightning as pl
-from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint, LearningRateMonitor
-from pytorch_lightning.loggers import CSVLogger, TensorBoardLogger
+from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
 from typing import Optional, Dict, Any, List, Union
 from ..logger import get_logger
+from ..config.constants import DEFAULT_MAX_EPOCHS, DEFAULT_ZERO_VALUE
 from . import (
     _create_base,
     _extract_train_params,
     _validate_config,
-    DDFM_TRAINER_DEFAULTS
+    KDFM_TRAINER_DEFAULTS
 )
 
 _logger = get_logger(__name__)
@@ -72,15 +72,15 @@ class KDFMTrainer(pl.Trainer):
     >>> from dfm_python.trainer import KDFMTrainer
     >>> from dfm_python import KDFM, KDFMDataModule
     >>> 
-    >>> model = KDFM(ar_order=1, ma_order=0)
+    >>> model = KDFM(ar_order=1, ma_order=0)  # Uses DEFAULT_KDFM_AR_ORDER, DEFAULT_KDFM_MA_ORDER
     >>> dm = KDFMDataModule(config_path='config.yaml', data=df)
-    >>> trainer = KDFMTrainer(max_epochs=100, enable_progress_bar=True)
+    >>> trainer = KDFMTrainer(max_epochs=100, enable_progress_bar=True)  # max_epochs=DEFAULT_MAX_EPOCHS
     >>> trainer.fit(model, dm)
     """
     
     def __init__(
             self,
-            max_epochs: int = 100,
+            max_epochs: int = DEFAULT_MAX_EPOCHS,
             enable_progress_bar: bool = True,
             enable_model_summary: bool = True,
             logger: Optional[Any] = True,
@@ -120,7 +120,7 @@ class KDFMTrainer(pl.Trainer):
         )
         
         # Add gradient clipping if specified
-        if gradient_clip_val is not None and gradient_clip_val > 0:
+        if gradient_clip_val is not None and gradient_clip_val > DEFAULT_ZERO_VALUE:
             trainer_config['gradient_clip_val'] = gradient_clip_val
         
         # Add gradient accumulation

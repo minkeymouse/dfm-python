@@ -1,0 +1,103 @@
+# DFM Configuration for Financial Datasets
+# Based on coded financial indicators (D, E, I, M, P, S, V series)
+# Data: 97 series (D1-D9, E1-E20, I1-I9, M1-M18, P1-P13, S1-S12, V1-V13, plus targets)
+# Target: market_forward_excess_returns
+# Excluded: risk_free_rate, forward_returns
+# Reduced series for testing purposes
+
+# EM Algorithm Parameters
+ar_lag: 1  # Global AR lag order (applies to all blocks)
+threshold: 1.0e-05  # EM convergence threshold
+max_iter: 5000  # Maximum EM iterations
+
+# Numerical Stability Parameters
+clip_ar_coefficients: true
+ar_clip_min: -0.99
+ar_clip_max: 0.99
+use_regularization: true
+regularization_scale: 1.0e-05
+
+# Idiosyncratic Component Parameters
+augment_idio: true
+augment_idio_slow: false  # Financial data typically at same frequency
+idio_rho0: 0.1
+idio_min_var: 1.0e-08
+
+# Data Handling
+clock: m  # Monthly clock frequency (tutorial uses monthly, adjust to 'd' for daily or 'w' for weekly)
+# target_scaler: Pass sklearn scaler object directly (e.g., StandardScaler(), RobustScaler())
+# Example in Python:
+#   from sklearn.preprocessing import StandardScaler
+#   config.target_scaler = StandardScaler()
+# Note: nan_method and nan_k are internal constants (not user-configurable)
+
+# Block Structure for Financial Data
+# Reduced series for testing (3-5 series per block)
+blocks:
+  Block_Global:
+    num_factors: 2  # Global market factors (risk-on/risk-off, liquidity, etc.)
+    series:
+      - E1  # Equity indicator
+      - I1  # Interest rate indicator
+      - M1  # Market indicator
+      - P1  # Price indicator
+  Block_Equity:
+    num_factors: 2  # Equity market factors (reduced from 20 to 5 for testing)
+    series:
+      - E1
+      - E2
+      - E3
+      - E4
+      - E5
+  Block_Interest:
+    num_factors: 2  # Interest rate factors (reduced from 9 to 5 for testing)
+    series:
+      - I1
+      - I2
+      - I3
+      - I4
+      - I5
+  Block_Market:
+    num_factors: 2  # Market factors (reduced from 18 to 5 for testing)
+    series:
+      - M1
+      - M2
+      - M3
+      - M4
+      - M5
+  Block_Price:
+    num_factors: 1  # Price factors (reduced from 13 to 4 for testing)
+    series:
+      - P1
+      - P2
+      - P3
+      - P4
+  Block_Spread:
+    num_factors: 1  # Spread factors (reduced from 12 to 4 for testing)
+    series:
+      - S1
+      - S2
+      - S3
+      - S4
+  Block_Volatility:
+    num_factors: 1  # Volatility factors (reduced from 13 to 4 for testing)
+    series:
+      - V1
+      - V2
+      - V3
+      - V4
+  Block_Debt:
+    num_factors: 1  # Debt factors (reduced from 9 to 4 for testing)
+    series:
+      - D1
+      - D2
+      - D3
+      - D4
+
+# Frequency mapping for financial data
+# If not specified, all series use clock frequency (monthly)
+# Uncomment and customize based on your dataset:
+# frequency:
+#   market_forward_excess_returns: m  # Monthly target
+#   D1: m  # Monthly debt indicators
+#   E1: m  # Monthly equity indicators

@@ -16,6 +16,7 @@ from .dfm_dm import DFMDataModule
 from ..dataset.dataset import KDFMDataset
 from ..dataset.dataloader import create_kdfm_dataloader
 from ..logger import get_logger
+from ..utils.errors import ConfigurationError
 
 _logger = get_logger(__name__)
 
@@ -38,17 +39,14 @@ class KDFMDataModule(BaseDataModule, lightning_pl.LightningDataModule):
     ----------
     config : KDFMConfig or DFMConfig
         Model configuration object (KDFMConfig inherits from BaseModelConfig)
-    scaler : Any, optional
-        Optional scaler for extracting Mx/Wx statistics (same as DFMDataModule).
-        Can be a scaler instance (e.g., StandardScaler, RobustScaler) or None.
+    target_series : str or List[str], optional
+        Target series column names. Can be a single string or list of strings.
     data_path : str or Path, optional
         Path to data file (CSV)
     data : np.ndarray or pd.DataFrame, optional
         Preprocessed data array or DataFrame. Data must be preprocessed before passing.
-    time_index : TimeIndex, optional
-        Time index for the data
-    time_index_column : str or list of str, optional
-        Column name(s) in DataFrame to use as time index
+    time_index : str, List[str], or TimeIndex, optional
+        Time index for the data. Can be TimeIndex object, column name(s), or None.
     batch_size : int, optional
         Batch size for DataLoader
     num_workers : int, default 0
@@ -61,11 +59,10 @@ class KDFMDataModule(BaseDataModule, lightning_pl.LightningDataModule):
         self,
         config=None,
         config_path=None,
-        scaler=None,
+        target_series=None,
         data_path=None,
         data=None,
         time_index=None,
-        time_index_column=None,
         batch_size=None,
         num_workers=0,
         val_split=None,
@@ -73,38 +70,26 @@ class KDFMDataModule(BaseDataModule, lightning_pl.LightningDataModule):
     ):
         # Initialize LightningDataModule first (no arguments)
         lightning_pl.LightningDataModule.__init__(self)
-        # Initialize BaseDataModule
+        # Initialize BaseDataModule (handles target_series, target_scaler, time_index)
         BaseDataModule.__init__(
             self,
             config=config,
             config_path=config_path,
             data_path=data_path,
             data=data,
+            target_series=target_series,
             time_index=time_index,
-            time_index_column=time_index_column,
             **kwargs
         )
         
         # Create internal DFMDataModule for preprocessing (composition)
-        # Extract scaler from pipeline if provided (for backward compatibility)
-        # Note: pipeline parameter is deprecated, use scaler directly
-        scaler_to_use = scaler
-        if scaler_to_use is None and 'pipeline' in kwargs:
-            # Backward compatibility: try to extract scaler from pipeline
-            try:
-                from ..dataset.process import _get_scaler
-                scaler_to_use = _get_scaler(kwargs['pipeline'])
-            except (AttributeError, ImportError):
-                pass
-        
         self._dfm_dm = DFMDataModule(
             config=config,
             config_path=config_path,
             data_path=data_path,
             data=data,
-            scaler=scaler_to_use,  # Use scaler instead of pipeline
+            target_series=target_series,
             time_index=time_index,
-            time_index_column=time_index_column,
             **kwargs
         )
         
@@ -115,8 +100,6 @@ class KDFMDataModule(BaseDataModule, lightning_pl.LightningDataModule):
         # Will be set in setup()
         self.train_dataset: Optional[KDFMDataset] = None
         self.val_dataset: Optional[KDFMDataset] = None
-        self.Mx: Optional[np.ndarray] = None
-        self.Wx: Optional[np.ndarray] = None
     
     def setup(self, stage: Optional[str] = None) -> None:
         """Load and prepare data, create datasets.
@@ -130,9 +113,7 @@ class KDFMDataModule(BaseDataModule, lightning_pl.LightningDataModule):
         # Get processed data from internal DFMDataModule
         data_processed = self._dfm_dm.get_processed_data()
         
-        # Copy Mx, Wx from internal DFMDataModule
-        self.Mx = self._dfm_dm.Mx
-        self.Wx = self._dfm_dm.Wx
+        # Target scaler is already available via self.target_scaler (from base class)
         
         # Convert to torch tensor if needed
         from ..config.constants import DEFAULT_TORCH_DTYPE
@@ -158,9 +139,10 @@ class KDFMDataModule(BaseDataModule, lightning_pl.LightningDataModule):
     def train_dataloader(self) -> DataLoader:
         """Create DataLoader for training."""
         if self.train_dataset is None:
-            raise RuntimeError(
+            raise ConfigurationError(
                 "DataModule train_dataloader failed: setup() must be called before train_dataloader(). "
-                "Please call dm.setup() first to load and preprocess data."
+                "Please call dm.setup() first to load and preprocess data.",
+                details="train_dataloader() requires train_dataset attribute which is set by setup()."
             )
         
         return create_kdfm_dataloader(
@@ -173,7 +155,10 @@ class KDFMDataModule(BaseDataModule, lightning_pl.LightningDataModule):
     def get_processed_data(self) -> torch.Tensor:
         """Get processed data array."""
         if self.train_dataset is None:
-            raise RuntimeError("DataModule setup() must be called before get_processed_data()")
+            raise ConfigurationError(
+                "DataModule setup() must be called before get_processed_data()",
+                details="get_processed_data() requires train_dataset attribute which is set by setup()."
+            )
         # Get data from train_dataset
         return self.train_dataset.data
     

@@ -26,6 +26,8 @@ from typing import Tuple, Optional
 import numpy as np
 import torch
 from ..logger import get_logger
+from ..utils.common import ensure_numpy
+from ..utils.errors import DataValidationError
 
 _logger = get_logger(__name__)
 
@@ -132,6 +134,7 @@ def compute_irf(
     """
     # Import validation utilities
     from ..numeric.validator import validate_irf_horizon, validate_no_nan_inf, validate_eigenvalue_bounds
+    from ..config.constants import DEFAULT_EIGENVALUE_MAX_MAGNITUDE, DEFAULT_EIGENVALUE_WARN_THRESHOLD
     
     # Validate horizon
     horizon = validate_irf_horizon(horizon)
@@ -142,29 +145,34 @@ def compute_irf(
     
     # Validate tensor shapes with detailed error messages
     if A_ar.shape[0] != A_ar.shape[1]:
-        raise ValueError(
+        raise DataValidationError(
             f"A_ar (AR companion matrix) must be square, got shape {A_ar.shape}. "
-            f"Expected shape: (p*K, p*K) where p is AR order and K is number of variables."
+            f"Expected shape: (p*K, p*K) where p is AR order and K is number of variables.",
+            details="AR companion matrix must be square for proper IRF computation"
         )
     if A_ma.shape[0] != A_ma.shape[1]:
-        raise ValueError(
+        raise DataValidationError(
             f"A_ma (MA companion matrix) must be square, got shape {A_ma.shape}. "
-            f"Expected shape: (q*K, q*K) where q is MA order and K is number of variables."
+            f"Expected shape: (q*K, q*K) where q is MA order and K is number of variables.",
+            details="MA companion matrix must be square for proper IRF computation"
         )
     if B.shape[0] != A_ar.shape[0] or B.shape[1] != K:
-        raise ValueError(
+        raise DataValidationError(
             f"B (AR input matrix) shape {B.shape} incompatible with A_ar {A_ar.shape} and K={K}. "
-            f"Expected shape: ({A_ar.shape[0]}, {K})"
+            f"Expected shape: ({A_ar.shape[0]}, {K})",
+            details="B matrix shape must match AR companion matrix dimensions and number of variables"
         )
     if C.shape[0] != K or C.shape[1] != A_ar.shape[0]:
-        raise ValueError(
+        raise DataValidationError(
             f"C (AR output matrix) shape {C.shape} incompatible with A_ar {A_ar.shape} and K={K}. "
-            f"Expected shape: ({K}, {A_ar.shape[0]})"
+            f"Expected shape: ({K}, {A_ar.shape[0]})",
+            details="C matrix shape must match number of variables and AR companion matrix dimensions"
         )
     if S.shape != (K, K):
-        raise ValueError(
+        raise DataValidationError(
             f"S (structural identification matrix) must be square of size K={K}, got shape {S.shape}. "
-            f"Expected shape: ({K}, {K})"
+            f"Expected shape: ({K}, {K})",
+            details="Structural identification matrix must be square with dimensions matching number of variables"
         )
     
     # Validate for NaN/Inf
@@ -176,9 +184,9 @@ def compute_irf(
     
     # Validate eigenvalue stability (warn if near-unstable)
     try:
-        A_ar_eigenvalues = torch.linalg.eigvals(A_ar).detach().cpu().numpy()
-        validate_eigenvalue_bounds(A_ar_eigenvalues, max_magnitude=1.0, warn_threshold=0.99)
-    except Exception:
+        A_ar_eigenvalues = ensure_numpy(torch.linalg.eigvals(A_ar))
+        validate_eigenvalue_bounds(A_ar_eigenvalues, max_magnitude=DEFAULT_EIGENVALUE_MAX_MAGNITUDE, warn_threshold=DEFAULT_EIGENVALUE_WARN_THRESHOLD)
+    except (ValueError, RuntimeError, AttributeError):
         pass  # Skip eigenvalue check if computation fails
     
     # Initialize IRF arrays
@@ -223,7 +231,7 @@ def compute_irf(
                 )
             
             # Convert to numpy and store
-            irf_reduced[h] = K_h.detach().cpu().numpy()
+            irf_reduced[h] = ensure_numpy(K_h)
             
             # Structural IRF: K_h^struct = K_h S
             if structural:
@@ -241,7 +249,7 @@ def compute_irf(
                         )
                     )
                 
-                irf_structural[h] = K_h_struct.detach().cpu().numpy()
+                irf_structural[h] = ensure_numpy(K_h_struct)
             
             # Update powers for next iteration
             if h < horizon - 1:
@@ -267,7 +275,7 @@ def compute_irf(
     
     try:
         validate_no_nan_inf(irf_reduced, name="reduced-form IRF")
-    except Exception as e:
+    except (ValueError, RuntimeError, AttributeError, NumericalError) as e:
         raise NumericalError(
             "IRF computation produced NaN/Inf values in reduced-form IRF. "
             "This indicates numerical instability.",
@@ -282,7 +290,7 @@ def compute_irf(
     if structural and irf_structural is not None:
         try:
             validate_no_nan_inf(irf_structural, name="structural IRF")
-        except Exception as e:
+        except (ValueError, RuntimeError, AttributeError, NumericalError) as e:
             raise NumericalError(
                 "IRF computation produced NaN/Inf values in structural IRF. "
                 "This may indicate issues with structural identification matrix S.",

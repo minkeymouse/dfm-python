@@ -14,6 +14,14 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 from scipy.linalg import block_diag
 
+if TYPE_CHECKING:
+    from torch import Tensor
+else:
+    try:
+        from torch import Tensor
+    except ImportError:
+        Tensor = Any
+
 # NumPy-based Kalman filter (pykalman) - now a required dependency
 from ..ssm.kalman import DFMKalmanFilter
 
@@ -23,7 +31,7 @@ from ..config import (
     ConfigSource,
     DFMResult,
 )
-from ..numeric.tent import get_agg_structure, get_tent_weights
+from ..numeric.tent import get_agg_structure, get_tent_weights, get_slower_freq_tent_weights
 from ..config.constants import (
     FREQUENCY_HIERARCHY,
     TENT_WEIGHTS_LOOKUP,
@@ -34,7 +42,8 @@ from ..config.constants import (
     DEFAULT_DTYPE,
     DEFAULT_CLOCK_FREQUENCY,
     DEFAULT_HIERARCHY_VALUE,
-    DEFAULT_CLOCK_HIERARCHY,
+    DEFAULT_IDENTITY_SCALE,
+    DEFAULT_ZERO_VALUE,
 )
 from ..logger import get_logger
 from .base import BaseFactorModel
@@ -46,20 +55,25 @@ from ..utils.errors import (
     PredictionError,
     NumericalError
 )
+from ..utils.validation import check_condition, has_shape_with_min_dims
+from ..utils.helper import handle_linear_algebra_error
 
-# Import EM algorithm from functional module
-from ..functional.em import run_em_algorithm, _DEFAULT_EM_CONFIG as _EM_CONFIG
+# Import EM config from functional module
+from ..functional.em import _DEFAULT_EM_CONFIG as _EM_CONFIG
 from ..functional.dfm_block import (
     build_lag_matrix,
     initialize_block_loadings,
     initialize_block_transition,
-    get_tent_kernel_size,
-    get_slower_freq_tent_weights,
     build_slower_freq_observation_matrix,
     build_slower_freq_idiosyncratic_chain
 )
-from ..numeric.missing import rem_nans_spline
+from ..numeric.stability import rem_nans_spline
 from ..numeric.stability import ensure_covariance_stable
+from ..numeric.stability import create_scaled_identity
+from ..numeric.estimator import (
+    estimate_ar1_unified,
+    estimate_variance_unified,
+)
 
 if TYPE_CHECKING:
     from ..datamodule import DFMDataModule
@@ -67,9 +81,8 @@ if TYPE_CHECKING:
 _logger = get_logger(__name__)
 
 
-# sort_data moved to dataset.data_utils.sort_data_by_config
-# Import for backward compatibility
-from ..dataset.data_utils import sort_data_by_config as sort_data
+# sort_data moved to datamodule.base._sort_data_by_config
+# No longer needed in DFM model (handled by DataModule)
 
 
 @dataclass
@@ -102,27 +115,36 @@ class DFM(BaseFactorModel):
     the M-step uses custom code that maintains block structure, mixed-frequency handling,
     and idiosyncratic components.
     
-    Example (Standard Lightning Pattern):
-        >>> from dfm_python import DFM, DFMDataModule, DFMTrainer
+    Example:
+        >>> from dfm_python import DFM, DFMDataModule
+        >>> from dfm_python.config import DFMConfig
         >>> import pandas as pd
         >>> 
         >>> # Step 1: Load and preprocess data
         >>> df = pd.read_csv('data/finance.csv')
-        >>> df_processed = df[[col for col in df.columns if col != 'date']]
         >>> 
-        >>> # Step 2: Create DataModule
-        >>> dm = DFMDataModule(config_path='config/dfm_config.yaml', data=df_processed)
+        >>> # Step 2: Create config
+        >>> config = DFMConfig(
+        ...     frequency={'series1': 'm', 'series2': 'm'},
+        ...     blocks={'Block1': {'num_factors': 1, 'series': ['series1', 'series2']}},
+        ...     clock='m'
+        ... )
+        >>> 
+        >>> # Step 3: Create model with config
+        >>> model = DFM(config=config)
+        >>> 
+        >>> # Step 4: Create DataModule and fit
+        >>> dm = DFMDataModule(config=config, data=df, target_series=['series1'])
         >>> dm.setup()
+        >>> init_params = dm.get_initialization_params()
+        >>> model.fit(X=init_params['X'], datamodule=dm)
         >>> 
-        >>> # Step 3: Create model and load config
-        >>> model = DFM()
-        >>> model.load_config('config/dfm_config.yaml')
+        >>> # Step 5: Access results
+        >>> result = model.result
+        >>> print(result.summary())
         >>> 
-        >>> # Step 4: Fit model
-        >>> model.fit(X_torch, Mx=Mx, Wx=Wx)
-        >>> 
-        >>> # Step 5: Predict
-        >>> Xf, Zf = model.predict(horizon=6)
+        >>> # Step 6: Predict
+        >>> X_forecast, Z_forecast = model.predict(horizon=6)
     """
     
     def __init__(
@@ -131,9 +153,8 @@ class DFM(BaseFactorModel):
         num_factors: Optional[int] = None,
         threshold: Optional[float] = None,
         max_iter: Optional[int] = None,
-        nan_method: int = 2,
-        nan_k: int = 3,
-        mixed_freq: bool = False,
+        nan_method: Optional[int] = None,
+        nan_k: Optional[int] = None,
         **kwargs: Any
     ) -> None:
         """Initialize DFM instance.
@@ -149,12 +170,9 @@ class DFM(BaseFactorModel):
         max_iter : int, optional
             Maximum EM iterations. Defaults to DEFAULT_MAX_ITER.
         nan_method : int, optional
-            Missing data handling method. Defaults to DEFAULT_NAN_METHOD.
+            Missing data handling method (internal, defaults to DEFAULT_NAN_METHOD).
         nan_k : int, optional
-            Spline interpolation order. Defaults to DEFAULT_NAN_K.
-        mixed_freq : bool, default False
-            If True, use tent kernels for mixed-frequency data. If False, treat all series as clock frequency.
-            When True, raises ValueError if any frequency pair is not in TENT_WEIGHTS_LOOKUP.
+            Spline interpolation order (internal, defaults to DEFAULT_NAN_K).
         **kwargs : Any
             Additional arguments passed to BaseFactorModel (for API consistency with KDFM/DDFM).
             
@@ -176,11 +194,13 @@ class DFM(BaseFactorModel):
         config = self._initialize_config(config)
         
         # Resolve parameters using consolidated helper
-        self.threshold = self._resolve_param(threshold, default=DEFAULT_CONVERGENCE_THRESHOLD)
-        self.max_iter = self._resolve_param(max_iter, default=DEFAULT_MAX_ITER)
-        self.nan_method = self._resolve_param(nan_method, default=DEFAULT_NAN_METHOD)
-        self.nan_k = self._resolve_param(nan_k, default=DEFAULT_NAN_K)
-        self.mixed_freq = mixed_freq
+        from ..utils.misc import resolve_param
+        self.threshold = resolve_param(threshold, default=DEFAULT_CONVERGENCE_THRESHOLD)
+        self.max_iter = resolve_param(max_iter, default=DEFAULT_MAX_ITER)
+        self.nan_method = resolve_param(nan_method, default=DEFAULT_NAN_METHOD)
+        self.nan_k = resolve_param(nan_k, default=DEFAULT_NAN_K)
+        # Mixed frequency: auto-detected from DataModule or config during fit()
+        self._mixed_freq: Optional[bool] = None  # Internal property, auto-detected
         
         # Mixed frequency parameters (set during fit)
         self._constraint_matrix = None  # R_mat: constraint matrix for tent kernel aggregation
@@ -191,9 +211,12 @@ class DFM(BaseFactorModel):
         self._idio_indicator = None  # i_idio: indicator for idiosyncratic components
         
         # Determine number of factors
+        # Conditional logic: Initialize num_factors from config if not provided (not validation)
         if num_factors is None:
-            if hasattr(config, 'factors_per_block') and config.factors_per_block:
-                self.num_factors = int(np.sum(config.factors_per_block))
+            from ..utils.helper import get_config_attr
+            factors_per_block = get_config_attr(config, 'factors_per_block', None)
+            if factors_per_block is not None:
+                self.num_factors = int(np.sum(factors_per_block))
             else:
                 blocks = config.get_blocks_array()
                 if blocks.shape[1] > 0:
@@ -209,7 +232,7 @@ class DFM(BaseFactorModel):
             else np.ones(config.get_blocks_array().shape[1]),
             dtype=DEFAULT_DTYPE
         )
-        self.p = config.ar_lag if hasattr(config, 'ar_lag') else 1
+        self.p = 1  # Factors always use AR(1) dynamics (simplified)
         self.blocks = np.array(config.get_blocks_array(), dtype=DEFAULT_DTYPE)
         
         # Parameters stored as NumPy arrays (no PyTorch dependencies)
@@ -223,23 +246,26 @@ class DFM(BaseFactorModel):
         
         
         # Training state
-        self.Mx: Optional[np.ndarray] = None
-        self.Wx: Optional[np.ndarray] = None
+        # Note: Mx/Wx removed - target_scaler is used instead for inverse transformation
         self.data_processed: Optional[np.ndarray] = None
+        self.target_scaler: Optional[Any] = None  # Fitted sklearn scaler for target series inverse transformation
     
     def _check_parameters_initialized(self) -> None:
         """Check if model parameters are initialized (required for prediction).
         
         Raises
         ------
-        RuntimeError
+        ModelNotInitializedError
             If parameters are not initialized
         """
-        if any(p is None for p in [self.A, self.C, self.Q, self.R, self.Z_0, self.V_0]):
-            raise ModelNotInitializedError(
-                f"{self.__class__.__name__}: Model parameters not initialized",
-                details="Parameters (A, C, Q, R, Z_0, V_0) are required but are None. Please call fit() first to initialize parameters"
-            )
+        from ..numeric.validator import validate_parameters_initialized
+        validate_parameters_initialized(
+            {
+                'A': self.A, 'C': self.C, 'Q': self.Q,
+                'R': self.R, 'Z_0': self.Z_0, 'V_0': self.V_0
+            },
+            model_name=self.__class__.__name__
+        )
     
     def _update_parameters(self, A: np.ndarray, C: np.ndarray, Q: np.ndarray,
                           R: np.ndarray, Z_0: np.ndarray, V_0: np.ndarray) -> None:
@@ -250,18 +276,14 @@ class DFM(BaseFactorModel):
         A, C, Q, R, Z_0, V_0 : np.ndarray
             Parameter arrays
         """
-        # Only convert dtype if necessary (avoid redundant conversions)
-        def _ensure_dtype(arr: Optional[np.ndarray]) -> Optional[np.ndarray]:
-            if arr is None:
-                return None
-            return arr.astype(DEFAULT_DTYPE) if arr.dtype != DEFAULT_DTYPE else arr
-        
-        self.A = _ensure_dtype(A)
-        self.C = _ensure_dtype(C)
-        self.Q = _ensure_dtype(Q)
-        self.R = _ensure_dtype(R)
-        self.Z_0 = _ensure_dtype(Z_0)
-        self.V_0 = _ensure_dtype(V_0)
+        from ..utils.common import ensure_numpy
+        # Convert to numpy and ensure dtype (only if necessary)
+        self.A = ensure_numpy(A, dtype=DEFAULT_DTYPE) if A is not None else None
+        self.C = ensure_numpy(C, dtype=DEFAULT_DTYPE) if C is not None else None
+        self.Q = ensure_numpy(Q, dtype=DEFAULT_DTYPE) if Q is not None else None
+        self.R = ensure_numpy(R, dtype=DEFAULT_DTYPE) if R is not None else None
+        self.Z_0 = ensure_numpy(Z_0, dtype=DEFAULT_DTYPE) if Z_0 is not None else None
+        self.V_0 = ensure_numpy(V_0, dtype=DEFAULT_DTYPE) if V_0 is not None else None
     
     def _initialize_clock_freq_idio(
         self,
@@ -295,18 +317,27 @@ class DFM(BaseFactorModel):
                 res_i_clean = res[first_non_nan:last_non_nan + 1, idx]
                 
                 if len(res_i_clean) > 1:
-                    try:
+                    def _estimate_ar1_for_idio() -> np.ndarray:
+                        # Use unified AR(1) estimation with raw data
                         y_ar = res_i_clean[1:]
                         x_ar = res_i_clean[:-1].reshape(-1, 1)
-                        BM[i, i] = np.linalg.solve(
-                            x_ar.T @ x_ar + np.eye(1, dtype=dtype) * _EM_CONFIG.matrix_regularization,
-                            x_ar.T @ y_ar
-                        ).item()
-                        residuals_ar = y_ar - x_ar.squeeze() * BM[i, i]
-                        SM[i, i] = np.var(residuals_ar, ddof=0) if len(residuals_ar) > 1 else default_noise
-                    except (np.linalg.LinAlgError, ValueError):
-                        BM[i, i] = default_ar_coef
-                        SM[i, i] = default_noise
+                        A_diag, Q_diag = estimate_ar1_unified(
+                            y=y_ar.reshape(-1, 1),  # (T-1 x 1)
+                            x=x_ar,  # (T-1 x 1)
+                            V_smooth=None,  # Raw data mode
+                            regularization=_EM_CONFIG.matrix_regularization,
+                            min_variance=default_noise,
+                            default_ar_coef=default_ar_coef,
+                            default_noise=default_noise,
+                            dtype=dtype
+                        )
+                        return (A_diag[0] if len(A_diag) > 0 else default_ar_coef,
+                                Q_diag[0] if len(Q_diag) > 0 else default_noise)
+                    
+                    BM[i, i], SM[i, i] = handle_linear_algebra_error(
+                        _estimate_ar1_for_idio, "AR(1) estimation for idiosyncratic component",
+                        fallback_func=lambda: (default_ar_coef, default_noise)
+                    )
                 else:
                     BM[i, i] = default_ar_coef
                     SM[i, i] = default_noise
@@ -315,14 +346,17 @@ class DFM(BaseFactorModel):
                 SM[i, i] = default_noise
         
         # Initial covariance for clock frequency idio
-        try:
-            eye_BM = np.eye(n_idio_clock, dtype=dtype)
+        def _compute_initViM() -> np.ndarray:
+            eye_BM = create_scaled_identity(n_idio_clock, DEFAULT_IDENTITY_SCALE, dtype=dtype)
             BM_sq = BM ** 2
-            diag_inv = 1.0 / np.diag(eye_BM - BM_sq)
-            diag_inv = np.where(np.isfinite(diag_inv), diag_inv, np.ones_like(diag_inv))
-            initViM = np.diag(diag_inv) @ SM
-        except (np.linalg.LinAlgError, ValueError):
-            initViM = SM.copy()
+            diag_inv = DEFAULT_IDENTITY_SCALE / np.diag(eye_BM - BM_sq)
+            diag_inv = np.where(np.isfinite(diag_inv), diag_inv, np.full_like(diag_inv, DEFAULT_IDENTITY_SCALE))
+            return np.diag(diag_inv) @ SM
+        
+        initViM = handle_linear_algebra_error(
+            _compute_initViM, "initial covariance computation",
+            fallback_func=lambda: SM.copy()
+        )
         
         return BM, SM, initViM
     
@@ -494,6 +528,48 @@ class DFM(BaseFactorModel):
         
         return build_slower_freq_idiosyncratic_chain(n_slower_freq, tent_kernel_size, rho0, sig_e, dtype)
     
+    def _find_slower_frequency(
+        self,
+        clock: str,
+        tent_weights_dict: Optional[Dict[str, np.ndarray]] = None
+    ) -> Optional[str]:
+        """Find slower frequency from tent_weights_dict or hierarchy.
+        
+        Parameters
+        ----------
+        clock : str
+            Clock frequency
+        tent_weights_dict : Optional[Dict[str, np.ndarray]]
+            Dictionary of tent weights by frequency
+            
+        Returns
+        -------
+        Optional[str]
+            Slower frequency if found, None otherwise
+        """
+        # Try tent_weights_dict first
+        if tent_weights_dict:
+            slower_freq = next((freq for freq in tent_weights_dict.keys() if freq != clock), None)
+            if slower_freq is not None:
+                return slower_freq
+        
+        # Try slower frequencies from hierarchy (sorted by hierarchy, ascending)
+        clock_hierarchy = FREQUENCY_HIERARCHY.get(clock, DEFAULT_HIERARCHY_VALUE)
+        slower_freqs = sorted(
+            [freq for freq in FREQUENCY_HIERARCHY if FREQUENCY_HIERARCHY[freq] > clock_hierarchy],
+            key=lambda f: FREQUENCY_HIERARCHY[f]
+        )
+        for freq in slower_freqs:
+            if get_tent_weights(freq, clock) is not None:
+                return freq
+        
+        # Fallback: first available slower frequency
+        for freq in FREQUENCY_HIERARCHY:
+            if FREQUENCY_HIERARCHY[freq] > clock_hierarchy and get_tent_weights(freq, clock) is not None:
+                return freq
+        
+        return None
+    
     def _add_idiosyncratic_observation_matrix(
         self,
         C: np.ndarray,
@@ -515,41 +591,19 @@ class DFM(BaseFactorModel):
         """
         # Clock frequency: identity matrix for each series
         if idio_indicator is not None:
-            eyeN = np.eye(N, dtype=dtype)
+            eyeN = create_scaled_identity(N, DEFAULT_IDENTITY_SCALE, dtype=dtype)
             idio_indicator_bool = idio_indicator.astype(bool)
             C = np.hstack([C, eyeN[:, idio_indicator_bool]])
         else:
             # Default: all clock frequency series have idiosyncratic components
             if n_clock_freq > 0:
-                C = np.hstack([C, np.eye(N, dtype=dtype)[:, :n_clock_freq]])
+                eyeN = create_scaled_identity(N, DEFAULT_IDENTITY_SCALE, dtype=dtype)
+                C = np.hstack([C, eyeN[:, :n_clock_freq]])
         
         # Slower frequency: tent kernel chain observation matrix
         if n_slower_freq > 0:
-            # Determine slower frequency from tent_weights_dict or use first available
-            slower_freq = None
-            if tent_weights_dict:
-                slower_freq = next((freq for freq in tent_weights_dict.keys() if freq != clock), None)
-            
-            # If not found, try slower frequencies from hierarchy (sorted by hierarchy value)
-            if slower_freq is None:
-                clock_hierarchy = FREQUENCY_HIERARCHY.get(clock, DEFAULT_HIERARCHY_VALUE)
-                # Get all slower frequencies sorted by hierarchy (ascending)
-                slower_freqs = sorted(
-                    [freq for freq in FREQUENCY_HIERARCHY if FREQUENCY_HIERARCHY[freq] > clock_hierarchy],
-                    key=lambda f: FREQUENCY_HIERARCHY[f]
-                )
-                for freq in slower_freqs:
-                    if get_tent_weights(freq, clock) is not None:
-                        slower_freq = freq
-                        break
-            
-            # Fallback: use first available slower frequency from hierarchy
-            if slower_freq is None:
-                clock_hierarchy = FREQUENCY_HIERARCHY.get(clock, DEFAULT_HIERARCHY_VALUE)
-                for freq in FREQUENCY_HIERARCHY:
-                    if FREQUENCY_HIERARCHY[freq] > clock_hierarchy and get_tent_weights(freq, clock) is not None:
-                        slower_freq = freq
-                        break
+            # Determine slower frequency using helper method
+            slower_freq = self._find_slower_frequency(clock, tent_weights_dict)
             
             # Get tent weights
             if tent_weights_dict and slower_freq in tent_weights_dict:
@@ -584,18 +638,22 @@ class DFM(BaseFactorModel):
         T_res, N_res = data_with_nans.shape
         default_obs_noise = _EM_CONFIG.default_observation_noise
         
-        # Compute variance for each series
+        # Use unified variance estimation with raw residuals
         if T_res <= 1:
-            var_res = np.full(N_res, default_obs_noise, dtype=dtype)
+            from ..numeric.stability import create_scaled_identity
+            R = create_scaled_identity(N_res, default_obs_noise, dtype)
         else:
-            var_res = np.array([
-                np.var(data_with_nans[:, i][np.isfinite(data_with_nans[:, i])], ddof=0) 
-                if np.sum(np.isfinite(data_with_nans[:, i])) > 1 else default_obs_noise
-                for i in range(N_res)
-            ], dtype=dtype)
-            var_res = np.where(np.isfinite(var_res), var_res, default_obs_noise)
-        
-        R = np.diag(var_res)
+            # Compute residuals (data itself, since we're initializing from raw data)
+            R = estimate_variance_unified(
+                residuals=data_with_nans,  # Raw data as "residuals" for initialization
+                X=None,  # Not using smoothed expectations mode
+                EZ=None,
+                C=None,
+                V_smooth=None,
+                min_variance=default_obs_noise,
+                default_variance=default_obs_noise,
+                dtype=dtype
+            )
         
         # Set variances for idiosyncratic series to default
         idio_indices = np.where(idio_indicator > 0)[0] if idio_indicator is not None else np.arange(n_clock_freq, dtype=np.int32)
@@ -689,7 +747,7 @@ class DFM(BaseFactorModel):
         x_clean, indNaN = rem_nans_spline(x, method=opt_nan.get('method', 2), k=opt_nan.get('k', 3))
         
         # Remove any remaining NaN/inf
-        x_clean = np.where(np.isfinite(x_clean), x_clean, 0.0)
+        x_clean = np.where(np.isfinite(x_clean), x_clean, DEFAULT_ZERO_VALUE)
         
         # Initialize data for factor extraction
         # NOTE: For Block 1, this is the original data (after cleaning).
@@ -699,12 +757,16 @@ class DFM(BaseFactorModel):
         data_with_nans[indNaN] = np.nan
         
         # Determine tent kernel size
-        tent_kernel_size = get_tent_kernel_size(
-            R_mat=R_mat,
-            tent_weights_dict=tent_weights_dict,
-            default_size=_EM_CONFIG.tent_kernel_size
-        )
-        max_lag_size = max(p, tent_kernel_size)
+        if R_mat is not None:
+            tent_kernel_size = R_mat.shape[1]
+        elif tent_weights_dict:
+            # Use first available tent weights
+            first_weights = next(iter(tent_weights_dict.values()))
+            tent_kernel_size = len(first_weights)
+        else:
+            tent_kernel_size = _EM_CONFIG.tent_kernel_size
+        # State dimension per factor = max(p + 1, tent_kernel_size)
+        max_lag_size = max(p + 1, tent_kernel_size)
         
         # Set initial observations as NaN for slower-frequency aggregation
         if tent_kernel_size > 1:
@@ -738,17 +800,24 @@ class DFM(BaseFactorModel):
         )
         
         # Combine all transition matrices
-        try:
+        def _construct_block_diagonal() -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
             A = block_diag(A_factors, BM, BQ)
             Q = block_diag(Q_factors, SM, SQ)
             V_0 = block_diag(V_0_factors, initViM, initViQ)
-        except (ValueError, np.linalg.LinAlgError) as e:
-            error_msg = f"Failed to construct block-diagonal matrices: {e}. Check matrix dimensions and ensure all blocks are valid."
+            return A, Q, V_0
+        
+        def _raise_block_diagonal_error(*args, **kwargs) -> None:
+            error_msg = "Failed to construct block-diagonal matrices. Check matrix dimensions and ensure all blocks are valid."
             _logger.error(error_msg)
-            raise NumericalError(error_msg) from e
+            raise NumericalError(error_msg)
+        
+        A, Q, V_0 = handle_linear_algebra_error(
+            _construct_block_diagonal, "block-diagonal matrix construction",
+            fallback_func=_raise_block_diagonal_error
+        )
         
         # Initial state: Z_0 = zeros
-        m = int(A.shape[0]) if A.size > 0 and len(A.shape) > 0 else 0
+        m = int(A.shape[0]) if A.size > 0 and has_shape_with_min_dims(A, min_dims=1) else 0
         Z_0 = np.zeros(m, dtype=DEFAULT_DTYPE)
         
         # Ensure V_0 is positive definite
@@ -760,8 +829,6 @@ class DFM(BaseFactorModel):
     def fit(
         self,
         X: Union[np.ndarray, Any],
-        Mx: Optional[np.ndarray] = None,
-        Wx: Optional[np.ndarray] = None,
         datamodule: Optional[Any] = None
     ) -> DFMTrainingState:
         """Fit model using EM algorithm (wrapper around pykalman).
@@ -773,13 +840,10 @@ class DFM(BaseFactorModel):
         ----------
         X : np.ndarray or torch.Tensor, optional
             Standardized data (T x N). If datamodule is provided, X can be None.
-        Mx : np.ndarray, optional
-            Mean values for unstandardization (N,). If datamodule is provided, Mx can be None.
-        Wx : np.ndarray, optional
-            Standard deviation values for unstandardization (N,). If datamodule is provided, Wx can be None.
         datamodule : DFMDataModule, optional
             Custom DFMDataModule instance. If provided, initialization parameters will be
             extracted from the datamodule instead of computing them directly.
+            Target scaler is obtained from datamodule.target_scaler for inverse transformation.
             
         Returns
         -------
@@ -789,10 +853,10 @@ class DFM(BaseFactorModel):
         # Use datamodule if provided
         if datamodule is not None:
             self._data_module = datamodule  # Store for later use in predict()
+            # Store target_scaler for inverse transformation in predict()
+            self.target_scaler = getattr(datamodule, 'target_scaler', None)
             init_params = datamodule.get_initialization_params()
             X_np = init_params['X']
-            Mx = init_params['Mx'] if Mx is None else Mx
-            Wx = init_params['Wx'] if Wx is None else Wx
             R_mat = init_params['R_mat']
             q = init_params['q']
             n_slower_freq = init_params['n_slower_freq']
@@ -801,40 +865,71 @@ class DFM(BaseFactorModel):
             idio_indicator = init_params['idio_indicator']
             opt_nan = init_params['opt_nan']
             clock = init_params['clock']
+            # Conditional logic: Auto-detect mixed_freq from DataModule if not set (not validation)
+            is_mixed_freq = init_params.get('is_mixed_freq', False)
+            if self._mixed_freq is None:
+                self._mixed_freq = is_mixed_freq
         else:
             # Convert to NumPy using utility function
             from ..utils.common import ensure_numpy
             X_np = ensure_numpy(X, dtype=DEFAULT_DTYPE)
             
             # Setup mixed-frequency parameters (fallback if no datamodule)
-            # Note: get_agg_structure, get_tent_weights, FREQUENCY_HIERARCHY, TENT_WEIGHTS_LOOKUP already imported at top
-            clock = getattr(self.config, 'clock', DEFAULT_CLOCK_FREQUENCY)
+            # Auto-detect from config if not explicitly set
+            from ..utils.helper import get_config_attr
+            clock = get_config_attr(self.config, 'clock', DEFAULT_CLOCK_FREQUENCY)
             
-            if not self.mixed_freq:
+            # Conditional logic: Auto-detect mixed frequency from config if not set (not validation)
+            if self._mixed_freq is None:
+                # Try to detect from config frequencies
+                frequencies = self.config.get_frequencies()
+                clock_hierarchy = FREQUENCY_HIERARCHY.get(clock, DEFAULT_HIERARCHY_VALUE)
+                self._mixed_freq = any(
+                    FREQUENCY_HIERARCHY.get(freq, DEFAULT_HIERARCHY_VALUE) > clock_hierarchy
+                    for freq in frequencies
+                )
+            
+            mixed_freq = self._mixed_freq
+            
+            if not mixed_freq:
                 R_mat = None
                 q = None
                 n_slower_freq = 0
+                n_clock_freq = X_np.shape[1]  # All series are at clock frequency
                 tent_weights_dict = None
                 frequencies_np = None
                 idio_indicator = np.ones(X_np.shape[1], dtype=DEFAULT_DTYPE)
             else:
-                agg_structure = get_agg_structure(self.config, clock=clock)
-                frequencies_list = [s.frequency for s in self.config.series]
-                frequencies_set = set(frequencies_list)
+                # Get frequencies using new API
+                frequencies_list = self.config.get_frequencies()
+                frequencies_set = set(frequencies_list) if frequencies_list else set()
+                # Compute clock_hierarchy once and reuse
                 clock_hierarchy = FREQUENCY_HIERARCHY.get(clock, DEFAULT_HIERARCHY_VALUE)
                 
+                # Validate frequency pairs
                 missing_pairs = [
                     (freq, clock) for freq in frequencies_set
                     if FREQUENCY_HIERARCHY.get(freq, DEFAULT_HIERARCHY_VALUE) > clock_hierarchy and get_tent_weights(freq, clock) is None
                 ]
                 if missing_pairs:
                     raise ConfigurationError(
-                        f"mixed_freq=True but the following frequency pairs are not in TENT_WEIGHTS_LOOKUP: {missing_pairs}",
+                        f"Mixed-frequency data detected but the following frequency pairs are not in TENT_WEIGHTS_LOOKUP: {missing_pairs}",
                         details=f"Available pairs: {list(TENT_WEIGHTS_LOOKUP.keys())}"
-                        f"Either add the missing pairs to TENT_WEIGHTS_LOOKUP or set mixed_freq=False."
+                        f"Either add the missing pairs to TENT_WEIGHTS_LOOKUP or ensure all series use clock frequency."
                     )
                 
+                # Get aggregation structure
+                agg_structure = get_agg_structure(self.config, clock=clock)
                 tent_weights_dict = {k: np.array(v, dtype=DEFAULT_DTYPE) for k, v in agg_structure['tent_weights'].items()}
+                
+                # Validate: DFM supports only clock + one slower frequency
+                if len(tent_weights_dict) > 1:
+                    slower_freqs = list(tent_weights_dict.keys())
+                    raise ConfigurationError(
+                        f"DFM supports only one slower frequency, but found {len(tent_weights_dict)} slower frequencies: {slower_freqs}. "
+                        f"Please ensure all slower-frequency series use the same frequency, or use a different clock frequency.",
+                        details=f"Slower frequencies detected: {slower_freqs}, clock: {clock}"
+                    )
                 
                 R_mat = None
                 q = None
@@ -843,27 +938,73 @@ class DFM(BaseFactorModel):
                     R_mat = np.array(first_structure[0], dtype=DEFAULT_DTYPE)
                     q = np.array(first_structure[1], dtype=DEFAULT_DTYPE)
                 
-                n_slower_freq = sum(1 for freq in frequencies_list if FREQUENCY_HIERARCHY.get(freq, DEFAULT_HIERARCHY_VALUE) > clock_hierarchy)
-                idio_indicator = np.array([1 if freq == clock else 0 for freq in frequencies_list], dtype=DEFAULT_DTYPE)
-                # Map frequencies to hierarchy values (default to DEFAULT_HIERARCHY_VALUE if not found)
+                # Compute frequency statistics (reuse clock_hierarchy computed above)
                 frequencies_np = np.array([
                     FREQUENCY_HIERARCHY.get(f, FREQUENCY_HIERARCHY.get(DEFAULT_CLOCK_FREQUENCY, DEFAULT_HIERARCHY_VALUE))
                     for f in frequencies_list
-                ], dtype=np.int32)
+                ], dtype=np.int32) if frequencies_list else None
+                
+                n_slower_freq = sum(1 for freq in frequencies_list if FREQUENCY_HIERARCHY.get(freq, DEFAULT_HIERARCHY_VALUE) > clock_hierarchy)
+                n_clock_freq = len(frequencies_list) - n_slower_freq if frequencies_list else 0
+                idio_indicator = np.array([1 if freq == clock else 0 for freq in frequencies_list], dtype=DEFAULT_DTYPE)
             
             opt_nan = {'method': self.nan_method, 'k': self.nan_k}
         
-        self.Mx = Mx
-        self.Wx = Wx
+        # Note: Mx/Wx removed - target_scaler is used instead for inverse transformation
+        # Target scaler is stored in self.target_scaler (set above from datamodule)
         self.data_processed = X_np
+        
+        # Rebuild blocks array to match actual data dimensions
+        # blocks must have shape (N, n_blocks) where N = X_np.shape[1]
+        N_actual = X_np.shape[1]
+        if self.blocks.shape[0] != N_actual:
+            # Rebuild blocks from config using actual data columns
+            columns = None
+            if datamodule is not None and hasattr(datamodule, '_processed_columns'):
+                # Use column names from datamodule
+                columns = list(datamodule._processed_columns)
+            elif hasattr(self._config, 'frequency') and self._config.frequency is not None:
+                # Use series from frequency dict, but filter to match actual data
+                freq_keys = list(self._config.frequency.keys())
+                if len(freq_keys) == N_actual:
+                    columns = freq_keys
+            
+            # If we have column names, rebuild blocks properly
+            if columns is not None and len(columns) == N_actual:
+                # Clear cache to force rebuild
+                if hasattr(self._config, '_cached_blocks'):
+                    self._config._cached_blocks = None
+                self.blocks = np.array(self._config.get_blocks_array(columns=columns), dtype=DEFAULT_DTYPE)
+            else:
+                # Fallback: pad blocks with zeros (series not in any block)
+                n_blocks = self.blocks.shape[1]
+                if self.blocks.shape[0] < N_actual:
+                    padding = np.zeros((N_actual - self.blocks.shape[0], n_blocks), dtype=DEFAULT_DTYPE)
+                    self.blocks = np.vstack([self.blocks, padding])
+                elif self.blocks.shape[0] > N_actual:
+                    # Truncate to match data
+                    self.blocks = self.blocks[:N_actual, :]
         
         # Store for reuse in EM steps
         self._constraint_matrix = R_mat
         self._constraint_vector = q
         self._n_slower_freq = n_slower_freq
+        self._n_clock_freq = n_clock_freq if 'n_clock_freq' in locals() else (X_np.shape[1] - n_slower_freq if n_slower_freq is not None else None)
         self._tent_weights_dict = tent_weights_dict
         self._frequencies = frequencies_np
         self._idio_indicator = idio_indicator
+        
+        # Compute max_lag_size for state dimension (used in both initialization and EM)
+        # For mixed-frequency data, use tent_kernel_size; otherwise use p+1
+        # State dimension per factor = max(p + 1, tent_kernel_size)
+        if R_mat is not None:
+            tent_kernel_size = R_mat.shape[1]
+        elif tent_weights_dict:
+            first_weights = next(iter(tent_weights_dict.values()))
+            tent_kernel_size = len(first_weights)
+        else:
+            tent_kernel_size = 1  # No tent kernel for single-frequency data
+        self._max_lag_size = max(self.p + 1, tent_kernel_size)
         
         # Initialize parameters (required for EM algorithm)
         # Note: pykalman handles E-step, but we still need to initialize state-space structure
@@ -876,46 +1017,45 @@ class DFM(BaseFactorModel):
         # Validate initialization succeeded
         self._check_parameters_initialized()
         
-        # Run EM algorithm (pykalman E-step + custom M-step)
-        initial_params: Dict[str, np.ndarray] = {
-            'A': self.A, 'C': self.C, 'Q': self.Q,
-            'R': self.R, 'Z_0': self.Z_0, 'V_0': self.V_0
-        }
+        # Run EM algorithm using DFMKalmanFilter.em() method
+        # Create Kalman filter and run EM algorithm
+        kalman_filter = DFMKalmanFilter(
+            transition_matrices=self.A,
+            observation_matrices=self.C,
+            transition_covariance=self.Q,
+            observation_covariance=self.R,
+            initial_state_mean=self.Z_0,
+            initial_state_covariance=self.V_0
+        )
         
-        def get_params_fn() -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-            return (self.A, self.C, self.Q, self.R, self.Z_0, self.V_0)
+        # Create EMConfig from DFMConfig (uses consolidated parameters)
+        em_config = self._config.to_em_config() if self._config is not None else _EM_CONFIG
         
-        # Compute state dimension per factor (p + 1)
-        p_plus_one = self.p + 1
-        
-        # Compute n_clock_freq and n_slower_freq from frequencies if available
-        # n_clock_freq: number of series at clock frequency (generic, not just monthly)
-        # n_slower_freq: number of series at slower frequencies (generic, not just quarterly)
-        n_clock_freq = None
-        n_slower_freq = None
-        if self._frequencies is not None:
-            clock_hierarchy = FREQUENCY_HIERARCHY.get(clock, DEFAULT_CLOCK_HIERARCHY)
-            n_clock_freq = int(np.sum(np.array([FREQUENCY_HIERARCHY.get(f, DEFAULT_HIERARCHY_VALUE) for f in self._frequencies]) == clock_hierarchy))
-            n_slower_freq = int(np.sum(np.array([FREQUENCY_HIERARCHY.get(f, DEFAULT_HIERARCHY_VALUE) for f in self._frequencies]) > clock_hierarchy))
-        
-        final_state = run_em_algorithm(
+        final_state = kalman_filter.em(
             X=X_np,
-            initial_params=initial_params,
-            update_params_fn=self._update_parameters,
-            get_params_fn=get_params_fn,
+            initial_params={
+                'A': self.A, 'C': self.C, 'Q': self.Q,
+                'R': self.R, 'Z_0': self.Z_0, 'V_0': self.V_0
+            },
             max_iter=self.max_iter,
             threshold=self.threshold,
-            config=_EM_CONFIG,
+            config=em_config,
             blocks=self.blocks,
             r=self.r,
             p=self.p,
-            p_plus_one=p_plus_one,
+            p_plus_one=self._max_lag_size,  # Use max_lag_size for state dimension (accounts for tent_kernel_size)
             R_mat=self._constraint_matrix,
             q=self._constraint_vector,
-            n_clock_freq=n_clock_freq,
+            n_clock_freq=self._n_clock_freq,
             n_slower_freq=n_slower_freq,
             idio_indicator=self._idio_indicator,
             tent_weights_dict=self._tent_weights_dict
+        )
+        
+        # Update model parameters from final state
+        self._update_parameters(
+            final_state['A'], final_state['C'], final_state['Q'],
+            final_state['R'], final_state['Z_0'], final_state['V_0']
         )
         
         self.training_state = DFMTrainingState(
@@ -927,6 +1067,39 @@ class DFM(BaseFactorModel):
         
         return self.training_state
     
+    def _create_kalman_filter(
+        self,
+        initial_state_mean: Optional[np.ndarray] = None,
+        initial_state_covariance: Optional[np.ndarray] = None
+    ) -> DFMKalmanFilter:
+        """Create Kalman filter with current training state parameters.
+        
+        Parameters
+        ----------
+        initial_state_mean : np.ndarray, optional
+            Initial state mean. If None, uses training_state.Z_0
+        initial_state_covariance : np.ndarray, optional
+            Initial state covariance. If None, uses training_state.V_0
+            
+        Returns
+        -------
+        DFMKalmanFilter
+            Configured Kalman filter instance
+        """
+        if initial_state_mean is None:
+            initial_state_mean = self.training_state.Z_0
+        if initial_state_covariance is None:
+            initial_state_covariance = self.training_state.V_0
+        
+        return DFMKalmanFilter(
+            transition_matrices=self.training_state.A,
+            observation_matrices=self.training_state.C,
+            transition_covariance=self.training_state.Q,
+            observation_covariance=self.training_state.R,
+            initial_state_mean=initial_state_mean,
+            initial_state_covariance=initial_state_covariance
+        )
+    
     def _compute_smoothed_factors(self) -> np.ndarray:
         """Compute smoothed factors using Kalman filter.
         
@@ -935,21 +1108,14 @@ class DFM(BaseFactorModel):
         np.ndarray
             Smoothed factors (T x m)
         """
-        if self.training_state is None or self.data_processed is None:
-            raise ModelNotTrainedError(
-                "Model not fitted or data not available",
-                details="Please call fit() method before computing smoothed factors"
-            )
-        
-        kalman_final = DFMKalmanFilter(
-            transition_matrices=self.training_state.A,
-            observation_matrices=self.training_state.C,
-            transition_covariance=self.training_state.Q,
-            observation_covariance=self.training_state.R,
-            initial_state_mean=self.training_state.Z_0,
-            initial_state_covariance=self.training_state.V_0
+        check_condition(
+            self.training_state is not None and self.data_processed is not None,
+            ModelNotTrainedError,
+            "Model not fitted or data not available",
+            details="Please call fit() method before computing smoothed factors"
         )
         
+        kalman_final = self._create_kalman_filter()
         y_masked = np.ma.masked_invalid(self.data_processed)
         smoothed_state_means, _ = kalman_final.smooth(y_masked)
         return smoothed_state_means
@@ -962,18 +1128,7 @@ class DFM(BaseFactorModel):
         DFMResult
             Estimation results with parameters, factors, and diagnostics
         """
-        if self.training_state is None:
-            raise ModelNotTrainedError(
-                "DFM get_result failed: model has not been fitted yet",
-                details="Please call fit() method first"
-            )
-        if self.data_processed is None:
-            raise ModelNotTrainedError(
-                "DFM get_result failed: data not available",
-                details="Please ensure fit() was called with data"
-            )
-        
-        # Compute smoothed factors
+        # Compute smoothed factors (validates training_state and data_processed internally)
         Z = self._compute_smoothed_factors()
         
         # Get parameters
@@ -986,22 +1141,103 @@ class DFM(BaseFactorModel):
         
         # Compute smoothed data
         x_sm = Z @ C.T
-        # Clean Mx/Wx using consolidated helper
-        Mx_clean, Wx_clean = self._clean_mx_wx(self.Mx, self.Wx, C.shape[0], dtype=DEFAULT_DTYPE)
-        X_sm = x_sm * Wx_clean + Mx_clean
+        
+        # Get target scaler from datamodule if available
+        target_scaler = getattr(self, 'target_scaler', None)
         
         return DFMResult(
-            x_sm=x_sm, X_sm=X_sm, Z=Z, C=C, R=R, A=A, Q=Q,
-            Mx=Mx_clean,  # Use cleaned values
-            Wx=Wx_clean,  # Use cleaned values
+            x_sm=x_sm, Z=Z, C=C, R=R, A=A, Q=Q,
+            target_scaler=target_scaler,
             Z_0=Z_0, V_0=V_0, r=self.r, p=self.p,
             converged=self.training_state.converged,
             num_iter=self.training_state.num_iter,
-            loglik=self.training_state.loglik,
-            series_ids=self.config.get_series_ids(),
-            block_names=self.config.block_names if hasattr(self.config, 'block_names') else None
+            loglik=self.training_state.loglik
         )
     
+    
+    def update(self, data: Union[np.ndarray, Any]) -> None:
+        """Update model state with new observations via Kalman filtering/smoothing.
+        
+        This method runs Kalman filtering/smoothing on new data to update the
+        latent factors, but keeps model parameters (A, C, Q, R) fixed.
+        
+        After calling update(), the model's internal state (result.Z and data_processed)
+        is extended with the new observations. Subsequent calls to predict() will use
+        the updated state.
+        
+        **Data Shape**: The input data must be 2D with shape (T_new x N) where:
+        - T_new: Number of new time steps (can be any positive integer)
+        - N: Number of series (must match training data)
+        
+        **Supported Types**:
+        - numpy.ndarray: (T_new x N) array
+        - pandas.DataFrame: DataFrame with N columns, T_new rows
+        - polars.DataFrame: DataFrame with N columns, T_new rows
+        
+        **Important**: Data must be preprocessed by the user (same preprocessing as training).
+        Only target scaler is handled internally if needed.
+        
+        Parameters
+        ----------
+        data : np.ndarray, pandas.DataFrame, or polars.DataFrame
+            New preprocessed observations with shape (T_new x N) where:
+            - T_new: Number of new time steps (any positive integer)
+            - N: Number of series (must match training data)
+            Data must be preprocessed by user (same preprocessing as training).
+            
+        Notes
+        -----
+        - This updates factors via filtering/smoothing, NOT parameter retraining
+        - For parameter retraining, use fit() with concatenated data
+        - After update(), predict() will use the updated factor state
+        - New data must have same number of series (N) as training data
+        - User must preprocess data themselves (same preprocessing as training)
+        
+        Raises
+        ------
+        ModelNotTrainedError
+            If model has not been trained yet
+        DataValidationError
+            If data shape doesn't match training data
+        """
+        # Validate and convert data (no preprocessing - user must preprocess)
+        from ..numeric.validator import validate_and_convert_update_data
+        data_new = validate_and_convert_update_data(
+            data, 
+            self.data_processed, 
+            dtype=DEFAULT_DTYPE,
+            model_name=self.__class__.__name__
+        )
+        
+        # Get current result (compute if needed)
+        result = self._ensure_result()
+        
+        # Get last smoothed state from training as initial state for new data
+        Z_last = result.Z[-1, :] if result.Z.shape[0] > 0 else result.Z_0
+        V_last = result.V_0  # Use original V_0 or could compute from last state covariance
+        
+        # Create Kalman filter with current parameters and new initial state
+        kalman_new = self._create_kalman_filter(
+            initial_state_mean=Z_last,
+            initial_state_covariance=V_last
+        )
+        
+        # Run filter and smooth on new data
+        y_masked = np.ma.masked_invalid(data_new)
+        Z_new, V_smooth_new, _, _ = kalman_new.filter_and_smooth(y_masked)
+        
+        # Update model state: append new factors and data
+        # Concatenate new factors to existing result.Z
+        result.Z = np.vstack([result.Z, Z_new])
+        
+        # Append new data to data_processed
+        self.data_processed = np.vstack([self.data_processed, data_new])
+        
+        # Update smoothed data (x_sm) in result
+        result.x_sm = result.Z @ result.C.T
+        
+        # Invalidate cached result (or it's already updated above)
+        # The result object is updated in place, so _result is still valid
     
     def load_config(
         self,
@@ -1010,22 +1246,17 @@ class DFM(BaseFactorModel):
         yaml: Optional[Union[str, Path]] = None,
         mapping: Optional[Dict[str, Any]] = None,
         hydra: Optional[Union[Dict[str, Any], Any]] = None,
-        base: Optional[Union[str, Path, Dict[str, Any], ConfigSource]] = None,
-        override: Optional[Union[str, Path, Dict[str, Any], ConfigSource]] = None,
     ) -> 'DFM':
         """Load configuration from various sources.
         
         After loading config, the model needs to be re-initialized with the new config.
         For standard Lightning pattern, pass config directly to __init__.
         """
-        # Use common config loading logic
         new_config = self._load_config_common(
             source=source,
             yaml=yaml,
             mapping=mapping,
             hydra=hydra,
-            base=base,
-            override=override,
         )
         
         # DFM-specific: Initialize r and blocks arrays
@@ -1044,29 +1275,41 @@ class DFM(BaseFactorModel):
         self,
         horizon: Optional[int] = None,
         *,
+        data: Optional[Union[np.ndarray, Tensor, Any]] = None,
         return_series: bool = True,
-        return_factors: bool = True,
-        target: Optional[List[str]] = None
+        return_factors: bool = True
     ) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
         """Forecast future values.
         
         This method can be called after training. It uses the training state
         from the Lightning module to generate forecasts.
         
+        Target series are determined from the DataModule's target_series attribute,
+        which should be set during DataModule initialization.
+        
+        **New Data Initialization**: If `data` is provided, the method runs a
+        Kalman filter forward pass on the new data to compute the initial factor
+        state for forecasting. This does NOT modify the model's internal state.
+        Use `update()` method if you want to update the model state with new data.
+        
+        **Important**: If `data` is provided, it must be preprocessed by the user
+        (same preprocessing as training). Only target scaler is handled internally.
+        
         Parameters
         ----------
         horizon : int, optional
             Number of periods ahead to forecast. If None, defaults to 1 year
             of periods based on clock frequency.
+        data : np.ndarray, torch.Tensor, pandas.DataFrame, or polars.DataFrame, optional
+            New preprocessed observations to use for initializing forecast. If provided,
+            runs Kalman filter forward pass to compute Z_last from the new data.
+            Does NOT modify model state (use update() for that).
+            Must have shape (T_new x N) where N matches training data.
+            Data must be preprocessed by user (same preprocessing as training).
         return_series : bool, optional
             Whether to return forecasted series (default: True)
         return_factors : bool, optional
             Whether to return forecasted factors (default: True)
-        target : List[str], optional
-            List of target series IDs to return. If None, uses target_series from DataModule.
-            If DataModule has no target_series, raises ValueError.
-            If specified, only returns predictions for the specified target series.
-            Only target series are returned (features are excluded).
             
         Returns
         -------
@@ -1074,85 +1317,102 @@ class DFM(BaseFactorModel):
             If both return_series and return_factors are True:
                 (X_forecast, Z_forecast) tuple
             If only return_series is True:
-                X_forecast (horizon x N)
+                X_forecast (horizon x len(target_series))
             If only return_factors is True:
                 Z_forecast (horizon x m)
             
+        Raises
+        ------
+        ValueError
+            If DataModule has no target_series set
+        ModelNotTrainedError
+            If model has not been trained yet
+        DataValidationError
+            If data shape doesn't match training data
         """
-        if self.training_state is None:
-            raise ModelNotTrainedError(
-                f"{self.__class__.__name__} prediction failed: model has not been trained yet",
-                details="Please call fit() first"
-            )
+        # Validate model is trained
+        check_condition(
+            self.training_state is not None,
+            ModelNotTrainedError,
+            f"{self.__class__.__name__} prediction failed: model has not been trained yet",
+            details="Please call fit() first"
+        )
         
         # Validate parameters are initialized
         self._check_parameters_initialized()
         
-        # Get result (only call get_result() if _result is None)
-        if not hasattr(self, '_result') or self._result is None:
-            self._result = self.get_result()
+        # Get result (compute if needed)
+        result = self._ensure_result()
         
-        result = self._result
+        check_condition(
+            result.Z is not None,
+            ModelNotTrainedError,
+            "DFM prediction failed: result.Z is not available",
+            details="This may indicate the model was not properly trained or result object is corrupted"
+        )
         
-        if result.Z is None:
-            raise ModelNotTrainedError(
-                "DFM prediction failed: result.Z is not available",
-                details="This may indicate the model was not properly trained or result object is corrupted"
-            )
-        
-        # Compute default horizon using consolidated helper
+        # Compute and validate horizon
         if horizon is None:
             horizon = self._compute_default_horizon()
-        
-        # Validate horizon
-        if horizon <= 0:
-            raise PredictionError(
-                f"horizon must be positive, got {horizon}",
-                details="Forecast horizon must be a positive integer"
-            )
+        from ..numeric.validator import validate_horizon
+        horizon = validate_horizon(horizon)
         
         # Extract model parameters
         A = result.A
         C = result.C
-        Wx = result.Wx
-        Mx = result.Mx
+        target_scaler = result.target_scaler  # Use scaler object instead of Mx/Wx
         p = result.p  # VAR order (always available after training)
         
-        # Use training state for initial factor state
-        # For DFM, we use the last smoothed state from training
-        # History-based updates can be added later if needed
-        Z_last = result.Z[-1, :] if result.Z.shape[0] > 0 else np.zeros(result.A.shape[0], dtype=DEFAULT_DTYPE)
-        
-        # Validate factor state
-        if np.any(np.isnan(Z_last)):
-            nan_count = np.sum(np.isnan(Z_last))
-            nan_ratio = nan_count / len(Z_last)
-            raise NumericalError(
-                f"DFM prediction failed: {nan_count}/{len(Z_last)} factors contain NaN ({nan_ratio:.1%})",
-                details="Model may not have converged. Try increasing max_iter or checking data quality"
+        # Determine initial factor state
+        if data is not None:
+            # Use new data to compute initial factor state via Kalman filter forward pass
+            # This does NOT modify model state
+            # User must preprocess data themselves (same preprocessing as training)
+            from ..numeric.validator import validate_and_convert_update_data
+            data_new = validate_and_convert_update_data(
+                data,
+                self.data_processed,
+                dtype=DEFAULT_DTYPE,
+                model_name=self.__class__.__name__
             )
-        
-        # Validate parameters are finite
-        if np.any(~np.isfinite(A)) or np.any(~np.isfinite(C)):
-            raise NumericalError(
-                "DFM prediction failed: model parameters (A or C) contain NaN/Inf",
-                details="Check training convergence and data quality"
+            
+            # Get last smoothed state from training as initial state for filtering
+            Z_initial = result.Z[-1, :] if result.Z.shape[0] > 0 else result.Z_0
+            V_initial = result.V_0
+            
+            # Create Kalman filter with current parameters
+            kalman_filter = self._create_kalman_filter(
+                initial_state_mean=Z_initial,
+                initial_state_covariance=V_initial
             )
+            
+            # Run filter (forward pass only, not smooth) on new data
+            y_masked = np.ma.masked_invalid(data_new)
+            filtered_states, _ = kalman_filter.filter(y_masked)
+            
+            # Extract last filtered state as initial state for forecasting
+            Z_last = filtered_states[-1, :] if filtered_states.shape[0] > 0 else Z_initial
+        else:
+            # Use training state for initial factor state
+            # For DFM, we use the last smoothed state from training
+            Z_last = result.Z[-1, :] if result.Z.shape[0] > 0 else np.zeros(result.A.shape[0], dtype=DEFAULT_DTYPE)
         
-        # Resolve target series using consolidated helper
+        # Validate factor state and parameters are finite
+        from ..numeric.validator import validate_no_nan_inf
+        validate_no_nan_inf(Z_last, name="factor state Z_last")
+        validate_no_nan_inf(A, name="transition matrix A")
+        validate_no_nan_inf(C, name="observation matrix C")
+        
+        # Resolve target series from DataModule (target_series should be set at initialization)
+        # _resolve_target_series() already validates and raises DataError if none found
         series_ids = self._config.get_series_ids() if self._config is not None else result.series_ids
-        target_series, target_indices = self._resolve_target_series(target, series_ids, result)
+        target_series, target_indices = self._resolve_target_series(series_ids, result)
         
+        # Additional validation: ensure target_series was set in DataModule
         if target_series is None or len(target_series) == 0:
             raise ValueError(
-                "DFM prediction failed: target is None but no target_series found in DataModule. "
-                "Please specify target=['series_id'] or ensure DataModule has target_series set."
-            )
-        
-        if target_indices is None or len(target_indices) == 0:
-            raise DataError(
-                f"DFM prediction failed: none of the specified target series found",
-                details=f"Target: {target_series}, Available: {series_ids}"
+                "DFM prediction failed: no target_series found in DataModule. "
+                "Please set target_series when creating the DataModule (e.g., DFMDataModule(..., target_series=['series_id']))."
             )
         
         # Forecast factors using VAR dynamics (common helper)
@@ -1166,53 +1426,55 @@ class DFM(BaseFactorModel):
         )
         
         # Optimized: Transform only target series (not all series)
-        # Use only target indices for C, Mx, Wx
+        # Use only target indices for C
         C_target = C[target_indices, :]  # (len(target) x m)
-        Mx_target = Mx[target_indices] if Mx is not None else None
-        Wx_target = Wx[target_indices] if Wx is not None else None
         
-        # Transform factors to target observations only
+        # Transform factors to target observations (in standardized scale)
         X_forecast_std = Z_forecast @ C_target.T  # (horizon x len(target))
-        X_forecast = X_forecast_std * Wx_target + Mx_target  # (horizon x len(target))
         
-        # Validate forecast results are finite
-        if np.any(~np.isfinite(X_forecast)):
-            nan_count = np.sum(~np.isfinite(X_forecast))
-            raise NumericalError(
-                f"DFM prediction failed: produced {nan_count} NaN/Inf values in forecast",
-                details="Possible numerical instability. Check model parameters, training convergence, and data quality."
-            )
+        # Unstandardize using scaler if available, otherwise return as-is
+        if target_scaler is not None and hasattr(target_scaler, 'inverse_transform'):
+            # Reshape for scaler: scaler expects (n_samples, n_features)
+            X_forecast = target_scaler.inverse_transform(X_forecast_std)
+        else:
+            # No scaler - assume already in original scale
+            X_forecast = X_forecast_std
         
-        # Ensure X_forecast is numpy array (handles torch inputs if present)
+        # Ensure X_forecast is numpy array and validate it's finite
         from ..utils.common import ensure_numpy
         X_forecast = ensure_numpy(X_forecast, dtype=DEFAULT_DTYPE)
+        validate_no_nan_inf(X_forecast, name="forecast X_forecast")
         
-        # Validate forecast values are within reasonable bounds (only for target series now)
-        if Wx_target is not None and Mx_target is not None and len(Wx_target) > 0 and len(Mx_target) > 0:
-            # Check each target series individually
-            extreme_threshold_std = _EM_CONFIG.extreme_forecast_threshold
-            for i in range(X_forecast.shape[1] if X_forecast.ndim > 1 else 1):
-                if i < len(Wx_target) and i < len(Mx_target) and Wx_target[i] > 0:
-                    series_forecast = X_forecast[:, i] if X_forecast.ndim > 1 else X_forecast
-                    series_mean = Mx_target[i]
-                    series_std = Wx_target[i]
-                    # Calculate how many standard deviations each forecast is from the mean
-                    abs_deviations = np.abs(series_forecast - series_mean) / series_std
-                    max_deviation = np.max(abs_deviations) if len(abs_deviations) > 0 else 0.0
-                    if max_deviation > extreme_threshold_std:
-                        extreme_count = np.sum(abs_deviations > extreme_threshold_std)
-                        _logger.warning(
-                            f"DFM prediction: Extreme forecast for target series {i} "
-                            f"(max deviation: {max_deviation:.1f} std devs). "
-                            f"Possible numerical instability."
-                        )
+        # Validate forecast values are within reasonable bounds (only if scaler available)
+        # Note: Validation using std devs requires scaler attributes, skip if not available
+        if target_scaler is not None:
+            # Try to extract scale for validation (optional - don't fail if unavailable)
+            try:
+                from ..dataset.process import _get_scaler
+                scaler = _get_scaler(target_scaler)
+                if scaler is not None and hasattr(scaler, 'scale_'):
+                    scale_vals = scaler.scale_
+                    if scale_vals is not None and len(scale_vals) > 0:
+                        extreme_threshold_std = _EM_CONFIG.extreme_forecast_threshold
+                        for i in range(X_forecast.shape[1] if X_forecast.ndim > 1 else 1):
+                            if i < len(scale_vals) and scale_vals[i] > 0:
+                                series_forecast = X_forecast[:, i] if X_forecast.ndim > 1 else X_forecast
+                                series_std = scale_vals[i]
+                                # Use std dev from scaler for validation (approximate)
+                                abs_deviations = np.abs(series_forecast) / series_std
+                                max_deviation = np.max(abs_deviations) if len(abs_deviations) > 0 else DEFAULT_ZERO_VALUE
+                                if max_deviation > extreme_threshold_std:
+                                    _logger.warning(
+                                        f"DFM prediction: Extreme forecast for target series {i} "
+                                        f"(max deviation: {max_deviation:.1f} std devs). "
+                                        f"Possible numerical instability."
+                                    )
+            except Exception:
+                # Skip validation if scaler attributes unavailable
+                pass
         
-        if return_factors and np.any(~np.isfinite(Z_forecast)):
-            nan_count = np.sum(~np.isfinite(Z_forecast))
-            raise NumericalError(
-                f"DFM prediction failed: produced {nan_count} NaN/Inf values in factor forecast",
-                details="Possible numerical instability in factor dynamics. Please check model parameters and training convergence"
-            )
+        if return_factors:
+            validate_no_nan_inf(Z_forecast, name="factor forecast Z_forecast")
         
         if return_series and return_factors:
             return X_forecast, Z_forecast
@@ -1226,20 +1488,13 @@ class DFM(BaseFactorModel):
         
         Raises
         ------
-        ValueError
+        ModelNotTrainedError
             If model has not been trained yet
         """
-        # Check if trained and extract result from training state if needed
-        self._check_trained()
-        if self._result is None:
-            # Generate result from training state if not already computed
-            self._result = self.get_result()
-        if not isinstance(self._result, DFMResult):
-            raise ModelNotTrainedError(
-                f"Expected DFMResult but got {type(self._result)}",
-                details="Model result type mismatch. Please ensure model was properly trained"
-            )
-        return self._result
+        result = self._ensure_result()
+        # Type assertion: get_result() always returns DFMResult for DFM model
+        assert isinstance(result, DFMResult), f"Expected DFMResult but got {type(result)}"
+        return result
     
     
     

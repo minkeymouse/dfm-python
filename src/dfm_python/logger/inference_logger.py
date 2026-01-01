@@ -1,7 +1,7 @@
 """Inference process logging utilities.
 
 This module provides specialized logging for inference/prediction processes,
-including prediction steps, nowcasting, and forecast generation for both DFM and DDFM.
+including prediction steps and forecast generation for both DFM and DDFM.
 """
 
 import logging
@@ -20,7 +20,6 @@ class InferenceLogger:
     This class provides structured logging for inference processes including:
     - Inference start/end
     - Prediction steps
-    - Nowcasting updates
     - Forecast generation
     - Prediction metrics
     """
@@ -56,7 +55,7 @@ class InferenceLogger:
         Parameters
         ----------
         task : str, default "inference"
-            Type of inference task (e.g., "prediction", "nowcasting", "forecast")
+            Type of inference task (e.g., "prediction", "forecast")
         **kwargs
             Additional context to log (e.g., horizon, target_series, view_date)
         """
@@ -123,7 +122,7 @@ class InferenceLogger:
         Parameters
         ----------
         prediction_type : str, default "prediction"
-            Type of prediction (e.g., "point", "interval", "nowcast", "forecast")
+            Type of prediction (e.g., "point", "interval", "forecast")
         horizon : int, optional
             Prediction horizon (number of periods ahead)
         **kwargs
@@ -289,7 +288,7 @@ def log_prediction(
     Parameters
     ----------
     prediction_type : str, default "prediction"
-        Type of prediction (e.g., "point", "interval", "nowcast", "forecast")
+        Type of prediction (e.g., "point", "interval", "forecast")
     horizon : int, optional
         Prediction horizon (number of periods ahead)
     **kwargs

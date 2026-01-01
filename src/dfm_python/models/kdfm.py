@@ -11,7 +11,6 @@ The implementation directly uses CompanionSSM and MACompanionSSM for the two-sta
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, Optional, Tuple, Union, Dict, Any, cast, Sequence
-from pathlib import Path
 
 import numpy as np
 import pytorch_lightning as pl
@@ -20,19 +19,23 @@ from torch import Tensor
 import torch.nn as nn
 
 from ..config import KDFMConfig, KDFMResult
-from ..config.constants import DEFAULT_TORCH_DTYPE, DEFAULT_CLOCK_FREQUENCY, DEFAULT_DTYPE
+from ..config.constants import DEFAULT_TORCH_DTYPE, DEFAULT_CLOCK_FREQUENCY, DEFAULT_REGULARIZATION, DEFAULT_GRAD_CLIP_VAL, DEFAULT_EIGENVALUE_MAX_MAGNITUDE, DEFAULT_EIGENVALUE_WARN_THRESHOLD, DEFAULT_IDENTITY_SCALE, DEFAULT_ZERO_VALUE, DEFAULT_FORECAST_HORIZON, DEFAULT_DTYPE, DEFAULT_KDFM_AR_ORDER, DEFAULT_KDFM_MA_ORDER, MIN_TIME_STEPS, MIN_VARIABLES, COMPUTATION_ERROR_TYPES
 from ..logger import get_logger
 from ..ssm.companion import CompanionSSM, MACompanionSSM
 from ..ssm.structural import StructuralIdentificationSSM
 from ..functional.irf import compute_irf
+from ..numeric.stability import create_scaled_identity
 from .base import BaseFactorModel
 from ..utils.errors import (
     ModelNotTrainedError,
     ModelNotInitializedError,
     PredictionError,
     NumericalError,
-    DataValidationError
+    DataValidationError,
+    ConfigurationError
 )
+from ..utils.validation import check_condition, has_shape_with_min_dims
+from ..utils.common import ensure_numpy
 from ..config.types import (
     Device, ArrayLike, ForecastResult, Shape2D, Shape3D,
     ForecastHorizon, NumVars, LagOrder, OptionalTensor, OptionalArray
@@ -87,11 +90,11 @@ class KDFM(BaseFactorModel, pl.LightningModule):
         >>> dm.setup()
         >>> 
         >>> # Step 3: Create model and load config
-        >>> model = KDFM(ar_order=1, ma_order=0)
+        >>> model = KDFM(ar_order=1, ma_order=0)  # Uses DEFAULT_KDFM_AR_ORDER, DEFAULT_KDFM_MA_ORDER
         >>> model.load_config('config/kdfm_config.yaml')
         >>> 
         >>> # Step 4: Create trainer and fit
-        >>> trainer = KDFMTrainer(max_epochs=100)
+        >>> trainer = KDFMTrainer(max_epochs=100)  # DEFAULT_MAX_EPOCHS
         >>> trainer.fit(model, dm)
         >>> 
         >>> # Step 5: Predict
@@ -101,8 +104,8 @@ class KDFM(BaseFactorModel, pl.LightningModule):
     def __init__(
         self,
         config: Optional[KDFMConfig] = None,
-        ar_order: int = 1,
-        ma_order: int = 0,
+        ar_order: int = DEFAULT_KDFM_AR_ORDER,
+        ma_order: int = DEFAULT_KDFM_MA_ORDER,
         learning_rate: Optional[float] = None,
         max_epochs: Optional[int] = None,
         batch_size: Optional[int] = None,
@@ -122,20 +125,20 @@ class KDFM(BaseFactorModel, pl.LightningModule):
             VAR order p
         ma_order : int, default=0
             MA order q (0 = pure VAR)
-        learning_rate : float, default=0.001
-            Learning rate for Adam optimizer
-        max_epochs : int, default=100
+        learning_rate : float, default=DEFAULT_LEARNING_RATE
+            Learning rate for Adam optimizer (default: DEFAULT_LEARNING_RATE from constants)
+        max_epochs : int, default=100  # DEFAULT_MAX_EPOCHS
             Maximum training epochs
         batch_size : int, default=32
             Batch size for training
         weight_decay : float, default=DEFAULT_REGULARIZATION_SCALE
             Weight decay (L2 regularization)
-        grad_clip_val : float, default=1.0
-            Gradient clipping value
+        grad_clip_val : float, default=DEFAULT_GRAD_CLIP_VAL
+            Gradient clipping value (default: DEFAULT_GRAD_CLIP_VAL from constants)
         structural_method : str, default='cholesky'
             Structural identification method: 'cholesky', 'full', 'low_rank'
-        structural_reg_weight : float, default=0.1
-            Weight for structural regularization loss
+        structural_reg_weight : float, default=DEFAULT_STRUCTURAL_REG_WEIGHT
+            Weight for structural regularization loss (default: DEFAULT_STRUCTURAL_REG_WEIGHT from constants)
         **kwargs
             Additional arguments passed to BaseFactorModel
         """
@@ -169,17 +172,18 @@ class KDFM(BaseFactorModel, pl.LightningModule):
         
         # Set parameters with defaults from constants and validate
         # Resolve parameters using consolidated helper
+        from ..utils.misc import resolve_param
         self.learning_rate = validate_learning_rate(
-            self._resolve_param(learning_rate, default=DEFAULT_LEARNING_RATE)
+            resolve_param(learning_rate, default=DEFAULT_LEARNING_RATE)
         )
-        self.max_epochs = self._resolve_param(max_epochs, default=DEFAULT_MAX_EPOCHS)
+        self.max_epochs = resolve_param(max_epochs, default=DEFAULT_MAX_EPOCHS)
         self.batch_size = validate_batch_size(
-            self._resolve_param(batch_size, default=DEFAULT_BATCH_SIZE)
+            resolve_param(batch_size, default=DEFAULT_BATCH_SIZE)
         )
-        self.weight_decay = self._resolve_param(weight_decay, default=DEFAULT_REGULARIZATION_SCALE)
-        self.grad_clip_val = self._resolve_param(grad_clip_val, default=DEFAULT_GRAD_CLIP_VAL)
+        self.weight_decay = resolve_param(weight_decay, default=DEFAULT_REGULARIZATION_SCALE)
+        self.grad_clip_val = resolve_param(grad_clip_val, default=DEFAULT_GRAD_CLIP_VAL)
         self.structural_method = structural_method
-        self.structural_reg_weight = self._resolve_param(structural_reg_weight, default=DEFAULT_STRUCTURAL_REG_WEIGHT)
+        self.structural_reg_weight = resolve_param(structural_reg_weight, default=DEFAULT_STRUCTURAL_REG_WEIGHT)
         
         # Model components initialized in initialize_from_data() when data dimensions are known
         self.companion_ar: Optional[CompanionSSM] = None
@@ -237,7 +241,7 @@ class KDFM(BaseFactorModel, pl.LightningModule):
             
         Examples
         --------
-        >>> model = KDFM(ar_order=1, ma_order=0)
+        >>> model = KDFM(ar_order=1, ma_order=0)  # Uses DEFAULT_KDFM_AR_ORDER, DEFAULT_KDFM_MA_ORDER
         >>> X = torch.randn(100, 5)  # 100 time steps, 5 variables
         >>> model.initialize_from_data(X)
         >>> assert model.companion_ar is not None
@@ -246,7 +250,6 @@ class KDFM(BaseFactorModel, pl.LightningModule):
         >>> assert model.companion_ar.order == 1
         """
         from ..numeric.validator import validate_data_shape, validate_no_nan_inf
-        from ..utils.errors import ConfigurationError
         
         # Validate data
         validate_data_shape(X, min_dims=2, max_dims=2, min_size=1)
@@ -255,28 +258,21 @@ class KDFM(BaseFactorModel, pl.LightningModule):
         T, N = X.shape
         
         # Validate dimensions
-        if T < 1:
-            raise DataValidationError(
-                f"Data must have at least 1 time step, got T={T}",
-                details="Ensure data is not empty"
-            )
-        if N < 1:
-            raise DataValidationError(
-                f"Data must have at least 1 variable, got N={N}",
-                details="Ensure data has at least one column"
-            )
+        check_condition(
+            T >= MIN_TIME_STEPS,
+            DataValidationError,
+            f"Data must have at least {MIN_TIME_STEPS} time step, got T={T}",
+            details="Ensure data is not empty"
+        )
+        check_condition(
+            N >= MIN_VARIABLES,
+            DataValidationError,
+            f"Data must have at least {MIN_VARIABLES} variable, got N={N}",
+            details="Ensure data has at least one column"
+        )
         
-        # Validate model configuration
-        if self.ar_order < 1:
-            raise ConfigurationError(
-                f"ar_order must be >= 1, got {self.ar_order}",
-                details="AR order must be positive for VAR dynamics"
-            )
-        if self.ma_order < 0:
-            raise ConfigurationError(
-                f"ma_order must be >= 0, got {self.ma_order}",
-                details="MA order must be non-negative (0 = pure VAR)"
-            )
+        # Note: ar_order and ma_order are already validated in __init__ via validate_ar_order/validate_ma_order
+        # No need to re-validate here since they cannot be modified after initialization
         
         K = N  # Number of variables
         device = X.device
@@ -319,9 +315,9 @@ class KDFM(BaseFactorModel, pl.LightningModule):
                 f"ma_order={self.ma_order}, device={device}"
             )
             
-        except (RuntimeError, ValueError, TypeError, AttributeError, KeyError) as e:
+        except COMPUTATION_ERROR_TYPES as e:
             # Specific exceptions for initialization failures
-            raise RuntimeError(
+            raise ModelNotInitializedError(
                 f"Failed to initialize KDFM components: {type(e).__name__}: {e}",
                 details=(
                     f"Data shape: {X.shape}, ar_order={self.ar_order}, ma_order={self.ma_order}, "
@@ -366,18 +362,19 @@ class KDFM(BaseFactorModel, pl.LightningModule):
             
         Examples
         --------
-        >>> model = KDFM(ar_order=1, ma_order=0)
+        >>> model = KDFM(ar_order=1, ma_order=0)  # Uses DEFAULT_KDFM_AR_ORDER, DEFAULT_KDFM_MA_ORDER
         >>> X = torch.randn(100, 5)  # 100 time steps, 5 variables
         >>> model.initialize_from_data(X)
         >>> y_pred = model.forward(X)
         >>> assert y_pred.shape == X.shape
         """
-        if self.companion_ar is None:
-            raise ModelNotInitializedError(
-                "KDFM forward pass requires initialized model components. "
-                "Call initialize_from_data() before forward pass.",
-                details="companion_ar is None"
-            )
+        check_condition(
+            self.companion_ar is not None,
+            ModelNotInitializedError,
+            "KDFM forward pass requires initialized model components. "
+            "Call initialize_from_data() before forward pass.",
+            details="companion_ar is None"
+        )
         
         # Handle different input shapes
         if x.ndim == 2:
@@ -444,11 +441,12 @@ class KDFM(BaseFactorModel, pl.LightningModule):
         RuntimeError
             If forward pass fails due to shape mismatches
         """
-        if self.companion_ar is None:
-            raise ModelNotInitializedError(
-                "AR stage not initialized. Call initialize_from_data() first.",
-                details="companion_ar is None"
-            )
+        check_condition(
+            self.companion_ar is not None,
+            ModelNotInitializedError,
+            "AR stage not initialized. Call initialize_from_data() first.",
+            details="companion_ar is None"
+        )
         return self.companion_ar(structural_shocks)
     
     def _forward_ma_stage(self, z_t: Tensor) -> Tensor:
@@ -531,7 +529,7 @@ class KDFM(BaseFactorModel, pl.LightningModule):
             
         Examples
         --------
-        >>> model = KDFM(ar_order=1, ma_order=0)
+        >>> model = KDFM(ar_order=1, ma_order=0)  # Uses DEFAULT_KDFM_AR_ORDER, DEFAULT_KDFM_MA_ORDER
         >>> batch = torch.randn(32, 100, 5)  # (B=32, T=100, N=5)
         >>> loss = model.training_step(batch, batch_idx=0)
         >>> assert loss.item() >= 0.0
@@ -561,6 +559,17 @@ class KDFM(BaseFactorModel, pl.LightningModule):
         
         # Forward pass
         y_pred = self.forward(data)
+        
+        # Store processed data for shape validation in update() (store first batch)
+        if self.data_processed is None:
+            from ..utils.common import ensure_numpy
+            # Store as numpy array in base class format
+            if data.ndim == 3:
+                # Batch format: take first sample
+                data_sample = data[0]
+            else:
+                data_sample = data
+            self.data_processed = ensure_numpy(data_sample, dtype=DEFAULT_DTYPE)
         
         # Compute losses using training step handler
         total_loss = self._compute_training_loss(y_pred, target, device)
@@ -631,7 +640,7 @@ class KDFM(BaseFactorModel, pl.LightningModule):
         **Loss Formula**: L_struct = ||S @ S.T - I||² (MSE between S @ S.T and identity)
         
         **Weighting**: The structural loss is weighted by `structural_reg_weight`
-        (typically 0.1) in the total loss, ensuring prediction loss dominates
+        (default: DEFAULT_STRUCTURAL_REG_WEIGHT = 0.1) in the total loss, ensuring prediction loss dominates
         while still encouraging orthogonality.
         
         Parameters
@@ -673,6 +682,7 @@ class KDFM(BaseFactorModel, pl.LightningModule):
                     )
                 
                 S_S_T = S @ S.T
+                # Use S.dtype to match input tensor dtype for loss computation consistency
                 I = torch.eye(S.shape[0], device=S.device, dtype=S.dtype)
                 loss = nn.functional.mse_loss(S_S_T, I)
                 
@@ -684,27 +694,23 @@ class KDFM(BaseFactorModel, pl.LightningModule):
                     )
                 
                 return loss
-            except (AttributeError, RuntimeError) as e:
-                # Structural loss computation failure indicates initialization issue
-                # Return zero loss to allow training to continue, but log as debug
-                # This is acceptable during early training when model is not yet initialized
-                _logger.debug(
-                    f"KDFM _compute_structural_loss: Failed to compute structural loss: {e}. "
-                    f"Returning zero loss. This may indicate structural_id is not properly initialized."
-                )
-                return torch.tensor(0.0, device=device, dtype=DEFAULT_TORCH_DTYPE)
             except NumericalError:
-                # Re-raise numerical errors - these are critical
+                # Re-raise numerical errors - these are critical and indicate data/model issues
+                # NumericalError is explicitly raised for NaN/Inf values in structural matrix or loss
                 raise
-            except (RuntimeError, ValueError, TypeError, AttributeError) as e:
-                # Specific exceptions for structural loss computation failures
+            except (AttributeError, RuntimeError) as e:
+                # Catch initialization/structural issues during early training:
+                # - AttributeError: structural_id.get_structural_matrix() method missing or attribute access fails
+                # - RuntimeError: Matrix operations fail due to shape/device mismatches or uninitialized state
+                # Return zero loss to allow training to continue, but log exception type for debugging
+                # This is acceptable during early training when model is not yet fully initialized
                 _logger.debug(
                     f"KDFM _compute_structural_loss: {type(e).__name__}: {e}. "
-                    f"Returning zero loss."
+                    f"Returning zero loss. This may indicate structural_id is not properly initialized."
                 )
-                return torch.tensor(0.0, device=device, dtype=DEFAULT_TORCH_DTYPE)
+                return torch.tensor(DEFAULT_ZERO_VALUE, device=device, dtype=DEFAULT_TORCH_DTYPE)
         else:
-            return torch.tensor(0.0, device=device, dtype=DEFAULT_TORCH_DTYPE)
+            return torch.tensor(DEFAULT_ZERO_VALUE, device=device, dtype=DEFAULT_TORCH_DTYPE)
     
     def _get_model_components(self) -> List[Optional[Union[CompanionSSM, MACompanionSSM, StructuralIdentificationSSM]]]:
         """Get list of all model components.
@@ -740,7 +746,7 @@ class KDFM(BaseFactorModel, pl.LightningModule):
             
         Examples
         --------
-        >>> model = KDFM(ar_order=1, ma_order=0)
+        >>> model = KDFM(ar_order=1, ma_order=0)  # Uses DEFAULT_KDFM_AR_ORDER, DEFAULT_KDFM_MA_ORDER
         >>> X = torch.randn(100, 5)
         >>> model.initialize_from_data(X)  # Automatically moves to X's device
         >>> # Or manually:
@@ -771,7 +777,7 @@ class KDFM(BaseFactorModel, pl.LightningModule):
             
         Examples
         --------
-        >>> model = KDFM(ar_order=1, ma_order=0)
+        >>> model = KDFM(ar_order=1, ma_order=0)  # Uses DEFAULT_KDFM_AR_ORDER, DEFAULT_KDFM_MA_ORDER
         >>> X = torch.randn(100, 5)
         >>> model.initialize_from_data(X)
         >>> params = model._collect_parameters()
@@ -794,9 +800,9 @@ class KDFM(BaseFactorModel, pl.LightningModule):
         
         **Optimizer Configuration**:
         - Optimizer: Adam (adaptive learning rate, good for non-stationary loss landscapes)
-        - Learning rate: Configurable via `learning_rate` parameter (default: 0.001)
-        - Weight decay: L2 regularization via `weight_decay` parameter (default: 1e-5)
-        - Gradient clipping: Applied via `grad_clip_val` parameter (default: 1.0)
+        - Learning rate: Configurable via `learning_rate` parameter (default: DEFAULT_LEARNING_RATE = 0.001)
+        - Weight decay: L2 regularization via `weight_decay` parameter (default: DEFAULT_REGULARIZATION_SCALE = 1e-5)
+        - Gradient clipping: Applied via `grad_clip_val` parameter (default: DEFAULT_GRAD_CLIP_VAL = 1.0 from constants)
         
         **Gradient Clipping**: Gradient clipping is applied automatically by Lightning
         if `grad_clip_val` is set. This prevents gradient explosion, which is
@@ -814,19 +820,19 @@ class KDFM(BaseFactorModel, pl.LightningModule):
             
         Examples
         --------
-        >>> model = KDFM(ar_order=1, ma_order=0, learning_rate=0.001)
+        >>> model = KDFM(ar_order=1, ma_order=0, learning_rate=DEFAULT_LEARNING_RATE)  # ar_order/ma_order use DEFAULT_KDFM_AR_ORDER, DEFAULT_KDFM_MA_ORDER
         >>> optimizer_config = model.configure_optimizers()
         >>> assert isinstance(optimizer_config, list)
         >>> assert len(optimizer_config) == 1
         >>> assert isinstance(optimizer_config[0], torch.optim.Optimizer)
-        >>> assert optimizer_config[0].param_groups[0]['lr'] == 0.001
+        >>> assert optimizer_config[0].param_groups[0]['lr'] == DEFAULT_LEARNING_RATE
         """
         params = self._collect_parameters()
         
         if not params:
             # Return dummy optimizer if no parameters yet (will be updated when model is initialized)
             # Create a dummy parameter to satisfy Lightning's optimizer requirement
-            dummy_param = nn.Parameter(torch.tensor(0.0))
+            dummy_param = nn.Parameter(torch.tensor(DEFAULT_ZERO_VALUE))
             return [torch.optim.Adam([dummy_param], lr=self.learning_rate)]
         
         optimizer = torch.optim.Adam(
@@ -862,7 +868,6 @@ class KDFM(BaseFactorModel, pl.LightningModule):
         *,
         return_series: bool = True,
         return_factors: bool = True,
-        target: Optional[List[str]] = None,  # Unused, kept for base class compatibility
         last_observation: Optional[Union[Tensor, np.ndarray]] = None  # Last data point for initialization
     ) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
         """Predict future values using trained KDFM model.
@@ -879,13 +884,13 @@ class KDFM(BaseFactorModel, pl.LightningModule):
         type-safe at runtime.
         
         This method generates forecasts by:
-        1. Validating companion matrix stability (eigenvalues must be < 1.0)
+        1. Validating companion matrix stability (eigenvalues must be < DEFAULT_EIGENVALUE_MAX_MAGNITUDE (1.0))
         2. Extracting the last factor state from the last observation (if provided)
         3. Forecasting factors forward using VAR dynamics via companion matrix powers
         4. Transforming factors to observations using the loading matrix
         
         **CRITICAL**: This method validates companion matrix stability before forecasting.
-        If the companion matrix has eigenvalues >= 1.0, forecasts will explode and a
+        If the companion matrix has eigenvalues >= DEFAULT_EIGENVALUE_MAX_MAGNITUDE (1.0), forecasts will explode and a
         `PredictionError` will be raised. This ensures numerical stability and prevents
         invalid forecasts.
         
@@ -903,8 +908,6 @@ class KDFM(BaseFactorModel, pl.LightningModule):
             Whether to return forecasted series (observations).
         return_factors : bool, default=True
             Whether to return forecasted factors.
-        target : List[str], optional
-            Target series IDs (unused, kept for base class compatibility).
         last_observation : torch.Tensor or np.ndarray, optional
             Last observation of shape (1, N) or (N,) to use for initializing forecast.
             Must be in PREPROCESSED scale (standardized, differenced).
@@ -933,7 +936,7 @@ class KDFM(BaseFactorModel, pl.LightningModule):
         ModelNotInitializedError
             If model components are not properly initialized (companion_ar is None).
         PredictionError
-            If companion matrix is unstable (max eigenvalue >= 1.0) or forecast
+            If companion matrix is unstable (max eigenvalue >= DEFAULT_EIGENVALUE_MAX_MAGNITUDE (1.0)) or forecast
             generation produces NaN/Inf values. This indicates numerical instability
             and the model should be retrained with better regularization.
         NumericalError
@@ -941,7 +944,7 @@ class KDFM(BaseFactorModel, pl.LightningModule):
             
         Examples
         --------
-        >>> model = KDFM(ar_order=1, ma_order=0)
+        >>> model = KDFM(ar_order=1, ma_order=0)  # Uses DEFAULT_KDFM_AR_ORDER, DEFAULT_KDFM_MA_ORDER
         >>> # ... train model ...
         >>> # Predict with last observation (in preprocessed scale)
         >>> X_f, Z_f = model.predict(horizon=6, last_observation=last_data_point)
@@ -957,7 +960,7 @@ class KDFM(BaseFactorModel, pl.LightningModule):
         
         # Validate and set horizon
         if horizon is None:
-            horizon = 6  # Default horizon
+            horizon = DEFAULT_FORECAST_HORIZON
         else:
             horizon = validate_horizon(horizon)
         
@@ -972,73 +975,33 @@ class KDFM(BaseFactorModel, pl.LightningModule):
             ) from e
         
         # Check if model is initialized
-        if self.companion_ar is None:
-            raise ModelNotInitializedError(
-                "KDFM model components are not initialized. "
-                "This may occur if initialize_from_data() was not called during training.",
-                details="companion_ar is None"
-            )
+        check_condition(
+            self.companion_ar is not None,
+            ModelNotInitializedError,
+            "KDFM model components are not initialized. "
+            "This may occur if initialize_from_data() was not called during training.",
+            details="companion_ar is None"
+        )
         
-        # Get result for parameters
-        result = self.get_result()
+        # Get result for parameters (compute if needed)
+        result = self._ensure_result()
         
-        # CRITICAL: Extract n_vars with fallback hierarchy
-        # Try 1: result.C.shape[0] (most reliable)
-        n_vars = None
-        if result is not None:
-            try:
-                if hasattr(result, 'C') and result.C is not None:
-                    if isinstance(result.C, np.ndarray):
-                        n_vars = int(result.C.shape[0])
-                    elif hasattr(result.C, 'shape') and len(result.C.shape) >= 2:
-                        n_vars = int(result.C.shape[0])
-            except (AttributeError, IndexError, TypeError):
-                pass
-            
-            # Try 2: result.n_vars
-            if n_vars is None:
-                try:
-                    if hasattr(result, 'n_vars') and result.n_vars is not None:
-                        n_vars = int(result.n_vars)
-                except (AttributeError, TypeError, ValueError):
-                    pass
-        
-        # Try 3: structural_id.n_vars
-        if n_vars is None and self.structural_id is not None:
-            try:
-                if hasattr(self.structural_id, 'n_vars') and self.structural_id.n_vars is not None:
-                    n_vars = int(self.structural_id.n_vars)
-            except (AttributeError, TypeError, ValueError):
-                pass
-        
-        # Try 4: companion_ar shape
-        if n_vars is None and self.companion_ar is not None and self.ar_order is not None and self.ar_order > 0:
-            try:
-                if hasattr(self.companion_ar, 'A'):
-                    A = self.companion_ar.A
-                    if isinstance(A, torch.Tensor):
-                        A_np = A.detach().cpu().numpy()
-                    else:
-                        A_np = A
-                    if A_np.ndim == 3:
-                        A_np = A_np[0]
-                    if A_np.shape[0] > 0:
-                        n_vars = A_np.shape[0] // self.ar_order
-                        if n_vars <= 0:
-                            n_vars = None
-            except (AttributeError, IndexError, TypeError, ZeroDivisionError):
-                pass
+        # Extract n_vars using helper method with fallback hierarchy
+        n_vars = self._extract_n_vars_from_sources(
+            result=result,
+            structural_id=self.structural_id,
+            companion_ar=self.companion_ar,
+            ar_order=self.ar_order
+        )
         
         if n_vars is None:
             # Enhanced error message with diagnostic information
-            diagnostic_info = {
-                'result': 'present' if result is not None else 'None',
-                'companion_ar': 'present' if self.companion_ar is not None else 'None',
-                'structural_id': 'present' if self.structural_id is not None else 'None',
-                'ar_order': self.ar_order,
-                'result_C_shape': getattr(result, 'C', None).shape if (result is not None and hasattr(result, 'C') and result.C is not None) else 'N/A',
-                'result_n_vars': getattr(result, 'n_vars', None) if result is not None else 'N/A'
-            }
+            diagnostic_info = self._build_diagnostic_info(
+                result=result,
+                companion_ar=self.companion_ar,
+                structural_id=self.structural_id,
+                ar_order=self.ar_order
+            )
             raise ModelNotInitializedError(
                 "Could not determine n_vars for KDFM from any source. Model may not be properly initialized.",
                 details=(
@@ -1074,29 +1037,35 @@ class KDFM(BaseFactorModel, pl.LightningModule):
         )
         
         try:
-            from ..utils.common import ensure_numpy
             from ..numeric.validator import validate_companion_stability
             A_np = ensure_numpy(result.A)
             is_stable, max_eigenval = validate_companion_stability(
                 companion_matrix=A_np,
                 model_name="KDFM",
                 name="KDFM companion matrix",
-                threshold=1.0,
-                warn_threshold=0.99
+                threshold=DEFAULT_EIGENVALUE_MAX_MAGNITUDE,
+                warn_threshold=DEFAULT_EIGENVALUE_WARN_THRESHOLD
             )
             # If we get here, matrix is stable (validate_companion_stability raises on failure)
         except (PredictionError, NumericalError):
             # Re-raise validation errors
             raise
         except (AttributeError, RuntimeError, ValueError, TypeError) as e:
-            # Specific exceptions for stability check failures
+            # Catch initialization/attribute errors during stability check (non-critical validation)
+            # These can occur if companion matrix attributes are missing or operations fail
+            # We log and continue because stability check is informational, not blocking
             _logger.debug(
                 f"Could not check companion matrix stability: {type(e).__name__}: {e}. "
                 f"Proceeding with forecast generation, but results may be unreliable."
             )
         
         # Compute n_factors from result.C or use n_vars as fallback
-        n_factors = result.C.shape[1] if result.C is not None and hasattr(result.C, 'shape') else n_vars
+        result_C = self._get_result_C(result)
+        # Simplify: check if result_C has shape and at least 2 dimensions
+        if has_shape_with_min_dims(result_C, min_dims=2):
+            n_factors = result_C.shape[1]
+        else:
+            n_factors = n_vars
         
         # Get last factor state by running forward pass on last observation
         if last_observation is not None:
@@ -1129,26 +1098,24 @@ class KDFM(BaseFactorModel, pl.LightningModule):
                 else:
                     z_t = structural_shocks.squeeze(0)  # (K,)
                 
-                Z_last = z_t.detach().cpu().numpy()
-                if np.any(np.isnan(Z_last)) or np.any(np.isinf(Z_last)):
-                    raise NumericalError(
-                        f"KDFM predict: Factor state Z_last contains NaN/Inf values. "
-                        f"Shape: {Z_last.shape}, NaN count: {np.sum(np.isnan(Z_last))}, "
-                        f"Inf count: {np.sum(np.isinf(Z_last))}. "
-                        f"This may indicate: (1) numerical instability in companion matrix operations, "
-                        f"(2) invalid input data in last_observation, or (3) model not properly trained. "
-                        f"Please check: model training convergence, input data validity, and companion matrix stability."
-                    )
-            except (RuntimeError, ValueError, TypeError, AttributeError, KeyError) as e:
-                # Specific exceptions for factor state computation failures
+                Z_last = ensure_numpy(z_t)
+                # Validate factor state is finite
+                from ..numeric.validator import validate_no_nan_inf
+                validate_no_nan_inf(Z_last, name="factor state Z_last")
+            except COMPUTATION_ERROR_TYPES as e:
+                # Catch computation errors during factor state extraction from observation
+                # Note: NumericalError/PredictionError inherit from Exception, not the caught types above,
+                # so the isinstance check below is defensive but typically unreachable
+                # If NumericalError/PredictionError are raised, they would propagate directly
                 if isinstance(e, (NumericalError, PredictionError)):
                     raise
+                # Convert generic exceptions to PredictionError for consistent error handling
                 raise PredictionError(
                     f"KDFM predict: Failed to compute factor state from observation: {type(e).__name__}: {e}",
                     details="The last_observation parameter may be invalid or the model may not be properly initialized."
                 ) from e
         else:
-            raise ValueError(
+            raise DataValidationError(
                 "KDFM predict: No last_observation provided. "
                 "KDFM requires last_observation parameter to compute initial factor state. "
                 "Provide the last observed data point (in preprocessed scale: standardized, differenced). "
@@ -1167,7 +1134,6 @@ class KDFM(BaseFactorModel, pl.LightningModule):
             )
         
         # Forecast factors using VAR dynamics
-        from ..utils.common import ensure_numpy
         K = Z_last.shape[0]
         A_np = ensure_numpy(result.A)
         expected_shape = (self.ar_order * K, self.ar_order * K)
@@ -1183,57 +1149,39 @@ class KDFM(BaseFactorModel, pl.LightningModule):
         
         # Initialize state vector (companion form)
         # Companion form stacks lagged factors: state = [Z_t, Z_{t-1}, ..., Z_{t-p+1}]
-        state = np.zeros(self.ar_order * K, dtype=np.float64)
-        state[:K] = Z_last.astype(np.float64)
+        state = np.zeros(self.ar_order * K, dtype=DEFAULT_DTYPE)
+        state[:K] = Z_last.astype(DEFAULT_DTYPE)
         
         # Validate state initialization
-        if np.any(np.isnan(state)) or np.any(np.isinf(state)):
-            raise NumericalError(
-                f"KDFM predict: Initial state vector contains NaN/Inf values. "
-                f"State shape: {state.shape}, NaN count: {np.sum(np.isnan(state))}, "
-                f"Inf count: {np.sum(np.isinf(state))}. "
-                f"This indicates invalid factor state Z_last. Please verify last_observation is valid."
-            )
+        from ..numeric.validator import validate_no_nan_inf
+        validate_no_nan_inf(state, name="initial state vector")
         
         # Generate forecasts using companion matrix powers
         # For VAR(1): Z_{t+h} = A^h @ Z_t
         # For VAR(p): Uses companion form state vector
-        Z_forecast = np.zeros((horizon, K), dtype=np.float64)
+        Z_forecast = np.zeros((horizon, K), dtype=DEFAULT_DTYPE)
         for h in range(horizon):
             Z_forecast[h, :] = state[:K].copy()
             state = A_np @ state
-            if np.any(np.isnan(state)) or np.any(np.isinf(state)):
+            # Validate state is finite at each step
+            try:
+                validate_no_nan_inf(state, name=f"forecast state at horizon {h+1}")
+            except NumericalError as e:
                 raise PredictionError(
                     f"KDFM predict: Factor forecast generation produced NaN/Inf at horizon {h+1}. "
-                    f"State shape: {state.shape}, NaN count: {np.sum(np.isnan(state))}, "
-                    f"Inf count: {np.sum(np.isinf(state))}. "
                     f"This indicates numerical instability in companion matrix multiplication. "
-                    f"Possible causes: (1) Companion matrix A has eigenvalues >= 1.0 (unstable), "
+                    f"Possible causes: (1) Companion matrix A has eigenvalues >= DEFAULT_EIGENVALUE_MAX_MAGNITUDE (1.0) (unstable), "
                     f"(2) Large forecast horizon causing numerical overflow, (3) Invalid initial state. "
-                    f"Please check: companion matrix stability (max eigenvalue < 1.0), "
+                    f"Please check: companion matrix stability (max eigenvalue < DEFAULT_EIGENVALUE_MAX_MAGNITUDE (1.0)), "
                     f"forecast horizon (try smaller horizon), and initial factor state validity."
-                )
+                ) from e
         
         # Transform factors to observations
         X_forecast = Z_forecast @ result.C.T  # (horizon, K) @ (K, N) -> (horizon, N)
         
-        # Validate forecasts
-        if np.any(np.isnan(Z_forecast)) or np.any(np.isinf(Z_forecast)):
-            raise NumericalError(
-                f"KDFM predict: Factor forecast Z_forecast contains NaN/Inf values. "
-                f"Shape: {Z_forecast.shape}, NaN count: {np.sum(np.isnan(Z_forecast))}, "
-                f"Inf count: {np.sum(np.isinf(Z_forecast))}. "
-                f"This indicates numerical instability in factor forecasting. "
-                f"Please check: companion matrix stability, forecast horizon, and initial factor state."
-            )
-        if np.any(np.isnan(X_forecast)) or np.any(np.isinf(X_forecast)):
-            raise NumericalError(
-                f"KDFM predict: Final forecast X_forecast contains NaN/Inf values. "
-                f"Shape: {X_forecast.shape}, NaN count: {np.sum(np.isnan(X_forecast))}, "
-                f"Inf count: {np.sum(np.isinf(X_forecast))}. "
-                f"This indicates numerical instability in factor-to-observation transformation. "
-                f"Please check: loading matrix C validity, factor forecast Z_forecast validity."
-            )
+        # Validate forecasts are finite
+        validate_no_nan_inf(Z_forecast, name="factor forecast Z_forecast")
+        validate_no_nan_inf(X_forecast, name="final forecast X_forecast")
         
         # Return based on flags
         if return_series and return_factors:
@@ -1273,13 +1221,13 @@ class KDFM(BaseFactorModel, pl.LightningModule):
             - AR order from self.ar_order (or default 1)
             - MA order from self.ma_order (or default 0)
         """
-        from ..config import SeriesConfig
+# SeriesConfig removed - use frequency dict instead
         # KDFM does not use blocks structure - only series
         # Get ar_order and ma_order from instance attributes (set in __init__)
-        ar_order = getattr(self, 'ar_order', 1)
-        ma_order = getattr(self, 'ma_order', 0)
+        ar_order = getattr(self, 'ar_order', DEFAULT_KDFM_AR_ORDER)
+        ma_order = getattr(self, 'ma_order', DEFAULT_KDFM_MA_ORDER)
         return KDFMConfig(
-            series=[SeriesConfig(series_id='temp', frequency=DEFAULT_CLOCK_FREQUENCY)],
+            frequency={'temp': DEFAULT_CLOCK_FREQUENCY},
             ar_order=ar_order,
             ma_order=ma_order
         )
@@ -1307,28 +1255,32 @@ class KDFM(BaseFactorModel, pl.LightningModule):
         NumericalError
             If parameter extraction fails (from utility function)
         """
-        if companion_ssm is None:
-            return None, None, None
+        check_condition(
+            companion_ssm is not None,
+            ModelNotInitializedError,
+            "Cannot extract companion parameters: companion_ssm is None",
+            details="Companion SSM must be initialized before extracting parameters. Please ensure model is properly trained."
+        )
         
         try:
             A = companion_ssm.get_companion_matrix()
             if A.ndim == 3:
-                A_np = A[0].detach().cpu().numpy()
+                A_np = ensure_numpy(A[0])
             else:
-                A_np = A.detach().cpu().numpy()
+                A_np = ensure_numpy(A)
             
             # Extract B and C parameters (they are nn.Parameter which are tensors)
             B_param = companion_ssm.B
             C_param = companion_ssm.C
             # Handle 3D case (n_kernels > 1) - extract first kernel
             if B_param.ndim > 2:
-                B_np = B_param[0].detach().cpu().numpy()
+                B_np = ensure_numpy(B_param[0])
             else:
-                B_np = B_param.detach().cpu().numpy()
+                B_np = ensure_numpy(B_param)
             if C_param.ndim > 2:
-                C_np = C_param[0].detach().cpu().numpy()
+                C_np = ensure_numpy(C_param[0])
             else:
-                C_np = C_param.detach().cpu().numpy()
+                C_np = ensure_numpy(C_param)
             
             return A_np, B_np, C_np
         except (AttributeError, KeyError, RuntimeError, ValueError) as e:
@@ -1348,6 +1300,43 @@ class KDFM(BaseFactorModel, pl.LightningModule):
                 error_msg,
                 details="Companion SSM parameter extraction failed. This may indicate model initialization issues, memory problems, or numerical instability."
             ) from e
+    
+    def _get_result_C(self, result: Optional['KDFMResult']) -> Optional[np.ndarray]:
+        """Get result.C attribute safely.
+        
+        Parameters
+        ----------
+        result : Optional[KDFMResult]
+            Result object to extract C from
+            
+        Returns
+        -------
+        Optional[np.ndarray]
+            result.C if available, None otherwise
+        """
+        if result is None:
+            return None
+        return getattr(result, 'C', None)
+    
+    def _get_result_n_vars(self, result: Optional['KDFMResult']) -> Optional[int]:
+        """Get result.n_vars attribute safely.
+        
+        Parameters
+        ----------
+        result : Optional[KDFMResult]
+            Result object to extract n_vars from
+            
+        Returns
+        -------
+        Optional[int]
+            result.n_vars if available, None otherwise
+        """
+        if result is None:
+            return None
+        try:
+            return getattr(result, 'n_vars', None)
+        except (AttributeError, TypeError):
+            return None
     
     def _compute_factor_state_from_observation(
         self,
@@ -1385,7 +1374,7 @@ class KDFM(BaseFactorModel, pl.LightningModule):
             else:
                 z_t = structural_shocks.squeeze(0)
             
-            Z_last = z_t.detach().cpu().numpy()
+            Z_last = ensure_numpy(z_t)
             if np.any(np.isnan(Z_last)) or np.any(np.isinf(Z_last)):
                 # This method is used internally and should return zeros for invalid states
                 # The calling code (predict) will handle the error appropriately
@@ -1393,17 +1382,18 @@ class KDFM(BaseFactorModel, pl.LightningModule):
                     "KDFM _compute_factor_state_from_observation: Z_last contains NaN/Inf. "
                     "Returning zeros. This may indicate numerical instability in factor state computation."
                 )
-                return np.zeros(n_factors)
+                return np.zeros(n_factors, dtype=DEFAULT_DTYPE)
             return Z_last
-        except (RuntimeError, ValueError, TypeError, AttributeError, KeyError) as e:
-            # Specific exceptions for factor state computation failures
-            # This method is a helper that should be resilient - return zeros on failure
-            # The calling code (predict) will validate and raise appropriate exceptions
+        except COMPUTATION_ERROR_TYPES as e:
+            # Catch computation errors in helper method - return zeros for resilience
+            # This is a helper method that should not raise exceptions - the calling code (predict)
+            # will validate the returned zeros and raise appropriate PredictionError if needed
+            # Broad exception catching is appropriate here to ensure method always returns a value
             _logger.debug(
                 f"KDFM _compute_factor_state_from_observation: Failed to compute factor state: "
                 f"{type(e).__name__}: {e}. Returning zeros. This may indicate invalid input or model state."
             )
-            return np.zeros(n_factors)
+            return np.zeros(n_factors, dtype=DEFAULT_DTYPE)
     
     def _can_compute_irf(
         self,
@@ -1454,13 +1444,15 @@ class KDFM(BaseFactorModel, pl.LightningModule):
         Examples
         --------
         >>> # Correct usage (6 parameters + self)
+        >>> # Note: In actual code, use create_scaled_identity() helper instead of np.eye()
+        >>> # These examples use np.eye() for simplicity in documentation
         >>> can_compute, error_msg = model._can_compute_irf(
         ...     ma_transition=None,
-        ...     ar_input=np.eye(5),
-        ...     ar_output=np.eye(5),
+        ...     ar_input=np.eye(5),  # Example: use create_scaled_identity(5) in actual code
+        ...     ar_output=np.eye(5),  # Example: use create_scaled_identity(5) in actual code
         ...     ma_input=None,
         ...     ma_output=None,
-        ...     structural_matrix=np.eye(5)
+        ...     structural_matrix=np.eye(5)  # Example: use create_scaled_identity(5) in actual code
         ... )
         >>> assert isinstance(can_compute, bool)
         >>> assert isinstance(error_msg, str)
@@ -1476,29 +1468,148 @@ class KDFM(BaseFactorModel, pl.LightningModule):
             if ma_transition is None or ma_input is None or ma_output is None:
                 return False, "MA stage parameters are required for VARMA IRF computation"
         
-        can_compute = True
+        # All required parameters are available
+        return True, ""
+    
+    def _extract_n_vars_from_sources(
+        self,
+        result: Optional[Any],
+        structural_id: Optional[Any],
+        companion_ar: Optional[Any],
+        ar_order: Optional[int]
+    ) -> Optional[int]:
+        """Extract n_vars from multiple sources with fallback hierarchy.
         
-        # Generate error message if parameters are missing
-        if not can_compute:
-            missing = []
-            if ar_input is None:
-                missing.append("ar_input (B)")
-            if ar_output is None:
-                missing.append("ar_output (C)")
-            if structural_matrix is None:
-                missing.append("structural_matrix (S)")
-            if has_ma_stage:
-                if ma_transition is None:
-                    missing.append("ma_transition (A^MA)")
-                if ma_input is None:
-                    missing.append("ma_input (B')")
-                if ma_output is None:
-                    missing.append("ma_output (C')")
-            error_msg = f"Missing required parameters: {', '.join(missing)}"
-        else:
-            error_msg = ""
+        Tries sources in order: (1) result.C.shape[0], (2) result.n_vars,
+        (3) structural_id.n_vars, (4) companion_ar.A shape.
         
-        return can_compute, error_msg
+        Parameters
+        ----------
+        result : Optional[Any]
+            KDFM result object
+        structural_id : Optional[Any]
+            Structural identification SSM
+        companion_ar : Optional[Any]
+            Companion AR SSM
+        ar_order : Optional[int]
+            AR order for shape calculation
+        
+        Returns
+        -------
+        Optional[int]
+            Number of variables if successfully extracted, None otherwise
+        """
+        n_vars = None
+        
+        # Try 1: result.C.shape[0] (most reliable)
+        if result is not None:
+            try:
+                result_C = self._get_result_C(result)
+                if result_C is not None:
+                    # Use has_shape_with_min_dims to check shape (handles np.ndarray, torch.Tensor, etc.)
+                    if has_shape_with_min_dims(result_C, min_dims=2):
+                        n_vars = int(result_C.shape[0])
+            except (AttributeError, IndexError, TypeError):
+                pass
+            
+            # Try 2: result.n_vars
+            if n_vars is None:
+                try:
+                    result_n_vars = self._get_result_n_vars(result)
+                    if result_n_vars is not None:
+                        n_vars = int(result_n_vars)
+                except (AttributeError, TypeError, ValueError):
+                    pass
+        
+        # Try 3: structural_id.n_vars
+        if n_vars is None and structural_id is not None:
+            try:
+                structural_n_vars = getattr(structural_id, 'n_vars', None)
+                if structural_n_vars is not None:
+                    n_vars = int(structural_n_vars)
+            except (AttributeError, TypeError, ValueError):
+                pass
+        
+        # Try 4: companion_ar shape
+        if n_vars is None and companion_ar is not None and ar_order is not None and ar_order > 0:
+            try:
+                if hasattr(companion_ar, 'A'):
+                    A = companion_ar.A
+                    A_np = ensure_numpy(A)
+                    if A_np.ndim == 3:
+                        A_np = A_np[0]
+                    if A_np.shape[0] > 0:
+                        n_vars = A_np.shape[0] // ar_order
+                        if n_vars <= 0:
+                            n_vars = None
+            except (AttributeError, IndexError, TypeError, ZeroDivisionError):
+                pass
+        
+        return n_vars
+    
+    def _format_diagnostic_value(self, obj: Optional[Any]) -> str:
+        """Format diagnostic value for error messages.
+        
+        Parameters
+        ----------
+        obj : Optional[Any]
+            Object to format
+        
+        Returns
+        -------
+        str
+            'present' if object is not None, 'None' otherwise
+        """
+        return 'present' if obj is not None else 'None'
+    
+    def _build_diagnostic_info(
+        self,
+        result: Optional[Any],
+        companion_ar: Optional[Any],
+        structural_id: Optional[Any],
+        ar_order: Optional[int]
+    ) -> Dict[str, Any]:
+        """Build diagnostic information dictionary for error messages.
+        
+        Parameters
+        ----------
+        result : Optional[Any]
+            KDFM result object
+        companion_ar : Optional[Any]
+            Companion AR SSM
+        structural_id : Optional[Any]
+            Structural identification SSM
+        ar_order : Optional[int]
+            AR order
+        
+        Returns
+        -------
+        Dict[str, Any]
+            Diagnostic information dictionary
+        """
+        # Format result_C_shape with simplified conditional logic
+        result_C_shape = 'N/A'
+        result_C = self._get_result_C(result)
+        if result_C is not None:
+            try:
+                result_C_shape = result_C.shape
+            except (AttributeError, TypeError):
+                pass
+        
+        # Format result_n_vars
+        result_n_vars = 'N/A'
+        result_n_vars_attr = self._get_result_n_vars(result)
+        if result_n_vars_attr is not None:
+            result_n_vars = result_n_vars_attr
+        
+        return {
+            'result': self._format_diagnostic_value(result),
+            'companion_ar': self._format_diagnostic_value(companion_ar),
+            'structural_id': self._format_diagnostic_value(structural_id),
+            'ar_order': ar_order,
+            'result_C_shape': result_C_shape,
+            'result_n_vars': result_n_vars
+        }
     
     def get_result(self) -> KDFMResult:
         """Extract parameters and create KDFMResult.
@@ -1530,25 +1641,22 @@ class KDFM(BaseFactorModel, pl.LightningModule):
             
         Examples
         --------
-        >>> model = KDFM(ar_order=1, ma_order=0)
+        >>> model = KDFM(ar_order=1, ma_order=0)  # Uses DEFAULT_KDFM_AR_ORDER, DEFAULT_KDFM_MA_ORDER
         >>> # ... train model ...
         >>> result = model.get_result()
         >>> assert result.ar_coeffs is not None
         >>> assert result.irf_reduced is not None
-        >>> assert result.max_eigenvalue < 1.0  # Stable model
+        >>> assert result.max_eigenvalue < DEFAULT_EIGENVALUE_MAX_MAGNITUDE  # Stable model
         """
-        from ..config.constants import DEFAULT_REGULARIZATION
-        
-        if self.companion_ar is None:
-            raise ModelNotInitializedError(
-                "KDFM get_result requires initialized model components. "
-                "Train the model using trainer.fit() before calling get_result().",
-                details="companion_ar is None"
-            )
+        check_condition(
+            self.companion_ar is not None,
+            ModelNotInitializedError,
+            "KDFM get_result requires initialized model components. "
+            "Train the model using trainer.fit() before calling get_result().",
+            details="companion_ar is None"
+        )
         
         # Extract parameters and convert to numpy using utility function
-        from ..utils.common import ensure_numpy
-        
         ar_coeffs_np = ensure_numpy(self.companion_ar.extract_coefficients())
         
         ma_coeffs_np = None
@@ -1576,19 +1684,22 @@ class KDFM(BaseFactorModel, pl.LightningModule):
         
         # Create result with proper dimensions
         # KDFM uses a two-stage VARMA structure rather than traditional factor model,
-        # so some result fields (x_sm, X_sm, Z) are minimal placeholders
+        # so some result fields (x_sm, Z) are minimal placeholders
+        # Get target scaler from model if available
+        target_scaler = getattr(self, 'target_scaler', None)
+        
         result = KDFMResult(
-            x_sm=np.zeros((1, n_vars)),
-            X_sm=np.zeros((1, n_vars)),
-            Z=np.zeros((1, n_factors)),
+            x_sm=np.zeros((1, n_vars), dtype=DEFAULT_DTYPE),
+            Z=np.zeros((1, n_factors), dtype=DEFAULT_DTYPE),
+            # Note: np.eye(n_factors, n_vars) creates rectangular matrix (n_factors x n_vars),
+            # so cannot use create_scaled_identity() helper which only supports square matrices
             C=ar_output if ar_output is not None else np.eye(n_factors, n_vars),
-            R=np.eye(n_vars) * DEFAULT_REGULARIZATION,  # Small noise covariance
-            A=ar_transition[:n_factors, :n_factors] if ar_transition is not None else np.eye(n_factors),
-            Q=np.eye(n_factors) * DEFAULT_REGULARIZATION,  # Small process noise
-            Mx=self.Mx if self.Mx is not None else np.zeros(n_vars),
-            Wx=self.Wx if self.Wx is not None else np.ones(n_vars),
-            Z_0=np.zeros(n_factors),
-            V_0=np.eye(n_factors) * DEFAULT_REGULARIZATION,
+            R=create_scaled_identity(n_vars, DEFAULT_REGULARIZATION),  # Small noise covariance
+            A=ar_transition[:n_factors, :n_factors] if ar_transition is not None else create_scaled_identity(n_factors, DEFAULT_IDENTITY_SCALE),
+            Q=create_scaled_identity(n_factors, DEFAULT_REGULARIZATION),  # Small process noise
+            target_scaler=target_scaler,
+            Z_0=np.zeros(n_factors, dtype=DEFAULT_DTYPE),
+            V_0=create_scaled_identity(n_factors, DEFAULT_REGULARIZATION),
             r=np.array([n_factors]),
             p=self.ar_order,
             converged=True,
@@ -1602,6 +1713,20 @@ class KDFM(BaseFactorModel, pl.LightningModule):
             ma_coeffs=ma_coeffs_np
         )
         
+        return result
+    
+    @property
+    def result(self) -> KDFMResult:
+        """Get model result from training state.
+        
+        Raises
+        ------
+        ModelNotTrainedError
+            If model has not been trained yet
+        """
+        result = self._ensure_result()
+        # Type assertion: get_result() always returns KDFMResult for KDFM model
+        assert isinstance(result, KDFMResult), f"Expected KDFMResult but got {type(result)}"
         return result
     
     def _compute_irfs_from_params(
@@ -1673,13 +1798,12 @@ class KDFM(BaseFactorModel, pl.LightningModule):
         )
         
         if not can_compute:
-            # IRF computation failure is acceptable - return None to indicate failure
-            # Log as debug since this is an internal helper method
-            _logger.debug(
-                f"KDFM _compute_irfs_from_params: Cannot compute IRF - {error_msg}. "
-                f"This may indicate incomplete parameter extraction or model initialization issues."
+            # IRF computation failure - raise exception instead of returning None
+            from ..utils.errors import ModelNotInitializedError
+            raise ModelNotInitializedError(
+                f"KDFM _compute_irfs_from_params: Cannot compute IRF - {error_msg}",
+                details="This may indicate incomplete parameter extraction or model initialization issues. Please ensure model is properly trained and parameters are initialized."
             )
-            return None, None
         
         try:
             from ..config.constants import DEFAULT_IRF_HORIZON
@@ -1699,9 +1823,9 @@ class KDFM(BaseFactorModel, pl.LightningModule):
             else:
                 # VAR model (no MA stage) - use identity matrices
                 K = ar_output_t.shape[0]
-                ma_transition_t = torch.eye(K, dtype=DEFAULT_TORCH_DTYPE, device=ar_transition_t.device)
-                ma_input_t = torch.eye(K, dtype=DEFAULT_TORCH_DTYPE, device=ar_transition_t.device)
-                ma_output_t = torch.eye(K, dtype=DEFAULT_TORCH_DTYPE, device=ar_transition_t.device)
+                # Use DEFAULT_TORCH_DTYPE constant for consistency with model's default dtype
+                identity = torch.eye(K, dtype=DEFAULT_TORCH_DTYPE, device=ar_transition_t.device)
+                ma_transition_t = ma_input_t = ma_output_t = identity
             
             # Compute IRFs
             irf_reduced, irf_structural = compute_irf(
@@ -1717,7 +1841,6 @@ class KDFM(BaseFactorModel, pl.LightningModule):
             )
             
             # Convert back to numpy using utility function
-            from ..utils.common import ensure_numpy
             if irf_reduced is not None:
                 irf_reduced = ensure_numpy(irf_reduced)
             if irf_structural is not None:
@@ -1738,9 +1861,108 @@ class KDFM(BaseFactorModel, pl.LightningModule):
             ) from e
         except (IndexError, OSError, MemoryError) as e:
             # Additional specific exceptions for IRF computation failures
-            _logger.warning(
-                f"KDFM _compute_irfs_from_params: {type(e).__name__} during IRF computation: {e}. "
-                f"Returning None for IRFs."
-            )
-            return None, None
+            from ..utils.errors import NumericalError
+            raise NumericalError(
+                f"KDFM IRF computation failed: {type(e).__name__} during IRF computation: {e}",
+                details="This may occur due to memory constraints, invalid indices, or system errors. Please check system resources and input parameters."
+            ) from e
+    
+    def update(self, data: Union[np.ndarray, Any]) -> None:
+        """Update model state with new observations via companion matrix forward pass.
+        
+        This method runs the KDFM forward pass on new data to update the latent factors,
+        but keeps model parameters fixed.
+        
+        After calling update(), the model's internal state (result.Z and data_processed)
+        is extended with the new observations. Subsequent calls to predict() will use
+        the updated state.
+        
+        **Data Shape**: The input data must be 2D with shape (T_new x N) where:
+        - T_new: Number of new time steps (can be any positive integer)
+        - N: Number of series (must match training data)
+        
+        **Supported Types**:
+        - numpy.ndarray: (T_new x N) array
+        - pandas.DataFrame: DataFrame with N columns, T_new rows
+        - polars.DataFrame: DataFrame with N columns, T_new rows
+        
+        **Important**: Data must be preprocessed by the user (same preprocessing as training).
+        Only target scaler is handled internally if needed.
+        
+        Parameters
+        ----------
+        data : np.ndarray, pandas.DataFrame, or polars.DataFrame
+            New preprocessed observations with shape (T_new x N) where:
+            - T_new: Number of new time steps (any positive integer)
+            - N: Number of series (must match training data)
+            Data must be preprocessed by user (same preprocessing as training).
+            
+        Notes
+        -----
+        - This updates factors via companion matrix forward pass, NOT parameter retraining
+        - For parameter retraining, use trainer.fit() with concatenated data
+        - After update(), predict() will use the updated factor state
+        - New data must have same number of series (N) as training data
+        - User must preprocess data themselves (same preprocessing as training)
+        
+        Raises
+        ------
+        ModelNotTrainedError
+            If model has not been trained yet
+        DataValidationError
+            If data shape doesn't match training data
+        ModelNotInitializedError
+            If model components are not initialized
+        """
+        from ..utils.common import ensure_tensor, ensure_numpy
+        
+        # Validate and convert data (no preprocessing - user must preprocess)
+        from ..numeric.validator import validate_and_convert_update_data
+        data_new = validate_and_convert_update_data(
+            data,
+            self.data_processed,
+            dtype=DEFAULT_DTYPE,
+            model_name=self.__class__.__name__
+        )
+        
+        # Convert to tensor
+        device = next(self.parameters()).device if self.companion_ar is not None else torch.device('cpu')
+        data_tensor = ensure_tensor(data_new, dtype=DEFAULT_TORCH_DTYPE)
+        data_tensor = data_tensor.to(device)
+        
+        # Check if model is initialized
+        check_condition(
+            self.companion_ar is not None,
+            ModelNotInitializedError,
+            "KDFM model components are not initialized. "
+            "This may occur if initialize_from_data() was not called during training.",
+            details="companion_ar is None"
+        )
+        
+        # Run forward pass to get factors
+        with torch.no_grad():
+            factors_new = self.forward(data_tensor)  # (T_new x K)
+        
+        # Convert to numpy
+        factors_new_np = ensure_numpy(factors_new, dtype=DEFAULT_DTYPE)
+        
+        # Get current result (compute if needed)
+        result = self._ensure_result()
+        
+        # Update model state: append new factors and data
+        result.Z = np.vstack([result.Z, factors_new_np])
+        
+        # Ensure data_processed is numpy array
+        if isinstance(self.data_processed, torch.Tensor):
+            self.data_processed = ensure_numpy(self.data_processed, dtype=DEFAULT_DTYPE)
+        
+        if self.data_processed is not None:
+            self.data_processed = np.vstack([self.data_processed, data_new])
+        else:
+            # If not stored during training, initialize with new data
+            self.data_processed = data_new
+        
+        # Update smoothed data (x_sm) in result
+        result.x_sm = result.Z @ result.C.T
+    
 

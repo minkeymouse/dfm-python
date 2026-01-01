@@ -11,7 +11,15 @@ import torch.nn as nn
 from einops import rearrange
 
 from ..utils.errors import ConfigurationError, NumericalError, NumericalStabilityError
+from ..utils.common import ensure_numpy
 from ..config.types import Tensor, Device, Shape2D, Shape3D, NumVars, LagOrder, OptionalTensor
+from ..config.constants import (
+    DEFAULT_EIGENVALUE_MAX_MAGNITUDE,
+    MIN_OBSERVATION_NOISE,
+    DEFAULT_EPSILON,
+    DEFAULT_INIT_SCALE,
+    DEFAULT_KERNEL_INIT_SCALE
+)
 from ..numeric.validator import (
     validate_eigenvalue_bounds,
     validate_matrix_condition,
@@ -25,12 +33,6 @@ class CompanionSSMBase(nn.Module):
     Provides common initialization, normalization, and forward pass logic
     shared between AR and MA companion SSMs.
     """
-    
-    # Default initialization constants
-    DEFAULT_INIT_SCALE = 0.01
-    DEFAULT_KERNEL_INIT_SCALE = 0.1
-    DEFAULT_MIN_NORM = 1e-4
-    DEFAULT_EPS = 1e-8
     
     def __init__(
         self,
@@ -63,9 +65,9 @@ class CompanionSSMBase(nn.Module):
         kernel_init_scale : float, optional
             Initialization scale for coefficient matrices. Defaults to DEFAULT_KERNEL_INIT_SCALE.
         min_norm : float, optional
-            Minimum norm threshold. Defaults to DEFAULT_MIN_NORM.
+            Minimum norm threshold. Defaults to MIN_OBSERVATION_NOISE.
         eps : float, optional
-            Epsilon for numerical stability. Defaults to DEFAULT_EPS.
+            Epsilon for numerical stability. Defaults to DEFAULT_EPSILON.
         """
         super().__init__()
         
@@ -77,10 +79,20 @@ class CompanionSSMBase(nn.Module):
         self.latent_dim = order * n_vars
         
         # Initialization constants (use defaults if not provided)
-        self.init_scale = init_scale if init_scale is not None else self.DEFAULT_INIT_SCALE
-        self.kernel_init_scale = kernel_init_scale if kernel_init_scale is not None else self.DEFAULT_KERNEL_INIT_SCALE
-        self.min_norm = min_norm if min_norm is not None else self.DEFAULT_MIN_NORM
-        self.eps = eps if eps is not None else self.DEFAULT_EPS
+        self.init_scale = init_scale if init_scale is not None else DEFAULT_INIT_SCALE
+        self.kernel_init_scale = kernel_init_scale if kernel_init_scale is not None else DEFAULT_KERNEL_INIT_SCALE
+        self.min_norm = min_norm if min_norm is not None else MIN_OBSERVATION_NOISE
+        self.eps = eps if eps is not None else DEFAULT_EPSILON
+    
+    def _create_identity_block(self) -> torch.Tensor:
+        """Create identity block tensor for companion matrix initialization.
+        
+        Returns
+        -------
+        identity_block : torch.Tensor
+            Identity block of shape (1, n_vars, n_vars) for broadcasting
+        """
+        return torch.eye(self.n_vars).unsqueeze(0)
     
     def _build_shift_matrix(self) -> torch.Tensor:
         """Build shift matrix with identity blocks on sub-diagonal.
@@ -91,13 +103,13 @@ class CompanionSSMBase(nn.Module):
             Shift matrix of shape (n_kernels, latent_dim, latent_dim)
         """
         shift_matrix = torch.zeros(self.n_kernels, self.latent_dim, self.latent_dim)
+        identity_block = self._create_identity_block()
         for i in range(1, self.order):
             start_row = i * self.n_vars
             end_row = (i + 1) * self.n_vars
             start_col = (i - 1) * self.n_vars
             end_col = i * self.n_vars
-            shift_matrix[:, start_row:end_row, start_col:end_col] = \
-                torch.eye(self.n_vars).unsqueeze(0)
+            shift_matrix[:, start_row:end_row, start_col:end_col] = identity_block
         return shift_matrix
     
     def _init_kernel_weights(self, size: int) -> torch.Tensor:
@@ -116,7 +128,8 @@ class CompanionSSMBase(nn.Module):
         if self.kernel_init == 'normal':
             return torch.randn(self.n_kernels, size) * self.kernel_init_scale
         elif self.kernel_init == 'xavier':
-            stdv = 1.0 / (size ** 0.5)
+            from ..config.constants import DEFAULT_IDENTITY_SCALE
+            stdv = DEFAULT_IDENTITY_SCALE / (size ** 0.5)
             return torch.empty(self.n_kernels, size).uniform_(-stdv, stdv)
         else:
             raise ConfigurationError(
@@ -133,7 +146,7 @@ class CompanionSSMBase(nn.Module):
             B matrix of shape (n_kernels, latent_dim, n_vars)
         """
         b = torch.zeros(self.n_kernels, self.latent_dim, self.n_vars)
-        b[:, :self.n_vars, :] = torch.eye(self.n_vars).unsqueeze(0)
+        b[:, :self.n_vars, :] = self._create_identity_block()
         b = b + torch.randn_like(b) * self.init_scale
         return b
     
@@ -146,7 +159,7 @@ class CompanionSSMBase(nn.Module):
             C matrix of shape (n_kernels, n_vars, latent_dim)
         """
         c = torch.zeros(self.n_kernels, self.n_vars, self.latent_dim)
-        c[:, :, :self.n_vars] = torch.eye(self.n_vars).unsqueeze(0)
+        c[:, :, :self.n_vars] = self._create_identity_block()
         c = c + torch.randn_like(c) * self.init_scale
         return c
     
@@ -254,7 +267,7 @@ class CompanionSSMBase(nn.Module):
                 "Krylov module not available. Cannot compute impulse response kernel.",
                 details=str(e)
             ) from e
-        except Exception as e:
+        except (ValueError, RuntimeError, AttributeError) as e:
             raise NumericalError(
                 "Failed to compute impulse response kernel using Krylov method.",
                 details=f"Error: {str(e)}, l={l}, A shape={A.shape if A is not None else None}"
@@ -593,7 +606,7 @@ class CompanionSSM(CompanionSSMBase):
             coeff = self.a
         return self._build_companion_from_coeffs(coeff)
     
-    def check_stability(self, coeff: Optional[Tensor] = None, threshold: float = 1.0) -> Tuple[bool, float]:
+    def check_stability(self, coeff: Optional[Tensor] = None, threshold: float = DEFAULT_EIGENVALUE_MAX_MAGNITUDE) -> Tuple[bool, float]:
         """Check if companion matrix is stable (all eigenvalues < threshold).
         
         This method computes the companion matrix and checks if its maximum eigenvalue
@@ -647,9 +660,9 @@ class CompanionSSM(CompanionSSMBase):
             
             # Get first kernel for eigenvalue computation
             if A.ndim == 3:
-                A_np = A[0].detach().cpu().numpy()  # (latent_dim, latent_dim)
+                A_np = ensure_numpy(A[0])  # (latent_dim, latent_dim)
             elif A.ndim == 2:
-                A_np = A.detach().cpu().numpy()
+                A_np = ensure_numpy(A)
             else:
                 raise NumericalError(
                     f"Invalid companion matrix shape: {A.shape}",
@@ -680,9 +693,9 @@ class CompanionSSM(CompanionSSMBase):
             
             return is_stable, max_eigenval
             
-        except Exception as e:
-            if isinstance(e, (NumericalError, ConfigurationError)):
-                raise
+        except (NumericalError, ConfigurationError):
+            raise  # Re-raise specific errors
+        except (ValueError, RuntimeError, AttributeError) as e:
             raise NumericalError(
                 f"Stability check failed: {e}",
                 details="Check that model components are properly initialized"

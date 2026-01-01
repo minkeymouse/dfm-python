@@ -1,12 +1,14 @@
 """Configuration subpackage for DFM.
 
 This subpackage provides:
-- Schema (DFMConfig, SeriesConfig) in schema.py
+- Schema (DFMConfig, etc.) in schema.py
 - IO (ConfigSource, YamlSource, etc.) in adapter.py
+
+Note: Series are specified via frequency dict mapping column names to frequencies.
 """
 
 from .schema import (
-    BaseModelConfig, SeriesConfig, DFMConfig, DDFMConfig, KDFMConfig,
+    BaseModelConfig, DFMConfig, DDFMConfig, KDFMConfig,
     BaseResult, DFMResult, DDFMResult, KDFMResult, FitParams,
 )
 # DEFAULT_BLOCK_NAME is imported lazily where needed to avoid circular imports
@@ -21,15 +23,12 @@ from .constants import (
     MIN_EIGENVALUE,
     MIN_STD,
 )
-from .schema.model import validate_frequency, validate_transformation
+from .schema.model import validate_frequency
 from .adapter import (
     ConfigSource,
     YamlSource,
     DictSource,
-    HydraSource,
-    MergedConfigSource,
     make_config_source,
-    parse_series_list,
     detect_config_type,
 )
 # Re-export types for convenience
@@ -74,7 +73,6 @@ from .types import (
     PathLike,
     ValidationIssue,
     ValidationResult,
-    ModelComponent,
     Tensor,
     is_numpy_array,
     is_torch_tensor,
@@ -103,8 +101,8 @@ def get_periods_per_year(frequency: str) -> int:
     return PERIODS_PER_YEAR.get(frequency, PERIODS_PER_YEAR.get(DEFAULT_CLOCK_FREQUENCY, 12))
 
 __all__ = [
-    # Base classes (from base.py)
-    'BaseModelConfig', 'SeriesConfig', 'BaseResult',
+    # Base classes
+    'BaseModelConfig', 'BaseResult',
     # 'DEFAULT_BLOCK_NAME',  # Removed to avoid circular import - import directly from functional.dfm_block
     # Model-specific configs (from schema.py)
     'DFMConfig', 'DDFMConfig', 'KDFMConfig',
@@ -113,11 +111,11 @@ __all__ = [
     # Model-specific results (from results.py)
     'DFMResult', 'DDFMResult', 'KDFMResult',
     # Utilities
-    'validate_frequency', 'validate_transformation',
+    'validate_frequency',
     # IO
     'ConfigSource', 'YamlSource', 'DictSource',
-    'HydraSource', 'MergedConfigSource', 'make_config_source',
-    'parse_series_list', 'detect_config_type',
+    'make_config_source',
+    'detect_config_type',
     # Frequency and aggregation utilities
     'FREQUENCY_HIERARCHY',
     'PERIODS_PER_YEAR',
@@ -167,7 +165,6 @@ __all__ = [
     'PathLike',
     'ValidationIssue',
     'ValidationResult',
-    'ModelComponent',
     'Tensor',
     'is_numpy_array',
     'is_torch_tensor',
