@@ -40,7 +40,7 @@ Example (Standard Lightning Pattern):
     >>> model.load_config('config/default.yaml')
     >>> 
     >>> # Step 4: Create trainer and fit (standard Lightning pattern)
-    >>> trainer = DFMTrainer(max_epochs=100)
+    >>> trainer = DFMTrainer(max_epochs=100)  # DEFAULT_MAX_EPOCHS
     >>> trainer.fit(model, dm)
     >>> 
     >>> # Step 5: Predict
@@ -55,7 +55,7 @@ Example (Standard Lightning Pattern):
     >>> ddfm_model = DDFM(encoder_layers=[64, 32], num_factors=2)
     >>> ddfm_model.load_config('config/default.yaml')
     >>> 
-    >>> trainer_ddfm = DDFMTrainer(max_epochs=100)
+    >>> trainer_ddfm = DDFMTrainer(max_epochs=100)  # DEFAULT_MAX_EPOCHS
     >>> trainer_ddfm.fit(ddfm_model, dm_ddfm)
     >>> Xf, Zf = ddfm_model.predict(horizon=6)
     
@@ -65,7 +65,7 @@ Note: DFMConfig uses frequency dict to specify series (column names -> frequenci
 For detailed documentation, see the README.md file and the tutorial notebooks/scripts.
 """
 
-__version__ = "0.5.53"
+__version__ = "0.5.54"
 
 # ============================================================================
 # PUBLIC API DEFINITION
