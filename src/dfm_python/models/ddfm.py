@@ -10,9 +10,8 @@ DDFM is a PyTorch Lightning module that inherits from BaseFactorModel.
 
 # Standard library imports
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union, Sequence
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 # Third-party imports
 import numpy as np
@@ -27,18 +26,30 @@ from ..config import (
     make_config_source,
 )
 from ..config import DDFMResult
-from ..config import get_periods_per_year
 from ..encoder.simple_encoder import Encoder, extract_decoder_params
 from ..decoder.linear import Decoder
 from ..decoder.mlp import MLPDecoder
 from ..logger import get_logger
-from ..numeric.stability import rem_nans_spline
-from ..utils.misc import (
-    get_clock_frequency,
-    TimeIndex,
+from ..numeric.stability import (
+    create_scaled_identity,
+    clean_matrix,
+    check_convergence_with_tolerance,
+    ensure_positive_definite,
+    compute_var_safe,
+    compute_cov_safe,
 )
 from ..numeric.estimator import (
-    estimate_var,
+    estimate_idio_dynamics,
+    estimate_variance_unified,
+    extract_idio_params_for_ddfm,
+    estimate_var_with_fallback,
+)
+from ..numeric.validator import (
+    validate_no_nan_inf,
+    validate_horizon,
+    validate_and_convert_update_data,
+    validate_factors,
+    validate_ddfm_training_data,
 )
 from .base import BaseFactorModel
 from ..utils.errors import (
@@ -52,6 +63,13 @@ from ..utils.errors import (
 )
 from ..utils.validation import check_condition, has_shape_with_min_dims
 from ..utils.common import ensure_numpy, sanitize_array, ensure_tensor
+from ..utils.loss import compute_masked_loss
+from ..utils.checkpoint import (
+    parse_checkpoint,
+    infer_input_dim_from_data,
+    infer_ddfm_input_dim,
+    infer_ddfm_params_from_state_dict,
+)
 from ..config.constants import (
     DEFAULT_TORCH_DTYPE,
     DEFAULT_CLOCK_FREQUENCY,
@@ -67,8 +85,8 @@ from ..config.constants import (
     PERFECT_CORR_THRESHOLD,
     DEFAULT_SEED,
     DEFAULT_MAX_EPOCHS,
+    DEFAULT_N_MC_SAMPLES,
     DEFAULT_IDENTITY_SCALE,
-    HUBER_QUADRATIC_COEFF,
     DEFAULT_LOG_INTERVAL,
     DEFAULT_EPSILON,
     DEFAULT_DTYPE,
@@ -80,6 +98,15 @@ from ..config.constants import (
     DEFAULT_NAN_K,
     MIN_VARIABLES,
     MIN_DDFM_TIME_STEPS,
+    COMPUTATION_ERROR_TYPES,
+    DEFAULT_DDFM_CLIP_RANGE_DEEP,
+    DEFAULT_MIN_OBS_PRETRAIN,
+    DEFAULT_MULT_EPOCH_PRETRAIN,
+    DEFAULT_DDFM_CLIP_RANGE_SHALLOW,
+    MATRIX_TYPE_DIAGONAL,
+    MATRIX_TYPE_COVARIANCE,
+    DEFAULT_DISP,
+    DEFAULT_IDIO_STD,
 )
 
 if TYPE_CHECKING:
@@ -111,7 +138,7 @@ class DDFM(BaseFactorModel, pl.LightningModule):
     Lightning training patterns. It inherits from both BaseFactorModel and
     pl.LightningModule, and implements DDFM training using autoencoder and MCMC procedure.
     
-    Note: Factors use AR(1) dynamics (simplified).
+    Note: Factors use AR(1) dynamics by default (configurable via factor_order).
     
     Example (Standard Lightning Pattern):
         >>> from dfm_python import DDFM, DDFMDataModule, DDFMTrainer
@@ -161,17 +188,17 @@ class DDFM(BaseFactorModel, pl.LightningModule):
         activation: str = 'relu',
         use_batch_norm: bool = True,
         learning_rate: Optional[float] = None,
-        epochs: Optional[int] = None,
+        n_mc_samples: Optional[int] = None,
         batch_size: Optional[int] = None,
         use_idiosyncratic: bool = True,
         min_obs_idio: Optional[int] = None,
         max_iter: Optional[int] = None,
         tolerance: Optional[float] = None,
-        disp: int = 10,
+        disp: Optional[int] = None,
         seed: Optional[int] = None,
         decay_learning_rate: bool = True,
-        min_obs_pretrain: int = 50,
-        mult_epoch_pretrain: int = 1,
+        min_obs_pretrain: Optional[int] = None,
+        mult_epoch_pretrain: Optional[int] = None,
         loss_function: str = 'mse',
         huber_delta: Optional[float] = None,
         weight_decay: Optional[float] = None,
@@ -196,8 +223,8 @@ class DDFM(BaseFactorModel, pl.LightningModule):
             Whether to use batch normalization in encoder
         learning_rate : float, default DEFAULT_DDFM_LEARNING_RATE (0.005)
             Learning rate for Adam optimizer (matches original DDFM default)
-        epochs : int, optional
-            Number of epochs per MCMC iteration (default: DEFAULT_MAX_EPOCHS = 100)
+        n_mc_samples : int, optional
+            Number of MC samples per MCMC iteration (default: DEFAULT_N_MC_SAMPLES = 1)
         batch_size : int, default 100
             Batch size for training (matches original DDFM)
         use_idiosyncratic : bool, default True
@@ -208,14 +235,15 @@ class DDFM(BaseFactorModel, pl.LightningModule):
             Maximum number of MCMC iterations
         tolerance : float, default DEFAULT_TOLERANCE (0.0005)
             Convergence tolerance
-        disp : int, default 10
-            Display progress every 'disp' iterations
+        disp : int, optional
+            Display progress every 'disp' iterations (default: DEFAULT_DISP = 10)
         decay_learning_rate : bool, default True
             Whether to use exponential decay learning rate scheduler (matches original DDFM)
-        min_obs_pretrain : int, default 50
+        min_obs_pretrain : int, optional
             Minimum number of observations for pre-training without interpolation
-        mult_epoch_pretrain : int, default 1
-            Multiplier for number of epochs during pre-training
+            (default: 50, matches original DDFM implementation)
+        mult_epoch_pretrain : int, optional
+            Multiplier for number of epochs during pre-training (default: 1)
         loss_function : str, default 'mse'
             Loss function for training ('mse', 'huber'). 
             'mse': Mean squared error (default, matches original DDFM)
@@ -269,23 +297,26 @@ class DDFM(BaseFactorModel, pl.LightningModule):
         from ..config.constants import (
             DEFAULT_DDFM_LEARNING_RATE, DEFAULT_DDFM_BATCH_SIZE,
             DEFAULT_MAX_EPOCHS, DEFAULT_MAX_MCMC_ITER, DEFAULT_TOLERANCE, DEFAULT_MIN_OBS_IDIO,
-            DEFAULT_HUBER_DELTA, DEFAULT_WEIGHT_DECAY, DEFAULT_GRAD_CLIP_VAL
+            DEFAULT_HUBER_DELTA, DEFAULT_WEIGHT_DECAY, DEFAULT_GRAD_CLIP_VAL,
+            DEFAULT_N_MC_SAMPLES, DEFAULT_FACTOR_ORDER
         )
         
         # Resolve parameters using consolidated helper
         from ..utils.misc import resolve_param
         self.learning_rate = resolve_param(learning_rate, default=DEFAULT_DDFM_LEARNING_RATE)
-        self.epochs_per_iter = resolve_param(epochs, default=DEFAULT_MAX_EPOCHS)
+        self.n_mc_samples = resolve_param(n_mc_samples, default=DEFAULT_N_MC_SAMPLES)
         self.batch_size = resolve_param(batch_size, default=DEFAULT_DDFM_BATCH_SIZE)
-        self.factor_order = 1  # Factors always use AR(1) dynamics (simplified)
+        self.factor_order = DEFAULT_FACTOR_ORDER  # Factors use AR(1) dynamics
         self.use_idiosyncratic = use_idiosyncratic
         self.min_obs_idio = resolve_param(min_obs_idio, default=DEFAULT_MIN_OBS_IDIO)
         self.max_iter = resolve_param(max_iter, default=DEFAULT_MAX_MCMC_ITER)
         self.tolerance = resolve_param(tolerance, default=DEFAULT_TOLERANCE)
-        self.disp = disp
+        self.disp = resolve_param(disp, default=DEFAULT_DISP)
         self.decay_learning_rate = decay_learning_rate
-        self.min_obs_pretrain = min_obs_pretrain
-        self.mult_epoch_pretrain = mult_epoch_pretrain
+        # Pre-training defaults (DDFM-specific: 50 observations, 1x multiplier)
+        # These match original DDFM implementation defaults
+        self.min_obs_pretrain = resolve_param(min_obs_pretrain, default=DEFAULT_MIN_OBS_PRETRAIN)
+        self.mult_epoch_pretrain = resolve_param(mult_epoch_pretrain, default=DEFAULT_MULT_EPOCH_PRETRAIN)
         self.loss_function = loss_function.lower()
         self.huber_delta = resolve_param(huber_delta, default=DEFAULT_HUBER_DELTA)
         self.weight_decay = resolve_param(weight_decay, default=DEFAULT_WEIGHT_DECAY)
@@ -311,7 +342,7 @@ class DDFM(BaseFactorModel, pl.LightningModule):
         # DDFM does not use block structure - num_factors is specified directly
         if num_factors is None:
             # Try to get from config num_factors (DDFM-specific parameter)
-            from ..utils.helper import get_config_attr
+            from ..utils.misc import get_config_attr
             num_factors_from_config = get_config_attr(config, 'num_factors', None)
             if num_factors_from_config is not None:
                 self.num_factors = num_factors_from_config
@@ -340,38 +371,75 @@ class DDFM(BaseFactorModel, pl.LightningModule):
         # Random number generator for MC sampling
         # Default seed for reproducibility (when not specified)
         self.rng = np.random.RandomState(resolve_param(seed, default=DEFAULT_SEED))
-    
-    def setup(self, stage: Optional[str] = None) -> None:
-        """Initialize encoder and decoder when data dimensions are known.
         
-        This is called by Lightning before configure_optimizers(), so we need
-        to initialize encoder/decoder here if datamodule is available.
-        If not available here, will be initialized in on_train_start().
+        # Enable manual optimization for alternating updates (NN params vs AR/Sigma_epsilon)
+        self.automatic_optimization = False
+        
+        # Register buffers for state parameters (will be properly initialized in on_train_start() when data dimensions are known)
+        # Phi: AR coefficients for idiosyncratic components, shape (N, N) - variable-specific AR(1)
+        # Sigma_eps: Idiosyncratic covariance, shape (N,) for diagonal or (N, N) for full
+        # eps_hat: Current residual estimates, shape (T, N)
+        # Initialize with placeholder tensors, will be resized in on_train_start()
+        self.register_buffer('Phi', torch.zeros(1, 1, dtype=DEFAULT_TORCH_DTYPE))
+        self.register_buffer('Sigma_eps', torch.ones(1, dtype=DEFAULT_TORCH_DTYPE))
+        self.register_buffer('eps_hat', torch.zeros(1, 1, dtype=DEFAULT_TORCH_DTYPE))
+        
+        # Training state for convergence checking
+        self.prediction_prev_iter: Optional[torch.Tensor] = None
+        self.factors_samples: Optional[torch.Tensor] = None  # Store factors from all MC samples as tensor (n_mc_samples, T, num_factors)
+        
+        # MC dataset (created in on_train_start)
+        self._mc_dataset: Optional[Any] = None
+        
+        # Data structures for MC sampling (initialized in on_train_start)
+        self._data_mod: Optional[torch.Tensor] = None
+        self._data_mod_only_miss: Optional[torch.Tensor] = None
+        self._missing_mask: Optional[np.ndarray] = None
+    
+    def _handle_initialization_error(
+        self,
+        component_name: str,
+        error: Exception,
+        component_specific_details: str
+    ) -> None:
+        """Handle initialization errors consistently.
+        
+        Parameters
+        ----------
+        component_name : str
+            Name of component being initialized (e.g., "encoder", "decoder")
+        error : Exception
+            The exception that occurred
+        component_specific_details : str
+            Component-specific error details and suggestions
         """
-        # Access datamodule if available (trainer should be attached by now)
-        trainer = getattr(self, 'trainer', None)
-        if trainer is not None:
-            datamodule = getattr(trainer, 'datamodule', None)
-            if datamodule is not None:
-                self._data_module = datamodule
-                try:
-                    # Get data to determine input dimension
-                    # datamodule.setup() should have been called by Lightning already
-                    X_torch = self._data_module.get_processed_data()
-                    input_dim = X_torch.shape[1]
-                    
-                    # Initialize networks if not already initialized
-                    if not self._are_networks_initialized():
-                        self.initialize_networks(input_dim)
-                        # Move to same device as data
-                        device = X_torch.device
-                        self.encoder = self.encoder.to(device)
-                        self.decoder = self.decoder.to(device)
-                        _logger.debug(f"Initialized encoder/decoder in setup() with input_dim={input_dim}")
-                except (RuntimeError, AttributeError) as e:
-                    # If datamodule not ready yet, will initialize in on_train_start()
-                    _logger.debug(f"Could not initialize networks in setup(): {e}. Will initialize in on_train_start()")
-                    pass
+        raise ModelNotInitializedError(
+            f"DDFM {component_name} initialization failed: failed to initialize {component_name}: {type(error).__name__}: {str(error)}",
+            details=component_specific_details
+        ) from error
+    
+    def _extract_decoder_weight(self, decoder: Union[Decoder, Any]) -> np.ndarray:
+        """Extract decoder weight for validation.
+        
+        Parameters
+        ----------
+        decoder : Decoder or MLPDecoder
+            Decoder instance
+            
+        Returns
+        -------
+        np.ndarray
+            Decoder weight matrix
+        """
+        if self.decoder_type == "linear":
+            return ensure_numpy(decoder.decoder.weight.data)
+        elif self.decoder_type == "mlp":
+            return ensure_numpy(decoder.layers[0].weight.data)
+        else:
+            raise ConfigurationError(
+                f"DDFM decoder weight extraction failed: unsupported decoder type '{self.decoder_type}'",
+                details="Supported decoder types are 'linear' and 'mlp'"
+            )
     
     def initialize_networks(self, input_dim: int) -> None:
         """Initialize encoder and decoder networks with error handling.
@@ -386,23 +454,6 @@ class DDFM(BaseFactorModel, pl.LightningModule):
         RuntimeError
             If encoder or decoder initialization fails with clear error message
         """
-        # Helper method for consistent exception handling during initialization
-        def _handle_initialization_error(
-            component_name: str,
-            error: Exception,
-            component_specific_details: str
-        ) -> None:
-            """Handle initialization errors consistently.
-            
-            Args:
-                component_name: Name of component being initialized (e.g., "encoder", "decoder")
-                error: The exception that occurred
-                component_specific_details: Component-specific error details and suggestions
-            """
-            raise ModelNotInitializedError(
-                f"DDFM {component_name} initialization failed: failed to initialize {component_name}: {type(error).__name__}: {str(error)}",
-                details=component_specific_details
-            ) from error
         
         try:
             self.encoder = Encoder(
@@ -412,8 +463,9 @@ class DDFM(BaseFactorModel, pl.LightningModule):
                 activation=self.activation,
                 use_batch_norm=self.use_batch_norm,
             )
-        except (ValueError, RuntimeError, TypeError) as e:
-            _handle_initialization_error(
+        except COMPUTATION_ERROR_TYPES as e:
+            # Uses COMPUTATION_ERROR_TYPES for consistent error handling (ValueError, RuntimeError, TypeError are included)
+            self._handle_initialization_error(
                 "encoder",
                 e,
                 f"Check encoder_layers={self.encoder_layers}, num_factors={self.num_factors}, input_dim={input_dim}. Suggestions: (1) Ensure input_dim > 0, (2) Reduce encoder_layers size if too large, (3) Ensure num_factors > 0 and num_factors <= input_dim, (4) Check that encoder_layers values are positive integers"
@@ -427,8 +479,6 @@ class DDFM(BaseFactorModel, pl.LightningModule):
                     output_dim=input_dim,
                     use_bias=True,
                 )
-                # Validate decoder weights are not all zeros (initialization check)
-                decoder_weight = ensure_numpy(self.decoder.decoder.weight.data)
             elif self.decoder_type == "mlp":
                 self.decoder = MLPDecoder(
                     input_dim=self.num_factors,
@@ -438,9 +488,6 @@ class DDFM(BaseFactorModel, pl.LightningModule):
                     use_batch_norm=False,  # Usually not needed for decoder
                     use_bias=True,
                 )
-                # Validate decoder weights are not all zeros (initialization check)
-                # For MLP, check the first layer
-                decoder_weight = ensure_numpy(self.decoder.layers[0].weight.data)
             else:
                 check_condition(
                     False,  # Always fails - decoder_type is invalid
@@ -448,6 +495,9 @@ class DDFM(BaseFactorModel, pl.LightningModule):
                     f"DDFM decoder initialization failed: decoder must be 'linear' or 'mlp', got '{self.decoder_type}'",
                     details="Valid decoder types are 'linear' (LinearDecoder) or 'mlp' (MLPDecoder)"
                 )
+            
+            # Extract decoder weight for validation (using helper method)
+            decoder_weight = self._extract_decoder_weight(self.decoder)
             
             # Validate decoder weights are not all zeros (initialization check)
             check_condition(
@@ -466,8 +516,9 @@ class DDFM(BaseFactorModel, pl.LightningModule):
                 f"mean={decoder_weight_mean:.6f}, std={decoder_weight_std:.6f}, "
                 f"nonzero={decoder_weight_nonzero}/{decoder_weight.size}"
             )
-        except (ValueError, RuntimeError, TypeError) as e:
-            _handle_initialization_error(
+        except COMPUTATION_ERROR_TYPES as e:
+            # Uses COMPUTATION_ERROR_TYPES for consistent error handling (ValueError, RuntimeError, TypeError are included)
+            self._handle_initialization_error(
                 "decoder",
                 e,
                 f"Check num_factors={self.num_factors}, input_dim={input_dim}. Suggestions: (1) Ensure num_factors > 0, (2) Ensure input_dim > 0, (3) Check that num_factors <= input_dim"
@@ -482,9 +533,74 @@ class DDFM(BaseFactorModel, pl.LightningModule):
             details="Please call _initialize_encoder_decoder() before using the model. Ensure setup() or on_train_start() has been called."
         )
     
-    def _are_networks_initialized(self) -> bool:
-        """Check if encoder and decoder are initialized (returns bool instead of raising)."""
-        return self.encoder is not None and self.decoder is not None
+    
+    def _move_networks_to_device(self, device: torch.device) -> None:
+        """Move encoder and decoder to specified device.
+        
+        Parameters
+        ----------
+        device : torch.device
+            Target device
+        """
+        self.encoder = self.encoder.to(device)
+        self.decoder = self.decoder.to(device)
+    
+    def _set_networks_mode(self, train: bool = True) -> None:
+        """Set encoder and decoder to train or eval mode.
+        
+        Parameters
+        ----------
+        train : bool, default True
+            If True, set to train mode; otherwise set to eval mode
+        """
+        if train:
+            self.encoder.train()
+            self.decoder.train()
+        else:
+            self.encoder.eval()
+            self.decoder.eval()
+    
+    def _get_buffer_device_dtype(self) -> Tuple[torch.device, torch.dtype]:
+        """Get device and dtype from Phi buffer.
+        
+        Returns
+        -------
+        device : torch.device
+            Device of Phi buffer
+        dtype : torch.dtype
+            Dtype of Phi buffer
+        """
+        return self.Phi.device, self.Phi.dtype
+    
+    def _initialize_buffers(self, T: int, N: int, device: torch.device, dtype: torch.dtype) -> None:
+        """Initialize or update Phi, Sigma_eps, and eps_hat buffers.
+        
+        Parameters
+        ----------
+        T : int
+            Number of time steps
+        N : int
+            Number of variables
+        device : torch.device
+            Device for buffers
+        dtype : torch.dtype
+            Data type for buffers
+        """
+        # Initialize or update buffers based on whether they exist
+        buffers = [
+            ('Phi', (N, N), torch.zeros(N, N, device=device, dtype=dtype)),
+            ('Sigma_eps', (N,), torch.ones(N, device=device, dtype=dtype) * DEFAULT_EPSILON),
+            ('eps_hat', (T, N), torch.zeros(T, N, device=device, dtype=dtype))
+        ]
+        
+        for name, expected_shape, init_value in buffers:
+            if not hasattr(self, name):
+                self.register_buffer(name, init_value)
+            elif getattr(self, name).shape != expected_shape:
+                # Update existing buffer if shape changed
+                setattr(self, name, init_value)
+    
+    
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass through encoder and decoder.
@@ -502,64 +618,87 @@ class DDFM(BaseFactorModel, pl.LightningModule):
         self._check_networks_initialized()
         
         # Handle different input shapes
-        if x.ndim == 3:
+        if x.ndim == 3:  # Batch format: (batch_size, T, N)
             batch_size, T, N = x.shape
             x_flat = x.view(batch_size * T, N)
             factors = self.encoder(x_flat)
             reconstructed = self.decoder(factors)
             return reconstructed.view(batch_size, T, N)
         else:
+            # Assume sequence format: (T, N)
             factors = self.encoder(x)
             reconstructed = self.decoder(factors)
             return reconstructed
     
-    def training_step(self, batch: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]], batch_idx: int) -> torch.Tensor:
-        """Training step for autoencoder.
+    def training_step(self, batch: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]], batch_idx: int) -> torch.Tensor:
+        """Training step for vectorized MC sampling with manual optimization.
         
-        This is used for standard autoencoder training and also called
-        during MCMC procedure for each MC sample.
-        
-        Missing data (NaN values) are handled by masking them in the loss function,
-        similar to the original DDFM implementation (mse_missing).
+        This method processes all MC samples in one forward pass for efficient training.
+        Batch from DDFMMCDataset contains:
+        - x_corrupted: (n_mc_samples, T, N) - corrupted inputs with MC noise
+        - x_target: (n_mc_samples, T, N) - target observations
+        - mask: (n_mc_samples, T, N) - missing data mask
         
         Parameters
         ----------
-        batch : torch.Tensor or tuple
-            Data tensor or (data, target) tuple where both are the same for reconstruction.
-            Data may contain NaN values which are masked in the loss.
+        batch : tuple
+            (x_corrupted, x_target, mask) from DDFMMCDataset
         batch_idx : int
-            Batch index
+            Batch index (should be 0 for MC dataset)
             
         Returns
         -------
         loss : torch.Tensor
-            Reconstruction loss (MSE with missing data masking)
+            Reconstruction loss (MSE with missing data masking) averaged over all MC samples
         """
-        # Handle both tuple and single tensor batches
-        # DataLoader may return tuple, list, or single tensor
-        if isinstance(batch, Sequence) and not isinstance(batch, str) and len(batch) == 2:
-            data, target = batch
-        elif isinstance(batch, (tuple, list)) and len(batch) == 1:
-            data = batch[0]
-            target = data  # For autoencoder, target is same as input
-        else:
-            data = batch
-            target = data  # For autoencoder, target is same as input
+        # Handle batch from MC dataset: (x_corrupted, x_target, mask)
+        if not isinstance(batch, (tuple, list)) or len(batch) != 3:
+            raise ValueError(
+                f"DDFM training_step expects batch from DDFMMCDataset with 3 elements "
+                f"(x_corrupted, x_target, mask), got {type(batch)} with {len(batch) if isinstance(batch, (tuple, list)) else 'N/A'} elements"
+            )
+        x_corrupted, x_target, mask = batch
         
-        # Ensure data is on the same device as the model
+        # Ensure tensors are on the same device as the model
         device = next(self.parameters()).device
-        data = data.to(device)
-        target = target.to(device)
+        x_corrupted = x_corrupted.to(device)
+        x_target = x_target.to(device)
+        mask = mask.to(device)
         
-        # Clip input data to prevent extreme values that cause NaN
-        # Clip to reasonable range: -10 to 10 standard deviations
-        # For deeper networks, use slightly tighter clipping to improve stability
-        from ..config.constants import DEFAULT_DDFM_CLIP_RANGE_DEEP, DEFAULT_DDFM_CLIP_RANGE_SHALLOW
+        # DataLoader with batch_size=1 adds an extra batch dimension
+        # Remove it if present: (1, n_mc_samples, T, N) -> (n_mc_samples, T, N)
+        BATCH_WRAPPER_NDIM = 4  # Extra batch dimension from DataLoader
+        SINGLE_BATCH = 1  # Single batch size
+        BATCH_DIM = 0  # Batch dimension index
+        
+        if x_corrupted.ndim == BATCH_WRAPPER_NDIM and x_corrupted.shape[BATCH_DIM] == SINGLE_BATCH:
+            x_corrupted = x_corrupted.squeeze(BATCH_DIM)
+            x_target = x_target.squeeze(BATCH_DIM)
+            mask = mask.squeeze(BATCH_DIM)
+        
+        # Ensure mask is boolean
+        if mask.dtype != torch.bool:
+            mask = mask.bool()
+        
+        # x_corrupted shape: (n_mc_samples, T, N)
+        # Reshape for batch processing: (n_mc_samples * T, N)
+        n_mc_samples, T, N = x_corrupted.shape
+        x_corrupted_flat = x_corrupted.view(n_mc_samples * T, N)
+        
+        # Clip input data to prevent extreme values
         clip_range = DEFAULT_DDFM_CLIP_RANGE_DEEP if len(self.encoder_layers) > 2 else DEFAULT_DDFM_CLIP_RANGE_SHALLOW
-        data_clipped = torch.clamp(data, min=-clip_range, max=clip_range)
+        x_corrupted_flat = torch.clamp(x_corrupted_flat, min=-clip_range, max=clip_range)
         
-        # Forward pass
-        reconstructed = self.forward(data_clipped)
+        # Forward pass: process all MC samples in one batch
+        self._set_networks_mode(train=True)
+        factors_flat = self.encoder(x_corrupted_flat)  # (n_mc_samples * T, num_factors)
+        reconstructed_flat = self.decoder(factors_flat)  # (n_mc_samples * T, N)
+        
+        # Reshape back: (n_mc_samples, T, N)
+        reconstructed = reconstructed_flat.view(n_mc_samples, T, N)
+        
+        # Store factors as tensor for efficient averaging in on_train_epoch_end
+        self.factors_samples = factors_flat.view(n_mc_samples, T, self.num_factors)  # (n_mc_samples, T, num_factors)
         
         # Check for NaN/Inf in forward pass output
         if not torch.all(torch.isfinite(reconstructed)):
@@ -580,25 +719,13 @@ class DDFM(BaseFactorModel, pl.LightningModule):
             )
         
         # Compute loss with missing data masking
-        mask = torch.isfinite(target)
-        target_clean = torch.where(mask, target, torch.zeros_like(target))
-        
-        # Use specified loss function
-        if self.loss_function == 'huber':
-            # Huber loss: more robust to outliers
-            # L_delta(a) = HUBER_QUADRATIC_COEFF * a^2 if |a| <= delta, else delta * (|a| - HUBER_QUADRATIC_COEFF * delta)
-            diff = target_clean - reconstructed
-            abs_diff = torch.abs(diff)
-            huber_loss = torch.where(
-                abs_diff <= self.huber_delta,
-                HUBER_QUADRATIC_COEFF * diff ** 2,
-                self.huber_delta * (abs_diff - HUBER_QUADRATIC_COEFF * self.huber_delta)
-            )
-            loss = torch.sum(huber_loss * mask) / (torch.sum(mask) + DEFAULT_EPSILON)
-        else:
-            # MSE loss (default)
-            squared_diff = (target_clean - reconstructed) ** 2
-            loss = torch.sum(squared_diff * mask) / (torch.sum(mask) + DEFAULT_EPSILON)
+        loss = compute_masked_loss(
+            reconstructed=reconstructed,
+            target=x_target,
+            mask=mask,
+            loss_function=self.loss_function,
+            huber_delta=self.huber_delta
+        )
         
         # Handle NaN/Inf in loss
         if not torch.isfinite(loss):
@@ -617,115 +744,131 @@ class DDFM(BaseFactorModel, pl.LightningModule):
                        f"Current loss value: {loss.item() if hasattr(loss, 'item') else loss}."
             )
         
+        # Manual optimization (automatic_optimization = False)
+        opt = self.optimizers()
+        self.manual_backward(loss)
+        
+        # Gradient clipping
+        if self.grad_clip_val > DEFAULT_ZERO_VALUE:
+            torch.nn.utils.clip_grad_norm_(
+                list(self.encoder.parameters()) + list(self.decoder.parameters()),
+                max_norm=self.grad_clip_val
+            )
+        
+        opt.step()
+        opt.zero_grad()
+        
         # Log metrics
         self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True)
         
-        # Note: Gradient clipping is handled automatically by Lightning trainer if gradient_clip_val is set
-        # The grad_clip_val parameter is used in pre_train() and MCMC training for manual training loops
-        
         return loss
+    
+    def _update_idiosyncratic_params(
+        self,
+        eps: np.ndarray,
+        missing_mask: np.ndarray
+    ) -> None:
+        """Update Phi and Sigma_eps buffers from residuals.
+        
+        Parameters
+        ----------
+        eps : np.ndarray
+            Residuals (T x N)
+        missing_mask : np.ndarray
+            Missing data mask (T x N), True where data is missing
+        """
+        if not self.use_idiosyncratic:
+            # If not using idiosyncratic, set to zero/identity
+            N = eps.shape[1]
+            device, dtype = self._get_buffer_device_dtype()
+            self.Phi = torch.zeros(N, N, device=device, dtype=dtype)
+            self.Sigma_eps = torch.ones(N, device=device, dtype=dtype) * DEFAULT_EPSILON
+            return
+        
+        try:
+            A_eps, Q_eps = estimate_idio_dynamics(eps, missing_mask, self.min_obs_idio)
+            
+            # Extract phi and std_eps using numeric utility
+            N = eps.shape[1]
+            phi, std_eps = extract_idio_params_for_ddfm(A_eps, Q_eps, N)
+            
+            # Update buffers
+            device, dtype = self._get_buffer_device_dtype()
+            self.Phi = torch.tensor(phi, device=device, dtype=dtype)
+            self.Sigma_eps = torch.tensor(std_eps, device=device, dtype=dtype)
+            
+        except Exception as e:
+            _logger.warning(f"Failed to update idiosyncratic parameters: {e}. Using previous values.")
+            # Keep previous values on error
+    
+    def _check_convergence(
+        self,
+        prediction_iter: np.ndarray,
+        prediction_prev_iter: Optional[np.ndarray],
+        data_mod_only_miss: np.ndarray
+    ) -> Tuple[float, bool]:
+        """Check convergence based on MSE delta using numeric utilities.
+        
+        Parameters
+        ----------
+        prediction_iter : np.ndarray
+            Current prediction (T x N)
+        prediction_prev_iter : np.ndarray, optional
+            Previous prediction (T x N)
+        data_mod_only_miss : np.ndarray
+            Original data with missing values (T x N)
+            
+        Returns
+        -------
+        delta : float
+            MSE delta between current and previous prediction
+        converged : bool
+            Whether convergence criterion is met
+        """
+        if prediction_prev_iter is None:
+            return float('inf'), False
+        
+        # Use numeric utility for convergence checking with tolerance
+        delta, converged = check_convergence_with_tolerance(
+            y_prev=prediction_prev_iter,
+            y_now=prediction_iter,
+            y_actual=data_mod_only_miss,
+            tolerance=self.tolerance
+        )
+        
+        return delta, converged
     
     
     def _validate_factors(self, factors: np.ndarray, operation: str = "operation") -> np.ndarray:
         """Validate and normalize factors shape and content quality.
         
-        Inlined from validate_factors_ddfm() utility function.
+        Parameters
+        ----------
+        factors : np.ndarray
+            Factors to validate
+        operation : str, default "operation"
+            Operation name for error messages
+            
+        Returns
+        -------
+        np.ndarray
+            Validated and normalized factors (2D array)
         """
-        factors = ensure_numpy(factors)
-        if factors.ndim == 0 or factors.size == 0:
-            raise DataError(
-                f"DDFM {operation} failed: factors is empty or invalid (shape: {factors.shape})",
-                details="This indicates training did not complete properly"
-            )
-        if factors.ndim == 1:
-            factors = factors.reshape(-1, self.num_factors) if factors.size > 0 else factors.reshape(0, self.num_factors)
-        if factors.ndim != 2:
-            raise DataError(
-                f"DDFM {operation} failed: factors must be 2D array (T x m), got shape {factors.shape}",
-                details="Factors should be a 2D array with shape (T, m) where T is time steps and m is number of factors"
-            )
-        
-        T, m = factors.shape
-        
-        # Validate factors are finite
-        from ..numeric.validator import validate_no_nan_inf
-        validate_no_nan_inf(factors, name=f"factors ({operation})")
-        
-        return factors
+        return validate_factors(factors, self.num_factors, operation)
     
     def _validate_training_data(
         self,
         X_torch: torch.Tensor,
         operation: str = "training setup"
     ) -> None:
-        """Validate data dimensions and model configuration before training starts.
-        
-        Inlined from validate_training_data_ddfm() utility function.
-        """
-        check_condition(
-            X_torch is not None,
-            DataError,
-            f"DDFM {operation} failed: X_torch is None",
-            details="Please provide training data"
+        """Validate data dimensions and model configuration before training starts."""
+        validate_ddfm_training_data(
+            X_torch=X_torch,
+            num_factors=self.num_factors,
+            encoder_layers=self.encoder_layers,
+            encoder=self.encoder,
+            operation=operation
         )
-        
-        check_condition(
-            isinstance(X_torch, torch.Tensor),
-            DataError,
-            f"DDFM {operation} failed: X_torch must be torch.Tensor, got {type(X_torch)}",
-            details="Training data must be a torch.Tensor. Convert numpy arrays using torch.from_numpy()"
-        )
-        
-        check_condition(
-            X_torch.ndim == 2,
-            DataError,
-            f"DDFM {operation} failed: X_torch must be 2D (T x N), got shape {X_torch.shape}",
-            details="Training data must be 2D with shape (T, N) where T is time steps and N is number of series"
-        )
-        
-        T, N = X_torch.shape
-        
-        check_condition(
-            T >= MIN_DDFM_TIME_STEPS,
-            DataError,
-            f"DDFM {operation} failed: Need at least {MIN_DDFM_TIME_STEPS} time periods, got T={T}",
-            details="DDFM requires at least 2 time periods for training"
-        )
-        
-        check_condition(
-            N >= MIN_VARIABLES,
-            DataError,
-            f"DDFM {operation} failed: Need at least {MIN_VARIABLES} series, got N={N}",
-            details="DDFM requires at least 1 series (variable) in the data"
-        )
-        
-        check_condition(
-            self.num_factors is not None and self.num_factors >= 1,
-            ConfigurationError,
-            f"DDFM {operation} failed: num_factors must be >= 1, got {self.num_factors}",
-            details="Number of factors must be a positive integer"
-        )
-        
-        check_condition(
-            self.num_factors <= N,
-            ConfigurationError,
-            f"DDFM {operation} failed: num_factors ({self.num_factors}) cannot exceed number of series (N={N})",
-            details="Number of factors cannot exceed the number of input series"
-        )
-        
-        if self.encoder_layers is not None and len(self.encoder_layers) > 0:
-            if self.encoder_layers[0] != N:
-                _logger.warning(
-                    f"DDFM {operation}: encoder_layers[0] ({self.encoder_layers[0]}) does not match input dimension (N={N}). "
-                    "Encoder will be reinitialized with correct input dimension."
-                )
-        
-        if self.encoder is not None:
-            if hasattr(self.encoder, 'input_dim') and self.encoder.input_dim != N:
-                raise ConfigurationError(
-                    f"DDFM {operation} failed: encoder.input_dim ({self.encoder.input_dim}) must match input dimension (N={N})",
-                    details="Encoder input dimension must match the number of series in the data"
-                )
     
     
     def _estimate_var(
@@ -745,79 +888,15 @@ class DDFM(BaseFactorModel, pl.LightningModule):
         Returns
         -------
         A_f : np.ndarray
-            VAR transition matrix of shape (m, m) for AR(1)
+            VAR transition matrix of shape (m, m) for AR(factor_order)
         Q_f : np.ndarray
             Innovation covariance matrix of shape (m, m), positive definite
-            
-        Raises
-        ------
-        ConfigurationError
-        NumericalError
-            If estimation produces invalid results (handled internally with fallback)
-            
-        Notes
-        -----
-        - Uses OLS regression to estimate VAR coefficients
-        - Ensures Q_f is positive definite with minimum eigenvalue >= MIN_EIGENVALUE
-        - Falls back to identity matrix with small regularization if estimation fails
-        - Inlined from estimate_var_ddfm() utility function for better integration
         """
-        factors = ensure_numpy(factors)
-        if factors.ndim == 0 or factors.size == 0 or factors.ndim < 2 or factors.shape[0] < 2 or factors.shape[1] == 0:
-            m = self.num_factors if self.num_factors else 1
-            from ..numeric.stability import create_scaled_identity
-            return create_scaled_identity(m, DEFAULT_IDENTITY_SCALE), create_scaled_identity(m, DEFAULT_REGULARIZATION)
-        
-        T, m = factors.shape
-        
-        min_obs_required = 1 + DEFAULT_MIN_OBS_VAR - 2  # AR(1) requires at least 2 observations
-        if T < min_obs_required:
-            from ..numeric.stability import create_scaled_identity
-            factor_var = np.var(factors, axis=0)
-            factor_var = np.maximum(factor_var, MIN_STD ** 2)
-            # AR(1) dynamics (simplified)
-            if True:
-                A_f = create_scaled_identity(m, DEFAULT_AR_COEF)
-            else:
-                A_f = np.hstack([create_scaled_identity(m, DEFAULT_AR_COEF), np.zeros((m, m), dtype=DEFAULT_DTYPE)])
-            Q_f = np.diag(factor_var)
-            return A_f, Q_f
-        
-        if not np.all(np.isfinite(factors)):
-            factors = sanitize_array(factors)
-        
-        # VAR estimation error handling: raises ConfigurationError for parameter validation failures
-        # This is intentionally different from _handle_initialization_error() which raises ModelNotInitializedError
-        # VAR estimation failures are configuration/parameter issues, not initialization failures
-        try:
-            A_f, Q_f = estimate_var(factors, order=1)  # Always use AR(1)
-        except (ValueError, RuntimeError) as e:
-            raise ConfigurationError(
-                "DDFM VAR estimation failed: factors always use AR(1) dynamics"
-            ) from e
-        
-        if Q_f.ndim == 0:
-            factor_var = np.var(factors, axis=0)
-            factor_var = np.maximum(factor_var, MIN_EIGENVALUE)
-            Q_f = np.diag(factor_var)
-        elif Q_f.ndim != 2:
-            if Q_f.size == m ** 2:
-                Q_f = Q_f.reshape(m, m)
-            else:
-                factor_var = np.var(factors, axis=0)
-                factor_var = np.maximum(factor_var, MIN_EIGENVALUE)
-                Q_f = np.diag(factor_var)
-        
-        Q_sym = (Q_f + Q_f.T) / 2
-        eigenvals_Q = np.linalg.eigvalsh(Q_sym)
-        min_eigenval_Q = np.min(eigenvals_Q)
-        if min_eigenval_Q < MIN_EIGENVALUE:
-            from ..numeric.stability import create_scaled_identity
-            Q_f = Q_sym + create_scaled_identity(m, MIN_EIGENVALUE - min_eigenval_Q)
-        else:
-            Q_f = Q_sym
-        
-        return A_f, Q_f
+        return estimate_var_with_fallback(
+            factors=factors,
+            order=self.factor_order,
+            num_factors=self.num_factors
+        )
     
     def configure_optimizers(self) -> Union[List[torch.optim.Optimizer], Dict[str, Any]]:
         """Configure optimizer and learning rate scheduler for autoencoder training.
@@ -830,9 +909,14 @@ class DDFM(BaseFactorModel, pl.LightningModule):
             If decay_learning_rate=False: List containing the optimizer
             If decay_learning_rate=True: Dict with optimizer and scheduler config
         """
-        if not self._are_networks_initialized():
+        # Encoder/decoder should be initialized by on_train_start() before configure_optimizers is called
+        # However, Lightning may call this before on_train_start() in some cases, so we handle gracefully
+        if self.encoder is None or self.decoder is None:
             _logger.warning("Encoder/decoder not initialized, creating placeholder optimizer")
-            optimizer = self._create_dummy_optimizer(self.learning_rate)
+            # Create a dummy parameter to satisfy Lightning's optimizer requirement
+            from ..config.constants import DEFAULT_ZERO_VALUE
+            dummy_param = nn.Parameter(torch.tensor(DEFAULT_ZERO_VALUE))
+            optimizer = torch.optim.Adam([dummy_param], lr=self.learning_rate)
             if self.decay_learning_rate:
                 return self._create_lr_scheduler(optimizer)
             return [optimizer]
@@ -874,44 +958,6 @@ class DDFM(BaseFactorModel, pl.LightningModule):
                 "frequency": 1,
             }
         }
-    
-    def _create_optimizer(self, step: int = 0) -> torch.optim.Optimizer:
-        """Create optimizer for autoencoder training.
-        
-        Helper method for internal use (e.g., in fit_mcmc()).
-        For Lightning trainer setup, use configure_optimizers() instead.
-        
-        Parameters
-        ----------
-        step : int, default 0
-            Current step/iteration for learning rate decay calculation
-            
-        Returns
-        -------
-        torch.optim.Optimizer
-            Adam optimizer for encoder and decoder parameters
-        """
-        self._check_networks_initialized()
-        
-        # Calculate learning rate with exponential decay if enabled
-        # Original DDFM: decay_rate=0.96, decay_steps=epochs, staircase=True
-        # lr = initial_lr * (decay_rate ^ floor(step / decay_steps))
-        if self.decay_learning_rate:
-            # For MCMC, we decay per MCMC iteration (not per epoch)
-            # Each MCMC iteration uses epochs_per_iter epochs
-            decay_steps = self.epochs_per_iter
-            decay_rate = DEFAULT_LR_DECAY_RATE
-            lr = self.learning_rate * (decay_rate ** (step // decay_steps))
-        else:
-            lr = self.learning_rate
-        
-        optimizer = torch.optim.Adam(
-            list(self.encoder.parameters()) + list(self.decoder.parameters()),
-            lr=lr,
-            weight_decay=self.weight_decay
-        )
-        
-        return optimizer
     
     def pre_train(
         self,
@@ -988,8 +1034,7 @@ class DDFM(BaseFactorModel, pl.LightningModule):
         oupt_tensor = ensure_tensor(oupt_pre_train, device=device, dtype=DEFAULT_TORCH_DTYPE)
         
         # Ensure encoder and decoder are on the same device
-        self.encoder = self.encoder.to(device)
-        self.decoder = self.decoder.to(device)
+        self._move_networks_to_device(device)
         
         # Create dataset and dataloader
         dataset = torch.utils.data.TensorDataset(inpt_tensor, oupt_tensor)
@@ -1004,12 +1049,12 @@ class DDFM(BaseFactorModel, pl.LightningModule):
             weight_decay=self.weight_decay
         )
         
-        # Pre-train for epochs * mult_epoch_pretrain
-        num_epochs = self.epochs_per_iter * self.mult_epoch_pretrain
+        # Pre-train for n_mc_samples * mult_epoch_pretrain epochs
+        # Matches original DDFM: epochs * mult_epoch_pre where epochs was the number of MC samples
+        num_epochs = self.n_mc_samples * self.mult_epoch_pretrain
         _logger.info(f"DDFM pre_train: Starting pre-training for {num_epochs} epochs")
         
-        self.encoder.train()
-        self.decoder.train()
+        self._set_networks_mode(train=True)
         
         for epoch in range(num_epochs):
             epoch_loss = DEFAULT_ZERO_VALUE
@@ -1031,15 +1076,14 @@ class DDFM(BaseFactorModel, pl.LightningModule):
                         torch.isnan(batch_target),
                         torch.zeros_like(batch_target),
                         torch.ones_like(batch_target)
+                    ).bool()
+                    # Use loss utility for consistency
+                    loss = compute_masked_loss(
+                        reconstructed=reconstructed,
+                        target=batch_target,
+                        mask=mask,
+                        loss_function='mse'
                     )
-                    target_clean = torch.where(
-                        torch.isnan(batch_target),
-                        torch.zeros_like(batch_target),
-                        batch_target
-                    )
-                    reconstructed_masked = reconstructed * mask
-                    squared_diff = (target_clean - reconstructed_masked) ** 2
-                    loss = torch.sum(squared_diff) / (torch.sum(mask) + DEFAULT_EPSILON)
                 else:
                     # Standard MSE (no missing values)
                     loss = nn.functional.mse_loss(reconstructed, batch_target)
@@ -1065,87 +1109,6 @@ class DDFM(BaseFactorModel, pl.LightningModule):
         
         _logger.info(f"DDFM pre_train: Pre-training completed")
     
-    def fit_mcmc(
-        self,
-        X: torch.Tensor,
-        x_clean: torch.Tensor,
-        missing_mask: np.ndarray,
-        target_scaler: Optional[Any] = None,
-        max_iter: Optional[int] = None,
-        tolerance: Optional[float] = None,
-        disp: Optional[int] = None,
-        seed: Optional[int] = None,
-    ) -> DDFMTrainingState:
-        """Run MCMC iterative training procedure for DDFM.
-        
-        This method delegates to DDFMDenoisingTrainer for the actual denoising training procedure.
-        See mcmc.py for detailed documentation of the MCMC algorithm.
-        
-        Parameters
-        ----------
-        X : torch.Tensor
-            Preprocessed data with missing values, shape (T x N), where T is number
-            of time periods and N is number of series. Data should already be preprocessed
-            (imputation, scaling, etc.). Missing values should be NaN or handled via missing_mask.
-        x_clean : torch.Tensor
-            Clean data (interpolated), shape (T x N), used for initial autoencoder
-            training. Should have same shape as X.
-        missing_mask : np.ndarray
-            Missing data mask, shape (T x N), boolean array where True indicates
-            missing data. Must match shape of X.
-        target_scaler : Any, optional
-            Scaler instance for target series inverse transformation. Used to convert
-            standardized predictions back to original scale for target series only.
-            If None, no inverse transformation is applied (predictions remain standardized).
-        max_iter : int, optional
-            Maximum number of MCMC iterations. If None, uses self.max_iter (default: 200).
-        tolerance : float, optional
-            Convergence tolerance for MSE change between iterations. If None, uses
-            self.tolerance (default: DEFAULT_TOLERANCE = 0.0005). Training stops when |MSE_new - MSE_old| < tolerance.
-        disp : int, optional
-            Display progress every 'disp' iterations. If None, uses self.disp (default: 10).
-            Set to 0 to disable progress output.
-        seed : int, optional
-            Random seed for reproducibility. If None, uses current random state.
-            Sets both NumPy and PyTorch random seeds.
-            
-        Returns
-        -------
-        DDFMTrainingState
-            Final training state containing:
-            - factors: np.ndarray, shape (T x num_factors) - extracted factors
-            - prediction: np.ndarray, shape (T x N) - final predictions
-            - converged: bool - whether convergence was achieved
-            - num_iter: int - number of iterations completed
-            - training_loss: float - final training loss (MSE)
-            
-        Examples
-        --------
-        >>> model = DDFM(encoder_layers=[64, 32], num_factors=2)
-        >>> model.load_config('config.yaml')
-        >>> # X, x_clean, missing_mask prepared from data module
-        >>> from dfm_python.config.constants import DEFAULT_TOLERANCE
-        >>> state = model.fit_mcmc(X, x_clean, missing_mask, max_iter=50, tolerance=DEFAULT_TOLERANCE)
-        >>> factors = state.factors  # (T x 2) factor estimates
-        >>> print(f"Converged: {state.converged}, Iterations: {state.num_iter}")
-        """
-        from ..trainer.ddfm import DDFMDenoisingTrainer
-        
-        # Store processed data for shape validation in update()
-        self.data_processed = ensure_numpy(X, dtype=DEFAULT_DTYPE)
-        
-        trainer = DDFMDenoisingTrainer(self)
-        return trainer.fit(
-            X=X,
-            x_clean=x_clean,
-            missing_mask=missing_mask,
-            target_scaler=target_scaler,
-            max_iter=max_iter,
-            tolerance=tolerance,
-            disp=disp,
-            seed=seed,
-        )
-    
     def get_result(self) -> DDFMResult:
         """Extract DDFMResult from trained model.
         
@@ -1158,7 +1121,7 @@ class DDFM(BaseFactorModel, pl.LightningModule):
             self.training_state is not None,
             ModelNotTrainedError,
             f"{self.__class__.__name__} get_result failed: model has not been fitted yet",
-            details="Please call fit_mcmc() first"
+            details="Please train the model using trainer.fit(model, datamodule) first"
         )
         
         self._check_networks_initialized()
@@ -1180,7 +1143,6 @@ class DDFM(BaseFactorModel, pl.LightningModule):
         )
         
         # Validate C matrix for NaN/Inf (extract_decoder_params should handle this, but double-check)
-        from ..numeric.validator import validate_no_nan_inf
         try:
             validate_no_nan_inf(C, name="C matrix")
         except NumericalError as e:
@@ -1224,41 +1186,52 @@ class DDFM(BaseFactorModel, pl.LightningModule):
             residuals = np.zeros_like(prediction_iter)
         
         # Estimate factor dynamics (VAR) with error handling
-        A_f, Q_f = self._estimate_var(factors, 1)  # Always use AR(1)
+        A_f, Q_f = self._estimate_var(factors)
         
         # For DDFM, we use simplified state-space (factor-only)
         A = A_f
         Q = Q_f
         Z_0 = factors[0, :]
-        V_0 = np.cov(factors.T)
-        # Ensure V_0 is always 2D (np.cov returns scalar when m=1)
+        
+        # Compute initial covariance using safe utility
+        # factors.T converts (T, m) to (m, T) for rowvar=True
+        # Handle edge case where we have insufficient data for covariance
+        try:
+            V_0 = compute_cov_safe(
+                factors.T,
+                rowvar=True,
+                pairwise_complete=False,
+                min_eigenval=MIN_EIGENVALUE,
+                fallback_to_identity=True
+            )
+        except DataError as e:
+            # If covariance computation fails due to insufficient data, use identity
+            _logger.warning(
+                f"DDFM get_result: Failed to compute initial covariance: {e}. "
+                f"Using identity matrix as fallback."
+            )
+            m = factors.shape[1]
+            V_0 = create_scaled_identity(m, DEFAULT_IDENTITY_SCALE)
+        
+        # Ensure V_0 is always 2D (compute_cov_safe handles this, but double-check)
         if V_0.ndim == 0:
             V_0 = np.atleast_2d(V_0)
         elif V_0.ndim == 1:
             # If 1D, reshape to (m x m)
             V_0 = np.atleast_2d(V_0).T if V_0.shape[0] == 1 else np.atleast_2d(V_0)
         
-        # Estimate R from residuals
-        R_diag = np.var(residuals, axis=0)
-        R = np.diag(np.maximum(R_diag, MIN_DIAGONAL_VARIANCE))
+        # Estimate R from residuals using unified variance estimation utility
+        R = estimate_variance_unified(
+            residuals=residuals,
+            min_variance=MIN_DIAGONAL_VARIANCE,
+            default_variance=MIN_DIAGONAL_VARIANCE,
+            dtype=DEFAULT_DTYPE
+        )
         
-        # Compute smoothed data
-        x_sm = prediction_iter  # T x N (standardized, already preprocessed)
+        # Compute smoothed data (already standardized)
+        x_sm = prediction_iter
         
-        # Unstandardize: Data is already preprocessed, so for most series Mx=0, Wx=1
-        # Only target series (if target_scaler provided) need inverse transformation
-        n_series = C.shape[0]
-        
-        # Data is already standardized (mean=0, std=1) - no transformation needed
-        # This is just for internal consistency in result structure
-        
-        # Target scaler is stored in self.target_scaler (from base class)
-        # Use scaler.inverse_transform() for unstandardization, not Mx/Wx arrays
-        
-        # Create result object
         r = np.array([self.num_factors])
-        
-        # Get target scaler from datamodule if available
         target_scaler = getattr(self, 'target_scaler', None)
         
         result = DDFMResult(
@@ -1272,7 +1245,7 @@ class DDFM(BaseFactorModel, pl.LightningModule):
             Z_0=Z_0,
             V_0=V_0,
             r=r,
-            p=1,  # Always use AR(1)
+            p=self.factor_order,
             converged=self.training_state.converged,
             num_iter=self.training_state.num_iter,
             loglik=None,  # DDFM doesn't compute loglik in same way
@@ -1293,7 +1266,8 @@ class DDFM(BaseFactorModel, pl.LightningModule):
             try:
                 if self._result is None:
                     self._result = self.get_result()
-            except (ValueError, RuntimeError, AttributeError) as e:
+            except COMPUTATION_ERROR_TYPES as e:
+                # Uses COMPUTATION_ERROR_TYPES for consistent error handling (ValueError, RuntimeError, AttributeError are included)
                 # Log warning but don't fail - result can be computed later if needed
                 _logger.warning(
                     f"Could not automatically compute result after training: {e}. "
@@ -1301,109 +1275,254 @@ class DDFM(BaseFactorModel, pl.LightningModule):
                 )
     
     def on_train_start(self) -> None:
-        """Called when training starts. Run MCMC training."""
-        # Get processed data and target scaler from DataModule
+        """Called when training starts. Initialize buffers and data structures for Lightning training."""
+        # Get processed data and target scaler from DataModule (standard Lightning flow)
         data_module = self._get_datamodule()
         X_torch = data_module.get_processed_data()
         target_scaler = getattr(data_module, 'target_scaler', None)
+        if target_scaler is not None:
+            self.target_scaler = target_scaler
         
         # Early validation: Check data dimensions and model configuration before training
         # This catches configuration issues early with clear error messages
         self._validate_training_data(X_torch, operation="training setup")
         
-        # Initialize encoder/decoder if not already done in setup()
-        if not self._are_networks_initialized():
-            input_dim = X_torch.shape[1]
-            self.initialize_networks(input_dim)
-            # Move to same device as data
-            device = X_torch.device
-            self.encoder = self.encoder.to(device)
-            self.decoder = self.decoder.to(device)
-            _logger.debug(f"Initialized encoder/decoder in on_train_start() with input_dim={input_dim}")
+        # Initialize encoder/decoder (data dimensions are now available)
+        input_dim = X_torch.shape[1]
+        self.initialize_networks(input_dim)
+        self._move_networks_to_device(X_torch.device)
+        _logger.debug(f"Initialized encoder/decoder with input_dim={input_dim}")
         
-        # Always run fit_mcmc() if training_state is None (first training run)
-        if self.training_state is None:
-            # Handle missing data - use imputation for MCMC training
-            from ..utils.helper import get_config_attr
-            nan_method = get_config_attr(self.config, 'nan_method', DEFAULT_NAN_METHOD)
-            nan_k = get_config_attr(self.config, 'nan_k', DEFAULT_NAN_K)
-            
-            # Check if data has NaN values
-            X_np = ensure_numpy(X_torch)
-            has_nan = np.any(np.isnan(X_np))
-            
-            if has_nan:
-                _logger.info(
-                    f"DDFM on_train_start: NaN values detected in training data. "
-                    f"Using imputation (method={nan_method}) for MCMC initialization. "
-                    f"DDFM will handle remaining missing data through state-space model."
-                )
-                x_clean_np, missing_mask = rem_nans_spline(
-                    X_np,
-                    method=nan_method,
-                    k=nan_k
-                )
-                x_clean_torch = ensure_tensor(x_clean_np, dtype=DEFAULT_TORCH_DTYPE, device=X_torch.device)
-            else:
-                # No NaN values - use data as-is
-                device = X_torch.device if isinstance(X_torch, torch.Tensor) else None
-                x_clean_torch = ensure_tensor(X_torch, dtype=DEFAULT_TORCH_DTYPE, device=device)
-                missing_mask = np.zeros(X_np.shape, dtype=bool)  # No missing data
-            
-            # Replace any remaining NaN/Inf with zeros (defensive check)
-            device = x_clean_torch.device
-            dtype = x_clean_torch.dtype
-            x_clean_torch = torch.where(
-                torch.isfinite(x_clean_torch),
-                x_clean_torch,
-                torch.tensor(DEFAULT_ZERO_VALUE, device=device, dtype=dtype)
+        # Store processed data
+        self.data_processed = X_torch
+        
+        # Handle missing data - use DataModule's preprocessing method
+        if hasattr(data_module, '_preprocess_training_data'):
+            x_clean_torch, missing_mask = data_module._preprocess_training_data(X_torch)
+        else:
+            raise ModelNotInitializedError(
+                "DDFM on_train_start failed: DataModule does not have _preprocess_training_data method. "
+                "Ensure datamodule.setup() has been called before training."
             )
-            
-            # Adjust missing_mask shape to match x_clean_torch
-            if missing_mask.shape != x_clean_torch.shape:
-                _logger.warning(f"DDFM on_train_start: missing_mask shape {missing_mask.shape} != x_clean_torch shape {x_clean_torch.shape}, adjusting")
-                target_shape = x_clean_torch.shape
-                # Truncate or pad rows
-                if missing_mask.shape[0] > target_shape[0]:
-                    missing_mask = missing_mask[:target_shape[0], :]
-                elif missing_mask.shape[0] < target_shape[0]:
-                    pad_rows = target_shape[0] - missing_mask.shape[0]
-                    missing_mask = np.vstack([missing_mask, np.zeros((pad_rows, missing_mask.shape[1]), dtype=bool)])
-                # Truncate or pad columns
-                if missing_mask.shape[1] > target_shape[1]:
-                    missing_mask = missing_mask[:, :target_shape[1]]
-                elif missing_mask.shape[1] < target_shape[1]:
-                    pad_cols = target_shape[1] - missing_mask.shape[1]
-                    missing_mask = np.hstack([missing_mask, np.zeros((missing_mask.shape[0], pad_cols), dtype=bool)])
-            
-            # Pre-train autoencoder on non-missing data (matching original DDFM)
-            # This provides stable initialization before MCMC training
-            # Error handling: This is a fallback pattern (graceful degradation) - logs warning instead of raising exception
-            # Intentionally different from _handle_initialization_error() which raises ModelNotInitializedError
-            # Pre-training can fail gracefully and MCMC training continues without it
-            try:
-                self.pre_train(
-                    X=x_clean_torch,
-                    x_clean=x_clean_torch,
-                    missing_mask=missing_mask,
-                    device=x_clean_torch.device,
-                )
-            except (RuntimeError, ValueError, AttributeError, OSError) as e:
-                _logger.warning(
-                    f"DDFM pre_train failed: {e}. Continuing with MCMC training without pre-training. "
-                    f"Continuing without pre-training."
-                )
-            
-            # Run MCMC training
-            # Pass x_clean_torch as X to ensure all data arrays have consistent shape
-            self.fit_mcmc(
+        
+        if np.any(missing_mask):
+            _logger.info(
+                f"DDFM on_train_start: NaN values detected in training data. "
+                f"Using imputation for initialization. "
+                f"DDFM will handle remaining missing data through state-space model."
+            )
+        
+        # Adjust missing_mask shape to match x_clean_torch
+        if hasattr(data_module, '_adjust_mask_shape'):
+            missing_mask = data_module._adjust_mask_shape(missing_mask, x_clean_torch.shape)
+        else:
+            raise ModelNotInitializedError(
+                "DDFM on_train_start failed: DataModule does not have _adjust_mask_shape method. "
+                "Ensure datamodule is properly initialized."
+            )
+        
+        # Store data structures for MC sampling
+        T, N = x_clean_torch.shape
+        self._data_mod_only_miss = x_clean_torch.clone()
+        self._data_mod = x_clean_torch.clone()
+        self._missing_mask = missing_mask
+        
+        # Pre-train autoencoder on non-missing data (matching original DDFM)
+        # This provides stable initialization before MCMC training
+        try:
+            self.pre_train(
                 X=x_clean_torch,
                 x_clean=x_clean_torch,
                 missing_mask=missing_mask,
-                target_scaler=target_scaler,
+                device=x_clean_torch.device,
+            )
+        except (RuntimeError, ValueError, AttributeError, OSError) as e:
+            _logger.warning(
+                f"DDFM pre_train failed: {e}. Continuing with MCMC training without pre-training."
             )
         
+        # Initialize buffers with proper dimensions
+        device = x_clean_torch.device
+        dtype = x_clean_torch.dtype
+        self._initialize_buffers(T, N, device, dtype)
+        
+        # Initialize initial prediction and residuals
+        self._set_networks_mode(train=False)
+        with torch.no_grad():
+            factors_init = self.encoder(x_clean_torch)  # (T, num_factors)
+            prediction_init = self.decoder(factors_init)  # (T, N)
+            
+            # Update missing values with initial prediction
+            bool_miss = torch.tensor(missing_mask, device=device, dtype=torch.bool)
+            if bool_miss.any():
+                self._data_mod_only_miss[bool_miss] = prediction_init[bool_miss]
+            
+            # Initialize residuals
+            eps_init = self._data_mod_only_miss - prediction_init
+            self.eps_hat = eps_init
+        
+        # Initialize prediction_prev_iter for convergence checking
+        self.prediction_prev_iter = None
+        
+        # Initialize factors_samples tensor
+        self.factors_samples = None
+        
+        # Initialize training state
+        if self.training_state is None:
+            self.training_state = DDFMTrainingState(
+                factors=ensure_numpy(factors_init),
+                prediction=ensure_numpy(prediction_init),
+                converged=False,
+                num_iter=0
+            )
+        
+        # Initialize MCMC iteration counter
+        self.mcmc_iteration = 0
+        
+        # Create MC dataset via DataModule (dataset/dataloader logic belongs in DataModule)
+        if hasattr(data_module, 'create_mc_dataset'):
+            self._mc_dataset = data_module.create_mc_dataset(
+                model=self,
+                data_mod=self._data_mod,
+                data_mod_only_miss=self._data_mod_only_miss,
+                missing_mask=self._missing_mask
+            )
+            # Store reference in datamodule for train_dataloader()
+            data_module.mc_dataset = self._mc_dataset
+        else:
+            # Fallback: create directly if datamodule doesn't have create_mc_dataset method
+            from ..dataset.ddfm_dataset import DDFMMCDataset
+            self._mc_dataset = DDFMMCDataset.create_from_model(
+                model=self,
+                data_mod=self._data_mod,
+                data_mod_only_miss=self._data_mod_only_miss,
+                missing_mask=self._missing_mask
+            )
+        
+        _logger.info(f"DDFM on_train_start: Initialized buffers and data structures. T={T}, N={N}, num_factors={self.num_factors}, n_mc_samples={self.n_mc_samples}")
+        
         pl.LightningModule.on_train_start(self)
+    
+    def on_train_epoch_end(self) -> None:
+        """Called at the end of each training epoch. Update AR/Sigma_epsilon and check convergence.
+        
+        This method:
+        1. Averages factors over all MC samples
+        2. Reconstructs epsilon from decoder output
+        3. Updates AR/Sigma_epsilon parameters
+        4. Checks convergence
+        5. Updates data structures for next iteration
+        """
+        # Check if we have factors from MC samples
+        if self.factors_samples is None:
+            _logger.warning("DDFM on_train_epoch_end: No factors samples available. Skipping update.")
+            return
+        
+        self.mcmc_iteration += 1
+        
+        # Average factors over all MC samples (already stored as tensor)
+        factors = torch.mean(self.factors_samples, dim=0)  # (T, num_factors)
+        
+        # Reconstruct prediction from averaged factors
+        self._set_networks_mode(train=False)
+        with torch.no_grad():
+            prediction_iter = self.decoder(factors)  # (T, N)
+        
+        # Ensure _data_mod_only_miss is on same device as prediction_iter
+        device = prediction_iter.device
+        if self._data_mod_only_miss.device != device:
+            self._data_mod_only_miss = self._data_mod_only_miss.to(device)
+        
+        # Update missing values with current prediction
+        bool_miss = torch.tensor(self._missing_mask, device=device, dtype=torch.bool)
+        if bool_miss.any():
+            self._data_mod_only_miss[bool_miss] = prediction_iter[bool_miss]
+        
+        # Update residuals (keep as torch for efficiency, convert only when needed)
+        eps_torch = self._data_mod_only_miss - prediction_iter
+        self.eps_hat = eps_torch
+        
+        # Convert to numpy for AR/Sigma update (only when needed)
+        eps_np = ensure_numpy(eps_torch)
+        factors_np = ensure_numpy(factors)
+        prediction_iter_np = ensure_numpy(prediction_iter)
+        
+        # Update AR/Sigma_epsilon parameters
+        self._update_idiosyncratic_params(eps_np, self._missing_mask)
+        
+        # Filter data: subtract conditional AR-idio mean (idiosyncratic uses AR(1) per variable)
+        MIN_TIME_STEPS_FOR_AR = 2  # Need at least 2 time steps for AR(1) filtering
+        if self.use_idiosyncratic and eps_torch.shape[0] >= MIN_TIME_STEPS_FOR_AR:
+            Phi = self.Phi
+            phi_device = Phi.device
+            # Ensure tensors are on same device as Phi (only transfer if needed)
+            if eps_torch.device != phi_device:
+                eps_torch = eps_torch.to(phi_device)
+            if self._data_mod_only_miss.device != phi_device:
+                self._data_mod_only_miss = self._data_mod_only_miss.to(phi_device)
+            
+            eps_prev = eps_torch[:-1, :]
+            # Clone only the portion we'll modify to avoid unnecessary memory copy
+            data_mod_torch = self._data_mod_only_miss.clone()
+            data_mod_torch[1:] = data_mod_torch[1:] - eps_prev @ Phi
+            self._data_mod = data_mod_torch
+        else:
+            # No filtering needed - clone to avoid shared reference issues
+            self._data_mod = self._data_mod_only_miss.clone()
+        
+        # Update MC dataset with new filtered data
+        if self._mc_dataset is not None:
+            self._mc_dataset.data_mod = self._data_mod
+            # Also update datamodule's reference if available
+            try:
+                data_module = self._get_datamodule()
+                if hasattr(data_module, 'mc_dataset'):
+                    data_module.mc_dataset = self._mc_dataset
+            except ModelNotInitializedError:
+                # Datamodule not available, skip update
+                pass
+        
+        # Check convergence
+        delta, converged = self._check_convergence(
+            prediction_iter_np,
+            ensure_numpy(self.prediction_prev_iter) if self.prediction_prev_iter is not None else None,
+            ensure_numpy(self._data_mod_only_miss)
+        )
+        
+        # Store prediction for next iteration (clone already detaches from computation graph)
+        self.prediction_prev_iter = prediction_iter.clone()
+        
+        # Update training state
+        self.training_state = DDFMTrainingState(
+            factors=factors_np,
+            prediction=prediction_iter_np,
+            converged=converged,
+            num_iter=self.mcmc_iteration,
+            training_loss=float(delta) if np.isfinite(delta) else float('inf')
+        )
+        
+        # Log progress
+        if self.mcmc_iteration % self.disp == 0:
+            _logger.info(
+                f"Iteration {self.mcmc_iteration}/{self.max_iter}: loss={self.training_state.training_loss:.6f}, "
+                f"delta={delta:.6f}, converged={converged}"
+            )
+        
+        # Stop training if converged
+        if converged:
+            _logger.info(
+                f"Convergence achieved in {self.mcmc_iteration} iterations: "
+                f"loss={self.training_state.training_loss:.6f}, delta={delta:.6f} < {self.tolerance}"
+            )
+            # Signal to trainer to stop
+            if hasattr(self.trainer, 'should_stop'):
+                self.trainer.should_stop = True
+        
+        # Clear factors_samples for next epoch
+        self.factors_samples = None
+        
+        pl.LightningModule.on_train_epoch_end(self)
+    
     
     
     def load_config(
@@ -1439,116 +1558,6 @@ class DDFM(BaseFactorModel, pl.LightningModule):
         
         return self
     
-    @staticmethod
-    def _parse_checkpoint(checkpoint: Any) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        """Extract state_dict and hyperparameters from checkpoint."""
-        if isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
-            return checkpoint['state_dict'], checkpoint.get('hyper_parameters', {})
-        return checkpoint, {}
-    
-    @staticmethod
-    def _infer_input_dim_from_data(
-        data: Union[pd.DataFrame, np.ndarray, torch.Tensor],
-        date_id_col: str = "date_id"
-    ) -> int:
-        """Infer input_dim from data."""
-        if isinstance(data, pd.DataFrame):
-            exclude_cols = [date_id_col, 'market_forward_excess_returns', 
-                          'forward_returns', 'risk_free_rate']
-            feature_cols = [c for c in data.columns if c not in exclude_cols]
-            return len(feature_cols)
-        elif isinstance(data, np.ndarray):
-            return data.shape[1] if has_shape_with_min_dims(data, min_dims=2) else 1
-        elif isinstance(data, torch.Tensor):
-            return data.shape[1] if has_shape_with_min_dims(data, min_dims=2) else 1
-        else:
-            raise DataError(
-                f"Unsupported data type: {type(data)}",
-                details="Data must be pandas.DataFrame, numpy.ndarray, or torch.Tensor"
-            )
-    
-    @staticmethod
-    def _infer_input_dim(state_dict: Dict[str, Any]) -> Optional[int]:
-        """Infer input_dim from checkpoint state_dict."""
-        if not isinstance(state_dict, dict):
-            raise DataValidationError(
-                "Cannot infer input_dim: state_dict must be a dictionary",
-                details=f"Received type: {type(state_dict).__name__}"
-            )
-        
-        # Check encoder.layers.0.weight shape: (hidden_dim, input_dim)
-        first_layer_keys = [k for k in state_dict.keys() if 'encoder.layers.0.weight' in k]
-        if first_layer_keys:
-            weight = state_dict[first_layer_keys[0]]
-            if isinstance(weight, torch.Tensor):
-                return weight.shape[1]
-        
-        # Check decoder.decoder.weight shape: (output_dim, num_factors)
-        decoder_keys = [k for k in state_dict.keys() 
-                      if 'decoder.decoder.weight' in k or ('decoder' in k and 'layers.0.weight' in k)]
-        for key in decoder_keys:
-            weight = state_dict[key]
-            if isinstance(weight, torch.Tensor):
-                return weight.shape[0]  # output_dim is input_dim
-        
-        raise DataValidationError(
-            "Cannot infer input_dim: no matching decoder weight keys found in state_dict",
-            details=f"Checked keys: {list(state_dict.keys())[:MAX_WARNING_ITEMS]}{'...' if len(state_dict.keys()) > MAX_WARNING_ITEMS else ''}"
-        )
-    
-    @staticmethod
-    def _infer_model_params_from_state_dict(
-        state_dict: Dict[str, Any],
-        hparams: Dict[str, Any],
-        kwargs: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """Infer model parameters from state_dict."""
-        if not isinstance(state_dict, dict):
-            return {
-                'encoder_layers': hparams.get('encoder_layers') or kwargs.get('encoder_layers', [64, 32]),
-                'num_factors': hparams.get('num_factors') or kwargs.get('num_factors', 3),
-                'activation': hparams.get('activation') or kwargs.get('activation', 'relu'),
-                'use_batch_norm': hparams.get('use_batch_norm', kwargs.get('use_batch_norm', True)),
-                'decoder': hparams.get('decoder') or kwargs.get('decoder', 'linear'),
-                'decoder_layers': hparams.get('decoder_layers') or kwargs.get('decoder_layers', None),
-            }
-        
-        # Infer encoder_layers
-        encoder_layer_keys = [k for k in sorted(state_dict.keys()) 
-                             if 'encoder.layers' in k and 'weight' in k and 'output' not in k]
-        inferred_encoder_layers = None
-        if encoder_layer_keys:
-            inferred_encoder_layers = []
-            for key in encoder_layer_keys:
-                weight = state_dict[key]
-                if isinstance(weight, torch.Tensor):
-                    inferred_encoder_layers.append(weight.shape[0])
-        
-        # Infer num_factors
-        inferred_num_factors = None
-        output_layer_keys = [k for k in state_dict.keys() if 'encoder.output_layer.weight' in k]
-        if output_layer_keys:
-            weight = state_dict[output_layer_keys[0]]
-            if isinstance(weight, torch.Tensor):
-                inferred_num_factors = weight.shape[0]
-        
-        if inferred_num_factors is None:
-            decoder_keys = [k for k in state_dict.keys() if 'decoder' in k and 'weight' in k]
-            for key in decoder_keys:
-                if 'decoder.weight' in key or ('layers' in key and '0.weight' in key):
-                    weight = state_dict[key]
-                    if isinstance(weight, torch.Tensor):
-                        inferred_num_factors = weight.shape[1]
-                        break
-        
-        return {
-            'encoder_layers': inferred_encoder_layers or hparams.get('encoder_layers') or kwargs.get('encoder_layers', [64, 32]),
-            'num_factors': inferred_num_factors or hparams.get('num_factors') or kwargs.get('num_factors', 3),
-            'activation': hparams.get('activation') or kwargs.get('activation', 'relu'),
-            'use_batch_norm': hparams.get('use_batch_norm', kwargs.get('use_batch_norm', True)),
-            'decoder': hparams.get('decoder') or kwargs.get('decoder', 'linear'),
-            'decoder_layers': hparams.get('decoder_layers') or kwargs.get('decoder_layers', None),
-        }
     
     @classmethod
     def load(
@@ -1618,24 +1627,24 @@ class DDFM(BaseFactorModel, pl.LightningModule):
         
         # Load checkpoint and extract state_dict/hparams
         checkpoint = torch.load(str(checkpoint_path), map_location=map_location)
-        state_dict, hparams = cls._parse_checkpoint(checkpoint)
+        state_dict, hparams = parse_checkpoint(checkpoint)
         
         # Infer input_dim: prioritize checkpoint, then data, then explicit parameter
-        checkpoint_input_dim = cls._infer_input_dim(state_dict)
+        checkpoint_input_dim = infer_ddfm_input_dim(state_dict)
         
         if input_dim is None:
             if checkpoint_input_dim is not None:
                 input_dim = checkpoint_input_dim
                 # Warn if data dimension doesn't match
                 if data is not None:
-                    data_input_dim = cls._infer_input_dim_from_data(data, date_id_col)
+                    data_input_dim = infer_input_dim_from_data(data, date_id_col)
                     if data_input_dim != input_dim:
                         _logger.warning(
                             f"DDFM.load: Data input_dim ({data_input_dim}) doesn't match checkpoint input_dim ({input_dim}). "
                             f"Using checkpoint input_dim. Model may not work correctly with current data."
                         )
             elif data is not None:
-                input_dim = cls._infer_input_dim_from_data(data, date_id_col)
+                input_dim = infer_input_dim_from_data(data, date_id_col)
             else:
                 raise ConfigurationError(
                     "Cannot determine input_dim. Please provide either 'data' or 'input_dim' parameter",
@@ -1643,7 +1652,7 @@ class DDFM(BaseFactorModel, pl.LightningModule):
                 )
         
         # Infer model parameters from state_dict
-        model_params = cls._infer_model_params_from_state_dict(state_dict, hparams, kwargs)
+        model_params = infer_ddfm_params_from_state_dict(state_dict, hparams, kwargs)
         
         # Create model with inferred/provided parameters
         excluded_keys = ['encoder_layers', 'num_factors', 'activation', 'use_batch_norm', 'decoder', 'decoder_layers']
@@ -1656,7 +1665,7 @@ class DDFM(BaseFactorModel, pl.LightningModule):
         model.load_state_dict(state_dict, strict=False)
         
         # Initialize encoder/decoder if not already initialized
-        if not model._are_networks_initialized():
+        if model.encoder is None or model.decoder is None:
             if input_dim is None:
                 raise ConfigurationError(
                     "Cannot initialize encoder/decoder: input_dim is required",
@@ -1722,7 +1731,6 @@ class DDFM(BaseFactorModel, pl.LightningModule):
         # Compute and validate horizon
         if horizon is None:
             horizon = self._compute_default_horizon()
-        from ..numeric.validator import validate_horizon
         horizon = validate_horizon(horizon)
         
         # Extract parameters
@@ -1746,8 +1754,10 @@ class DDFM(BaseFactorModel, pl.LightningModule):
                 details="Please set target_series when creating the DataModule (e.g., DDFMDataModule(..., target_series=['series_id']))."
             )
         
-        # Forecast factors using VAR dynamics (common helper)
-        Z_prev = result.Z[-2, :] if result.Z.shape[0] >= 2 and p == 2 else None
+        # Forecast factors using VAR dynamics
+        MIN_TIME_STEPS_FOR_AR2 = 2  # Minimum time steps needed for AR(2) prediction
+        AR_ORDER_2 = 2
+        Z_prev = result.Z[-2, :] if result.Z.shape[0] >= MIN_TIME_STEPS_FOR_AR2 and p == AR_ORDER_2 else None
         Z_forecast = self._forecast_var_factors(
             Z_last=Z_last,
             A=A,
@@ -1774,7 +1784,6 @@ class DDFM(BaseFactorModel, pl.LightningModule):
         
         # Ensure X_forecast is numpy array and validate it's finite
         X_forecast = ensure_numpy(X_forecast)
-        from ..numeric.validator import validate_no_nan_inf
         validate_no_nan_inf(X_forecast, name="forecast X_forecast")
         
         # Validate factor forecast if returning factors
@@ -1837,7 +1846,7 @@ class DDFM(BaseFactorModel, pl.LightningModule):
         Notes
         -----
         - This updates factors via neural network forward pass, NOT parameter retraining
-        - For parameter retraining, use fit_mcmc() with concatenated data
+        - For parameter retraining, retrain the model using trainer.fit(model, datamodule) with concatenated data
         - After update(), predict() will use the updated factor state
         - New data must have same number of series (N) as training data
         - User must preprocess data themselves (same preprocessing as training)
@@ -1850,7 +1859,6 @@ class DDFM(BaseFactorModel, pl.LightningModule):
             If data shape doesn't match training data
         """
         # Validate and convert data (no preprocessing - user must preprocess)
-        from ..numeric.validator import validate_and_convert_update_data
         data_new = validate_and_convert_update_data(
             data,
             self.data_processed,

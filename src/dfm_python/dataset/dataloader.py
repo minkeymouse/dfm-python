@@ -8,7 +8,8 @@ This module provides DataLoader factories for PyTorch-based DFM models:
 import torch
 from torch.utils.data import DataLoader
 from typing import Optional, Union
-from .dataset import DDFMDataset, KDFMDataset
+from .ddfm_dataset import DDFMDataset
+from .kdfm_dataset import KDFMDataset
 from ..logger import get_logger
 
 _logger = get_logger(__name__)

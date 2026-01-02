@@ -96,6 +96,13 @@ from .common import (
     validate_matrix_shape,
     log_tensor_stats,
     select_columns_by_prefix,
+    extract_tensor_value,
+)
+
+# Preprocessing utilities
+from .preprocessing import (
+    preprocess_training_data,
+    adjust_mask_shape,
 )
 
 # Analytics utilities (from numeric.stability)
@@ -120,12 +127,12 @@ from ..numeric.validator import (
 # Helper utilities (from misc)
 from .misc import (
     resolve_param,
+    get_config_attr,
     get_clock_frequency,
 )
 
 # Tensor conversion utilities
 from .tensor_utils import (
-    extract_tensor_value,
     normalize_tensor_shape,
     validate_tensor_device,
     batch_tensor_operation,
@@ -171,6 +178,7 @@ __all__ = [
     'detect_config_type',
     # Helper utilities
     'resolve_param',
+    'get_config_attr',
     'get_clock_frequency',
     # Scaling utilities
     '_check_sklearn',
@@ -204,6 +212,10 @@ __all__ = [
     'validate_matrix_shape',
     'log_tensor_stats',
     'select_columns_by_prefix',
+    'extract_tensor_value',
+    # Preprocessing utilities
+    'preprocess_training_data',
+    'adjust_mask_shape',
     # Model validation utilities (from numeric.validator)
     'validate_companion_stability',
     'validate_companion_matrix',
@@ -214,7 +226,6 @@ __all__ = [
     'validate_result_structure',
     'validate_parameter_shapes',
     # Tensor conversion utilities
-    'extract_tensor_value',
     'normalize_tensor_shape',
     'validate_tensor_device',
     'batch_tensor_operation',

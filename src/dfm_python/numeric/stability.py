@@ -1035,6 +1035,58 @@ def convergence_checker(
     return delta, loss_now
 
 
+def check_convergence_with_tolerance(
+    y_prev: np.ndarray,
+    y_now: np.ndarray,
+    y_actual: np.ndarray,
+    tolerance: float,
+    tolerance_multiplier: float = 10.0
+) -> Tuple[float, bool]:
+    """Check convergence with tolerance threshold.
+    
+    Wrapper around convergence_checker that adds tolerance-based convergence flag.
+    
+    Parameters
+    ----------
+    y_prev : np.ndarray
+        Previous reconstruction (T x N)
+    y_now : np.ndarray
+        Current reconstruction (T x N)
+    y_actual : np.ndarray
+        Actual values (T x N) with NaN for missing values
+    tolerance : float
+        Convergence tolerance threshold
+    tolerance_multiplier : float, default 10.0
+        Multiplier for fallback delta when not finite
+        
+    Returns
+    -------
+    delta : float
+        Relative change in loss: |loss_now - loss_prev| / loss_prev
+    converged : bool
+        Whether convergence criterion is met (delta < tolerance)
+    """
+    if y_prev is None:
+        return float('inf'), False
+    
+    # Use numeric utility for convergence checking
+    delta, _ = convergence_checker(
+        y_prev=y_prev,
+        y_now=y_now,
+        y_actual=y_actual
+    )
+    
+    # Ensure delta is finite
+    if not np.isfinite(delta):
+        _logger.warning(
+            f"Convergence check: delta is not finite ({delta}). Using large default value"
+        )
+        delta = tolerance * tolerance_multiplier
+    
+    converged = delta < tolerance
+    return delta, converged
+
+
 def safe_matrix_power(
     matrix: Union[np.ndarray, Tensor],
     power: int,

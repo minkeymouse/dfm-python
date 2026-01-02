@@ -14,9 +14,9 @@ use_batch_norm: true
 
 # Training Parameters
 learning_rate: 0.001
-epochs: 100
+epochs: 1  # Number of MC samples per MCMC iteration (default: 1 for ~100x speedup vs original DDFM). Note: This is NOT training epochs, but MC samples.
 batch_size: 100  # DDFM-specific default batch size
-factor_order: 1  # VAR lag order for factor dynamics (1 or 2)
+factor_order: 1  # VAR lag order for factor dynamics (must be 1)
 
 # Idiosyncratic Components
 use_idiosyncratic: true

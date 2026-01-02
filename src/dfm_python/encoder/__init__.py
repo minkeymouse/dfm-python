@@ -3,7 +3,9 @@
 This package provides implementations of various encoding methods for
 extracting latent factors from observed time series data:
 - PCA: Principal Component Analysis (linear dimension reduction)
-- Autoencoder: Nonlinear deep learning encoder/decoder for DDFM
+- Encoder: DDFM-specific nonlinear encoder (simple_encoder)
+- AutoencoderEncoder: Generic autoencoder wrapper (variational_encoder)
+- VariationalEncoder: VAE encoder (variational_encoder, placeholder)
 """
 
 from .base import BaseEncoder
@@ -15,9 +17,13 @@ from .pca import (
 
 from .simple_encoder import (
     Encoder,
-    AutoencoderEncoder,
     extract_decoder_params,
     convert_decoder_to_numpy,
+)
+
+from .variational_encoder import (
+    AutoencoderEncoder,
+    VariationalEncoder,
 )
 
 from ..decoder.linear import Decoder
@@ -28,11 +34,14 @@ __all__ = [
     # PCA
     'PCAEncoder',
     'compute_principal_components',
-    # Autoencoder
+    # DDFM Encoder
     'Encoder',
-    'AutoencoderEncoder',
-    'Decoder',
     'extract_decoder_params',
     'convert_decoder_to_numpy',
+    # Autoencoder/VAE
+    'AutoencoderEncoder',
+    'VariationalEncoder',
+    # Decoder
+    'Decoder',
 ]
 

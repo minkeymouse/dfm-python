@@ -42,7 +42,8 @@ from .stability import (
     stabilize_innovation_covariance,
     create_scaled_identity,
 )
-from ..utils.helper import handle_linear_algebra_error, get_config_attr
+from ..utils.helper import handle_linear_algebra_error
+from ..utils.misc import get_config_attr
 from ..utils.common import ensure_numpy
 from ..config.constants import DEFAULT_DTYPE
 from .validator import validate_ndarray_ndim, validate_no_nan_inf
@@ -194,6 +195,122 @@ def estimate_var(factors: np.ndarray, order: int = 1) -> Tuple[np.ndarray, np.nd
     Q = stabilize_innovation_covariance(Q, min_eigenval=MIN_EIGENVALUE, min_floor=MIN_Q_FLOOR, dtype=np.float32)
     
     return A, Q
+
+
+def estimate_var_with_fallback(
+    factors: np.ndarray,
+    order: int = 1,
+    num_factors: Optional[int] = None,
+    min_time_steps: int = 2
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Estimate VAR dynamics with comprehensive error handling and fallback.
+    
+    Estimates VAR(p) coefficients from factor time series using OLS regression.
+    Includes fallback to identity matrix if estimation fails.
+    
+    Parameters
+    ----------
+    factors : np.ndarray
+        Factor time series of shape (T, m) where T is time steps and m is number of factors
+    order : int, default 1
+        VAR order p
+    num_factors : int, optional
+        Number of factors (for fallback when factors shape is invalid)
+    min_time_steps : int, default 2
+        Minimum time steps required for VAR estimation
+        
+    Returns
+    -------
+    A_f : np.ndarray
+        VAR transition matrix of shape (m, m) for AR(order)
+    Q_f : np.ndarray
+        Innovation covariance matrix of shape (m, m), positive definite
+    """
+    from ..config.constants import (
+        MIN_STD, DEFAULT_AR_COEF, DEFAULT_IDENTITY_SCALE, DEFAULT_REGULARIZATION,
+        MIN_EIGENVALUE
+    )
+    from .stability import (
+        compute_var_safe, create_scaled_identity, ensure_positive_definite
+    )
+    from ..utils.common import ensure_numpy, sanitize_array
+    from ..utils.errors import DataError
+    from ..config.constants import COMPUTATION_ERROR_TYPES
+    
+    factors = ensure_numpy(factors)
+    
+    # Helper function to compute factor variance with minimum threshold
+    def _compute_factor_variance(factors: np.ndarray) -> np.ndarray:
+        """Compute factor variance with minimum threshold using numeric utilities."""
+        m = factors.shape[1]
+        factor_var = np.zeros(m)
+        for i in range(m):
+            factor_var[i] = compute_var_safe(
+                factors[:, i],
+                ddof=0,
+                min_variance=MIN_STD ** 2,
+                default_variance=MIN_STD ** 2
+            )
+        return factor_var
+    
+    # Helper function to create fallback VAR dynamics
+    def _create_fallback_var(m: int, factors: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """Create fallback VAR dynamics when estimation fails."""
+        factor_var = _compute_factor_variance(factors)
+        A_f = create_scaled_identity(m, DEFAULT_AR_COEF)
+        Q_f = np.diag(factor_var)
+        return A_f, Q_f
+    
+    # Validate factors shape and dimensions
+    MIN_FACTOR_DIM = 1
+    if (factors.ndim == 0 or factors.size == 0 or factors.ndim < 2 or 
+        factors.shape[0] < min_time_steps or factors.shape[1] < MIN_FACTOR_DIM):
+        m = num_factors if num_factors else MIN_FACTOR_DIM
+        return (
+            create_scaled_identity(m, DEFAULT_IDENTITY_SCALE),
+            create_scaled_identity(m, DEFAULT_REGULARIZATION)
+        )
+    
+    T, m = factors.shape
+    
+    # Minimum observations required for VAR estimation (order + 1)
+    min_obs_required = order + 1
+    if T < min_obs_required:
+        return _create_fallback_var(m, factors)
+    
+    if not np.all(np.isfinite(factors)):
+        factors = sanitize_array(factors)
+    
+    # VAR estimation error handling
+    try:
+        A_f, Q_f = estimate_var(factors, order=order)
+    except (*COMPUTATION_ERROR_TYPES, DataError) as e:
+        # Catch computation errors and data errors (e.g., insufficient observations)
+        _logger.warning(
+            f"VAR estimation failed (insufficient data or computation error): {e}. "
+            f"Using simplified AR dynamics as fallback."
+        )
+        return _create_fallback_var(m, factors)
+    
+    # Normalize Q_f shape and ensure it's 2D
+    if Q_f.ndim == 0:
+        # Scalar case: create diagonal matrix from factor variance
+        factor_var = _compute_factor_variance(factors)
+        Q_f = np.diag(factor_var)
+    elif Q_f.ndim != 2:
+        # Check if Q_f can be reshaped to (m, m)
+        expected_size = m * m
+        if Q_f.size == expected_size:
+            Q_f = Q_f.reshape(m, m)
+        else:
+            # Fallback: create diagonal from factor variance
+            factor_var = _compute_factor_variance(factors)
+            Q_f = np.diag(factor_var)
+    
+    # Use numeric utility to ensure positive definiteness
+    Q_f = ensure_positive_definite(Q_f, min_eigenvalue=MIN_EIGENVALUE)
+    
+    return A_f, Q_f
 
 
 def forecast_ar1_factors(
@@ -362,6 +479,69 @@ def estimate_idio_dynamics(
             Q_eps[j, j] = compute_var_safe(residuals_ar, ddof=0, min_variance=MIN_DIAGONAL_VARIANCE)
     
     return A_eps, Q_eps
+
+
+def extract_idio_params_for_ddfm(
+    A_eps: np.ndarray,
+    Q_eps: np.ndarray,
+    N: int
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Extract phi (AR coefficients) and std_eps (standard deviations) from estimated idio dynamics.
+    
+    This function converts the output of estimate_idio_dynamics() into the format
+    expected by DDFM's denoising procedure.
+    
+    Parameters
+    ----------
+    A_eps : np.ndarray
+        AR(1) coefficients from estimate_idio_dynamics (N x N) or (N,)
+    Q_eps : np.ndarray
+        Innovation covariance from estimate_idio_dynamics (N x N) or (N,)
+    N : int
+        Number of variables
+        
+    Returns
+    -------
+    phi : np.ndarray
+        AR coefficients matrix (N x N)
+    std_eps : np.ndarray
+        Standard deviations (N,)
+    """
+    from ..config.constants import (
+        DEFAULT_IDENTITY_SCALE, DEFAULT_EPSILON, DEFAULT_IDIO_STD,
+        MATRIX_TYPE_DIAGONAL, MATRIX_TYPE_COVARIANCE
+    )
+    from .stability import clean_matrix, create_scaled_identity
+    from ..utils.common import sanitize_array
+    
+    # Validate and sanitize using numeric utilities
+    A_eps = clean_matrix(A_eps, matrix_type=MATRIX_TYPE_DIAGONAL)
+    Q_eps = clean_matrix(Q_eps, matrix_type=MATRIX_TYPE_COVARIANCE)
+    
+    # Extract phi (AR coefficients) - handle different input formats
+    if A_eps.ndim == 2:
+        phi = A_eps
+    elif A_eps.ndim == 1:
+        phi = np.diag(A_eps)
+    else:
+        phi = create_scaled_identity(N, DEFAULT_IDENTITY_SCALE)
+    
+    # Extract std_eps (idiosyncratic standard deviations) - handle different input formats
+    if Q_eps.ndim == 2:
+        # Extract diagonal and compute std
+        diag = np.diag(Q_eps)
+        std_eps = np.sqrt(np.maximum(diag, DEFAULT_EPSILON))
+    elif Q_eps.ndim == 1:
+        # Q_eps is already diagonal (variances), compute std
+        std_eps = np.sqrt(np.maximum(Q_eps, DEFAULT_EPSILON))
+    else:
+        std_eps = np.ones(N) * DEFAULT_IDIO_STD
+    
+    # Ensure std_eps is finite and positive using sanitize_array
+    std_eps = sanitize_array(std_eps, nan_value=DEFAULT_EPSILON, inf_value=DEFAULT_IDIO_STD)
+    std_eps = np.maximum(std_eps, DEFAULT_EPSILON)
+    
+    return phi, std_eps
 
 
 def estimate_idio_params(
@@ -943,6 +1123,9 @@ __all__ = [
     'estimate_variance_unified',
     'compute_initial_covariance_from_transition',
     'stabilize_innovation_covariance',
+    # DDFM-specific utilities
+    'extract_idio_params_for_ddfm',
+    'estimate_var_with_fallback',
     # Forecast functions
     'forecast_ar1_factors',
 ]

@@ -28,7 +28,7 @@ except ImportError:
         torch = None
 
 from ..logger import get_logger
-from .errors import NumericalError
+from .errors import NumericalError, ConfigValidationError
 
 _logger = get_logger(__name__)
 
@@ -181,6 +181,62 @@ def extract_opt_param(
     return resolve_param(name=name, kwargs=kwargs, config=config, defaults=defaults)
 
 
+def get_config_attr(
+    config: Optional[Any],
+    attr_name: str,
+    default: Any = None,
+    required: bool = False
+) -> Any:
+    """Get configuration attribute with fallback and validation.
+    
+    This helper standardizes config attribute access, replacing
+    getattr(config, 'attr', default) patterns throughout the codebase.
+    
+    Parameters
+    ----------
+    config : Any, optional
+        Configuration object
+    attr_name : str
+        Attribute name to access
+    default : Any, optional
+        Default value if attribute not found
+    required : bool, default False
+        If True, raise ConfigValidationError if attribute not found
+        
+    Returns
+    -------
+    Any
+        Attribute value, default value, or None
+        
+    Raises
+    ------
+    ConfigValidationError
+        If required=True and attribute not found
+        
+    Examples
+    --------
+    >>> # Basic usage
+    >>> clip_enabled = get_config_attr(config, 'clip_ar_coefficients', True)
+    
+    >>> # Required attribute
+    >>> clock = get_config_attr(config, 'clock', required=True)
+    """
+    if config is None:
+        if required:
+            raise ConfigValidationError(f"Config is None, cannot access required attribute '{attr_name}'")
+        return default
+    
+    if hasattr(config, attr_name):
+        value = getattr(config, attr_name)
+        if value is not None:
+            return value
+    
+    if required:
+        raise ConfigValidationError(f"Config missing required attribute '{attr_name}'")
+    
+    return default
+
+
 def get_clock_frequency(config: Optional["DFMConfig"], default: Optional[str] = None) -> str:
     """Get clock frequency from config.
     
@@ -197,7 +253,6 @@ def get_clock_frequency(config: Optional["DFMConfig"], default: Optional[str] = 
         Clock frequency string
     """
     from ..config.constants import DEFAULT_CLOCK_FREQUENCY
-    from ..utils.helper import get_config_attr
     return get_config_attr(config, 'clock', default or DEFAULT_CLOCK_FREQUENCY)
 
 
@@ -309,22 +364,21 @@ def resolve_target_series(
 
 
 
-# Preprocessing functions moved to dataset.process
-# Re-export for backward compatibility (only commonly used functions)
+# ============================================================================
+# Re-exports for backward compatibility
+# ============================================================================
+# These functions have been moved to other modules but are re-exported here
+# to maintain backward compatibility with existing code.
+
+# Preprocessing functions (moved to dataset.process)
 from ..dataset.process import (
     _check_sklearn,
     _get_scaler,
     TimeIndex,
+    parse_timestamp,
 )
 
-
-
-# Time utilities moved to dataset.process
-# Re-export parse_timestamp for backward compatibility
-from ..dataset.process import parse_timestamp
-
-# Metric functions moved to metric.py
-# Re-export for backward compatibility
+# Metric functions (moved to metric.py)
 from .metric import (
     calculate_rmse,
     calculate_mae,

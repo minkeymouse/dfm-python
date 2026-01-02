@@ -2,7 +2,7 @@
 
 import pytest
 from torch.utils.data import DataLoader
-from dfm_python.dataset.dataset import DDFMDataset
+from dfm_python.dataset.ddfm_dataset import DDFMDataset
 import numpy as np
 
 

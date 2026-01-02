@@ -24,7 +24,7 @@ from ..dataset.process import TimeIndex, parse_timestamp
 from ..logger import get_logger
 from ..utils.common import ensure_numpy
 from ..utils.errors import ConfigurationError, DataValidationError
-from ..utils.helper import get_config_attr
+from ..utils.misc import get_config_attr
 
 _logger = get_logger(__name__)
 

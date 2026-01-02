@@ -13,7 +13,7 @@ import pytorch_lightning as lightning_pl
 
 from .base import BaseDataModule
 from .dfm_dm import DFMDataModule
-from ..dataset.dataset import KDFMDataset
+from ..dataset.kdfm_dataset import KDFMDataset
 from ..dataset.dataloader import create_kdfm_dataloader
 from ..logger import get_logger
 from ..utils.errors import ConfigurationError

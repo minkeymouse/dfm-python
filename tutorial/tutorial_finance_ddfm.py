@@ -158,13 +158,13 @@ frequency_dict = {col: "m" for col in selected_cols}
 
 # Create DDFM config (DDFM does not use blocks structure)
 # DDFM uses num_factors directly, not blocks
+# Note: factor_order is not a parameter - factors always use AR(1) dynamics
 config = DDFMConfig(
     frequency=frequency_dict,
     clock="m",  # Monthly clock frequency
     num_factors=1,  # Reduced to 1 for faster execution
-    factor_order=1,  # VAR(1) - first-order autoregressive
     encoder_layers=[32, 16],  # Reduced for faster execution
-    epochs=10,  # Reduced for faster execution
+    n_mc_samples=10,  # Number of MC samples per MCMC iteration (reduced for faster execution)
     learning_rate=DEFAULT_LEARNING_RATE,
     batch_size=DEFAULT_BATCH_SIZE,
     target_scaler=y_scaler  # Fitted scaler for target series inverse transformation
@@ -172,7 +172,8 @@ config = DDFMConfig(
 
 print(f"   Number of series: {len(selected_cols)}")
 print(f"   Number of factors: {config.num_factors} (DDFM uses num_factors parameter)")
-print(f"   Factor dynamics: VAR(1) (factor_order=1)")
+print(f"   Factor dynamics: VAR(1) (always AR(1), not configurable)")
+print(f"   MC samples per iteration: {config.n_mc_samples}")
 print(f"   Target series: {target_col}")
 
 # ============================================================================
@@ -218,15 +219,17 @@ print("\n[Step 5] Training DDFM model...")
 model = DDFM(
     encoder_layers=[32, 16],  # Reduced for faster execution
     num_factors=1,  # Reduced to 1 for faster execution
-    factor_order=1,  # VAR(1) - first-order factor dynamics
-    epochs=10,  # Reduced for faster execution
-    max_iter=3,  # Reduced for faster execution
-    batch_size=DEFAULT_BATCH_SIZE,  # Reduced for faster execution
+    n_mc_samples=10,  # Number of MC samples per MCMC iteration (reduced for faster execution)
+    max_iter=3,  # Maximum MCMC iterations (reduced for faster execution)
+    batch_size=DEFAULT_BATCH_SIZE,
     learning_rate=DEFAULT_DDFM_LEARNING_RATE
 )
-model._config = config  # Set config directly
+# Load config to ensure all parameters are set correctly
+model.load_config(config)
 
-trainer = DDFMTrainer(max_epochs=1)  # Minimal epochs for faster execution
+# Note: max_epochs in trainer corresponds to number of MCMC iterations (max_iter)
+# Each Lightning epoch = one MCMC iteration
+trainer = DDFMTrainer(max_epochs=3)  # Matches max_iter for faster execution
 trainer.fit(model, data_module)
 
 print("   Training completed!")

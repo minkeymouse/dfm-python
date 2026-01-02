@@ -4,7 +4,7 @@ import pytest
 import numpy as np
 from dfm_python.encoder.base import BaseEncoder
 from dfm_python.encoder.pca import PCAEncoder
-from dfm_python.encoder.simple_encoder import AutoencoderEncoder
+from dfm_python.encoder.variational_encoder import AutoencoderEncoder
 
 
 class TestBaseEncoder:

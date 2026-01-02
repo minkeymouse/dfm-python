@@ -24,7 +24,7 @@ and cannot be used interchangeably.
 - Use case: Dimensionality reduction, factor extraction
 
 **DDFM (Deep Dynamic Factor Model)**:
-- Training: Uses `fit_mcmc(data)` method (MCMC sampling)
+- Training: Uses PyTorch Lightning Trainer pattern (trainer.fit(model, datamodule))
 - Prediction: `predict(horizon)` - NO `last_observation` parameter
 - Result extraction: `get_result()` returns DDFMResult with uncertainty quantification
 - Architecture: Deep learning + Bayesian inference
@@ -52,7 +52,11 @@ explicit state management.
     
     # DDFM
     model = DDFM(config=config)
-    model.fit_mcmc(data)
+    model.load_config(config)
+    datamodule = DDFMDataModule(config=config, data=data)
+    datamodule.setup()
+    trainer = DDFMTrainer(max_epochs=100)
+    trainer.fit(model, datamodule)
     forecasts = model.predict(horizon=8)
 """
 

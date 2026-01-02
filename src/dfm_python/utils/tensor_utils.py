@@ -7,10 +7,11 @@ Note: Basic tensor conversion (tensor_to_numpy, numpy_to_tensor, ensure_tensor_o
 has been removed. Use ensure_numpy() and ensure_tensor() from utils.common instead.
 
 Remaining utilities:
-- extract_tensor_value: Extract scalar or array values
 - normalize_tensor_shape: Normalize tensor dimensions
 - validate_tensor_device: Validate device placement
 - batch_tensor_operation: Apply operations to batch dimensions
+
+Note: extract_tensor_value has been moved to utils.common for consolidation.
 """
 
 from typing import Union, Optional, Tuple, Any
@@ -30,47 +31,7 @@ _logger = get_logger(__name__)
 # - ensure_tensor_on_device() -> use ensure_tensor(..., device=...)
 
 
-def extract_tensor_value(tensor: Union[Tensor, np.ndarray, float, int]) -> Union[float, np.ndarray]:
-    """Extract scalar or array value from tensor.
-    
-    For scalar tensors, returns Python float/int.
-    For array tensors, returns NumPy array.
-    
-    Parameters
-    ----------
-    tensor : Tensor, np.ndarray, float, or int
-        Input tensor, array, or scalar
-        
-    Returns
-    -------
-    float, int, or np.ndarray
-        Extracted value
-        
-    Examples
-    --------
-    >>> t = torch.tensor(3.14)
-    >>> val = extract_tensor_value(t)
-    >>> assert isinstance(val, float)
-    >>> assert val == 3.14
-    """
-    if isinstance(tensor, (float, int)):
-        return tensor
-    elif isinstance(tensor, np.ndarray):
-        if tensor.size == 1:
-            return float(tensor.item()) if tensor.ndim == 0 else float(tensor.flat[0])
-        return tensor
-    elif isinstance(tensor, Tensor):
-        if tensor.numel() == 1:
-            return float(tensor.item())
-        from .common import ensure_numpy
-        return ensure_numpy(tensor)
-    else:
-        raise DataValidationError(
-            f"Expected Tensor, np.ndarray, float, or int, got {type(tensor).__name__}",
-            details=f"Input type: {type(tensor).__name__}, value: {tensor}"
-        )
-
-
+# extract_tensor_value moved to utils.common for consolidation
 def normalize_tensor_shape(
     tensor: Union[Tensor, np.ndarray],
     expected_ndim: int,

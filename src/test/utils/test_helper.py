@@ -4,9 +4,9 @@ import pytest
 import numpy as np
 from dfm_python.utils.helper import (
     handle_linear_algebra_error,
-    get_config_attr,
     validate_finite_array
 )
+from dfm_python.utils.misc import get_config_attr
 from dfm_python.utils.errors import NumericalError, ConfigValidationError
 
 

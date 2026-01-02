@@ -17,10 +17,8 @@ __all__ = [
 
 # DDFM implementation
 from .ddfm import DDFM
-from ..trainer.ddfm import DDFMDenoisingTrainer
 __all__.extend([
     'DDFM',  # High-level API
-    'DDFMDenoisingTrainer',  # Denoising training procedure
 ])
 
 # KDFM implementation

@@ -502,7 +502,7 @@ class DDFMConfig(BaseModelConfig):
     activation: str = 'relu'  # Activation function ('tanh', 'relu', 'sigmoid', default: 'relu' to match original DDFM)
     use_batch_norm: bool = True  # Use batch normalization in encoder (default: True)
     learning_rate: float = 0.001  # Learning rate for Adam optimizer (default: 0.001)
-    epochs: int = 100  # Number of training epochs (default: 100)
+    n_mc_samples: int = 200  # Number of MC samples per MCMC iteration (default: 200, matching original paper's epochs=100 and typical usage)
     batch_size: int = 100  # Batch size for training (default: 100 to match original DDFM)
     # Note: factor_order removed - factors always use AR(1) dynamics (simplified)
     use_idiosyncratic: bool = True  # Model idio components with AR(1) dynamics (default: True)
@@ -523,13 +523,14 @@ class DDFMConfig(BaseModelConfig):
     def _extract_ddfm(cls, data: Dict[str, Any]) -> Dict[str, Any]:
         """Extract DDFM-specific parameters from config dict."""
         # Don't extract base params here - they're already in base_params from from_dict
+        from ..constants import DEFAULT_N_MC_SAMPLES
         ddfm_params = cls._extract_params(data, {
             'encoder_layers': None,
             'num_factors': None,
             'activation': 'relu',
             'use_batch_norm': True,
             'learning_rate': DEFAULT_LEARNING_RATE,
-            'epochs': DEFAULT_MAX_EPOCHS,
+            'epochs': DEFAULT_N_MC_SAMPLES,  # Map 'epochs' from config to n_mc_samples (backward compatibility - configs use 'epochs')
             'batch_size': DEFAULT_DDFM_BATCH_SIZE,
             'use_idiosyncratic': True,
             'min_obs_idio': DEFAULT_MIN_OBS_IDIO,
@@ -538,6 +539,9 @@ class DDFMConfig(BaseModelConfig):
             'disp': DEFAULT_DISP,
             'seed': None,
         })
+        # Map 'epochs' from config to 'n_mc_samples' for clarity
+        if 'epochs' in ddfm_params:
+            ddfm_params['n_mc_samples'] = ddfm_params.pop('epochs')
         return ddfm_params
     
     @classmethod

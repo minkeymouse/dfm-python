@@ -213,7 +213,7 @@ class DFM(BaseFactorModel):
         # Determine number of factors
         # Conditional logic: Initialize num_factors from config if not provided (not validation)
         if num_factors is None:
-            from ..utils.helper import get_config_attr
+            from ..utils.misc import get_config_attr
             factors_per_block = get_config_attr(config, 'factors_per_block', None)
             if factors_per_block is not None:
                 self.num_factors = int(np.sum(factors_per_block))
@@ -876,7 +876,7 @@ class DFM(BaseFactorModel):
             
             # Setup mixed-frequency parameters (fallback if no datamodule)
             # Auto-detect from config if not explicitly set
-            from ..utils.helper import get_config_attr
+            from ..utils.misc import get_config_attr
             clock = get_config_attr(self.config, 'clock', DEFAULT_CLOCK_FREQUENCY)
             
             # Conditional logic: Auto-detect mixed frequency from config if not set (not validation)
@@ -1213,7 +1213,8 @@ class DFM(BaseFactorModel):
         result = self._ensure_result()
         
         # Get last smoothed state from training as initial state for new data
-        Z_last = result.Z[-1, :] if result.Z.shape[0] > 0 else result.Z_0
+        # Check both shape dimensions and length to safely access last row
+        Z_last = result.Z[-1, :] if (has_shape_with_min_dims(result.Z, min_dims=1) and result.Z.shape[0] > 0) else result.Z_0
         V_last = result.V_0  # Use original V_0 or could compute from last state covariance
         
         # Create Kalman filter with current parameters and new initial state
@@ -1377,7 +1378,8 @@ class DFM(BaseFactorModel):
             )
             
             # Get last smoothed state from training as initial state for filtering
-            Z_initial = result.Z[-1, :] if result.Z.shape[0] > 0 else result.Z_0
+            # Check both shape dimensions and length to safely access last row
+            Z_initial = result.Z[-1, :] if (has_shape_with_min_dims(result.Z, min_dims=1) and result.Z.shape[0] > 0) else result.Z_0
             V_initial = result.V_0
             
             # Create Kalman filter with current parameters
@@ -1391,11 +1393,13 @@ class DFM(BaseFactorModel):
             filtered_states, _ = kalman_filter.filter(y_masked)
             
             # Extract last filtered state as initial state for forecasting
-            Z_last = filtered_states[-1, :] if filtered_states.shape[0] > 0 else Z_initial
+            # Check both shape dimensions and length to safely access last row (consistent with other shape checks)
+            Z_last = filtered_states[-1, :] if (has_shape_with_min_dims(filtered_states, min_dims=1) and filtered_states.shape[0] > 0) else Z_initial
         else:
             # Use training state for initial factor state
             # For DFM, we use the last smoothed state from training
-            Z_last = result.Z[-1, :] if result.Z.shape[0] > 0 else np.zeros(result.A.shape[0], dtype=DEFAULT_DTYPE)
+            # Check both shape dimensions and length to safely access last row
+            Z_last = result.Z[-1, :] if (has_shape_with_min_dims(result.Z, min_dims=1) and result.Z.shape[0] > 0) else np.zeros(result.A.shape[0], dtype=DEFAULT_DTYPE)
         
         # Validate factor state and parameters are finite
         from ..numeric.validator import validate_no_nan_inf

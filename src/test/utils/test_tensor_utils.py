@@ -4,11 +4,11 @@ import pytest
 import numpy as np
 import torch
 from dfm_python.utils.tensor_utils import (
-    extract_tensor_value,
     normalize_tensor_shape,
     validate_tensor_device,
     batch_tensor_operation
 )
+from dfm_python.utils.common import extract_tensor_value
 from dfm_python.utils.errors import DataValidationError
 
 

@@ -2,7 +2,8 @@
 
 import pytest
 import torch
-from dfm_python.encoder.simple_encoder import Encoder, AutoencoderEncoder
+from dfm_python.encoder.simple_encoder import Encoder
+from dfm_python.encoder.variational_encoder import AutoencoderEncoder
 from dfm_python.utils.errors import ConfigurationError, DataValidationError
 
 

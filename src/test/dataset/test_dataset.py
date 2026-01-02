@@ -1,7 +1,8 @@
 """Tests for dataset.dataset module."""
 
 import pytest
-from dfm_python.dataset.dataset import DDFMDataset, KDFMDataset
+from dfm_python.dataset.ddfm_dataset import DDFMDataset
+from dfm_python.dataset.kdfm_dataset import KDFMDataset
 
 
 class TestDDFMDataset:

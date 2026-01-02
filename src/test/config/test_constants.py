@@ -22,6 +22,9 @@ from dfm_python.config.constants import (
     MIN_DDFM_DATASET_SIZE_WARNING,
     MIN_ITER_FOR_DELTA_COMPUTATION,
     MIN_EPS_SHAPE_FOR_IDIO,
+    DEFAULT_N_MC_SAMPLES,
+    DEFAULT_FACTOR_ORDER,
+    COMPUTATION_ERROR_TYPES,
 )
 
 
@@ -155,4 +158,40 @@ class TestConstants:
         assert MIN_EPS_SHAPE_FOR_IDIO == 1
         # Verify it's used in trainer/ddfm.py for eps.shape[0] comparison
         # The constant is used in condition: eps.shape[0] > MIN_EPS_SHAPE_FOR_IDIO
+    
+    def test_default_n_mc_samples(self):
+        """Test DEFAULT_N_MC_SAMPLES constant."""
+        assert DEFAULT_N_MC_SAMPLES is not None
+        assert isinstance(DEFAULT_N_MC_SAMPLES, int)
+        assert DEFAULT_N_MC_SAMPLES == 200  # Updated to match original paper's convention
+        # Verify it's used in models/ddfm.py for n_mc_samples parameter
+        # This is the number of MC samples per MCMC iteration for DDFM denoising training
+        # Matches original paper's typical usage (around 200 samples)
+        assert DEFAULT_N_MC_SAMPLES > 0
+    
+    def test_default_factor_order(self):
+        """Test DEFAULT_FACTOR_ORDER constant."""
+        assert DEFAULT_FACTOR_ORDER is not None
+        assert isinstance(DEFAULT_FACTOR_ORDER, int)
+        assert DEFAULT_FACTOR_ORDER == 1  # Default factor order for DDFM (AR(1) dynamics)
+        # Verify it's used in models/ddfm.py for factor_order parameter
+        # This replaces hardcoded factor_order=1 throughout the codebase
+        assert DEFAULT_FACTOR_ORDER > 0
+    
+    def test_computation_error_types(self):
+        """Test COMPUTATION_ERROR_TYPES constant."""
+        assert COMPUTATION_ERROR_TYPES is not None
+        assert isinstance(COMPUTATION_ERROR_TYPES, tuple)
+        # Verify it contains expected exception types
+        assert RuntimeError in COMPUTATION_ERROR_TYPES
+        assert ValueError in COMPUTATION_ERROR_TYPES
+        assert TypeError in COMPUTATION_ERROR_TYPES
+        assert AttributeError in COMPUTATION_ERROR_TYPES
+        assert KeyError in COMPUTATION_ERROR_TYPES
+        # Verify it does not contain OSError (which is used separately in ddfm.py for I/O errors)
+        # OSError is a built-in exception, check by name
+        error_type_names = [et.__name__ for et in COMPUTATION_ERROR_TYPES]
+        assert 'OSError' not in error_type_names
+        # Verify it's used in models/kdfm.py for consistent error handling
+        # Used to consolidate duplicate exception handling patterns across models
 

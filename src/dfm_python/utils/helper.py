@@ -8,8 +8,7 @@ from typing import Any, Optional, Callable, Type, Union, NoReturn
 import numpy as np
 
 from ..logger import get_logger
-from ..utils.errors import NumericalError, ConfigValidationError
-from ..utils.misc import resolve_param
+from ..utils.errors import NumericalError
 
 _logger = get_logger(__name__)
 
@@ -78,73 +77,25 @@ def handle_linear_algebra_error(
             raise
 
 
-def get_config_attr(
-    config: Optional[Any],
-    attr_name: str,
-    default: Any = None,
-    required: bool = False
-) -> Any:
-    """Get configuration attribute with fallback and validation.
-    
-    This helper standardizes config attribute access, replacing
-    getattr(config, 'attr', default) patterns throughout the codebase.
-    
-    Parameters
-    ----------
-    config : Any, optional
-        Configuration object
-    attr_name : str
-        Attribute name to access
-    default : Any, optional
-        Default value if attribute not found
-    required : bool, default False
-        If True, raise AttributeError if attribute not found
-        
-    Returns
-    -------
-    Any
-        Attribute value, default value, or None
-        
-    Raises
-    ------
-    AttributeError
-        If required=True and attribute not found
-        
-    Examples
-    --------
-    >>> # Basic usage
-    >>> clip_enabled = get_config_attr(config, 'clip_ar_coefficients', True)
-    
-    >>> # Required attribute
-    >>> clock = get_config_attr(config, 'clock', required=True)
-    """
-    if config is None:
-        if required:
-            raise ConfigValidationError(f"Config is None, cannot access required attribute '{attr_name}'")
-        return default
-    
-    if hasattr(config, attr_name):
-        value = getattr(config, attr_name)
-        if value is not None:
-            return value
-    
-    if required:
-        raise ConfigValidationError(f"Config missing required attribute '{attr_name}'")
-    
-    return default
-
+# get_config_attr moved to utils.misc for consolidation with other config utilities
 
 def validate_finite_array(
     arr: np.ndarray,
     name: str = "array",
     context: Optional[str] = None,
     error_class: Type[Exception] = NumericalError,
-    fallback: Optional[np.ndarray] = None
+    fallback: Optional[np.ndarray] = None,
+    sanitize: bool = False,
+    nan_value: float = None,
+    inf_value: float = None
 ) -> np.ndarray:
-    """Validate that array contains only finite values, with optional fallback.
+    """Validate that array contains only finite values, with optional fallback or sanitization.
     
     This helper standardizes finite array checks, replacing manual
     np.any(~np.isfinite()) patterns throughout the codebase.
+    
+    Can optionally sanitize the array (replace NaN/Inf) instead of raising,
+    or use a fallback array.
     
     Parameters
     ----------
@@ -155,19 +106,25 @@ def validate_finite_array(
     context : str, optional
         Additional context for error messages
     error_class : Type[Exception], default NumericalError
-        Exception class to raise if validation fails
+        Exception class to raise if validation fails (only if sanitize=False and fallback=None)
     fallback : np.ndarray, optional
-        Fallback array to return if validation fails (instead of raising)
+        Fallback array to return if validation fails (instead of raising or sanitizing)
+    sanitize : bool, default False
+        If True, sanitize the array instead of raising (uses sanitize_array)
+    nan_value : float, optional
+        Value to replace NaN with if sanitize=True. If None, uses DEFAULT_ZERO_VALUE.
+    inf_value : float, optional
+        Value to replace Inf with if sanitize=True. If None, uses MAX_EIGENVALUE.
         
     Returns
     -------
     np.ndarray
-        Original array if finite, or fallback if provided and check fails
+        Original array if finite, sanitized array if sanitize=True, or fallback if provided
         
     Raises
     ------
     error_class
-        If array contains non-finite values and no fallback provided
+        If array contains non-finite values and no fallback/sanitization provided
         
     Examples
     --------
@@ -179,22 +136,32 @@ def validate_finite_array(
     
     >>> # With fallback (returns fallback on failure)
     >>> arr = validate_finite_array(data, "data", fallback=default_data)
-    """
-    if not np.all(np.isfinite(arr)):
-        nan_count = np.sum(~np.isfinite(arr))
-        context_str = f" in {context}" if context else ""
-        msg = f"{name}{context_str} contains {nan_count} non-finite values"
-        
-        if fallback is not None:
-            from ..logger import get_logger
-            _logger = get_logger(__name__)
-            _logger.warning(f"{msg}. Using fallback array")
-            return fallback
-        else:
-            raise error_class(
-                msg,
-                details="This indicates numerical instability. Please check model parameters and training convergence."
-            )
     
-    return arr
+    >>> # With sanitization (replaces NaN/Inf instead of raising)
+    >>> arr = validate_finite_array(data, "data", sanitize=True)
+    """
+    if np.all(np.isfinite(arr)):
+        return arr
+    
+    nan_count = np.sum(~np.isfinite(arr))
+    context_str = f" in {context}" if context else ""
+    msg = f"{name}{context_str} contains {nan_count} non-finite values"
+    
+    if fallback is not None:
+        _logger.warning(f"{msg}. Using fallback array")
+        return fallback
+    elif sanitize:
+        from ..utils.common import sanitize_array
+        from ..config.constants import DEFAULT_ZERO_VALUE, MAX_EIGENVALUE
+        _logger.warning(f"{msg}. Sanitizing array")
+        return sanitize_array(
+            arr,
+            nan_value=nan_value if nan_value is not None else DEFAULT_ZERO_VALUE,
+            inf_value=inf_value if inf_value is not None else MAX_EIGENVALUE
+        )
+    else:
+        raise error_class(
+            msg,
+            details="This indicates numerical instability. Please check model parameters and training convergence."
+        )
 

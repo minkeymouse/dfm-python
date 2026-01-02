@@ -1,7 +1,7 @@
-"""Autoencoder layers and utilities for DDFM.
+"""Encoder and decoder utilities for DDFM.
 
-This module contains PyTorch-based encoder networks used in the
-Deep Dynamic Factor Model (DDFM), along with training and conversion utilities.
+This module contains DDFM-specific encoder networks and decoder parameter extraction utilities.
+The Encoder class is the core PyTorch module used in DDFM training.
 """
 
 import numpy as np
@@ -26,12 +26,11 @@ except ImportError:
     nn = None
     optim = None
 
-from .base import BaseEncoder
 from ..logger import get_logger
 from ..utils.errors import ConfigurationError, DataValidationError
 from ..utils.common import ensure_numpy, sanitize_array
 from ..numeric.stability import create_scaled_identity
-from ..config.constants import DEFAULT_TORCH_DTYPE, DEFAULT_ZERO_VALUE
+from ..config.constants import DEFAULT_TORCH_DTYPE, DEFAULT_ZERO_VALUE, DEFAULT_FACTOR_ORDER
 
 _logger = get_logger(__name__)
 
@@ -179,152 +178,14 @@ if _has_torch:
             # Output layer (linear, no activation)
             x = self.output_layer(x)
             return x
-    
-    
-    class AutoencoderEncoder(BaseEncoder):
-        """Autoencoder encoder wrapper for factor extraction.
-        
-        This class wraps the PyTorch Encoder module to provide the BaseEncoder interface.
-        It handles training and encoding for DDFM.
-        
-        Parameters
-        ----------
-        n_components : int
-            Number of factors to extract
-        input_dim : int
-            Number of input features (number of series)
-        hidden_dims : List[int]
-            List of hidden layer dimensions
-        activation : str, default 'tanh'
-            Activation function ('tanh', 'relu', 'sigmoid')
-        use_batch_norm : bool, default True
-            Whether to use batch normalization
-        """
-        
-        def __init__(
-            self,
-            n_components: int,
-            input_dim: int,
-            hidden_dims: List[int],
-            activation: str = 'tanh',
-            use_batch_norm: bool = True,
-        ):
-            super().__init__(n_components)
-            
-            if not _has_torch:
-                raise ImportError("PyTorch is required for AutoencoderEncoder")
-            
-            self.input_dim = input_dim
-            self.hidden_dims = hidden_dims
-            self.activation = activation
-            self.use_batch_norm = use_batch_norm
-            
-            # Create the PyTorch encoder module
-            self.encoder_module = Encoder(
-                input_dim=input_dim,
-                hidden_dims=hidden_dims,
-                output_dim=n_components,
-                activation=activation,
-                use_batch_norm=use_batch_norm,
-            )
-            
-            # Training state
-            self._is_fitted = False
-        
-        def fit(
-            self,
-            X: Union[np.ndarray, "torch.Tensor"],
-            **kwargs
-        ) -> "AutoencoderEncoder":
-            """Fit autoencoder encoder (no-op, training is done separately).
-            
-            Note: Autoencoder encoders are typically trained via autoencoder training
-            (encoder + decoder) before being used for factor extraction.
-            This method satisfies the BaseEncoder interface but does nothing.
-            
-            Parameters
-            ----------
-            X : np.ndarray or torch.Tensor
-                Training data (T x N). Not used, training is done separately.
-            **kwargs
-                Additional parameters (ignored)
-                
-            Returns
-            -------
-            self : AutoencoderEncoder
-                Returns self for method chaining
-            """
-            # Autoencoder training is done separately via autoencoder training
-            # This is just for interface compatibility
-            self._is_fitted = True
-            return self
-        
-        def encode(
-            self,
-            X: Union[np.ndarray, "torch.Tensor"],
-            **kwargs
-        ) -> "torch.Tensor":
-            """Extract factors using trained autoencoder encoder.
-            
-            Parameters
-            ----------
-            X : np.ndarray or torch.Tensor
-                Observed data (T x N) or (batch_size x T x N)
-            **kwargs
-                Additional parameters (ignored)
-                
-            Returns
-            -------
-            factors : torch.Tensor
-                Extracted factors (T x n_components) or (batch_size x T x n_components)
-            """
-            if not _has_torch:
-                raise ImportError("PyTorch is required for AutoencoderEncoder")
-            
-            # Convert to tensor if needed
-            if isinstance(X, np.ndarray):
-                X = torch.tensor(X, dtype=DEFAULT_TORCH_DTYPE)
-            
-            # Handle different input shapes
-            original_shape = X.shape
-            if X.ndim == 3:
-                # (batch_size, T, N) -> (batch_size * T, N)
-                batch_size, T, N = X.shape
-                X = X.view(batch_size * T, N)
-                factors = self.encoder_module(X)
-                # Reshape back: (batch_size * T, n_components) -> (batch_size, T, n_components)
-                factors = factors.view(batch_size, T, self.n_components)
-            elif X.ndim == 2:
-                # (T, N) -> (T, n_components)
-                factors = self.encoder_module(X)
-            else:
-                raise DataValidationError(
-                    f"Expected 2D or 3D input, got {X.ndim}D",
-                    details="Input must be 2D (T, K) or 3D (batch, T, K) for encoder forward pass"
-                )
-            
-            return factors
-        
-        @property
-        def encoder(self) -> Encoder:
-            """Get the underlying PyTorch encoder module."""
-            return self.encoder_module
-    
-    
+
+
 else:
-    # Placeholder classes when PyTorch is not available
+    # Placeholder class when PyTorch is not available
     class Encoder:
         """Placeholder Encoder class when PyTorch is not available."""
         def __init__(self, *args, **kwargs):
             raise ImportError("PyTorch is required for DDFM. Install with: pip install dfm-python[deep]")
-    
-    class AutoencoderEncoder(BaseEncoder):
-        """Placeholder AutoencoderEncoder class when PyTorch is not available."""
-        def __init__(self, *args, **kwargs):
-            raise ImportError("PyTorch is required for AutoencoderEncoder. Install with: pip install dfm-python[deep]")
-        
-        def encode(self, X, **kwargs):
-            raise ImportError("PyTorch is required for AutoencoderEncoder")
 
 
 def extract_decoder_params(decoder) -> Tuple[np.ndarray, np.ndarray]:
@@ -382,13 +243,13 @@ def extract_decoder_params(decoder) -> Tuple[np.ndarray, np.ndarray]:
 def convert_decoder_to_numpy(
     decoder: Any,  # nn.Module when torch is available
     has_bias: bool = True,
-    factor_order: int = 1,
+    factor_order: int = DEFAULT_FACTOR_ORDER,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Convert PyTorch decoder to NumPy arrays for state-space model.
     
     Extracts weights and biases from a PyTorch decoder (typically nn.Linear)
     and constructs the observation matrix (emission matrix) for the state-space
-    representation. Supports VAR(1) and VAR(2) factor dynamics.
+    representation. Currently supports VAR(1) factor dynamics.
     
     Parameters
     ----------
@@ -397,8 +258,8 @@ def convert_decoder_to_numpy(
         a final Linear layer accessible via `.decoder` attribute)
     has_bias : bool
         Whether the decoder has a bias term
-    factor_order : int
-        Lag order for common factors. Only VAR(1) and VAR(2) are supported.
+    factor_order : int, default DEFAULT_FACTOR_ORDER
+        Lag order for common factors. Currently only VAR(1) (factor_order=1) is supported.
         Higher orders will raise NotImplementedError.
         
     Returns
@@ -408,13 +269,12 @@ def convert_decoder_to_numpy(
     emission : np.ndarray
         Emission matrix (N x state_dim) for state-space model.
         For VAR(1): [C, I] where C is loading matrix and I is identity for idio
-        For VAR(2): [C, zeros, I] where zeros are for lagged factors
         
     Notes
     -----
     The emission matrix structure depends on the state vector:
     - VAR(1): x_t = [f_t, eps_t], emission = [C, I]
-    - VAR(2): x_t = [f_t, f_{t-1}, eps_t], emission = [C, zeros, I]
+    - Higher orders: Not yet implemented
     """
     if not _has_torch:
         raise ImportError("PyTorch is required for decoder conversion")
@@ -444,19 +304,8 @@ def convert_decoder_to_numpy(
     # Construct emission matrix for state-space model
     N, m = weight.shape
     
-    if factor_order == 2:
-        # VAR(2): x_t = [f_t, f_{t-1}, eps_t]
-        # emission = [C, zeros, I]
-        # where C is the loading matrix (N x m)
-        C = weight.T  # m x N, but we need N x m for emission
-        # Actually, emission should be N x (m + m + N) = N x (2m + N)
-        from ..config.constants import DEFAULT_IDENTITY_SCALE
-        emission = np.hstack([
-            weight,  # N x m (current factors)
-            np.zeros((N, m)),  # N x m (lagged factors, zero contribution)
-            create_scaled_identity(N, DEFAULT_IDENTITY_SCALE)  # N x N (idiosyncratic components)
-        ])
-    elif factor_order == 1:
+    # Currently only VAR(1) is implemented (factor_order=1)
+    if factor_order == 1:
         # VAR(1): x_t = [f_t, eps_t]
         # emission = [C, I]
         from ..config.constants import DEFAULT_IDENTITY_SCALE
@@ -466,8 +315,8 @@ def convert_decoder_to_numpy(
         ])
     else:
         raise NotImplementedError(
-            f"Only VAR(1) or VAR(2) for common factors are supported. "
-            f"Got factor_order={factor_order}"
+            f"Only VAR(1) (factor_order=1) for common factors is currently supported. "
+            f"Got factor_order={factor_order}. Higher orders may be implemented in the future."
         )
     
     return bias, emission

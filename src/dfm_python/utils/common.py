@@ -10,7 +10,7 @@ import torch
 from torch import Tensor
 
 from ..config.types import Device, ArrayLike
-from .errors import NumericalError, DataValidationError
+from .errors import DataValidationError
 from ..logger import get_logger
 from ..config.constants import DEFAULT_ZERO_VALUE, MAX_EIGENVALUE
 
@@ -205,12 +205,18 @@ def sanitize_array(
     arr: np.ndarray,
     nan_value: float = DEFAULT_ZERO_VALUE,
     inf_value: float = MAX_EIGENVALUE,
-    neginf_value: Optional[float] = None
+    neginf_value: Optional[float] = None,
+    validate: bool = False,
+    name: str = "array",
+    context: Optional[str] = None
 ) -> np.ndarray:
     """Sanitize array by replacing NaN/Inf with specified values.
     
     This helper consolidates the common pattern of using np.nan_to_num
     with DEFAULT_ZERO_VALUE for NaN and MAX_EIGENVALUE for Inf values.
+    
+    Can optionally validate that the array contains finite values before
+    sanitization, providing better error messages.
     
     Parameters
     ----------
@@ -222,6 +228,12 @@ def sanitize_array(
         Value to replace positive infinity with
     neginf_value : float, optional
         Value to replace negative infinity with. If None, uses -inf_value.
+    validate : bool, default False
+        If True, log a warning if non-finite values are found before sanitization
+    name : str, default "array"
+        Name for validation messages (only used if validate=True)
+    context : str, optional
+        Additional context for validation messages (only used if validate=True)
         
     Returns
     -------
@@ -234,7 +246,18 @@ def sanitize_array(
     >>> arr = np.array([1.0, np.nan, np.inf, -np.inf, 2.0])
     >>> sanitized = sanitize_array(arr)
     >>> assert np.all(np.isfinite(sanitized))
+    
+    >>> # With validation warning
+    >>> sanitized = sanitize_array(arr, validate=True, name="factors", context="DDFM")
     """
+    if validate and not np.all(np.isfinite(arr)):
+        nan_count = np.sum(~np.isfinite(arr))
+        context_str = f" in {context}" if context else ""
+        _logger.warning(
+            f"{name}{context_str} contains {nan_count} non-finite values. "
+            f"Sanitizing with nan_value={nan_value}, inf_value={inf_value}"
+        )
+    
     if neginf_value is None:
         neginf_value = -inf_value
     return np.nan_to_num(arr, nan=nan_value, posinf=inf_value, neginf=neginf_value)
@@ -401,3 +424,50 @@ def select_columns_by_prefix(
             if hasattr(df, 'columns') and col in df.columns:
                 selected_cols.append(col)
     return selected_cols
+
+
+def extract_tensor_value(tensor: Union[Tensor, np.ndarray, float, int]) -> Union[float, np.ndarray]:
+    """Extract scalar or array value from tensor.
+    
+    For scalar tensors, returns Python float/int.
+    For array tensors, returns NumPy array.
+    
+    This consolidates tensor value extraction logic, complementing
+    ensure_numpy() which always returns arrays.
+    
+    Parameters
+    ----------
+    tensor : Tensor, np.ndarray, float, or int
+        Input tensor, array, or scalar
+        
+    Returns
+    -------
+    float, int, or np.ndarray
+        Extracted value (scalar for single-element tensors, array otherwise)
+        
+    Examples
+    --------
+    >>> t = torch.tensor(3.14)
+    >>> val = extract_tensor_value(t)
+    >>> assert isinstance(val, float)
+    >>> assert val == 3.14
+    
+    >>> t = torch.tensor([1.0, 2.0, 3.0])
+    >>> arr = extract_tensor_value(t)
+    >>> assert isinstance(arr, np.ndarray)
+    """
+    if isinstance(tensor, (float, int)):
+        return tensor
+    elif isinstance(tensor, np.ndarray):
+        if tensor.size == 1:
+            return float(tensor.item()) if tensor.ndim == 0 else float(tensor.flat[0])
+        return tensor
+    elif isinstance(tensor, Tensor):
+        if tensor.numel() == 1:
+            return float(tensor.item())
+        return ensure_numpy(tensor)
+    else:
+        raise DataValidationError(
+            f"Expected Tensor, np.ndarray, float, or int, got {type(tensor).__name__}",
+            details=f"Input type: {type(tensor).__name__}, value: {tensor}"
+        )

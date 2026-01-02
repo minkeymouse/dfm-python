@@ -13,13 +13,19 @@ from pathlib import Path
 import pytorch_lightning as lightning_pl
 
 from .base import BaseDataModule
-from ..config.constants import DEFAULT_WINDOW_SIZE, DEFAULT_DDFM_BATCH_SIZE, DEFAULT_TORCH_DTYPE
+from ..config.constants import (
+    DEFAULT_WINDOW_SIZE, DEFAULT_DDFM_BATCH_SIZE, DEFAULT_TORCH_DTYPE,
+    DEFAULT_NAN_METHOD, DEFAULT_NAN_K, DEFAULT_ZERO_VALUE, DEFAULT_EPSILON
+)
 from ..config import DFMConfig
-from ..dataset.dataset import DDFMDataset
+from ..dataset.ddfm_dataset import DDFMDataset, DDFMMCDataset
 from ..dataset.dataloader import create_ddfm_dataloader
 from ..dataset.process import TimeIndex, _get_scaler
 from ..logger import get_logger
 from ..utils.errors import DataValidationError, ConfigurationError
+from ..utils.misc import get_config_attr
+from ..utils.common import ensure_numpy, ensure_tensor
+from ..utils.preprocessing import preprocess_training_data, adjust_mask_shape
 
 _logger = get_logger(__name__)
 
@@ -150,6 +156,10 @@ class DDFMDataModule(BaseDataModule, lightning_pl.LightningDataModule):
         self.train_dataset: Optional[DDFMDataset] = None
         self.val_dataset: Optional[DDFMDataset] = None
         self.data_processed: Optional[torch.Tensor] = None
+        
+        # MC dataset for DDFM training (created in setup() or on_train_start hook)
+        self.mc_dataset: Optional[DDFMMCDataset] = None
+        self.model: Optional[Any] = None  # Reference to DDFM model
     
     def setup(self, stage: Optional[str] = None) -> None:
         """Load and prepare data.
@@ -232,8 +242,127 @@ class DDFMDataModule(BaseDataModule, lightning_pl.LightningDataModule):
             self.train_dataset = DDFMDataset(self.data_processed, window_size=self.window_size, stride=self.stride)
             self.val_dataset = None
     
+    def _preprocess_training_data(self, X_torch: torch.Tensor) -> Tuple[torch.Tensor, np.ndarray]:
+        """Preprocess training data: handle missing values and ensure finite values.
+        
+        This method delegates to the utility function preprocess_training_data
+        for consistency and reusability.
+        
+        Parameters
+        ----------
+        X_torch : torch.Tensor
+            Raw training data (T x N)
+            
+        Returns
+        -------
+        x_clean_torch : torch.Tensor
+            Cleaned data with missing values imputed
+        missing_mask : np.ndarray
+            Boolean mask indicating missing values (True = missing)
+        """
+        return preprocess_training_data(
+            X_torch,
+            config=self.config,
+            dtype=DEFAULT_TORCH_DTYPE,
+            replace_inf=True
+        )
+    
+    def _adjust_mask_shape(self, mask: np.ndarray, target_shape: Tuple[int, int]) -> np.ndarray:
+        """Adjust missing mask shape to match target shape.
+        
+        This method delegates to the utility function adjust_mask_shape
+        for consistency and reusability.
+        
+        Parameters
+        ----------
+        mask : np.ndarray
+            Missing mask (may have different shape)
+        target_shape : Tuple[int, int]
+            Target shape (T, N)
+            
+        Returns
+        -------
+        mask : np.ndarray
+            Adjusted mask with shape matching target_shape
+        """
+        return adjust_mask_shape(
+            mask,
+            target_shape,
+            time_dim=0,
+            variable_dim=1,
+            pad_value=False,
+            warn=True
+        )
+    
+    def create_mc_dataset(
+        self,
+        model: 'DDFM',
+        data_mod: torch.Tensor,
+        data_mod_only_miss: torch.Tensor,
+        missing_mask: np.ndarray
+    ) -> DDFMMCDataset:
+        """Create MC dataset from model and preprocessed data.
+        
+        This method encapsulates MC dataset creation logic in the datamodule,
+        moving it from the model class for better separation of concerns.
+        
+        Parameters
+        ----------
+        model : DDFM
+            DDFM model instance with initialized buffers (Phi, Sigma_eps)
+        data_mod : torch.Tensor
+            Filtered data (T x N), after subtracting AR-idio mean
+        data_mod_only_miss : torch.Tensor
+            Original data with missing values (T x N)
+        missing_mask : np.ndarray
+            Missing data mask (T x N), True where data is missing
+            
+        Returns
+        -------
+        DDFMMCDataset
+            Initialized MC dataset instance
+        """
+        return DDFMMCDataset.create_from_model(
+            model=model,
+            data_mod=data_mod,
+            data_mod_only_miss=data_mod_only_miss,
+            missing_mask=missing_mask
+        )
+    
     def train_dataloader(self) -> DataLoader:
-        """Create DataLoader for training."""
+        """Create DataLoader for training with MC dataset.
+        
+        Returns DataLoader wrapping the MC dataset created in on_train_start() hook.
+        Always checks model's _mc_dataset attribute dynamically to handle Lightning's caching.
+        """
+        # Always check model's _mc_dataset first (created in on_train_start hook)
+        # This handles Lightning's caching - we check dynamically every time
+        trainer = getattr(self, 'trainer', None)
+        if trainer is not None:
+            model = getattr(trainer, 'model', None)
+            if model is not None and hasattr(model, '_mc_dataset') and model._mc_dataset is not None:
+                # Use model's MC dataset and store reference
+                self.mc_dataset = model._mc_dataset
+                return DataLoader(
+                    self.mc_dataset,
+                    batch_size=1,  # MC dataset returns all samples as one batch
+                    shuffle=False,  # No need to shuffle - all samples in one batch
+                    num_workers=0,  # Single batch, no need for workers
+                    pin_memory=torch.cuda.is_available()
+                )
+        
+        # Check if MC dataset is available (created in on_train_start hook)
+        if self.mc_dataset is not None:
+            return DataLoader(
+                self.mc_dataset,
+                batch_size=1,  # MC dataset returns all samples as one batch
+                shuffle=False,  # No need to shuffle - all samples in one batch
+                num_workers=0,  # Single batch, no need for workers
+                pin_memory=torch.cuda.is_available()
+            )
+        
+        # MC dataset not available yet - this can happen if train_dataloader() is called
+        # before on_train_start() hook. Lightning will call train_dataloader() again after on_train_start().
         if self.train_dataset is None:
             raise ConfigurationError(
                 "DataModule train_dataloader failed: setup() must be called before train_dataloader(). "
@@ -241,11 +370,62 @@ class DDFMDataModule(BaseDataModule, lightning_pl.LightningDataModule):
                 details="train_dataloader() requires train_dataset attribute which is set by setup()."
             )
         
-        return create_ddfm_dataloader(
-            self.train_dataset,
-            batch_size=self.batch_size,
-            shuffle=True,
-            num_workers=self.num_workers,
+        # MC dataset not available yet - create minimal placeholder DDFMMCDataset
+        # This placeholder will be replaced after on_train_start() creates the real MC dataset
+        # We need to create a minimal MC dataset with dummy data that returns 3 elements
+        # to match the expected format from DDFMMCDataset
+        _logger.warning(
+            "DDFM train_dataloader: MC dataset not available yet. "
+            "Creating minimal placeholder - this will be replaced after on_train_start()."
+        )
+        
+        # Get data shape from train_dataset to create placeholder with correct dimensions
+        if hasattr(self.train_dataset, 'data'):
+            data_shape = self.train_dataset.data.shape
+        else:
+            # Fallback: use processed data if available
+            try:
+                processed_data = self.get_processed_data()
+                data_shape = processed_data.shape
+            except Exception:
+                # Last resort: use default shape
+                data_shape = (100, 10)  # (T, N)
+        
+        T, N = data_shape
+        
+        # Create minimal placeholder MC dataset with dummy data
+        # This will be replaced by the real MC dataset in on_train_start()
+        dummy_data_mod = torch.zeros(T, N, dtype=DEFAULT_TORCH_DTYPE)
+        dummy_data_mod_only_miss = torch.zeros(T, N, dtype=DEFAULT_TORCH_DTYPE)
+        dummy_missing_mask = np.zeros((T, N), dtype=bool)
+        
+        # Create minimal placeholder - we'll use a simple lambda for get_phi/sigma_eps
+        # These will be replaced when the real dataset is created
+        def dummy_get_phi():
+            return torch.zeros(N, N, dtype=DEFAULT_TORCH_DTYPE)
+        
+        def dummy_get_sigma_eps():
+            return torch.ones(N, dtype=DEFAULT_TORCH_DTYPE) * DEFAULT_EPSILON
+        
+        # Create minimal random state
+        dummy_rng = np.random.RandomState(42)
+        
+        # Create placeholder MC dataset
+        placeholder_mc_dataset = DDFMMCDataset(
+            data_mod=dummy_data_mod,
+            data_mod_only_miss=dummy_data_mod_only_miss,
+            missing_mask=dummy_missing_mask,
+            n_mc_samples=1,  # Minimal samples for placeholder
+            get_phi_fn=dummy_get_phi,
+            get_sigma_eps_fn=dummy_get_sigma_eps,
+            rng=dummy_rng
+        )
+        
+        return DataLoader(
+            placeholder_mc_dataset,
+            batch_size=1,
+            shuffle=False,
+            num_workers=0,
             pin_memory=torch.cuda.is_available()
         )
     

@@ -19,7 +19,7 @@ from pykalman.standard import _filter, _smooth, _smooth_pair
 
 from ..logger import get_logger
 from ..utils.errors import ModelNotInitializedError
-from ..utils.helper import get_config_attr
+from ..utils.misc import get_config_attr
 from ..config.types import FloatArray
 from ..config.constants import DEFAULT_MIN_DELTA, DEFAULT_ZERO_VALUE
 

@@ -870,5 +870,156 @@ __all__ = [
     'validate_ndarray_ndim',
     # Parameter validation
     'validate_parameters_initialized',
+    # DDFM-specific validators
+    'validate_factors',
+    'validate_ddfm_training_data',
 ]
+
+
+def validate_factors(
+    factors: Union[np.ndarray, Tensor],
+    num_factors: int,
+    operation: str = "operation"
+) -> np.ndarray:
+    """Validate and normalize factors shape and content quality.
+    
+    Parameters
+    ----------
+    factors : np.ndarray or Tensor
+        Factors to validate
+    num_factors : int
+        Expected number of factors (for reshaping 1D arrays)
+    operation : str, default "operation"
+        Operation name for error messages
+        
+    Returns
+    -------
+    np.ndarray
+        Validated and normalized factors (2D array)
+        
+    Raises
+    ------
+    DataError
+        If factors are empty, invalid shape, or contain NaN/Inf
+    """
+    from ..utils.errors import DataError
+    
+    factors = ensure_numpy(factors)
+    
+    if factors.ndim == 0 or factors.size == 0:
+        raise DataError(
+            f"Factors validation failed: factors is empty or invalid (shape: {factors.shape})",
+            details="This indicates training did not complete properly"
+        )
+    
+    # Reshape 1D factors to 2D
+    if factors.ndim == 1:
+        factors = factors.reshape(-1, num_factors) if factors.size > 0 else factors.reshape(0, num_factors)
+    
+    if factors.ndim != 2:
+        raise DataError(
+            f"Factors validation failed: factors must be 2D array (T x m), got shape {factors.shape}",
+            details="Factors should be a 2D array with shape (T, m) where T is time steps and m is number of factors"
+        )
+    
+    # Validate factors are finite
+    validate_no_nan_inf(factors, name=f"factors ({operation})")
+    
+    return factors
+
+
+def validate_ddfm_training_data(
+    X_torch: Tensor,
+    num_factors: int,
+    encoder_layers: Optional[List[int]] = None,
+    encoder: Optional[Any] = None,
+    operation: str = "training setup"
+) -> Tuple[int, int]:
+    """Validate data dimensions and model configuration before training starts.
+    
+    Parameters
+    ----------
+    X_torch : torch.Tensor
+        Training data tensor
+    num_factors : int
+        Number of factors
+    encoder_layers : List[int], optional
+        Encoder layer dimensions
+    encoder : object, optional
+        Encoder instance (for input_dim validation)
+    operation : str, default "training setup"
+        Operation name for error messages
+        
+    Returns
+    -------
+    T : int
+        Number of time steps
+    N : int
+        Number of variables
+        
+    Raises
+    ------
+    DataError
+        If data is None, invalid type, or invalid shape
+    ConfigurationError
+        If num_factors is invalid or encoder dimensions don't match
+    """
+    from ..config.constants import MIN_VARIABLES, MIN_DDFM_TIME_STEPS
+    from ..utils.errors import DataError, ConfigurationError
+    from ..utils.validation import check_condition
+    
+    check_condition(
+        X_torch is not None,
+        DataError,
+        f"DDFM {operation} failed: X_torch is None",
+        details="Please provide training data"
+    )
+    
+    check_condition(
+        isinstance(X_torch, Tensor),
+        DataError,
+        f"DDFM {operation} failed: X_torch must be torch.Tensor, got {type(X_torch)}",
+        details="Training data must be a torch.Tensor. Convert numpy arrays using torch.from_numpy()"
+    )
+    
+    # Validate shape using existing utility
+    validate_data_shape(X_torch, min_dims=2, max_dims=2, min_size=MIN_DDFM_TIME_STEPS)
+    T, N = X_torch.shape
+    
+    check_condition(
+        N >= MIN_VARIABLES,
+        DataError,
+        f"DDFM {operation} failed: Need at least {MIN_VARIABLES} series, got N={N}",
+        details="DDFM requires at least 1 series (variable) in the data"
+    )
+    
+    check_condition(
+        num_factors is not None and num_factors >= 1,
+        ConfigurationError,
+        f"DDFM {operation} failed: num_factors must be >= 1, got {num_factors}",
+        details="Number of factors must be a positive integer"
+    )
+    
+    check_condition(
+        num_factors <= N,
+        ConfigurationError,
+        f"DDFM {operation} failed: num_factors ({num_factors}) cannot exceed number of series (N={N})",
+        details="Number of factors cannot exceed the number of input series"
+    )
+    
+    if encoder_layers is not None and len(encoder_layers) > 0:
+        if encoder_layers[0] != N:
+            _logger.warning(
+                f"DDFM {operation}: encoder_layers[0] ({encoder_layers[0]}) does not match input dimension (N={N}). "
+                "Encoder will be reinitialized with correct input dimension."
+            )
+    
+    if encoder is not None:
+        if hasattr(encoder, 'input_dim') and encoder.input_dim != N:
+            raise ConfigurationError(
+                f"DDFM {operation} failed: encoder.input_dim ({encoder.input_dim}) must match input dimension (N={N})",
+                details="Encoder input dimension must match the number of series in the data"
+            )
+    
+    return T, N
 

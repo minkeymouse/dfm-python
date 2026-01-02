@@ -1,8 +1,22 @@
-"""PyTorch Lightning Trainer and Denoising Trainer for Deep Dynamic Factor Model (DDFM).
+"""PyTorch Lightning Trainer for Deep Dynamic Factor Model (DDFM).
 
 This module provides:
 - DDFMTrainer: A specialized PyTorch Lightning Trainer class for DDFM models
-- DDFMDenoisingTrainer: A custom denoising (MCMC-based) training procedure for DDFM
+
+DDFM training uses PyTorch Lightning's standard training loop with vectorized MC sampling
+for efficient training. The recommended pattern is:
+
+    from dfm_python import DDFM, DDFMDataModule, DDFMTrainer
+    
+    model = DDFM(encoder_layers=[64, 32], num_factors=2)
+    model.load_config(config)
+    datamodule = DDFMDataModule(config=config, data=data)
+    datamodule.setup()
+    trainer = DDFMTrainer(max_epochs=100)
+    trainer.fit(model, datamodule)
+
+The legacy DDFMDenoisingTrainer has been removed as its functionality is now integrated
+into the DDFM LightningModule.
 """
 
 import pytorch_lightning as pl
@@ -13,12 +27,8 @@ import numpy as np
 import torch
 
 from ..logger import get_logger
-from ..utils.common import ensure_numpy, sanitize_array
-from ..utils.errors import DataValidationError, NumericalError
 from ..config import DFMConfig, DDFMConfig
-from ..config.constants import DEFAULT_GRAD_CLIP_VAL, DEFAULT_CLIP_THRESHOLD, DEFAULT_ZERO_VALUE, DEFAULT_MIN_DELTA, DEFAULT_IDENTITY_SCALE, DEFAULT_EPSILON, MAX_EIGENVALUE, DEFAULT_MAX_EPOCHS, MIN_DDFM_DATASET_SIZE_WARNING, MIN_ITER_FOR_DELTA_COMPUTATION, MIN_EPS_SHAPE_FOR_IDIO, DEFAULT_IDIO_STD
-from ..numeric.stability import create_scaled_identity
-from ..numeric.estimator import estimate_idio_dynamics
+from ..config.constants import DEFAULT_GRAD_CLIP_VAL, DEFAULT_MIN_DELTA, DEFAULT_MAX_EPOCHS
 from . import (
     _create_base,
     _extract_train_params,
@@ -47,7 +57,7 @@ class DDFMTrainer(pl.Trainer):
         - accelerator: 'auto'
         - devices: 'auto'
         - precision: 32
-        - gradient_clip_val: DEFAULT_GRAD_CLIP_VAL (default, for numerical stability)
+        - gradient_clip_val: Not used (DDFM handles gradient clipping manually in training_step)
         - accumulate_grad_batches: 1
     
     These defaults are optimized for DDFM neural network training. The trainer
@@ -72,9 +82,9 @@ class DDFMTrainer(pl.Trainer):
         Device configuration
     precision : str or int, default 32
         Training precision (16, 32, 'bf16', etc.)
-    gradient_clip_val : float, optional, default DEFAULT_GRAD_CLIP_VAL
-        Gradient clipping value for numerical stability. Default DEFAULT_GRAD_CLIP_VAL helps prevent
-        gradient explosion that can cause NaN values during training.
+    gradient_clip_val : float, optional, default None
+        Not used - DDFM uses manual optimization and handles gradient clipping in training_step().
+        Gradient clipping is controlled by model.grad_clip_val parameter.
     accumulate_grad_batches : int, default 1
         Number of batches to accumulate gradients before optimizer step
     **kwargs
@@ -101,7 +111,7 @@ class DDFMTrainer(pl.Trainer):
             accelerator: str = 'auto',
             devices: Any = 'auto',
             precision: Any = 32,
-            gradient_clip_val: Optional[float] = DEFAULT_GRAD_CLIP_VAL,  # Default: DEFAULT_GRAD_CLIP_VAL for numerical stability
+            gradient_clip_val: Optional[float] = None,  # Not used - DDFM handles gradient clipping manually in training_step
             accumulate_grad_batches: int = 1,
             **kwargs
     ):
@@ -116,6 +126,8 @@ class DDFMTrainer(pl.Trainer):
         
         # Use common trainer base setup with DDFM-specific parameters
         # DDFM uses 'train_loss' metric, TensorBoard logger, patience=20, and additional callbacks
+        # Note: gradient_clip_val is NOT passed to trainer - DDFM uses manual optimization
+        # and handles gradient clipping in training_step() manually
         trainer_config = _create_base(
             max_epochs=max_epochs,
             enable_progress_bar=enable_progress_bar,
@@ -131,7 +143,7 @@ class DDFMTrainer(pl.Trainer):
             logger_type='tensorboard',  # DDFM uses TensorBoard logger
             logger_name='ddfm',
             additional_callbacks=[lr_monitor, checkpoint],  # DDFM-specific callbacks
-            gradient_clip_val=gradient_clip_val,  # DDFM-specific parameter
+            # gradient_clip_val is NOT passed - DDFM handles it manually in training_step
             accumulate_grad_batches=accumulate_grad_batches,  # DDFM-specific parameter
             **kwargs
         )
@@ -163,7 +175,8 @@ class DDFMTrainer(pl.Trainer):
             Configuration object (can be DDFMConfig or DDFMConfig with DDFM parameters)
         **kwargs
             Additional arguments to override config values.
-            Supported parameters: max_epochs, enable_progress_bar, enable_model_summary, gradient_clip_val.
+            Supported parameters: max_epochs, enable_progress_bar, enable_model_summary.
+            Note: gradient_clip_val is not used - DDFM handles gradient clipping manually.
             For additional Trainer parameters, use __init__() directly.
             
         Returns
@@ -189,468 +202,7 @@ class DDFMTrainer(pl.Trainer):
         return cls(**params)
 
 
-# ============================================================================
-# Denoising Training Procedure
-# ============================================================================
-
-class DDFMDenoisingTrainer:
-    """Denoising (MCMC-based) training procedure for DDFM.
-    
-    This class encapsulates the iterative denoising training procedure for DDFM,
-    which alternates between:
-    1. Estimating idiosyncratic dynamics (AR parameters)
-    2. Generating Monte Carlo samples from the state-space model
-    3. Training the autoencoder (encoder/decoder) on corrupted MC samples (denoising)
-    4. Extracting factors from trained encoder
-    5. Checking convergence based on MSE between predictions and data
-    
-    The procedure continues until convergence (MSE change < tolerance) or
-    maximum iterations reached.
-    """
-    
-    def __init__(self, model: 'DDFM'):
-        """Initialize denoising trainer with DDFM model instance.
-        
-        Parameters
-        ----------
-        model : DDFM
-            DDFM model instance to train. The trainer will access model's
-            encoder, decoder, and other attributes/methods.
-        """
-        self.model = model
-    
-    def fit(
-        self,
-        X: torch.Tensor,
-        x_clean: torch.Tensor,
-        missing_mask: np.ndarray,
-        target_scaler: Optional[Any] = None,
-        max_iter: Optional[int] = None,
-        tolerance: Optional[float] = None,
-        disp: Optional[int] = None,
-        seed: Optional[int] = None,
-    ) -> 'DDFMTrainingState':
-        """Run denoising iterative training procedure for DDFM.
-        
-        This method implements the denoising (MCMC-based) procedure for
-        Deep Dynamic Factor Model training. It alternates between:
-        1. Estimating idiosyncratic dynamics (AR parameters)
-        2. Generating Monte Carlo samples from the state-space model
-        3. Training the autoencoder (encoder/decoder) on corrupted MC samples (denoising)
-        4. Extracting factors from trained encoder
-        5. Checking convergence based on MSE between predictions and data
-        
-        The procedure continues until convergence (MSE change < tolerance) or
-        maximum iterations reached.
-        
-        Parameters
-        ----------
-        X : torch.Tensor
-            Preprocessed data with missing values, shape (T x N), where T is number
-            of time periods and N is number of series. Data should already be preprocessed
-            (imputation, scaling, etc.). Missing values should be NaN or handled via missing_mask.
-        x_clean : torch.Tensor
-            Clean data (interpolated), shape (T x N), used for initial autoencoder
-            training. Should have same shape as X.
-        missing_mask : np.ndarray
-            Missing data mask, shape (T x N), boolean array where True indicates
-            missing data. Must match shape of X.
-        target_scaler : Any, optional
-            Scaler instance for target series inverse transformation. Used to convert
-            standardized predictions back to original scale for target series only.
-            If None, no inverse transformation is applied (predictions remain standardized).
-        max_iter : int, optional
-            Maximum number of iterations. If None, uses model.max_iter (default: 200).
-        tolerance : float, optional
-            Convergence tolerance for MSE change between iterations. If None, uses
-            model.tolerance (default: 0.0005). Training stops when |MSE_new - MSE_old| < tolerance.
-        disp : int, optional
-            Display progress every 'disp' iterations. If None, uses model.disp (default: 10).
-            Set to 0 to disable progress output.
-        seed : int, optional
-            Random seed for reproducibility. If None, uses current random state.
-            Sets both NumPy and PyTorch random seeds.
-            
-        Returns
-        -------
-        DDFMTrainingState
-            Final training state containing:
-            - factors: np.ndarray, shape (T x num_factors) - extracted factors
-            - prediction: np.ndarray, shape (T x N) - final predictions
-            - converged: bool - whether convergence was achieved
-            - num_iter: int - number of iterations completed
-            - training_loss: float - final training loss (MSE)
-            
-        Raises
-        ------
-        ValueError
-            If X and x_clean have mismatched shapes.
-            If missing_mask shape doesn't match X shape.
-            If numerical issues occur (NaN/Inf propagation) that cannot be handled.
-        """
-        # Store target scaler for inverse transformation in prediction
-        if target_scaler is not None:
-            self.model.target_scaler = target_scaler
-        
-        # Store processed data
-        self.model.data_processed = X
-        
-        device = X.device
-        dtype = X.dtype
-        T, N = X.shape
-        
-        # Validate shape consistency between X, x_clean, and missing_mask
-        if x_clean.shape != X.shape:
-            raise DataValidationError(
-                f"{self.model.__class__.__name__} fit_mcmc failed: shape mismatch between X ({X.shape}) and x_clean ({x_clean.shape}). "
-                f"Both X and x_clean must have the same shape (T x N). "
-                f"This indicates data preprocessing inconsistency. "
-                f"Please ensure x_clean is created from the same data as X.",
-                details="X and x_clean must have identical shapes (T x N) for denoising training"
-            )
-        if missing_mask.shape != (T, N):
-            raise DataValidationError(
-                f"{self.model.__class__.__name__} fit_mcmc failed: shape mismatch between X ({X.shape}) and missing_mask ({missing_mask.shape}). "
-                f"missing_mask must have shape (T x N) matching X. "
-                f"This indicates missing_mask was created from data with different shape. "
-                f"Please ensure missing_mask is created from the same data passed as X parameter.",
-                details="missing_mask must have shape (T x N) matching X for denoising training"
-            )
-        
-        # Use instance attributes if not provided
-        max_iter = max_iter if max_iter is not None else self.model.max_iter
-        tolerance = tolerance if tolerance is not None else self.model.tolerance
-        disp = disp if disp is not None else self.model.disp
-        
-        # Initialize networks if not done
-        if self.model.encoder is None or self.model.decoder is None:
-            self.model.initialize_networks(N)
-        
-        # Ensure encoder and decoder are on the correct device
-        self.model.encoder = self.model.encoder.to(device)
-        self.model.decoder = self.model.decoder.to(device)
-        
-        # Random number generator for MC sampling
-        rng = np.random.RandomState(seed if seed is not None else (self.model.rng.randint(0, 2**31) if hasattr(self.model.rng, 'randint') else 3))
-        
-        # Convert to numpy for denoising procedure
-        x_standardized_np = ensure_numpy(X)
-        x_clean_np = ensure_numpy(x_clean)
-        bool_no_miss = ~missing_mask
-        
-        # Initialize data structures
-        data_mod_only_miss = x_standardized_np.copy()  # Original with missing values
-        data_mod = x_clean_np.copy()  # Clean data (will be modified during denoising)
-        z_actual = x_standardized_np.copy()  # Actual observations (target for training)
-        
-        # Initial prediction
-        from ..utils.helper import validate_finite_array
-        x_tensor = x_clean.to(device)
-        self.model.encoder.eval()
-        self.model.decoder.eval()
-        with torch.no_grad():
-            factors_init = ensure_numpy(self.model.encoder(x_tensor))
-            try:
-                factors_init = validate_finite_array(factors_init, "initial factors", context="at iteration 0", fallback=None)
-            except NumericalError:
-                factors_init = sanitize_array(factors_init)
-            
-            factors_tensor = torch.tensor(factors_init, device=device, dtype=dtype)
-            prediction_iter = ensure_numpy(self.model.decoder(factors_tensor))
-            try:
-                prediction_iter = validate_finite_array(prediction_iter, "initial prediction", context="at iteration 0", fallback=None)
-            except NumericalError:
-                prediction_iter = sanitize_array(prediction_iter)
-        
-        # Initialize factors
-        factors = factors_init.copy()
-        
-        # Update missing values with initial prediction
-        bool_miss = missing_mask
-        if bool_miss.any():
-            data_mod_only_miss[bool_miss] = prediction_iter[bool_miss]
-        
-        # Initial residuals
-        eps = data_mod_only_miss - prediction_iter
-        try:
-            eps = validate_finite_array(eps, "initial residuals", context="at iteration 0", fallback=None)
-        except NumericalError:
-            eps = sanitize_array(eps)
-        
-        # Denoising loop
-        iter_count = 0
-        not_converged = True
-        prediction_prev_iter = None
-        delta = float('inf')
-        loss_now = float('inf')
-        
-        # Check for very small dataset and warn about potential instability
-        if T < MIN_DDFM_DATASET_SIZE_WARNING:
-            _logger.warning(
-                f"{self.model.__class__.__name__} denoising training: very small dataset (T={T} < {MIN_DDFM_DATASET_SIZE_WARNING}) may cause unstable sampling. "
-                f"With only {T} time periods, encoder/decoder training per iteration may have high variance. "
-                f"Factor extraction and VAR estimation will use fallback strategies. Results may be less reliable. "
-                f"Monitor convergence carefully. Consider reducing num_factors or using smaller encoder_layers for better stability"
-            )
-        
-        _logger.info(f"Starting denoising training: max_iter={max_iter}, tolerance={tolerance}, epochs_per_iter={self.model.epochs_per_iter}")
-        
-        # Create optimizer once per iteration (reused across MC samples)
-        optimizer = None
-        
-        while not_converged and iter_count < max_iter:
-            iter_count += 1
-            self.model.mcmc_iteration = iter_count
-            
-            # Create optimizer for this iteration (reused across MC samples)
-            optimizer = self.model._create_optimizer()
-            
-            # Get idiosyncratic distribution
-            if self.model.use_idiosyncratic:
-                A_eps, Q_eps = estimate_idio_dynamics(eps, missing_mask, self.model.min_obs_idio)
-                try:
-                    A_eps = validate_finite_array(A_eps, f"idiosyncratic AR coefficients (A_eps)", context=f"at iteration {iter_count}", fallback=None)
-                except NumericalError:
-                    A_eps = sanitize_array(A_eps)
-                try:
-                    Q_eps = validate_finite_array(Q_eps, f"idiosyncratic innovation covariance (Q_eps)", context=f"at iteration {iter_count}", fallback=None)
-                except NumericalError:
-                    Q_eps = sanitize_array(Q_eps)
-                
-                # Convert to format expected by denoising procedure
-                phi = A_eps if A_eps.ndim == 2 else np.diag(A_eps) if A_eps.ndim == 1 else create_scaled_identity(N, DEFAULT_IDENTITY_SCALE)
-                mu_eps = np.zeros(N)
-                if Q_eps.ndim == 2:
-                    std_eps = np.sqrt(np.diag(Q_eps))
-                elif Q_eps.ndim == 1:
-                    std_eps = np.sqrt(Q_eps)
-                else:
-                    # Fallback: Use default idiosyncratic standard deviation when Q_eps has invalid dimensions
-                    # DEFAULT_IDIO_STD (0.1) represents an actual standard deviation value for the idiosyncratic component
-                    std_eps = np.ones(N) * DEFAULT_IDIO_STD
-                
-                # Ensure std_eps is finite and positive
-                std_eps = np.maximum(std_eps, DEFAULT_EPSILON)
-                try:
-                    std_eps = validate_finite_array(std_eps, f"idiosyncratic std (std_eps)", context=f"at iteration {iter_count}", fallback=None)
-                except NumericalError:
-                    std_eps = sanitize_array(std_eps)
-            else:
-                # When use_idiosyncratic is False, set std_eps to numerical epsilon (not actual std)
-                # DEFAULT_EPSILON (1e-8) is a numerical stability constant, not a standard deviation value
-                # This ensures std_eps is positive for numerical stability, but the component is effectively disabled
-                phi = np.zeros((N, N))
-                mu_eps = np.zeros(N)
-                std_eps = np.ones(N) * DEFAULT_EPSILON
-            
-            # Subtract conditional AR-idio mean from x
-            if self.model.use_idiosyncratic and eps.shape[0] > MIN_EPS_SHAPE_FOR_IDIO:
-                data_mod[1:] = data_mod_only_miss[1:] - eps[:-1, :] @ phi
-                data_mod[:1] = data_mod_only_miss[:1]
-            else:
-                data_mod = data_mod_only_miss.copy()
-            
-            # Generate MC samples for idio (dims = epochs_per_iter x T x N)
-            eps_draws = np.zeros((self.model.epochs_per_iter, T, N))
-            try:
-                for t in range(T):
-                    eps_draws[:, t, :] = rng.multivariate_normal(
-                        mu_eps, np.diag(std_eps), size=self.model.epochs_per_iter
-                    )
-                try:
-                    eps_draws = validate_finite_array(eps_draws, f"MC samples (eps_draws)", context=f"at iteration {iter_count}", fallback=None)
-                except NumericalError:
-                    eps_draws = sanitize_array(eps_draws)
-            except (ValueError, np.linalg.LinAlgError, NumericalError) as e:
-                _logger.warning(
-                    f"{self.model.__class__.__name__} denoising iteration {iter_count}: failed to generate MC samples: {e}. "
-                    f"Using zero samples as fallback"
-                )
-                eps_draws = np.zeros((self.model.epochs_per_iter, T, N))
-            
-            # Initialize noisy inputs
-            x_sim_den = np.zeros((self.model.epochs_per_iter, T, N))
-            
-            # Loop over MC samples
-            factors_samples = []
-            for i in range(self.model.epochs_per_iter):
-                x_sim_den[i, :, :] = data_mod.copy()
-                # Corrupt input data by subtracting sampled idio innovations (denoising)
-                x_sim_den[i, :, :] = x_sim_den[i, :, :] - eps_draws[i, :, :]
-                
-                # Train autoencoder on corrupted sample (1 epoch) - denoising training
-                x_sample = torch.tensor(x_sim_den[i, :, :], device=device, dtype=dtype)
-                z_actual_tensor = torch.tensor(z_actual, device=device, dtype=dtype)
-                dataset = torch.utils.data.TensorDataset(x_sample, z_actual_tensor)
-                dataloader = torch.utils.data.DataLoader(
-                    dataset, batch_size=self.model.batch_size, shuffle=True
-                )
-                
-                # Train for 1 epoch
-                self.model.encoder.train()
-                self.model.decoder.train()
-                
-                for batch_data, batch_target in dataloader:
-                    optimizer.zero_grad()
-                    reconstructed = self.model.forward(batch_data)
-                    # Use missing-aware loss
-                    mask = torch.where(torch.isnan(batch_target), torch.zeros_like(batch_target), torch.ones_like(batch_target))
-                    target_clean = torch.where(torch.isnan(batch_target), torch.zeros_like(batch_target), batch_target)
-                    reconstructed_masked = reconstructed * mask
-                    squared_diff = (target_clean - reconstructed_masked) ** 2
-                    loss = torch.sum(squared_diff) / (torch.sum(mask) + DEFAULT_EPSILON)
-                    loss.backward()
-                    # Gradient clipping to prevent NaN and improve stability
-                    if self.model.grad_clip_val > DEFAULT_ZERO_VALUE:
-                        torch.nn.utils.clip_grad_norm_(
-                            list(self.model.encoder.parameters()) + list(self.model.decoder.parameters()),
-                            max_norm=self.model.grad_clip_val
-                        )
-                    optimizer.step()
-                # Extract factors from this sample
-                x_sample_tensor = torch.tensor(x_sim_den[i, :, :], device=device, dtype=dtype)
-                self.model.encoder.eval()
-                with torch.no_grad():
-                    factors_sample = ensure_numpy(self.model.encoder(x_sample_tensor))
-                    try:
-                        factors_sample = validate_finite_array(
-                            factors_sample, 
-                            f"factor sample {i+1}/{self.model.epochs_per_iter}", 
-                            context=f"at iteration {iter_count}",
-                            fallback=None
-                        )
-                    except NumericalError:
-                        factors_sample = sanitize_array(factors_sample)
-                factors_samples.append(factors_sample)
-            
-            # Update factors: average over all MC samples
-            factors = np.mean(np.array(factors_samples), axis=0)  # T x num_factors
-            try:
-                factors = validate_finite_array(factors, "averaged factors", context=f"at iteration {iter_count}", fallback=factors_init)
-            except NumericalError:
-                if factors_init is not None:
-                    factors = factors_init.copy()
-                else:
-                    factors = sanitize_array(factors)
-            
-            # Clip extreme factor values to prevent numerical instability
-            clip_threshold = DEFAULT_CLIP_THRESHOLD
-            factor_mean = np.mean(factors, axis=0)
-            factor_std = np.std(factors, axis=0)
-            factor_std = np.maximum(factor_std, DEFAULT_EPSILON)
-            
-            clipped_count = 0
-            for i in range(factors.shape[1]):
-                lower_bound = factor_mean[i] - clip_threshold * factor_std[i]
-                upper_bound = factor_mean[i] + clip_threshold * factor_std[i]
-                before_clip = factors[:, i].copy()
-                factors[:, i] = np.clip(factors[:, i], lower_bound, upper_bound)
-                clipped_count += np.sum((before_clip != factors[:, i]))
-            
-            if clipped_count > DEFAULT_ZERO_VALUE:
-                _logger.warning(
-                    f"{self.model.__class__.__name__} denoising iteration {iter_count}: clipped {clipped_count} extreme factor values (>{clip_threshold} std devs). "
-                    f"This prevents numerical instability in encoder/decoder forward passes. "
-                    f"If clipping occurs frequently, consider: (1) Reducing learning_rate, (2) Using smaller encoder_layers, (3) Checking data scaling"
-                )
-            
-            # Check convergence
-            self.model.decoder.eval()
-            with torch.no_grad():
-                factors_tensor = torch.tensor(factors, device=device, dtype=dtype)
-                prediction_iter = ensure_numpy(self.model.decoder(factors_tensor))
-                try:
-                    prediction_iter = validate_finite_array(
-                        prediction_iter, 
-                        "prediction_iter", 
-                        context=f"at iteration {iter_count}",
-                        fallback=prediction_prev_iter if prediction_prev_iter is not None else prediction_iter
-                    )
-                except NumericalError:
-                    if prediction_prev_iter is not None:
-                        prediction_iter = prediction_prev_iter.copy()
-                    else:
-                        prediction_iter = sanitize_array(prediction_iter)
-            
-            if iter_count > MIN_ITER_FOR_DELTA_COMPUTATION:
-                # Compute MSE on non-missing values
-                mask = ~np.isnan(data_mod_only_miss)
-                if np.sum(mask) > 0:
-                    mse = np.nanmean((prediction_prev_iter[mask] - prediction_iter[mask]) ** 2)
-                    if not np.isfinite(mse):
-                        _logger.warning(
-                            f"{self.model.__class__.__name__} denoising iteration {iter_count}: MSE is not finite ({mse}). "
-                            f"Using previous delta value"
-                        )
-                        mse = delta if np.isfinite(delta) else tolerance * 10
-                    delta = mse
-                    loss_now = mse
-                else:
-                    delta = float('inf')
-                    loss_now = float('inf')
-                
-                if iter_count % disp == 0:
-                    _logger.info(
-                        f"Iteration {iter_count}/{max_iter}: loss={loss_now:.6f}, delta={delta:.6f}"
-                    )
-                
-                if delta < tolerance:
-                    not_converged = False
-                    _logger.info(
-                        f"Convergence achieved in {iter_count} iterations: "
-                        f"loss={loss_now:.6f}, delta={delta:.6f} < {tolerance}"
-                    )
-            else:
-                # First iteration: compute initial loss
-                mask = ~np.isnan(data_mod_only_miss)
-                if np.sum(mask) > 0:
-                    loss_now = np.nanmean((data_mod_only_miss[mask] - prediction_iter[mask]) ** 2)
-                    if not np.isfinite(loss_now):
-                        _logger.warning(
-                            f"{self.model.__class__.__name__} denoising iteration {iter_count}: initial loss is not finite ({loss_now}). "
-                            f"Using large default value"
-                        )
-                        loss_now = 1e6
-                else:
-                    loss_now = float('inf')
-            
-            # Store previous prediction for convergence checking
-            prediction_prev_iter = prediction_iter.copy()
-            
-            # Update missing values with current prediction
-            if bool_miss.any():
-                data_mod_only_miss[bool_miss] = prediction_iter[bool_miss]
-            
-            # Update residuals
-            eps = data_mod_only_miss - prediction_iter
-            try:
-                eps = validate_finite_array(eps, "residuals (eps)", context=f"at iteration {iter_count}", fallback=None)
-            except NumericalError:
-                eps = sanitize_array(eps)
-        
-        if not_converged:
-            delta_str = f"{delta:.6f}" if iter_count > MIN_ITER_FOR_DELTA_COMPUTATION else "N/A"
-            _logger.warning(
-                f"{self.model.__class__.__name__} denoising training: convergence not achieved within {max_iter} iterations. "
-                f"Final delta: {delta_str}"
-            )
-        
-        converged = not not_converged
-        
-        # Validate and normalize factors shape before storing
-        factors = self.model._validate_factors(factors, operation="fit_mcmc")
-        
-        # Import DDFMTrainingState here to avoid circular dependency
-        from ..models.ddfm import DDFMTrainingState
-        
-        # Store final state
-        self.model.training_state = DDFMTrainingState(
-            factors=factors,
-            prediction=prediction_iter,
-            converged=converged,
-            num_iter=iter_count,
-            training_loss=loss_now
-        )
-        
-        return self.model.training_state
+# DDFMDenoisingTrainer removed - functionality now integrated into DDFM LightningModule
+# The legacy sequential Python for-loop implementation has been replaced with vectorized MC sampling
+# in DDFMMCDataset and Lightning's training_step/on_train_epoch_end hooks for better performance.
 

@@ -68,6 +68,8 @@ DEFAULT_MAX_ITER = 100  # Default maximum EM iterations (general)
 DEFAULT_EM_MAX_ITER = 5000  # Default maximum EM iterations (DFM-specific)
 DEFAULT_MAX_EPOCHS = 100  # Default maximum training epochs
 DEFAULT_MAX_MCMC_ITER = 200  # Default maximum MCMC iterations
+DEFAULT_N_MC_SAMPLES = 200  # Default number of MC samples per MCMC iteration for DDFM denoising training (matches original paper's epochs=100 and typical usage)
+DEFAULT_FACTOR_ORDER = 1  # Default factor order for DDFM (AR(1) dynamics)
 
 # Batch size defaults
 DEFAULT_BATCH_SIZE = 32  # Default batch size for neural networks
@@ -116,6 +118,10 @@ CHOLESKY_LOG_DET_FACTOR = 2.0  # Factor for log determinant computation from Cho
 
 # Encoder layer defaults
 DEFAULT_ENCODER_LAYERS = [64, 32]  # Default encoder layer sizes
+DEFAULT_NUM_FACTORS = 3  # Default number of factors for DDFM
+DEFAULT_ACTIVATION = 'relu'  # Default activation function for DDFM
+DEFAULT_DECODER = 'linear'  # Default decoder type for DDFM
+DEFAULT_USE_BATCH_NORM = True  # Default batch normalization setting for DDFM
 
 # ============================================================================
 # Data Processing Defaults
@@ -142,6 +148,8 @@ MAX_ERROR_ITEMS = 20  # Maximum number of items to show in error message details
 DEFAULT_MIN_OBS = 5  # Default minimum observations for estimation
 DEFAULT_MIN_OBS_IDIO = 5  # Default minimum observations for idio estimation
 DEFAULT_MIN_OBS_VAR = 7  # Minimum observations for VAR estimation (order + 5)
+DEFAULT_MIN_OBS_PRETRAIN = 50  # Minimum observations for DDFM pre-training without interpolation
+DEFAULT_MULT_EPOCH_PRETRAIN = 1  # Multiplier for DDFM pre-training epochs
 
 # Dimension validation bounds
 MIN_TIME_STEPS = 1  # Minimum number of time steps (T) required for data
@@ -349,6 +357,7 @@ __all__ = [
     'DEFAULT_MAX_ITER',
     'DEFAULT_MAX_EPOCHS',
     'DEFAULT_MAX_MCMC_ITER',
+    'DEFAULT_N_MC_SAMPLES',
     'DEFAULT_BATCH_SIZE',  # General neural network default (32)
     'DEFAULT_DDFM_BATCH_SIZE',  # DDFM-specific default (100)
     'DEFAULT_LEARNING_RATE',
@@ -369,6 +378,10 @@ __all__ = [
     'DEFAULT_CHOLESKY_EPS',
     # Architecture
     'DEFAULT_ENCODER_LAYERS',
+    'DEFAULT_NUM_FACTORS',
+    'DEFAULT_ACTIVATION',
+    'DEFAULT_DECODER',
+    'DEFAULT_USE_BATCH_NORM',
     # Data processing
     'DEFAULT_NAN_METHOD',
     'DEFAULT_NAN_K',
@@ -378,6 +391,8 @@ __all__ = [
     'DEFAULT_MIN_OBS',
     'DEFAULT_MIN_OBS_IDIO',
     'DEFAULT_MIN_OBS_VAR',
+    'DEFAULT_MIN_OBS_PRETRAIN',
+    'DEFAULT_MULT_EPOCH_PRETRAIN',
     # Dimension validation
     'MIN_TIME_STEPS',
     'MIN_VARIABLES',

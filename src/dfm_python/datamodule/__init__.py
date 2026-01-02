@@ -12,7 +12,8 @@ from .base import BaseDataModule
 from .dfm_dm import DFMDataModule
 from .ddfm_dm import DDFMDataModule
 from .kdfm_dm import KDFMDataModule
-from ..dataset.dataset import DDFMDataset, KDFMDataset
+from ..dataset.ddfm_dataset import DDFMDataset
+from ..dataset.kdfm_dataset import KDFMDataset
 
 # DFMTrainingState is defined in models.dfm and exported here for convenience
 from ..models.dfm import DFMTrainingState
