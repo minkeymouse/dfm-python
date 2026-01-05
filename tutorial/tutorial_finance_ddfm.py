@@ -6,6 +6,10 @@ using finance data with market_forward_excess_returns as the target variable.
 Target: market_forward_excess_returns
 Excluded: risk_free_rate, forward_returns
 
+Note: DDFM uses noise injection integrated into the Autoencoder class.
+Noise is pre-sampled on GPU and injected by subtracting epsilon from clean data,
+following the original DDFM pattern: y_t^(mc) = ỹ_t - ε_t^(mc).
+
 """
 
 import sys
@@ -18,9 +22,9 @@ sys.path.insert(0, str(project_root / "src"))
 import pandas as pd
 import numpy as np
 from datetime import datetime
-from dfm_python import DDFM, DDFMDataModule, DDFMTrainer
+from dfm_python import DDFM, DDFMDataset
 from dfm_python.config import DDFMConfig
-from dfm_python.config.constants import TUTORIAL_MAX_PERIODS, DEFAULT_LEARNING_RATE, DEFAULT_BATCH_SIZE, DEFAULT_DDFM_LEARNING_RATE
+from dfm_python.config.constants import TUTORIAL_MAX_PERIODS, DEFAULT_LEARNING_RATE, DEFAULT_DDFM_WINDOW_SIZE, DEFAULT_DDFM_LEARNING_RATE
 from dfm_python.utils.misc import TimeIndex
 from dfm_python.utils.common import select_columns_by_prefix
 from dfm_python.dataset.process import parse_timestamp
@@ -136,13 +140,27 @@ missing_after = df_preprocessed.isnull().sum().sum()
 print(f"   Missing values after preprocessing: {missing_after}")
 print(f"   Preprocessed data shape: {df_preprocessed.shape}")
 
+# Standardize ALL data (matching original TensorFlow DDFM)
+# Original TensorFlow: self.data = (data - self.mean_z) / self.sigma_z
+print("\n[Step 2.6] Standardizing ALL data (matching original TensorFlow DDFM)...")
+print("   Original TensorFlow: self.data = (data - self.mean_z) / self.sigma_z")
+print("   All series (including target) must be standardized before passing to Dataset")
+
+# Standardize all data (matching original TensorFlow DDFM)
+mean_z = df_preprocessed.mean().values
+sigma_z = df_preprocessed.std().values
+df_standardized = (df_preprocessed - mean_z) / sigma_z
+
 # Verify standardization
-mean_vals = df_preprocessed.mean()
-std_vals = df_preprocessed.std()
+mean_vals = df_standardized.mean()
+std_vals = df_standardized.std()
 max_mean = float(mean_vals.abs().max())
 max_std_dev = float((std_vals - 1.0).abs().max())
 print(f"   Standardization check - Max |mean|: {max_mean:.6f} (should be ~0)")
 print(f"   Standardization check - Max |std - 1|: {max_std_dev:.6f} (should be ~0)")
+
+# Update df_preprocessed to use standardized data
+df_preprocessed = df_standardized
 
 # Update df_processed to use preprocessed data
 df_processed = df_preprocessed
@@ -166,7 +184,7 @@ config = DDFMConfig(
     encoder_layers=[32, 16],  # Reduced for faster execution
     n_mc_samples=10,  # Number of MC samples per MCMC iteration (reduced for faster execution)
     learning_rate=DEFAULT_LEARNING_RATE,
-    batch_size=DEFAULT_BATCH_SIZE,
+    window_size=DEFAULT_DDFM_WINDOW_SIZE,  # Window size (time-step batch size) for training
     target_scaler=y_scaler  # Fitted scaler for target series inverse transformation
 )
 
@@ -175,11 +193,12 @@ print(f"   Number of factors: {config.num_factors} (DDFM uses num_factors parame
 print(f"   Factor dynamics: VAR(1) (always AR(1), not configurable)")
 print(f"   MC samples per iteration: {config.n_mc_samples}")
 print(f"   Target series: {target_col}")
+print(f"   Noise injection: Integrated in Autoencoder (pre-sampled on GPU)")
 
 # ============================================================================
-# Step 4: Create DataModule
+# Step 4: Create Dataset
 # ============================================================================
-print("\n[Step 4] Creating DataModule...")
+print("\n[Step 4] Creating Dataset...")
 
 # Create time index (assuming monthly data)
 # For finance data, date_id is an index, so we'll create a simple time index
@@ -194,20 +213,20 @@ time_list = [
 
 time_index = TimeIndex(time_list)
 
-# Create DDFMDataModule with preprocessed data
-# Data must be preprocessed before passing to DataModule
+# Create DDFMDataset with preprocessed data
+# Data must be preprocessed before passing to Dataset
 # Target series are specified separately - they remain in raw form (not preprocessed)
-data_module = DDFMDataModule(
+dataset = DDFMDataset(
     config=config,
     data=df_processed,  # Pass DataFrame directly (not .values) - already preprocessed
     time_index=time_index,
     target_series=[target_col]  # Specify target series
 )
-data_module.setup()
+# Dataset initialization happens in __init__
 
-print(f"   DataModule created successfully")
-if hasattr(data_module, 'data_processed') and data_module.data_processed is not None:
-    print(f"   Processed data shape: {data_module.data_processed.shape}")
+print(f"   Dataset created successfully")
+if hasattr(data_module, 'data_processed') and dataset.data_processed is not None:
+    print(f"   Processed data shape: {dataset.data_processed.shape}")
 else:
     print(f"   Data shape: {df_processed.shape}")
 
@@ -220,17 +239,31 @@ model = DDFM(
     encoder_layers=[32, 16],  # Reduced for faster execution
     num_factors=1,  # Reduced to 1 for faster execution
     n_mc_samples=10,  # Number of MC samples per MCMC iteration (reduced for faster execution)
-    max_iter=3,  # Maximum MCMC iterations (reduced for faster execution)
-    batch_size=DEFAULT_BATCH_SIZE,
+    max_epoch=3,  # Maximum epochs (MCMC iterations). One epoch = one MCMC iteration (reduced for faster execution)
+    window_size=DEFAULT_DDFM_WINDOW_SIZE,  # Window size (time-step batch size) for training
     learning_rate=DEFAULT_DDFM_LEARNING_RATE
 )
 # Load config to ensure all parameters are set correctly
 model.load_config(config)
 
-# Note: max_epochs in trainer corresponds to number of MCMC iterations (max_iter)
-# Each Lightning epoch = one MCMC iteration
-trainer = DDFMTrainer(max_epochs=3)  # Matches max_iter for faster execution
-trainer.fit(model, data_module)
+# Initialize networks before training (required for configure_optimizers)
+# Input dimension is determined from processed data
+input_dim = dataset.get_processed_data().shape[1]
+model.initialize_networks(input_dim)
+# Note: Device movement is handled automatically by Lightning
+# on_train_start() will move the model to the correct device
+
+# Note: For DDFM, max_epochs is set to model.max_epoch (number of MCMC iterations).
+# Each Lightning epoch = one MCMC iteration.
+# Training uses standard Lightning training loop with convergence callback.
+# Training stops early if convergence is achieved before max_epoch.
+# 
+# Noise injection is handled automatically by the Autoencoder class:
+# - Noise samples are pre-generated on GPU at the start of each epoch
+# - During training, noise is injected by subtracting epsilon: y_t^(mc) = ỹ_t - ε_t^(mc)
+# - This follows the original DDFM pattern for denoising autoencoder training
+# Note: trainer parameter removed - model.train() is called directly (plain PyTorch, no PyTorch Lightning)
+model.train(dataset=dataset)
 
 print("   Training completed!")
 
@@ -239,7 +272,7 @@ print("   Training completed!")
 # ============================================================================
 print("\n[Step 6] Making predictions...")
 
-# Predict with horizon=6 (uses target_series from DataModule)
+# Predict with horizon=6 (uses target_series from Dataset)
 X_forecast, Z_forecast = model.predict(horizon=6)
 
 print(f"   Forecast shape: {X_forecast.shape}")

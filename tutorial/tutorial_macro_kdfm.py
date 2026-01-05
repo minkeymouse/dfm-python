@@ -23,7 +23,7 @@ sys.path.insert(0, str(project_root / "src"))
 import pandas as pd
 import numpy as np
 from datetime import datetime
-from dfm_python import KDFM, KDFMDataModule, KDFMTrainer
+from dfm_python import KDFM, KDFMDataset
 from dfm_python.config import KDFMConfig
 from dfm_python.config.constants import TUTORIAL_MAX_PERIODS, DEFAULT_LEARNING_RATE, DEFAULT_BATCH_SIZE, TUTORIAL_MAX_EPOCHS, DEFAULT_GRAD_CLIP_VAL
 from dfm_python.utils.misc import TimeIndex
@@ -162,7 +162,7 @@ if isinstance(df_preprocessed, np.ndarray):
 elif not isinstance(df_preprocessed, pd.DataFrame):
     df_preprocessed = pd.DataFrame(df_preprocessed)
 
-# Add date column back for DataModule to extract
+# Add date column back for Dataset to extract
 # Date column was separated earlier, so add it back now
 df_preprocessed['date'] = date_column.values
 
@@ -218,29 +218,29 @@ print(f"   Factor dynamics: Two-stage VARMA with stochastic structural shocks")
 print(f"   Target series: {target_col}")
 
 # ============================================================================
-# Step 4: Create DataModule
+# Step 4: Create Dataset
 # ============================================================================
-print("\n[Step 4] Creating DataModule...")
+print("\n[Step 4] Creating Dataset...")
 
-# Create KDFMDataModule with preprocessed data
-# Data must be preprocessed before passing to DataModule
+# Create KDFMDataset with preprocessed data
+# Data must be preprocessed before passing to Dataset
 # Target series are specified separately - they remain in raw form (not preprocessed)
 # time_index_column='date' will extract time index from DataFrame and remove the column
-data_module = KDFMDataModule(
+dataset = KDFMDataset(
     config=config,
     data=df_processed,  # Pass DataFrame directly (not .values) - already preprocessed
     time_index_column='date',  # Extract time index from 'date' column and exclude it from data
     target_series=[target_col]  # Specify target series
 )
-data_module.setup()
+# Dataset initialization happens in __init__
 
-print(f"   DataModule created successfully")
-if hasattr(data_module, 'data_processed') and data_module.data_processed is not None:
-    print(f"   Processed data shape: {data_module.data_processed.shape}")
+print(f"   Dataset created successfully")
+if hasattr(data_module, 'data_processed') and dataset.data_processed is not None:
+    print(f"   Processed data shape: {dataset.data_processed.shape}")
 else:
     print(f"   Data shape: {df_processed.shape}")
-if data_module.time_index is not None:
-    print(f"   Time range: {data_module.time_index[0]} to {data_module.time_index[-1]}")
+if dataset.time_index is not None:
+    print(f"   Time range: {dataset.time_index[0]} to {dataset.time_index[-1]}")
 
 # ============================================================================
 # Step 5: Train Model
@@ -260,7 +260,7 @@ model = KDFM(
 
 # Initialize model from data before training
 # Get a sample batch to initialize dimensions
-sample_batch = next(iter(data_module.train_dataloader()))
+sample_batch = next(iter(dataset.train_dataloader()))
 if isinstance(sample_batch, (tuple, list)):
     sample_data = sample_batch[0]
 else:
@@ -270,11 +270,8 @@ if sample_data.ndim == 3:
     sample_data = sample_data[0]  # (T, N)
 model.initialize_from_data(sample_data)
 
-trainer = KDFMTrainer(
-    max_epochs=2,  # Need at least 2 epochs for early stopping to work properly
-    enable_progress_bar=False  # Disable progress bar for cleaner output
-)
-trainer.fit(model, data_module)
+# Note: trainer parameter removed - model.train() is called directly (plain PyTorch, no PyTorch Lightning)
+model.train(dataset=dataset)
 
 print("   Training completed!")
 print("   KDFM uses gradient descent training (not EM algorithm)")
@@ -285,7 +282,7 @@ print("   Two-stage VARMA architecture: AR stage → MA stage")
 # ============================================================================
 print("\n[Step 6] Making predictions...")
 
-# Predict with horizon=6 (uses target_series from DataModule)
+# Predict with horizon=6 (uses target_series from Dataset)
 X_forecast, Z_forecast = model.predict(horizon=6)
 
 print(f"   Forecast shape: {X_forecast.shape}")

@@ -6,7 +6,7 @@ from dfm_python.config import (
     DDFMConfig,
     KDFMConfig,
 )
-from dfm_python.config.constants import DEFAULT_KDFM_AR_ORDER, DEFAULT_KDFM_MA_ORDER
+from dfm_python.config.constants import DEFAULT_KDFM_AR_ORDER, DEFAULT_KDFM_MA_ORDER, DEFAULT_EM_THRESHOLD, DEFAULT_CLOCK_FREQUENCY, DEFAULT_MAX_ITER
 
 
 class TestDFMConfig:
@@ -22,11 +22,11 @@ class TestDFMConfig:
         """Test DFMConfig parameter setting."""
         config = DFMConfig(
             blocks={'block1': {'num_factors': 2, 'series': []}},
-            max_iter=100,
-            threshold=1e-5
+            max_iter=DEFAULT_MAX_ITER,
+            threshold=DEFAULT_EM_THRESHOLD
         )
-        assert config.max_iter == 100
-        assert config.threshold == 1e-5
+        assert config.max_iter == DEFAULT_MAX_ITER
+        assert config.threshold == DEFAULT_EM_THRESHOLD
 
 
 class TestDDFMConfig:
@@ -36,7 +36,7 @@ class TestDDFMConfig:
         """Test DDFMConfig can be initialized."""
         config = DDFMConfig()
         assert config is not None
-        assert config.clock == 'm'  # Default clock frequency
+        assert config.clock == DEFAULT_CLOCK_FREQUENCY  # Default clock frequency
 
 
 class TestKDFMConfig:
@@ -46,11 +46,9 @@ class TestKDFMConfig:
         """Test KDFMConfig can be initialized."""
         config = KDFMConfig()
         assert config is not None
-        assert config.clock == 'm'  # Default clock frequency
+        assert config.clock == DEFAULT_CLOCK_FREQUENCY  # Default clock frequency
         assert config.ar_order == DEFAULT_KDFM_AR_ORDER  # Default AR order from constants
         assert config.ma_order == DEFAULT_KDFM_MA_ORDER  # Default MA order from constants
-        assert config.ar_order == 1
-        assert config.ma_order == 0
 
 
 

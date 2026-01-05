@@ -197,120 +197,93 @@ def estimate_var(factors: np.ndarray, order: int = 1) -> Tuple[np.ndarray, np.nd
     return A, Q
 
 
-def estimate_var_with_fallback(
-    factors: np.ndarray,
-    order: int = 1,
-    num_factors: Optional[int] = None,
-    min_time_steps: int = 2
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Estimate VAR dynamics with comprehensive error handling and fallback.
+def get_idio(eps: np.ndarray, idx_no_missings: np.ndarray, min_obs: int = 5) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Get AR(1) statistics from eps (matching original TensorFlow get_idio).
     
-    Estimates VAR(p) coefficients from factor time series using OLS regression.
-    Includes fallback to identity matrix if estimation fails.
+    Returns Phi (AR(1) coefficient matrix), mu_eps (mean), and std_eps (std dev).
     
     Parameters
     ----------
-    factors : np.ndarray
-        Factor time series of shape (T, m) where T is time steps and m is number of factors
-    order : int, default 1
-        VAR order p
-    num_factors : int, optional
-        Number of factors (for fallback when factors shape is invalid)
-    min_time_steps : int, default 2
-        Minimum time steps required for VAR estimation
+    eps : np.ndarray
+        Idiosyncratic residuals (T x N)
+    idx_no_missings : np.ndarray
+        Boolean mask (T x N) indicating non-missing values
+    min_obs : int, default 5
+        Minimum number of observations required
         
     Returns
     -------
-    A_f : np.ndarray
-        VAR transition matrix of shape (m, m) for AR(order)
-    Q_f : np.ndarray
-        Innovation covariance matrix of shape (m, m), positive definite
+    Phi : np.ndarray
+        AR(1) coefficient matrix (N x N), diagonal
+    mu_eps : np.ndarray
+        Mean of idiosyncratic components (N,)
+    std_eps : np.ndarray
+        Standard deviation of idiosyncratic components (N,)
     """
-    from ..config.constants import (
-        MIN_STD, DEFAULT_AR_COEF, DEFAULT_IDENTITY_SCALE, DEFAULT_REGULARIZATION,
-        MIN_EIGENVALUE
-    )
-    from .stability import (
-        compute_var_safe, create_scaled_identity, ensure_positive_definite
-    )
-    from ..utils.common import ensure_numpy, sanitize_array
-    from ..utils.errors import DataError
-    from ..config.constants import COMPUTATION_ERROR_TYPES
-    
-    factors = ensure_numpy(factors)
-    
-    # Helper function to compute factor variance with minimum threshold
-    def _compute_factor_variance(factors: np.ndarray) -> np.ndarray:
-        """Compute factor variance with minimum threshold using numeric utilities."""
-        m = factors.shape[1]
-        factor_var = np.zeros(m)
-        for i in range(m):
-            factor_var[i] = compute_var_safe(
-                factors[:, i],
-                ddof=0,
-                min_variance=MIN_STD ** 2,
-                default_variance=MIN_STD ** 2
-            )
-        return factor_var
-    
-    # Helper function to create fallback VAR dynamics
-    def _create_fallback_var(m: int, factors: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        """Create fallback VAR dynamics when estimation fails."""
-        factor_var = _compute_factor_variance(factors)
-        A_f = create_scaled_identity(m, DEFAULT_AR_COEF)
-        Q_f = np.diag(factor_var)
-        return A_f, Q_f
-    
-    # Validate factors shape and dimensions
-    MIN_FACTOR_DIM = 1
-    if (factors.ndim == 0 or factors.size == 0 or factors.ndim < 2 or 
-        factors.shape[0] < min_time_steps or factors.shape[1] < MIN_FACTOR_DIM):
-        m = num_factors if num_factors else MIN_FACTOR_DIM
-        return (
-            create_scaled_identity(m, DEFAULT_IDENTITY_SCALE),
-            create_scaled_identity(m, DEFAULT_REGULARIZATION)
-        )
-    
-    T, m = factors.shape
-    
-    # Minimum observations required for VAR estimation (order + 1)
-    min_obs_required = order + 1
-    if T < min_obs_required:
-        return _create_fallback_var(m, factors)
-    
-    if not np.all(np.isfinite(factors)):
-        factors = sanitize_array(factors)
-    
-    # VAR estimation error handling
-    try:
-        A_f, Q_f = estimate_var(factors, order=order)
-    except (*COMPUTATION_ERROR_TYPES, DataError) as e:
-        # Catch computation errors and data errors (e.g., insufficient observations)
-        _logger.warning(
-            f"VAR estimation failed (insufficient data or computation error): {e}. "
-            f"Using simplified AR dynamics as fallback."
-        )
-        return _create_fallback_var(m, factors)
-    
-    # Normalize Q_f shape and ensure it's 2D
-    if Q_f.ndim == 0:
-        # Scalar case: create diagonal matrix from factor variance
-        factor_var = _compute_factor_variance(factors)
-        Q_f = np.diag(factor_var)
-    elif Q_f.ndim != 2:
-        # Check if Q_f can be reshaped to (m, m)
-        expected_size = m * m
-        if Q_f.size == expected_size:
-            Q_f = Q_f.reshape(m, m)
+    Phi = np.zeros((eps.shape[1], eps.shape[1]))
+    mu_eps = np.zeros(eps.shape[1])
+    std_eps = np.zeros(eps.shape[1])
+    for j in range(eps.shape[1]):
+        to_select = idx_no_missings[:, j]
+        to_select = np.hstack((np.array([False]), to_select[:-1] & to_select[1:]))
+        if np.sum(to_select) >= min_obs:
+            this_eps = eps[to_select, j]
         else:
-            # Fallback: create diagonal from factor variance
-            factor_var = _compute_factor_variance(factors)
-            Q_f = np.diag(factor_var)
+            raise ValueError(f"Not enough observation ({min_obs}) to estimate idio AR(1) parameters.")
+        mu_eps[j] = np.mean(this_eps)
+        std_eps[j] = np.std(this_eps)
+        cov1_eps = np.cov(this_eps[1:], this_eps[:-1])[0][1]
+        Phi[j, j] = cov1_eps / (std_eps[j] ** 2)
+    return Phi, mu_eps, std_eps
+
+
+def get_transition_params(f_t: np.ndarray, eps_t: np.ndarray, bool_no_miss: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Calculate transition parameters (matching original TensorFlow get_transition_params).
     
-    # Use numeric utility to ensure positive definiteness
-    Q_f = ensure_positive_definite(Q_f, min_eigenvalue=MIN_EIGENVALUE)
+    Factor order is fixed to 1 (VAR(1) only).
     
-    return A_f, Q_f
+    Parameters
+    ----------
+    f_t : np.ndarray
+        Common factors (T x m)
+    eps_t : np.ndarray
+        Idiosyncratic residuals (T x N)
+    bool_no_miss : np.ndarray
+        Boolean mask (T x N) indicating non-missing values
+        
+    Returns
+    -------
+    A : np.ndarray
+        Transition matrix (combines VAR(1) for factors and AR(1) for idiosyncratic)
+    Q : np.ndarray
+        Process noise covariance (W in original)
+    mu_0 : np.ndarray
+        Initial state mean
+    Sigma_0 : np.ndarray
+        Initial state covariance
+    x_t : np.ndarray
+        Latent states [f_t, eps_t]
+    """
+    # Factor order is fixed to 1 (VAR(1) only)
+    f_past = f_t[:-1, :]
+    A_f = (np.linalg.pinv(f_past.T @ f_past) @ f_past.T @ f_t[1:, :]).T
+    
+    Phi, _, _ = get_idio(eps_t, bool_no_miss)
+    
+    x_t = np.vstack((f_t.T, eps_t.T))
+    A = np.vstack((
+        np.hstack((A_f, np.zeros((A_f.shape[0], eps_t.shape[1])))),  # VAR factors
+        np.hstack((np.zeros((eps_t.shape[1], A_f.shape[1])), Phi))  # AR(1) idio
+    ))
+    
+    w_t = x_t[:, 1:] - A @ x_t[:, :-1]
+    Q = np.diag(np.diag(np.cov(w_t)))
+    mu_0 = np.mean(x_t, axis=1)
+    Sigma_0 = np.cov(x_t)
+    Sigma_0[:A_f.shape[1], A_f.shape[1]:] = 0
+    Sigma_0[A_f.shape[1]:, :A_f.shape[1]] = 0
+    Sigma_0[A_f.shape[1]:, A_f.shape[1]:] = np.diag(np.diag(Sigma_0[A_f.shape[1]:, A_f.shape[1]:]))
+    return A, Q, mu_0, Sigma_0, x_t
 
 
 def forecast_ar1_factors(
@@ -436,14 +409,19 @@ def estimate_idio_dynamics(
     Q_eps = np.zeros((N, N))
     
     for j in range(N):
-        # Find valid consecutive pairs (both t-1 and t must be non-missing)
-        valid = ~missing_mask[:, j]
-        valid_pairs = valid[:-1] & valid[1:]
+        # Match original get_idio selection logic:
+        # Original: to_select = np.hstack((np.array([False]), to_select[:-1] * to_select[1:]))
+        # This selects eps[t] where both t-1 and t are non-missing (for t>=1)
+        # Then uses np.cov(this_eps[1:], this_eps[:-1]) to get AR(1) coefficient
+        valid = ~missing_mask[:, j]  # True where non-missing
+        # Select indices where both t-1 and t are non-missing (for t>=1)
+        # First element is False (can't use t=0 without t-1)
+        to_select = np.hstack((np.array([False]), valid[:-1] & valid[1:]))
         
-        if np.sum(valid_pairs) < min_obs:
+        if np.sum(to_select) < min_obs:
             # Insufficient data: use zero AR(1) coefficient
             _logger.warning(
-                f"Insufficient observations ({np.sum(valid_pairs)}) for idio AR(1) "
+                f"Insufficient observations ({np.sum(to_select)}) for idio AR(1) "
                 f"estimation for series {j}. Using zero AR(1) coefficient."
             )
             A_eps[j, j] = DEFAULT_ZERO_VALUE
@@ -453,95 +431,44 @@ def estimate_idio_dynamics(
             else:
                 Q_eps[j, j] = MIN_DIAGONAL_VARIANCE
         else:
-            # Extract valid consecutive pairs
-            eps_t = residuals[1:, j][valid_pairs]
-            eps_t_1 = residuals[:-1, j][valid_pairs]
+            # Extract selected eps values (matches original: this_eps = eps[to_select, j])
+            this_eps = residuals[to_select, j]
             
-            # Estimate AR(1) coefficient using covariance
-            var_eps_t_1 = compute_var_safe(eps_t_1, ddof=0, min_variance=MIN_FACTOR_VARIANCE)
-            if var_eps_t_1 > MIN_FACTOR_VARIANCE:
-                cov_matrix = compute_cov_safe(np.vstack([eps_t, eps_t_1]), rowvar=True, pairwise_complete=False)
+            # Compute AR(1) coefficient using original method:
+            # cov1_eps = np.cov(this_eps[1:], this_eps[:-1])[0][1]
+            # phi = cov1_eps / (std_eps[j] ** 2)
+            # This computes covariance between consecutive pairs in selected sequence
+            if len(this_eps) >= 2:
+                cov_matrix = compute_cov_safe(np.vstack([this_eps[1:], this_eps[:-1]]), rowvar=True, pairwise_complete=False)
                 cov_eps = cov_matrix[0, 1]
-                A_eps[j, j] = cov_eps / var_eps_t_1
-                
-                # Ensure stability: clip AR(1) coefficient
-                if abs(A_eps[j, j]) >= VAR_STABILITY_THRESHOLD:
-                    sign = np.sign(A_eps[j, j])
-                    A_eps[j, j] = sign * VAR_STABILITY_THRESHOLD
-                    _logger.debug(
-                        f"AR(1) coefficient for series {j} clipped to {A_eps[j, j]:.4f} for stability"
-                    )
+                var_eps = compute_var_safe(this_eps[:-1], ddof=0, min_variance=MIN_FACTOR_VARIANCE)
+                if var_eps > MIN_FACTOR_VARIANCE:
+                    A_eps[j, j] = cov_eps / var_eps
+                else:
+                    A_eps[j, j] = DEFAULT_ZERO_VALUE
             else:
                 A_eps[j, j] = DEFAULT_ZERO_VALUE
             
-            # Estimate innovation covariance
-            residuals_ar = eps_t - A_eps[j, j] * eps_t_1
-            Q_eps[j, j] = compute_var_safe(residuals_ar, ddof=0, min_variance=MIN_DIAGONAL_VARIANCE)
+            # Ensure stability: clip AR(1) coefficient
+            if abs(A_eps[j, j]) >= VAR_STABILITY_THRESHOLD:
+                sign = np.sign(A_eps[j, j])
+                A_eps[j, j] = sign * VAR_STABILITY_THRESHOLD
+                _logger.debug(
+                    f"AR(1) coefficient for series {j} clipped to {A_eps[j, j]:.4f} for stability"
+                )
+            
+            # Estimate innovation covariance from AR(1) residuals
+            # Use the same selection as for AR coefficient
+            if len(this_eps) >= 2:
+                eps_t = this_eps[1:]
+                eps_t_1 = this_eps[:-1]
+                residuals_ar = eps_t - A_eps[j, j] * eps_t_1
+                Q_eps[j, j] = compute_var_safe(residuals_ar, ddof=0, min_variance=MIN_DIAGONAL_VARIANCE)
+            else:
+                # Fallback: use variance of selected eps
+                Q_eps[j, j] = compute_var_safe(this_eps, ddof=0, min_variance=MIN_DIAGONAL_VARIANCE)
     
     return A_eps, Q_eps
-
-
-def extract_idio_params_for_ddfm(
-    A_eps: np.ndarray,
-    Q_eps: np.ndarray,
-    N: int
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Extract phi (AR coefficients) and std_eps (standard deviations) from estimated idio dynamics.
-    
-    This function converts the output of estimate_idio_dynamics() into the format
-    expected by DDFM's denoising procedure.
-    
-    Parameters
-    ----------
-    A_eps : np.ndarray
-        AR(1) coefficients from estimate_idio_dynamics (N x N) or (N,)
-    Q_eps : np.ndarray
-        Innovation covariance from estimate_idio_dynamics (N x N) or (N,)
-    N : int
-        Number of variables
-        
-    Returns
-    -------
-    phi : np.ndarray
-        AR coefficients matrix (N x N)
-    std_eps : np.ndarray
-        Standard deviations (N,)
-    """
-    from ..config.constants import (
-        DEFAULT_IDENTITY_SCALE, DEFAULT_EPSILON, DEFAULT_IDIO_STD,
-        MATRIX_TYPE_DIAGONAL, MATRIX_TYPE_COVARIANCE
-    )
-    from .stability import clean_matrix, create_scaled_identity
-    from ..utils.common import sanitize_array
-    
-    # Validate and sanitize using numeric utilities
-    A_eps = clean_matrix(A_eps, matrix_type=MATRIX_TYPE_DIAGONAL)
-    Q_eps = clean_matrix(Q_eps, matrix_type=MATRIX_TYPE_COVARIANCE)
-    
-    # Extract phi (AR coefficients) - handle different input formats
-    if A_eps.ndim == 2:
-        phi = A_eps
-    elif A_eps.ndim == 1:
-        phi = np.diag(A_eps)
-    else:
-        phi = create_scaled_identity(N, DEFAULT_IDENTITY_SCALE)
-    
-    # Extract std_eps (idiosyncratic standard deviations) - handle different input formats
-    if Q_eps.ndim == 2:
-        # Extract diagonal and compute std
-        diag = np.diag(Q_eps)
-        std_eps = np.sqrt(np.maximum(diag, DEFAULT_EPSILON))
-    elif Q_eps.ndim == 1:
-        # Q_eps is already diagonal (variances), compute std
-        std_eps = np.sqrt(np.maximum(Q_eps, DEFAULT_EPSILON))
-    else:
-        std_eps = np.ones(N) * DEFAULT_IDIO_STD
-    
-    # Ensure std_eps is finite and positive using sanitize_array
-    std_eps = sanitize_array(std_eps, nan_value=DEFAULT_EPSILON, inf_value=DEFAULT_IDIO_STD)
-    std_eps = np.maximum(std_eps, DEFAULT_EPSILON)
-    
-    return phi, std_eps
 
 
 def estimate_idio_params(
@@ -1116,6 +1043,9 @@ __all__ = [
     'estimate_var',
     'estimate_idio_dynamics',
     'estimate_idio_params',
+    # DDFM-specific functions
+    'get_idio',
+    'get_transition_params',
     # Unified estimation functions
     'estimate_var_unified',
     'estimate_ar1_unified',
@@ -1123,9 +1053,6 @@ __all__ = [
     'estimate_variance_unified',
     'compute_initial_covariance_from_transition',
     'stabilize_innovation_covariance',
-    # DDFM-specific utilities
-    'extract_idio_params_for_ddfm',
-    'estimate_var_with_fallback',
     # Forecast functions
     'forecast_ar1_factors',
 ]

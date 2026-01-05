@@ -24,6 +24,10 @@ from dfm_python.config.constants import (
     MIN_EPS_SHAPE_FOR_IDIO,
     DEFAULT_N_MC_SAMPLES,
     DEFAULT_FACTOR_ORDER,
+    DEFAULT_AR_ORDER_2,
+    MIN_SHAPE_FOR_AR2,
+    DEFAULT_DDFM_CLIP_RANGE_DEEP,
+    DEFAULT_DDFM_CLIP_RANGE_SHALLOW,
     COMPUTATION_ERROR_TYPES,
 )
 
@@ -163,7 +167,7 @@ class TestConstants:
         """Test DEFAULT_N_MC_SAMPLES constant."""
         assert DEFAULT_N_MC_SAMPLES is not None
         assert isinstance(DEFAULT_N_MC_SAMPLES, int)
-        assert DEFAULT_N_MC_SAMPLES == 200  # Updated to match original paper's convention
+        assert DEFAULT_N_MC_SAMPLES == 10  # Matches original TensorFlow epochs=10 default (per experiment/config/model/ddfm.yaml)
         # Verify it's used in models/ddfm.py for n_mc_samples parameter
         # This is the number of MC samples per MCMC iteration for DDFM denoising training
         # Matches original paper's typical usage (around 200 samples)
@@ -177,6 +181,46 @@ class TestConstants:
         # Verify it's used in models/ddfm.py for factor_order parameter
         # This replaces hardcoded factor_order=1 throughout the codebase
         assert DEFAULT_FACTOR_ORDER > 0
+    
+    def test_default_ar_order_2(self):
+        """Test DEFAULT_AR_ORDER_2 constant."""
+        assert DEFAULT_AR_ORDER_2 is not None
+        assert isinstance(DEFAULT_AR_ORDER_2, int)
+        assert DEFAULT_AR_ORDER_2 == 2  # Default AR order 2 for DDFM forecast (AR(2) dynamics)
+        # Verify it's used in models/ddfm.py for AR(2) forecast
+        # This replaces hardcoded AR_ORDER_2 = 2 in ddfm.py line 1758
+        assert DEFAULT_AR_ORDER_2 > 0
+    
+    def test_min_shape_for_ar2(self):
+        """Test MIN_SHAPE_FOR_AR2 constant."""
+        assert MIN_SHAPE_FOR_AR2 is not None
+        assert isinstance(MIN_SHAPE_FOR_AR2, int)
+        assert MIN_SHAPE_FOR_AR2 == 2  # Minimum shape dimension for AR(2) forecast (need at least 2 previous time steps)
+        # Verify it's used in models/ddfm.py for shape checks
+        # This replaces hardcoded >= 2 comparisons in ddfm.py lines 1325, 1759
+        assert MIN_SHAPE_FOR_AR2 > 0
+        # Verify it's related to DEFAULT_AR_ORDER_2 (need at least AR_ORDER_2 previous time steps)
+        assert MIN_SHAPE_FOR_AR2 == DEFAULT_AR_ORDER_2
+    
+    def test_default_ddfm_clip_range_deep(self):
+        """Test DEFAULT_DDFM_CLIP_RANGE_DEEP constant."""
+        assert DEFAULT_DDFM_CLIP_RANGE_DEEP is not None
+        assert isinstance(DEFAULT_DDFM_CLIP_RANGE_DEEP, float)
+        assert DEFAULT_DDFM_CLIP_RANGE_DEEP == 8.0  # Clipping range for deep networks (>2 layers)
+        # Verify it's used in models/ddfm.py for clip_range calculation
+        # Used in _get_clip_range() helper method for deep networks
+        assert DEFAULT_DDFM_CLIP_RANGE_DEEP > 0
+    
+    def test_default_ddfm_clip_range_shallow(self):
+        """Test DEFAULT_DDFM_CLIP_RANGE_SHALLOW constant."""
+        assert DEFAULT_DDFM_CLIP_RANGE_SHALLOW is not None
+        assert isinstance(DEFAULT_DDFM_CLIP_RANGE_SHALLOW, float)
+        assert DEFAULT_DDFM_CLIP_RANGE_SHALLOW == 10.0  # Clipping range for shallow networks (<=2 layers)
+        # Verify it's used in models/ddfm.py for clip_range calculation
+        # Used in _get_clip_range() helper method for shallow networks
+        assert DEFAULT_DDFM_CLIP_RANGE_SHALLOW > 0
+        # Verify shallow range is greater than deep range (shallow networks can handle larger values)
+        assert DEFAULT_DDFM_CLIP_RANGE_SHALLOW > DEFAULT_DDFM_CLIP_RANGE_DEEP
     
     def test_computation_error_types(self):
         """Test COMPUTATION_ERROR_TYPES constant."""

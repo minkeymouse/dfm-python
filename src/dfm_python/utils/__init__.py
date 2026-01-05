@@ -94,6 +94,9 @@ from .common import (
     ensure_tensor,
     ensure_numpy,
     validate_matrix_shape,
+    compute_scale_stats,
+    check_and_standardize_data,
+    normalize_to_match_scale,
     log_tensor_stats,
     select_columns_by_prefix,
     extract_tensor_value,
@@ -139,14 +142,14 @@ from .tensor_utils import (
 )
 
 
-# Autoencoder functions are now in encoder.simple_encoder
-from ..encoder.simple_encoder import (
+# Autoencoder functions are now in encoder.simple_autoencoder
+from ..encoder.simple_autoencoder import (
     extract_decoder_params,
     convert_decoder_to_numpy,
 )
 
 __all__ = [
-    # Autoencoder functions (from encoder.simple_encoder)
+    # Autoencoder functions (from encoder.simple_autoencoder)
     'extract_decoder_params',
     'convert_decoder_to_numpy',
     # State-space utilities
@@ -210,6 +213,9 @@ __all__ = [
     'safe_matrix_power',
     'extract_matrix_block',
     'validate_matrix_shape',
+    'compute_scale_stats',
+    'check_and_standardize_data',
+    'normalize_to_match_scale',
     'log_tensor_stats',
     'select_columns_by_prefix',
     'extract_tensor_value',

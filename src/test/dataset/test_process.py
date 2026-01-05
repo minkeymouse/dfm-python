@@ -62,9 +62,13 @@ class TestParseTimestamp:
         """Test TimeIndex raises DataValidationError for non-datetime Series."""
         # Create Series with non-datetime dtype that cannot be converted
         # Use object dtype with non-datetime strings to ensure conversion fails
+        import warnings
         invalid_series = pd.Series(['not', 'a', 'date', 'string'], dtype=object)
-        with pytest.raises(DataValidationError, match="Cannot convert Series with dtype"):
-            TimeIndex(invalid_series)
+        # Suppress expected pandas warning about date parsing (test verifies error is raised)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=".*Could not infer format.*", category=UserWarning)
+            with pytest.raises(DataValidationError, match="Cannot convert Series with dtype"):
+                TimeIndex(invalid_series)
     
     def test_time_index_invalid_type(self):
         """Test TimeIndex raises DataValidationError for unsupported input types."""

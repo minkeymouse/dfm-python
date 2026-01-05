@@ -1,8 +1,7 @@
 """Linear Dynamic Factor Model (DFM) implementation.
 
 This module contains the linear DFM implementation using EM algorithm.
-DFM inherits from BaseFactorModel (not PyTorch Lightning) since all
-calculations are performed in NumPy using pykalman.
+DFM inherits from BaseFactorModel since all calculations are performed in NumPy using pykalman.
 """
 
 # Standard library imports
@@ -76,7 +75,7 @@ from ..numeric.estimator import (
 )
 
 if TYPE_CHECKING:
-    from ..datamodule import DFMDataModule
+    from ..dataset.dfm_dataset import DFMDataset
 
 _logger = get_logger(__name__)
 
@@ -103,7 +102,7 @@ class DFM(BaseFactorModel):
     """High-level API for Linear Dynamic Factor Model.
     
     This class implements the EM algorithm for DFM estimation using NumPy and pykalman.
-    It inherits from BaseFactorModel (not PyTorch Lightning) since all calculations
+    It inherits from BaseFactorModel since all calculations
     are performed in NumPy.
     
     **Note**: All calculations are performed in NumPy (using pykalman) for better
@@ -116,7 +115,7 @@ class DFM(BaseFactorModel):
     and idiosyncratic components.
     
     Example:
-        >>> from dfm_python import DFM, DFMDataModule
+        >>> from dfm_python import DFM, DFMDataset
         >>> from dfm_python.config import DFMConfig
         >>> import pandas as pd
         >>> 
@@ -133,11 +132,10 @@ class DFM(BaseFactorModel):
         >>> # Step 3: Create model with config
         >>> model = DFM(config=config)
         >>> 
-        >>> # Step 4: Create DataModule and fit
-        >>> dm = DFMDataModule(config=config, data=df, target_series=['series1'])
-        >>> dm.setup()
-        >>> init_params = dm.get_initialization_params()
-        >>> model.fit(X=init_params['X'], datamodule=dm)
+        >>> # Step 4: Create Dataset and fit
+        >>> dataset = DFMDataset(config=config, data=df, target_series=['series1'])
+        >>> init_params = dataset.get_initialization_params()
+        >>> model.fit(X=init_params['X'], dataset=dataset)
         >>> 
         >>> # Step 5: Access results
         >>> result = model.result
@@ -199,7 +197,7 @@ class DFM(BaseFactorModel):
         self.max_iter = resolve_param(max_iter, default=DEFAULT_MAX_ITER)
         self.nan_method = resolve_param(nan_method, default=DEFAULT_NAN_METHOD)
         self.nan_k = resolve_param(nan_k, default=DEFAULT_NAN_K)
-        # Mixed frequency: auto-detected from DataModule or config during fit()
+        # Mixed frequency: auto-detected from Dataset or config during fit()
         self._mixed_freq: Optional[bool] = None  # Internal property, auto-detected
         
         # Mixed frequency parameters (set during fit)
@@ -829,7 +827,7 @@ class DFM(BaseFactorModel):
     def fit(
         self,
         X: Union[np.ndarray, Any],
-        datamodule: Optional[Any] = None
+        dataset: Optional[Any] = None
     ) -> DFMTrainingState:
         """Fit model using EM algorithm (wrapper around pykalman).
         
@@ -839,23 +837,23 @@ class DFM(BaseFactorModel):
         Parameters
         ----------
         X : np.ndarray or torch.Tensor, optional
-            Standardized data (T x N). If datamodule is provided, X can be None.
-        datamodule : DFMDataModule, optional
-            Custom DFMDataModule instance. If provided, initialization parameters will be
-            extracted from the datamodule instead of computing them directly.
-            Target scaler is obtained from datamodule.target_scaler for inverse transformation.
+            Standardized data (T x N). If dataset is provided, X can be None.
+        dataset : DFMDataset, optional
+            Custom DFMDataset instance. If provided, initialization parameters will be
+            extracted from the dataset instead of computing them directly.
+            Target scaler is obtained from dataset.target_scaler for inverse transformation.
             
         Returns
         -------
         DFMTrainingState
             Final training state with parameters and convergence info
         """
-        # Use datamodule if provided
-        if datamodule is not None:
-            self._data_module = datamodule  # Store for later use in predict()
+        # Use dataset if provided
+        if dataset is not None:
+            self._dataset = dataset  # Store for later use in predict()
             # Store target_scaler for inverse transformation in predict()
-            self.target_scaler = getattr(datamodule, 'target_scaler', None)
-            init_params = datamodule.get_initialization_params()
+            self.target_scaler = getattr(dataset, 'target_scaler', None)
+            init_params = dataset.get_initialization_params()
             X_np = init_params['X']
             R_mat = init_params['R_mat']
             q = init_params['q']
@@ -865,7 +863,7 @@ class DFM(BaseFactorModel):
             idio_indicator = init_params['idio_indicator']
             opt_nan = init_params['opt_nan']
             clock = init_params['clock']
-            # Conditional logic: Auto-detect mixed_freq from DataModule if not set (not validation)
+            # Conditional logic: Auto-detect mixed_freq from Dataset if not set (not validation)
             is_mixed_freq = init_params.get('is_mixed_freq', False)
             if self._mixed_freq is None:
                 self._mixed_freq = is_mixed_freq
@@ -951,7 +949,7 @@ class DFM(BaseFactorModel):
             opt_nan = {'method': self.nan_method, 'k': self.nan_k}
         
         # Note: Mx/Wx removed - target_scaler is used instead for inverse transformation
-        # Target scaler is stored in self.target_scaler (set above from datamodule)
+        # Target scaler is stored in self.target_scaler (set above from dataset)
         self.data_processed = X_np
         
         # Rebuild blocks array to match actual data dimensions
@@ -960,9 +958,9 @@ class DFM(BaseFactorModel):
         if self.blocks.shape[0] != N_actual:
             # Rebuild blocks from config using actual data columns
             columns = None
-            if datamodule is not None and hasattr(datamodule, '_processed_columns'):
-                # Use column names from datamodule
-                columns = list(datamodule._processed_columns)
+            if dataset is not None and hasattr(dataset, '_processed_columns'):
+                # Use column names from dataset
+                columns = list(dataset._processed_columns)
             elif hasattr(self._config, 'frequency') and self._config.frequency is not None:
                 # Use series from frequency dict, but filter to match actual data
                 freq_keys = list(self._config.frequency.keys())
@@ -1142,7 +1140,7 @@ class DFM(BaseFactorModel):
         # Compute smoothed data
         x_sm = Z @ C.T
         
-        # Get target scaler from datamodule if available
+        # Get target scaler from dataset if available
         target_scaler = getattr(self, 'target_scaler', None)
         
         return DFMResult(
@@ -1251,7 +1249,7 @@ class DFM(BaseFactorModel):
         """Load configuration from various sources.
         
         After loading config, the model needs to be re-initialized with the new config.
-        For standard Lightning pattern, pass config directly to __init__.
+        For standard pattern, pass config directly to __init__.
         """
         new_config = self._load_config_common(
             source=source,
@@ -1283,10 +1281,10 @@ class DFM(BaseFactorModel):
         """Forecast future values.
         
         This method can be called after training. It uses the training state
-        from the Lightning module to generate forecasts.
+        from the model to generate forecasts.
         
-        Target series are determined from the DataModule's target_series attribute,
-        which should be set during DataModule initialization.
+        Target series are determined from the Dataset's target_series attribute,
+        which should be set during Dataset initialization.
         
         **New Data Initialization**: If `data` is provided, the method runs a
         Kalman filter forward pass on the new data to compute the initial factor
@@ -1325,7 +1323,7 @@ class DFM(BaseFactorModel):
         Raises
         ------
         ValueError
-            If DataModule has no target_series set
+            If Dataset has no target_series set
         ModelNotTrainedError
             If model has not been trained yet
         DataValidationError
@@ -1352,9 +1350,9 @@ class DFM(BaseFactorModel):
             details="This may indicate the model was not properly trained or result object is corrupted"
         )
         
-        # Compute and validate horizon
         if horizon is None:
-            horizon = self._compute_default_horizon()
+            from ..utils.misc import compute_default_horizon
+            horizon = compute_default_horizon(self._config)
         from ..numeric.validator import validate_horizon
         horizon = validate_horizon(horizon)
         
@@ -1407,27 +1405,24 @@ class DFM(BaseFactorModel):
         validate_no_nan_inf(A, name="transition matrix A")
         validate_no_nan_inf(C, name="observation matrix C")
         
-        # Resolve target series from DataModule (target_series should be set at initialization)
-        # _resolve_target_series() already validates and raises DataError if none found
+        from ..utils.misc import resolve_target_series
         series_ids = self._config.get_series_ids() if self._config is not None else result.series_ids
-        target_series, target_indices = self._resolve_target_series(series_ids, result)
+        dataset = None
+        try:
+            dataset = self._get_dataset()
+        except (ModelNotInitializedError, AttributeError):
+            pass
+        target_series, target_indices = resolve_target_series(dataset, series_ids, result, self.__class__.__name__)
         
-        # Additional validation: ensure target_series was set in DataModule
+        # Additional validation: ensure target_series was set in Dataset
         if target_series is None or len(target_series) == 0:
             raise ValueError(
-                "DFM prediction failed: no target_series found in DataModule. "
-                "Please set target_series when creating the DataModule (e.g., DFMDataModule(..., target_series=['series_id']))."
+                "DFM prediction failed: no target_series found in Dataset. "
+                "Please set target_series when creating the Dataset (e.g., DFMDataset(..., target_series=['series_id']))."
             )
         
-        # Forecast factors using VAR dynamics (common helper)
-        Z_prev = result.Z[-2, :] if result.Z.shape[0] >= 2 and p == 2 else None
-        Z_forecast = self._forecast_var_factors(
-            Z_last=Z_last,
-            A=A,
-            p=p,
-            horizon=horizon,
-            Z_prev=Z_prev
-        )
+        from ..numeric.estimator import forecast_ar1_factors
+        Z_forecast = forecast_ar1_factors(Z_last, A, horizon, dtype=DEFAULT_DTYPE)
         
         # Optimized: Transform only target series (not all series)
         # Use only target indices for C
@@ -1473,8 +1468,9 @@ class DFM(BaseFactorModel):
                                         f"(max deviation: {max_deviation:.1f} std devs). "
                                         f"Possible numerical instability."
                                     )
-            except Exception:
+            except (AttributeError, TypeError, ValueError):
                 # Skip validation if scaler attributes unavailable
+                # Uses specific exception types instead of bare Exception to avoid masking unexpected errors
                 pass
         
         if return_factors:

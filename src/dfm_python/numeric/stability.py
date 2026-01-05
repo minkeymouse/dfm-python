@@ -1015,19 +1015,28 @@ def convergence_checker(
     loss_now : float
         Current MSE loss (on non-missing values)
     """
-    # Mask for non-missing values
+    # Match original: use boolean indexing like original's y_prev[~np.isnan(y_actual)]
+    # Original: loss_minus = mse(y_prev[~np.isnan(y_actual)], y_actual[~np.isnan(y_actual)])
+    # This flattens arrays and selects non-missing values
     mask = ~np.isnan(y_actual)
     
-    # Compute MSE on non-missing values
-    y_prev_valid = y_prev[mask]
-    y_now_valid = y_now[mask]
-    y_actual_valid = y_actual[mask]
+    # Flatten and select non-missing values (matching original's indexing)
+    y_prev_flat = y_prev.flatten()
+    y_now_flat = y_now.flatten()
+    y_actual_flat = y_actual.flatten()
+    mask_flat = mask.flatten()
     
+    y_prev_valid = y_prev_flat[mask_flat]
+    y_now_valid = y_now_flat[mask_flat]
+    y_actual_valid = y_actual_flat[mask_flat]
+    
+    # Compute MSE (matching original sklearn.metrics.mean_squared_error)
     loss_prev = float(np.mean((y_actual_valid - y_prev_valid) ** 2))
     loss_now = float(np.mean((y_actual_valid - y_now_valid) ** 2))
     
-    # Relative change
+    # Relative change (matching original: np.abs(loss - loss_minus) / loss_minus)
     if loss_prev < MIN_FACTOR_VARIANCE:
+        # Avoid division by zero
         delta = float(abs(loss_now - loss_prev))
     else:
         delta = float(abs(loss_now - loss_prev) / loss_prev)

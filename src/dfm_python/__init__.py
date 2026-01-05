@@ -23,40 +23,36 @@ Key Features:
     - Robust handling of missing data (internal spline interpolation)
     - Automatic standardization and data clipping
 
-Example (Standard Lightning Pattern):
-    >>> from dfm_python import DFM, DFMDataModule, DFMTrainer
+Example:
+    >>> from dfm_python import DFM, DFMDataset
     >>> import pandas as pd
     >>> 
     >>> # Step 1: Load and preprocess data
     >>> df = pd.read_csv('data/your_data.csv')
     >>> df_processed = df[[col for col in df.columns if col != 'date']]
     >>> 
-    >>> # Step 2: Create DataModule
-    >>> dm = DFMDataModule(config_path='config/default.yaml', data=df_processed)
-    >>> dm.setup()
+    >>> # Step 2: Create Dataset
+    >>> dataset = DFMDataset(config_path='config/default.yaml', data=df_processed)
     >>> 
     >>> # Step 3: Create model and load config
     >>> model = DFM()
     >>> model.load_config('config/default.yaml')
     >>> 
-    >>> # Step 4: Create trainer and fit (standard Lightning pattern)
-    >>> trainer = DFMTrainer(max_epochs=100)  # DEFAULT_MAX_EPOCHS
-    >>> trainer.fit(model, dm)
+    >>> # Step 4: Fit model
+    >>> model.fit(X=dataset.get_processed_data(), dataset=dataset)
     >>> 
     >>> # Step 5: Predict
     >>> Xf, Zf = model.predict(horizon=6)
     >>> 
-    >>> # Or use DDFM (same pattern)
-    >>> from dfm_python import DDFM, DDFMTrainer
+    >>> # Or use DDFM
+    >>> from dfm_python import DDFM, DDFMDataset
     >>> 
-    >>> dm_ddfm = DFMDataModule(config_path='config/default.yaml', data=df_processed)
-    >>> dm_ddfm.setup()
+    >>> dataset_ddfm = DDFMDataset(config_path='config/default.yaml', data=df_processed)
     >>> 
     >>> ddfm_model = DDFM(encoder_layers=[64, 32], num_factors=2)
     >>> ddfm_model.load_config('config/default.yaml')
     >>> 
-    >>> trainer_ddfm = DDFMTrainer(max_epochs=100)  # DEFAULT_MAX_EPOCHS
-    >>> trainer_ddfm.fit(ddfm_model, dm_ddfm)
+    >>> ddfm_model.train(dataset=dataset_ddfm)
     >>> Xf, Zf = ddfm_model.predict(horizon=6)
     
 Note: DFMConfig uses frequency dict to specify series (column names -> frequencies).
@@ -97,15 +93,11 @@ from .config import DFMResult, DDFMResult, KDFMResult, BaseResult
 # Utilities (from utils/ subpackage)
 from .utils.metric import calculate_rmse
 
-# DataModule classes (includes both Lightning and custom implementations)
+# Dataset classes
 # Users can import these directly from dfm_python
-from .datamodule import (
-    DFMDataModule,
-    DDFMDataModule,  # DDFM-specific DataModule
-    KDFMDataModule,  # KDFM-specific DataModule
-    DDFMDataset,  # DDFM Dataset class (usually not needed directly)
-    KDFMDataset,  # KDFM Dataset class (usually not needed directly)
-)
+from .dataset.dfm_dataset import DFMDataset
+from .dataset.ddfm_dataset import DDFMDataset
+from .dataset.kdfm_dataset import KDFMDataset
 
 # Model implementations
 from .models.base import BaseFactorModel
@@ -139,22 +131,14 @@ __all__.extend([
     'KDFM',  # High-level API class
 ])
 
-# Lightning modules (mandatory dependency)
+# Dataset classes
 __all__.extend([
-    'DFMDataModule',
-    'DDFMDataModule',  # DDFM-specific DataModule
-    'KDFMDataModule',  # KDFM-specific DataModule
-    'DDFMDataset',  # DDFM Dataset class (usually not needed directly)
-    'KDFMDataset',  # KDFM Dataset class (usually not needed directly)
+    'DFMDataset',  # DFM Dataset class
+    'DDFMDataset',  # DDFM Dataset class
+    'KDFMDataset',  # KDFM Dataset class
 ])
 
-# Trainer classes (mandatory dependency)
-from .trainer import DFMTrainer, DDFMTrainer, KDFMTrainer
-
-__all__.extend([
-    'DFMTrainer',
-    'DDFMTrainer',
-    'KDFMTrainer',
-])
+# Trainer classes (DEPRECATED - removed, kept stubs in trainer/__init__.py for backward compatibility)
+# Note: Trainer classes have been removed. Use model.train() or model.fit() methods instead.
 
 

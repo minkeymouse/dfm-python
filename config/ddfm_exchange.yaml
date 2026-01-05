@@ -1,0 +1,51 @@
+# DDFM Configuration for Exchange Rate Dataset
+# Based on original TensorFlow DDFM implementation (DDFM/run_exchange_rate_original.py)
+# Data: 8 exchange rate series (AUD_USD, GBP_USD, CAD_USD, CHF_USD, CNY_USD, JPY_USD, SGD_USD, NZD_USD)
+# Clock: Daily (d) - all series are daily frequency
+# Date range: 1990-01-01 to 2010-10-10
+
+# Neural Network Architecture (matching original TensorFlow DDFM)
+encoder_layers:
+  - 16
+  - 4
+num_factors: 4  # Matching original structure_encoder=(16, 4) -> 4 factors
+activation: relu  # Matching original link='relu'
+use_batch_norm: true  # Matching original batch_norm=True
+# Note: decoder="linear" is set in model initialization, not in config
+# Matching original structure_decoder=None (linear decoder)
+
+# Training Parameters (matching original TensorFlow DDFM)
+learning_rate: 0.005  # Matching original learning_rate=0.005
+epochs: 10  # Matching original epochs=10 (number of MC samples per MCMC iteration)
+batch_size: 100  # Matching original batch_size=100 (time-step batch size)
+factor_order: 1  # VAR lag order for factor dynamics (must be 1)
+
+# Idiosyncratic Components
+use_idiosyncratic: true
+min_obs_idio: 5  # Minimum observations for idio AR(1) estimation
+
+# MCMC/Iterative Parameters (matching original TensorFlow DDFM)
+max_iter: 200  # Matching original max_iter=200 (maximum MCMC iterations)
+tolerance: 0.0005  # Matching original tolerance=0.0005
+disp: 10  # Matching original disp=10 (print every 10 iterations)
+seed: 3  # Matching original seed=3
+lags_input: 0  # Matching original lags_input=0
+
+# Data Handling
+clock: d  # Daily clock frequency (all series are daily)
+target_scaler: null  # No target series - all series are features
+# Note: nan_method and nan_k are internal constants (not user-configurable)
+
+# Frequency mapping (all series are daily)
+# If not specified, all series use clock frequency (d)
+# Format: {"series_name": "frequency_code"}
+# frequency:
+#   AUD_USD: d
+#   GBP_USD: d
+#   CAD_USD: d
+#   CHF_USD: d
+#   CNY_USD: d
+#   JPY_USD: d
+#   SGD_USD: d
+#   NZD_USD: d
+

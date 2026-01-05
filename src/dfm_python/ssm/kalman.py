@@ -260,6 +260,7 @@ class DFMKalmanFilter:
             loglik = self._pykalman.loglikelihood(observations)
         except (ValueError, RuntimeError, AttributeError) as e:
             _logger.warning(f"DFMKalmanFilter: Failed to compute log-likelihood: {e}. Using {DEFAULT_ZERO_VALUE}.")
+            _logger.debug(f"DFMKalmanFilter: Full exception traceback for loglikelihood computation failure:", exc_info=True)
             loglik = DEFAULT_ZERO_VALUE
         
         return smoothed_state_means, smoothed_state_covariances, sigma_pair_smooth, loglik

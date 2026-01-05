@@ -14,6 +14,7 @@ from typing import Optional, List, Dict, Any, Tuple
 from datetime import datetime
 
 from .model import DFMConfig
+from .params import DFMFitParams, DDFMFitParams
 
 
 
@@ -233,6 +234,15 @@ class DFMResult(BaseResult):
         Whether EM algorithm converged.
     num_iter : int
         Number of EM iterations performed.
+    fit_params : DFMFitParams, optional
+        Fit-time parameter overrides used during estimation.
+        Contains: max_iter, threshold, regularization_scale
+    training_max_iter : int, optional
+        Maximum EM iterations used (from model.max_iter or fit_params.max_iter)
+    training_threshold : float, optional
+        Convergence threshold used (from model.threshold or fit_params.threshold)
+    training_regularization_scale : float, optional
+        Regularization scale used (from fit_params.regularization_scale if provided)
     
     Examples
     --------
@@ -245,13 +255,41 @@ class DFMResult(BaseResult):
     >>> loadings = Res.C[0, :]
     >>> # Reconstruct smoothed series from factors
     >>> reconstructed = Res.Z @ Res.C.T
+    >>> # Access training hyperparameters
+    >>> print(f"Used {Res.training_max_iter} max iterations")
+    >>> print(f"Convergence threshold: {Res.training_threshold}")
     """
     # All fields inherited from BaseResult
     # converged and num_iter have specific meaning for EM algorithm
     
+    # Fit-time parameters
+    fit_params: Optional[DFMFitParams] = None
+    training_max_iter: Optional[int] = None
+    training_threshold: Optional[float] = None
+    training_regularization_scale: Optional[float] = None
+    
     def summary(self) -> str:
         """Return a formatted summary of the DFM results."""
-        return super().summary()
+        summary_text = super().summary()
+        lines = summary_text.split("\n")
+        
+        # Insert training hyperparameters before the final separator
+        insert_idx = len(lines) - 1
+        training_info = []
+        if self.training_max_iter is not None:
+            training_info.append(f"  Max iterations: {self.training_max_iter}")
+        if self.training_threshold is not None:
+            training_info.append(f"  Convergence threshold: {self.training_threshold:.6f}")
+        if self.training_regularization_scale is not None:
+            training_info.append(f"  Regularization scale: {self.training_regularization_scale:.6f}")
+        
+        if training_info:
+            lines.insert(insert_idx, "")
+            lines.insert(insert_idx, "Training Hyperparameters:")
+            for info in training_info:
+                lines.insert(insert_idx + 1, info)
+        
+        return "\n".join(lines)
 
 
 @dataclass
@@ -276,6 +314,38 @@ class DDFMResult(BaseResult):
         Architecture of the encoder network used.
     use_idiosyncratic : bool, optional
         Whether idiosyncratic components were modeled.
+    fit_params : DDFMFitParams, optional
+        State-space model parameters created during fit (F, Q, mu_0, sigma_0, H, R).
+        These are computed during build_state_space() and represent the fitted
+        state-space model structure.
+    # Training hyperparameters
+    training_max_iter : int, optional
+        Maximum MCMC iterations used (from model.max_iter)
+    training_tolerance : float, optional
+        Convergence tolerance used (from model.tolerance)
+    training_n_mc_samples : int, optional
+        Number of Monte Carlo samples per MCMC iteration (from model.n_mc_samples)
+    training_window_size : int, optional
+        Batch/window size used during training (from model.window_size)
+    training_learning_rate : float, optional
+        Learning rate used (from model.learning_rate)
+    training_optimizer : str, optional
+        Optimizer type used ('Adam' or 'SGD', from model.optimizer_type)
+    training_decay_learning_rate : bool, optional
+        Whether learning rate decay was used (from model.decay_learning_rate)
+    training_encoder_size : tuple, optional
+        Encoder architecture tuple (from model.encoder_size)
+    training_decoder_size : tuple, optional
+        Decoder architecture tuple (from model.decoder_size, None for linear)
+    training_target_series : List[str], optional
+        Target series used for reconstruction loss (from model.target_series)
+    training_use_bias : bool, optional
+        Whether bias was used in final decoder layer (from model.use_bias).
+        The bias term is extracted and used to adjust data mean during state-space construction.
+    training_batch_norm : bool, optional
+        Whether batch normalization was used (from model.batch_norm)
+    training_activation : str, optional
+        Activation function used ('relu' or 'tanh', from model.activation)
     
     Examples
     --------
@@ -286,12 +356,34 @@ class DDFMResult(BaseResult):
     >>> common_factor = Res.Z[:, 0]
     >>> # Access factor loadings
     >>> loadings = Res.C[0, :]
+    >>> # Access state-space parameters
+    >>> if Res.fit_params is not None:
+    ...     transition_matrix = Res.fit_params.F
+    ...     observation_matrix = Res.fit_params.H
     """
     # All fields inherited from BaseResult
     # Additional DDFM-specific fields
     training_loss: Optional[float] = None  # Final training loss
     encoder_layers: Optional[List[int]] = None  # Encoder architecture
     use_idiosyncratic: Optional[bool] = None  # Whether idio components were used
+    
+    # Fit-time parameters (state-space model)
+    fit_params: Optional[DDFMFitParams] = None
+    
+    # Training hyperparameters
+    training_max_iter: Optional[int] = None
+    training_tolerance: Optional[float] = None
+    training_n_mc_samples: Optional[int] = None
+    training_window_size: Optional[int] = None
+    training_learning_rate: Optional[float] = None
+    training_optimizer: Optional[str] = None
+    training_decay_learning_rate: Optional[bool] = None
+    training_encoder_size: Optional[tuple] = None
+    training_decoder_size: Optional[tuple] = None
+    training_target_series: Optional[List[str]] = None
+    training_use_bias: Optional[bool] = None
+    training_batch_norm: Optional[bool] = None
+    training_activation: Optional[str] = None
     
     def summary(self) -> str:
         """Return a formatted summary of the DDFM results."""
@@ -300,12 +392,36 @@ class DDFMResult(BaseResult):
         
         # Insert DDFM-specific information before the final separator
         insert_idx = len(lines) - 1
+        ddfm_info = []
+        
         if self.training_loss is not None:
+            ddfm_info.append(f"  Final training loss: {self.training_loss:.4f}")
+        if self.encoder_layers is not None:
+            ddfm_info.append(f"  Encoder architecture: {self.encoder_layers}")
+        if self.training_encoder_size is not None:
+            ddfm_info.append(f"  Encoder size: {self.training_encoder_size}")
+        if self.training_decoder_size is not None:
+            ddfm_info.append(f"  Decoder size: {self.training_decoder_size}")
+        if self.training_max_iter is not None:
+            ddfm_info.append(f"  Max MCMC iterations: {self.training_max_iter}")
+        if self.training_tolerance is not None:
+            ddfm_info.append(f"  Convergence tolerance: {self.training_tolerance:.6f}")
+        if self.training_n_mc_samples is not None:
+            ddfm_info.append(f"  MC samples per iteration: {self.training_n_mc_samples}")
+        if self.training_window_size is not None:
+            ddfm_info.append(f"  Window size: {self.training_window_size}")
+        if self.training_learning_rate is not None:
+            ddfm_info.append(f"  Learning rate: {self.training_learning_rate:.6f}")
+        if self.training_optimizer is not None:
+            ddfm_info.append(f"  Optimizer: {self.training_optimizer}")
+        if self.training_decay_learning_rate is not None:
+            ddfm_info.append(f"  Learning rate decay: {self.training_decay_learning_rate}")
+        
+        if ddfm_info:
             lines.insert(insert_idx, "")
             lines.insert(insert_idx, "Neural Network Training:")
-            lines.insert(insert_idx + 1, f"  Final training loss: {self.training_loss:.4f}")
-            if self.encoder_layers is not None:
-                lines.insert(insert_idx + 2, f"  Encoder architecture: {self.encoder_layers}")
+            for info in ddfm_info:
+                lines.insert(insert_idx + 1, info)
         
         return "\n".join(lines)
 
@@ -370,28 +486,5 @@ class KDFMResult(BaseResult):
         
         return "\n".join(lines)
 
-
-# ============================================================================
-# Parameter Override Structure
-# ============================================================================
-
-@dataclass
-class FitParams:
-    """Parameter overrides for DFM estimation.
-    
-    This dataclass allows overriding configuration parameters at fit time
-    without modifying the configuration object itself.
-    
-    Attributes
-    ----------
-    max_iter : int, optional
-        Maximum EM iterations (overrides config.max_iter)
-    threshold : float, optional
-        Convergence threshold (overrides config.threshold)
-    regularization_scale : float, optional
-        Regularization scale (overrides config.regularization_scale)
-    """
-    max_iter: Optional[int] = None
-    threshold: Optional[float] = None
-    regularization_scale: Optional[float] = None
+# FitParams moved to config.schema.params as DFMParams
 

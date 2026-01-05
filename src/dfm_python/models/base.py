@@ -10,7 +10,7 @@ to reflect their different architectures and use cases. They are NOT polymorphic
 and cannot be used interchangeably.
 
 **KDFM (Kernelized Dynamic Factor Model)**:
-- Training: Uses `training_step()` method (PyTorch Lightning training loop)
+- Training: Uses `train(dataset)` method
 - Prediction: `predict(horizon, last_observation)` - REQUIRES `last_observation` parameter
 - Result extraction: `get_result()` returns KDFMResult with IRF data
 - Architecture: Companion matrix parameterization, structural identification layer
@@ -24,7 +24,10 @@ and cannot be used interchangeably.
 - Use case: Dimensionality reduction, factor extraction
 
 **DDFM (Deep Dynamic Factor Model)**:
-- Training: Uses PyTorch Lightning Trainer pattern (trainer.fit(model, datamodule))
+- Training: Uses `train(dataset)` method
+  - MCMC training loop with max_epochs=model.max_epoch (each epoch = one MCMC iteration)
+  - Convergence checked automatically during training
+  - Training stops early if convergence is achieved before max_epoch
 - Prediction: `predict(horizon)` - NO `last_observation` parameter
 - Result extraction: `get_result()` returns DDFMResult with uncertainty quantification
 - Architecture: Deep learning + Bayesian inference
@@ -40,23 +43,24 @@ explicit state management.
 **Usage Examples**:
     # KDFM
     model = KDFM(config=config)
-    model.initialize_from_data(data)
-    # Training via PyTorch Lightning Trainer
-    trainer.fit(model, datamodule)
+    dataset = KDFMDataset(config=config, data=data)
+    model.train(dataset=dataset)
     forecasts = model.predict(horizon=8, last_observation=last_obs)
     
     # DFM
     model = DFM(config=config)
-    model.fit(data)
+    dataset = DFMDataset(config=config, data=data)
+    model.fit(X=dataset.get_processed_data(), dataset=dataset)
     forecasts = model.predict(horizon=8)
     
     # DDFM
     model = DDFM(config=config)
     model.load_config(config)
-    datamodule = DDFMDataModule(config=config, data=data)
-    datamodule.setup()
-    trainer = DDFMTrainer(max_epochs=100)
-    trainer.fit(model, datamodule)
+    dataset = DDFMDataset(config=config, data=data)
+    # Note: For DDFM, max_epochs is set to model.max_epoch (number of MCMC iterations).
+    # Each training epoch = one MCMC iteration.
+    # Training uses simple training loop with automatic convergence checking.
+    model.train(dataset=dataset)
     forecasts = model.predict(horizon=8)
 """
 
@@ -74,7 +78,9 @@ else:
         Tensor = Any
 
 if TYPE_CHECKING:
-    from ..datamodule import KDFMDataModule, DFMDataModule, DDFMDataModule
+    from ..dataset.kdfm_dataset import KDFMDataset
+    from ..dataset.dfm_dataset import DFMDataset
+    from ..dataset.ddfm_dataset import DDFMDataset
 
 from ..config import (
     DFMConfig, make_config_source, ConfigSource,
@@ -110,7 +116,7 @@ class BaseFactorModel(ABC):
         self._config: Optional[DFMConfig] = None
         self._result: Optional[BaseResult] = None
         self.training_state: Optional[Any] = None
-        self._data_module: Optional[Any] = None
+        self._dataset: Optional[Any] = None
         self.data_processed: Optional[np.ndarray] = None  # Store processed training data for shape validation
     
     @property
@@ -161,26 +167,10 @@ class BaseFactorModel(ABC):
             )
     
     def _ensure_result(self) -> BaseResult:
-        """Ensure result exists, computing it if necessary.
-        
-        This helper method ensures that self._result is available. If it's None,
-        it attempts to compute it from training_state. This is a common pattern
-        used in update(), predict(), and result property.
-        
-        Returns
-        -------
-        BaseResult
-            The model result (computed if necessary)
-            
-        Raises
-        ------
-        ModelNotTrainedError
-            If model has not been trained yet
-        """
+        """Ensure result exists, computing it if necessary."""
         if self._result is None:
-            self._check_trained()  # This will try to compute result if training_state exists
+            self._check_trained()
             if self._result is None:
-                # If still None after _check_trained, explicitly compute
                 self._result = self.get_result()
         return self._result
     
@@ -244,183 +234,61 @@ class BaseFactorModel(ABC):
         self._config = new_config
         return new_config
     
-    def _get_datamodule(self) -> Union['KDFMDataModule', 'DFMDataModule', 'DDFMDataModule']:
-        """Get DataModule from model or trainer.
+    def _get_dataset(self) -> Union['KDFMDataset', 'DFMDataset', 'DDFMDataset']:
+        """Get Dataset from model.
         
-        This method attempts to retrieve the DataModule from:
-        1. Model's _data_module attribute (if set directly)
-        2. Trainer's datamodule attribute (if model has trainer and trainer.fit() was called)
+        This method retrieves the Dataset from the model's _dataset attribute.
+        The Dataset should be set during training (model.train() or model.fit()).
         
         This is a common helper used by predict() methods to access data preprocessing
-        parameters (Mx, Wx) and target series configuration.
+        parameters and target series configuration.
         
         **Type Note**: Uses TYPE_CHECKING to avoid circular imports. The return type
-        is `Union[KDFMDataModule, DFMDataModule, DDFMDataModule]` depending on model type.
+        is `Union[KDFMDataset, DFMDataset, DDFMDataset]` depending on model type.
         TYPE_CHECKING allows proper type hints without runtime circular dependencies.
         
         Returns
         -------
         Any
-            DataModule instance (KDFMDataModule, DFMDataModule, or DDFMDataModule)
-            - KDFMDataModule: For KDFM models
-            - DFMDataModule: For DFM models
-            - DDFMDataModule: For DDFM models
+            Dataset instance (KDFMDataset, DFMDataset, or DDFMDataset)
+            - KDFMDataset: For KDFM models
+            - DFMDataset: For DFM models
+            - DDFMDataset: For DDFM models
             
         Raises
         ------
         ModelNotInitializedError
-            If DataModule is not available from any source. This typically means:
-            - Trainer.fit() has not been called yet
-            - DataModule was not attached to trainer
-            - DataModule was not set directly on model
+            If Dataset is not available. This typically means:
+            - Model.train() or model.fit() has not been called yet
+            - Dataset was not set during training
             - Model was not properly initialized before use
             
         Examples
         --------
-        >>> # After trainer.fit(), DataModule is available from trainer
-        >>> data_module = model._get_datamodule()
-        >>> target_series = data_module.target_series
-        >>> target_scaler = data_module.target_scaler
+        >>> # After model.train(), Dataset is available
+        >>> dataset = model._get_dataset()
+        >>> target_series = dataset.target_series
+        >>> target_scaler = dataset.target_scaler
         """
-        data_module = getattr(self, '_data_module', None)
+        dataset = getattr(self, '_dataset', None)
         
-        if data_module is None:
-            trainer = getattr(self, 'trainer', None)
-            if trainer is not None:
-                data_module = getattr(trainer, 'datamodule', None)
-        
-        if data_module is None:
+        if dataset is None:
             raise ModelNotInitializedError(
-                f"{self.__class__.__name__}: DataModule not available",
+                f"{self.__class__.__name__}: Dataset not available",
                 details=(
-                    "DataModule is required for data access and preprocessing. "
-                    "Please ensure: (1) DataModule is attached to trainer, "
-                    "(2) Trainer.fit() has been called, or (3) DataModule is set directly on model."
+                    "Dataset is required for data access and preprocessing. "
+                    "Please ensure: (1) Dataset is passed to train()/fit(), "
+                    "(2) Model has been trained, or (3) Dataset is set directly on model."
                 )
             )
-        return data_module
-    
-    def _forecast_var_factors(
-        self,
-        Z_last: np.ndarray,
-        A: np.ndarray,
-        p: int = 1,
-        horizon: int = 1,
-        Z_prev: Optional[np.ndarray] = None
-    ) -> np.ndarray:
-        """Forecast factors using AR(1) dynamics.
-        
-        This is a convenience wrapper around forecast_ar1_factors() from numeric.estimator.
-        The `p` and `Z_prev` parameters are kept for backward compatibility but are ignored
-        (AR(1) dynamics only).
-        
-        Parameters
-        ----------
-        Z_last : np.ndarray
-            Last factor state of shape (m,)
-        A : np.ndarray
-            Transition matrix of shape (m, m)
-        p : int, default 1
-            AR order (ignored, always uses AR(1))
-        horizon : int, default 1
-            Number of periods to forecast
-        Z_prev : np.ndarray, optional
-            Ignored (unused parameter)
-            
-        Returns
-        -------
-        np.ndarray
-            Forecasted factors of shape (horizon, m)
-        """
-        from ..numeric.estimator import forecast_ar1_factors
-        return forecast_ar1_factors(Z_last, A, horizon, dtype=DEFAULT_DTYPE)
-    
-    # Legacy method removed: _transform_factors_to_observations()
-    # This method used Mx/Wx arrays which are no longer used.
-    # Models now use target_scaler.inverse_transform() directly in their predict() methods.
-    
-    def _resolve_target_series(
-        self,
-        series_ids: Optional[List[str]] = None,
-        result: Optional[BaseResult] = None
-    ) -> Tuple[Optional[List[str]], Optional[List[int]]]:
-        """Resolve target series from DataModule.
-        
-        This is a convenience wrapper around resolve_target_series() from utils.misc.
-        It gets the DataModule and series_ids, then calls the utility function.
-        
-        Parameters
-        ----------
-        series_ids : List[str], optional
-            Available series IDs from config or result. Used for validation.
-        result : BaseResult, optional
-            Result object that may contain series_ids. Used as fallback.
-            
-        Returns
-        -------
-        Tuple[Optional[List[str]], Optional[List[int]]]
-            Tuple of (target_series_ids, target_indices) where:
-            - target_series_ids: List of target series IDs (None if not resolved)
-            - target_indices: List of indices into series_ids (None if not resolved)
-            
-        Raises
-        ------
-        DataError
-            If target series are not found in available series
-        """
-        from ..utils.misc import resolve_target_series
-        
-        # Get DataModule (may raise ModelNotInitializedError)
-        data_module = None
-        try:
-            data_module = self._get_datamodule()
-        except (ModelNotInitializedError, AttributeError):
-            pass
-        
-        # Get series_ids for validation
-        if series_ids is None:
-            if result is not None:
-                series_ids = getattr(result, 'series_ids', None)
-            if series_ids is None and self._config is not None:
-                series_ids = self._config.get_series_ids()
-        
-        # Call utility function
-        return resolve_target_series(
-            datamodule=data_module,
-            series_ids=series_ids,
-            result=result,
-            model_name=self.__class__.__name__
-        )
-    
-    def _compute_default_horizon(self, default: Optional[int] = None) -> int:
-        """Compute default forecast horizon from clock frequency.
-        
-        This is a convenience wrapper around compute_default_horizon() from utils.misc.
-        
-        Parameters
-        ----------
-        default : int, optional
-            Default value to use if clock frequency cannot be determined.
-            If None, uses DEFAULT_FORECAST_HORIZON constant.
-            
-        Returns
-        -------
-        int
-            Default horizon in periods (typically 1 year worth of periods)
-        """
-        from ..utils.misc import compute_default_horizon
-        return compute_default_horizon(self._config, default=default)
-    
-    # Legacy method removed: _standardize_data()
-    # This method used Mx/Wx arrays which are no longer used.
-    # Data standardization should be done using sklearn scalers before passing to models.
+        return dataset
     
     def reset(self) -> 'BaseFactorModel':
         """Reset model state."""
         self._config = None
         self._result = None
         self.training_state = None
-        self._data_module = None
+        self._dataset = None
         return self
     
     

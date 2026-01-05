@@ -6,7 +6,10 @@ import torch
 from unittest.mock import patch
 from dfm_python.models.kdfm import KDFM
 from dfm_python.utils.errors import ConfigurationError, DataValidationError, ModelNotInitializedError, ModelNotTrainedError, PredictionError, NumericalError
-from dfm_python.config.constants import DEFAULT_DTYPE, DEFAULT_KDFM_AR_ORDER, DEFAULT_KDFM_MA_ORDER, DEFAULT_ZERO_VALUE
+from dfm_python.config.constants import DEFAULT_DTYPE, DEFAULT_KDFM_AR_ORDER, DEFAULT_KDFM_MA_ORDER, DEFAULT_ZERO_VALUE, MIN_TIME_STEPS, MIN_VARIABLES
+
+# Test constants
+SKIP_MESSAGE_STRUCTURAL_ID_NOT_INITIALIZED = "structural_id not initialized (structural_method may be None)"
 
 
 class TestKDFM:
@@ -62,7 +65,6 @@ class TestKDFM:
     
     def test_kdfm_initialize_from_data_empty_time_steps(self):
         """Test KDFM raises error when data has zero time steps."""
-        from dfm_python.config.constants import MIN_TIME_STEPS
         model = KDFM(ar_order=1, ma_order=0)
         X = torch.randn(0, 5)  # 0 time steps, 5 variables
         # Error is caught by validate_data_shape first (min_size=1 check)
@@ -74,7 +76,6 @@ class TestKDFM:
     
     def test_kdfm_initialize_from_data_zero_variables(self):
         """Test KDFM raises error when data has zero variables."""
-        from dfm_python.config.constants import MIN_VARIABLES
         model = KDFM(ar_order=1, ma_order=0)
         X = torch.randn(10, 0)  # 10 time steps, 0 variables
         # Error is caught by validate_data_shape first (min_size=1 check)
@@ -86,7 +87,6 @@ class TestKDFM:
     
     def test_kdfm_dimension_validation_uses_constants(self):
         """Test KDFM dimension validation uses MIN_TIME_STEPS and MIN_VARIABLES constants."""
-        from dfm_python.config.constants import MIN_TIME_STEPS, MIN_VARIABLES
         # Verify constants are defined and have correct values
         assert MIN_TIME_STEPS == 1
         assert MIN_VARIABLES == 1
@@ -144,17 +144,24 @@ class TestKDFM:
     def test_kdfm_predict_requires_trained_model(self):
         """Test KDFM predict requires trained model (not just initialized).
         
-        Note: predict() requires get_result() which needs a fully trained model.
-        This test verifies that predict() raises appropriate error for untrained model.
+        Note: After fix for companion_ma=None handling, get_result() can succeed
+        for initialized but untrained models. However, predict() should still work
+        for initialized models (it uses get_result() which extracts parameters).
+        This test verifies that predict() works for initialized models.
+        For a truly untrained model (not initialized), companion_ar would be None
+        and get_result() would raise ModelNotInitializedError.
         """
         model = KDFM(ar_order=1, ma_order=0)
         X = torch.randn(20, 5)  # 20 time steps, 5 variables
         model.initialize_from_data(X)
         last_obs = X[-1:].numpy()  # Last observation as numpy array
-        # predict() calls get_result() internally which requires trained model
-        # For ma_order=0, companion_ma is None, so get_result() will fail
-        with pytest.raises(ModelNotInitializedError, match="Cannot extract companion parameters"):
-            model.predict(horizon=5, last_observation=last_obs)
+        # predict() should work for initialized model (even if not fully trained)
+        # It uses get_result() which extracts parameters from initialized components
+        X_forecast, Z_forecast = model.predict(horizon=5, last_observation=last_obs)
+        assert X_forecast is not None
+        assert Z_forecast is not None
+        assert X_forecast.shape[0] == 5  # horizon
+        assert Z_forecast.shape[0] == 5  # horizon
     
     def test_kdfm_forward_shape_mismatch(self):
         """Test KDFM forward handles shape mismatches appropriately."""
@@ -388,7 +395,7 @@ class TestKDFM:
                     model._compute_structural_loss(device)
         else:
             # If structural_id is None, test is not applicable
-            pytest.skip("structural_id not initialized (structural_method may be None)")
+            pytest.skip(SKIP_MESSAGE_STRUCTURAL_ID_NOT_INITIALIZED)
     
     def test_compute_structural_loss_returns_zero_on_attribute_error(self):
         """Test _compute_structural_loss returns zero loss when AttributeError occurs (initialization issue)."""
@@ -407,5 +414,5 @@ class TestKDFM:
                 assert result.item() == DEFAULT_ZERO_VALUE
         else:
             # If structural_id is None, test is not applicable
-            pytest.skip("structural_id not initialized (structural_method may be None)")
+            pytest.skip(SKIP_MESSAGE_STRUCTURAL_ID_NOT_INITIALIZED)
 

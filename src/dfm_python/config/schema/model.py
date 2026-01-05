@@ -46,7 +46,7 @@ from ..constants import (
     DEFAULT_LEARNING_RATE,
     DEFAULT_MAX_EPOCHS,
     DEFAULT_BATCH_SIZE,
-    DEFAULT_DDFM_BATCH_SIZE,
+    DEFAULT_DDFM_WINDOW_SIZE,
     DEFAULT_GRAD_CLIP_VAL,
     DEFAULT_REGULARIZATION_SCALE,
     DEFAULT_STRUCTURAL_REG_WEIGHT,
@@ -495,24 +495,25 @@ class DDFMConfig(BaseModelConfig):
     - Series definitions via frequency dict (column names -> frequencies)
     """
     # ========================================================================
-    # Neural Network Training Parameters
+    # Neural Network Training Hyper Parameters
     # ========================================================================
     encoder_layers: Optional[List[int]] = None  # Hidden layer dimensions for encoder (default: [64, 32])
     num_factors: Optional[int] = None  # Number of factors (inferred from config if None)
     activation: str = 'relu'  # Activation function ('tanh', 'relu', 'sigmoid', default: 'relu' to match original DDFM)
     use_batch_norm: bool = True  # Use batch normalization in encoder (default: True)
     learning_rate: float = 0.001  # Learning rate for Adam optimizer (default: 0.001)
-    n_mc_samples: int = 200  # Number of MC samples per MCMC iteration (default: 200, matching original paper's epochs=100 and typical usage)
-    batch_size: int = 100  # Batch size for training (default: 100 to match original DDFM)
+    n_mc_samples: int = 10  # Number of MC samples per MCMC iteration (default: 10, matching original TensorFlow epochs=10 default, per experiment/config/model/ddfm.yaml)
+    window_size: int = 100  # Window size (time-step batch size) for training (default: 100 to match original DDFM)
     # Note: factor_order removed - factors always use AR(1) dynamics (simplified)
     use_idiosyncratic: bool = True  # Model idio components with AR(1) dynamics (default: True)
     min_obs_idio: int = 5  # Minimum observations for idio AR(1) estimation (default: 5)
     
     # Additional training parameters
-    max_iter: int = DEFAULT_MAX_MCMC_ITER  # Maximum MCMC iterations for iterative factor extraction
+    max_epoch: int = DEFAULT_MAX_MCMC_ITER  # Maximum number of epochs (MCMC iterations). One epoch = one MCMC iteration (MC sampling → training → convergence check)
     tolerance: float = DEFAULT_TOLERANCE  # Convergence tolerance for MCMC iterations
     disp: int = 10  # Display frequency for training progress
     seed: Optional[int] = None  # Random seed for reproducibility
+    lags_input: int = 0  # Number of lags of inputs on encoder (default 0, matching original TensorFlow DDFM)
     
     
     # ========================================================================
@@ -530,18 +531,33 @@ class DDFMConfig(BaseModelConfig):
             'activation': 'relu',
             'use_batch_norm': True,
             'learning_rate': DEFAULT_LEARNING_RATE,
-            'epochs': DEFAULT_N_MC_SAMPLES,  # Map 'epochs' from config to n_mc_samples (backward compatibility - configs use 'epochs')
-            'batch_size': DEFAULT_DDFM_BATCH_SIZE,
+            'epochs': DEFAULT_N_MC_SAMPLES,  # Backward compatibility: map 'epochs' to n_mc_samples
+            'n_mc_samples': DEFAULT_N_MC_SAMPLES,  # Preferred name: number of MC samples per MCMC iteration
+            'window_size': DEFAULT_DDFM_WINDOW_SIZE,  # Window size (time-step batch size) for training
             'use_idiosyncratic': True,
             'min_obs_idio': DEFAULT_MIN_OBS_IDIO,
-            'max_iter': DEFAULT_MAX_MCMC_ITER,
+            'max_epoch': DEFAULT_MAX_MCMC_ITER,  # Maximum epochs (MCMC iterations)
             'tolerance': DEFAULT_TOLERANCE,
             'disp': DEFAULT_DISP,
             'seed': None,
+            'lags_input': 0,  # Number of lags (default 0, matching original TensorFlow)
         })
-        # Map 'epochs' from config to 'n_mc_samples' for clarity
+        # Map 'epochs' from config to 'n_mc_samples' for clarity (backward compatibility)
+        # Always remove 'epochs' if present (even if n_mc_samples is also present)
         if 'epochs' in ddfm_params:
-            ddfm_params['n_mc_samples'] = ddfm_params.pop('epochs')
+            if 'n_mc_samples' not in ddfm_params:
+                ddfm_params['n_mc_samples'] = ddfm_params['epochs']
+            ddfm_params.pop('epochs')  # Always remove 'epochs' to avoid passing it to constructor
+        # Map 'batch_size' from config to 'window_size' for backward compatibility
+        if 'batch_size' in ddfm_params:
+            if 'window_size' not in ddfm_params:
+                ddfm_params['window_size'] = ddfm_params['batch_size']
+            ddfm_params.pop('batch_size')  # Always remove 'batch_size' to avoid passing it to constructor
+        # Only accept 'max_epoch' parameter (no backward compatibility)
+        # Remove any old parameter names if present
+        ddfm_params.pop('max_iter', None)
+        ddfm_params.pop('max_iterations', None)
+        ddfm_params.pop('max_mc_iter', None)
         return ddfm_params
     
     @classmethod
@@ -550,7 +566,7 @@ class DDFMConfig(BaseModelConfig):
         result = DFMConfig.from_dict(data)
         if isinstance(result, DDFMConfig):
             return result
-        from ..utils.errors import ConfigurationError
+        from ...utils.errors import ConfigurationError
         raise ConfigurationError(
             "Expected DDFMConfig but got DFMConfig",
             details=f"Result type: {type(result).__name__}, expected: DDFMConfig"

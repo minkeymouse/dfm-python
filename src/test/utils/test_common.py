@@ -4,7 +4,7 @@ import pytest
 import numpy as np
 import torch
 import pandas as pd
-from dfm_python.utils.common import ensure_tensor, ensure_numpy, validate_matrix_shape, log_tensor_stats, sanitize_array, select_columns_by_prefix
+from dfm_python.utils.common import ensure_tensor, ensure_numpy, validate_matrix_shape, log_tensor_stats, sanitize_array, select_columns_by_prefix, compute_scale_stats, normalize_to_match_scale
 from dfm_python.utils.errors import DataValidationError
 from dfm_python.config.constants import DEFAULT_ZERO_VALUE, MAX_EIGENVALUE
 
@@ -318,4 +318,134 @@ class TestSelectColumnsByPrefix:
         df = pd.DataFrame({"D1": [1, 2], "E1": [3, 4]})
         result = select_columns_by_prefix(df, ["D", "E"], count_per_prefix=0)
         assert result == []  # No columns selected with count=0
+
+
+class TestComputeScaleStats:
+    """Test suite for compute_scale_stats function."""
+    
+    def test_compute_scale_stats_numpy_array(self):
+        """Test compute_scale_stats with numpy array."""
+        arr = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+        mean_val, std_val = compute_scale_stats(arr)
+        assert isinstance(mean_val, float)
+        assert isinstance(std_val, float)
+        assert abs(mean_val - 3.0) < 1e-6  # Mean should be 3.0
+        assert abs(std_val - np.std(arr)) < 1e-6  # Std should match numpy std
+    
+    def test_compute_scale_stats_tensor(self):
+        """Test compute_scale_stats with torch Tensor."""
+        tensor = torch.tensor([1.0, 2.0, 3.0, 4.0, 5.0])
+        mean_val, std_val = compute_scale_stats(tensor)
+        assert isinstance(mean_val, float)
+        assert isinstance(std_val, float)
+        assert abs(mean_val - 3.0) < 1e-6  # Mean should be 3.0
+        assert abs(std_val - tensor.std().item()) < 1e-6  # Std should match tensor std
+    
+    def test_compute_scale_stats_2d_array(self):
+        """Test compute_scale_stats with 2D numpy array."""
+        arr = np.array([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
+        mean_val, std_val = compute_scale_stats(arr)
+        assert isinstance(mean_val, float)
+        assert isinstance(std_val, float)
+        assert abs(mean_val - np.mean(arr)) < 1e-6
+        assert abs(std_val - np.std(arr)) < 1e-6
+    
+    def test_compute_scale_stats_2d_tensor(self):
+        """Test compute_scale_stats with 2D torch Tensor."""
+        tensor = torch.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
+        mean_val, std_val = compute_scale_stats(tensor)
+        assert isinstance(mean_val, float)
+        assert isinstance(std_val, float)
+        assert abs(mean_val - tensor.mean().item()) < 1e-6
+        assert abs(std_val - tensor.std().item()) < 1e-6
+    
+    def test_compute_scale_stats_standardized_data(self):
+        """Test compute_scale_stats with standardized data (mean≈0, std≈1)."""
+        # Generate standardized data
+        arr = np.random.randn(100)
+        mean_val, std_val = compute_scale_stats(arr)
+        assert isinstance(mean_val, float)
+        assert isinstance(std_val, float)
+        # For standardized data, mean should be close to 0, std close to 1
+        assert abs(mean_val) < 0.5  # Mean should be close to 0
+        assert 0.5 < std_val < 1.5  # Std should be close to 1
+    
+    def test_compute_scale_stats_constant_array(self):
+        """Test compute_scale_stats with constant array (std=0)."""
+        arr = np.array([5.0, 5.0, 5.0, 5.0])
+        mean_val, std_val = compute_scale_stats(arr)
+        assert isinstance(mean_val, float)
+        assert isinstance(std_val, float)
+        assert abs(mean_val - 5.0) < 1e-6
+        assert abs(std_val - 0.0) < 1e-6  # Std should be 0 for constant array
+    
+    def test_compute_scale_stats_single_element(self):
+        """Test compute_scale_stats with single element array."""
+        arr = np.array([42.0])
+        mean_val, std_val = compute_scale_stats(arr)
+        assert isinstance(mean_val, float)
+        assert isinstance(std_val, float)
+        assert abs(mean_val - 42.0) < 1e-6
+        # Single element: numpy std returns 0.0 (not NaN)
+        assert std_val == 0.0
+
+
+class TestNormalizeToMatchScale:
+    """Test suite for normalize_to_match_scale function."""
+    
+    def test_normalize_to_match_scale_no_normalization_needed(self):
+        """Test normalize_to_match_scale returns unchanged when scales match."""
+        prediction = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+        target = np.array([1.1, 2.1, 3.1, 4.1, 5.1])  # Similar scale
+        normalized, ratio, was_normalized = normalize_to_match_scale(prediction, target)
+        assert not was_normalized
+        assert np.allclose(normalized, prediction)
+        assert 0.5 < ratio < 2.0  # Ratio should be reasonable
+    
+    def test_normalize_to_match_scale_normalization_applied(self):
+        """Test normalize_to_match_scale normalizes when scale mismatch detected."""
+        prediction = np.array([10.0, 20.0, 30.0, 40.0, 50.0])  # Large scale
+        target = np.array([0.1, 0.2, 0.3, 0.4, 0.5])  # Small scale
+        normalized, ratio, was_normalized = normalize_to_match_scale(prediction, target)
+        assert was_normalized
+        # Normalized prediction should have similar scale to target
+        norm_mean, norm_std = compute_scale_stats(normalized)
+        target_mean, target_std = compute_scale_stats(target)
+        assert abs(norm_std - target_std) < 0.1  # Scales should match after normalization
+    
+    def test_normalize_to_match_scale_tensor_input(self):
+        """Test normalize_to_match_scale works with torch tensors."""
+        from dfm_python.config.constants import DEFAULT_SCALE_RATIO_MAX
+        # Use extreme scale difference to ensure normalization is triggered
+        prediction = torch.tensor([100.0, 200.0, 300.0])  # Large scale
+        target = torch.tensor([0.1, 0.2, 0.3])  # Small scale (ratio > DEFAULT_SCALE_RATIO_MAX)
+        normalized, ratio, was_normalized = normalize_to_match_scale(prediction, target)
+        assert isinstance(normalized, torch.Tensor) or isinstance(normalized, np.ndarray)
+        assert was_normalized  # Extreme scale difference, should normalize
+    
+    def test_normalize_to_match_scale_zero_std_raises_when_requested(self):
+        """Test normalize_to_match_scale raises error on zero std when raise_on_zero_std=True."""
+        prediction = np.array([5.0, 5.0, 5.0])  # Constant array, std=0
+        target = np.array([1.0, 2.0, 3.0])
+        from dfm_python.utils.errors import DataError
+        with pytest.raises(DataError, match="zero std"):
+            normalize_to_match_scale(prediction, target, raise_on_zero_std=True)
+    
+    def test_normalize_to_match_scale_zero_std_returns_unchanged_when_not_raised(self):
+        """Test normalize_to_match_scale returns unchanged on zero std when raise_on_zero_std=False."""
+        prediction = np.array([5.0, 5.0, 5.0])  # Constant array, std=0
+        target = np.array([1.0, 2.0, 3.0])
+        normalized, ratio, was_normalized = normalize_to_match_scale(prediction, target, raise_on_zero_std=False)
+        assert not was_normalized
+        assert np.allclose(normalized, prediction)
+    
+    def test_normalize_to_match_scale_2d_arrays(self):
+        """Test normalize_to_match_scale works with 2D arrays."""
+        from dfm_python.config.constants import DEFAULT_SCALE_RATIO_MAX
+        # Use extreme scale difference to ensure normalization is triggered
+        prediction = np.array([[100.0, 200.0], [300.0, 400.0], [500.0, 600.0]])  # Large scale
+        target = np.array([[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]])  # Small scale (ratio > DEFAULT_SCALE_RATIO_MAX)
+        normalized, ratio, was_normalized = normalize_to_match_scale(prediction, target)
+        assert was_normalized  # Extreme scale difference, should normalize
+        assert normalized.shape == prediction.shape
 

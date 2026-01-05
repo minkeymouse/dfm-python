@@ -10,32 +10,22 @@ from dfm_python.utils.errors import ModelNotTrainedError, DataError, Configurati
 class TestDFM:
     """Test suite for DFM model."""
     
-    def test_dfm_initialization(self):
-        """Test DFM can be initialized."""
-        model = DFM()
-        # Verify model has expected attributes
-        assert hasattr(model, 'config')
-        assert hasattr(model, 'reset')
-    
-    def test_dfm_with_config(self, sample_config):
-        """Test DFM initialization with config."""
-        model = DFM(config=sample_config)
-        assert model.config == sample_config
-    
-    def test_dfm_load_config(self):
-        """Test DFM config loading (legacy pattern - still supported but not recommended)."""
-        config = DFMConfig(blocks={'block1': {'num_factors': 2, 'series': []}}, frequency={'m': 'm'})
-        model = DFM()
-        # load_config accepts config object directly via source parameter
-        # Note: Preferred pattern is DFM(config) instead of DFM().load_config()
-        # load_config returns self (the model), not the config
-        result = model.load_config(source=config)
-        assert result is not None
-        assert result is model  # load_config returns self
-        # Verify config was loaded into model
-        assert model.config is not None
-        assert hasattr(model.config, 'blocks')
-        assert hasattr(model.config, 'frequency')
+    def test_dfm_initialization(self, sample_config):
+        """Test DFM can be initialized with or without config."""
+        # Test without config
+        model1 = DFM()
+        assert hasattr(model1, 'config')
+        assert hasattr(model1, 'reset')
+        
+        # Test with config (preferred pattern)
+        model2 = DFM(config=sample_config)
+        assert model2.config == sample_config
+        
+        # Test load_config (legacy pattern - still supported)
+        model3 = DFM()
+        result = model3.load_config(source=sample_config)
+        assert result is model3  # load_config returns self
+        assert model3.config is not None
     
     def test_dfm_initialization_with_config_preferred(self):
         """Test DFM initialization with config (preferred pattern)."""

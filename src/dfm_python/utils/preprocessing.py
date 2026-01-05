@@ -109,6 +109,43 @@ def preprocess_training_data(
     return x_clean_torch, missing_mask
 
 
+def create_mask_from_nan(tensor: Tensor) -> Tensor:
+    """Create boolean mask from NaN values in tensor.
+    
+    Consolidates pattern: torch.where(torch.isnan(tensor), torch.zeros_like(tensor), torch.ones_like(tensor)).bool()
+    Used when converting NaN values to a boolean mask for loss computation or data handling.
+    
+    Parameters
+    ----------
+    tensor : Tensor
+        Input tensor that may contain NaN values
+        
+    Returns
+    -------
+    mask : Tensor
+        Boolean mask where True indicates non-NaN values, False indicates NaN values.
+        Same shape as input tensor.
+        
+    Examples
+    --------
+    >>> import torch
+    >>> import numpy as np
+    >>> from dfm_python.utils.preprocessing import create_mask_from_nan
+    >>> 
+    >>> x = torch.tensor([[1.0, 2.0], [np.nan, 4.0]])
+    >>> mask = create_mask_from_nan(x)
+    >>> assert mask.shape == x.shape
+    >>> assert mask.dtype == torch.bool
+    >>> assert mask[0, 0] == True  # Non-NaN
+    >>> assert mask[1, 0] == False  # NaN
+    """
+    return torch.where(
+        torch.isnan(tensor),
+        torch.zeros_like(tensor),
+        torch.ones_like(tensor)
+    ).bool()
+
+
 def adjust_mask_shape(
     mask: np.ndarray,
     target_shape: Tuple[int, ...],
@@ -218,4 +255,5 @@ def adjust_mask_shape(
         mask = adjusted_mask
     
     return mask
+
 

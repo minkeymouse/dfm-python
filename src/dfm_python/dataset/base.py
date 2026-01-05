@@ -1,74 +1,104 @@
-"""Base dataset class for Deep Dynamic Factor Models.
+"""Base dataset class for Factor Models.
 
 This module provides the base dataset class that all factor model datasets inherit from.
+Contains common functionality for config loading and target series handling.
 """
 
-import torch
-from torch.utils.data import Dataset
-import numpy as np
-from typing import Union
+from typing import Optional, Union, List, TYPE_CHECKING
+from pathlib import Path
+
+if TYPE_CHECKING:
+    from ..config import DFMConfig
+
 from ..logger import get_logger
-from ..config.constants import DEFAULT_TORCH_DTYPE
+from ..config import DFMConfig, YamlSource
+from ..utils.misc import get_config_attr
+from ..utils.errors import ConfigurationError
 
 _logger = get_logger(__name__)
 
 
-class DeepFactorModelDataset(Dataset):
-    """Base dataset class for Deep Dynamic Factor Models.
-    
-    This class provides common functionality for all factor model datasets,
-    including data validation and tensor conversion.
+def load_config(config: Optional[DFMConfig], config_path: Optional[Union[str, Path]]) -> DFMConfig:
+    """Load configuration from config object or config_path.
     
     Parameters
     ----------
-    data : torch.Tensor or np.ndarray
-        Data tensor/array (T x N) where T is time periods and N is number of series
+    config : DFMConfig, optional
+        Configuration object
+    config_path : str or Path, optional
+        Path to configuration file
+        
+    Returns
+    -------
+    DFMConfig
+        Loaded configuration object
+        
+    Raises
+    ------
+    ConfigurationError
+        If both config and config_path are None
+    """
+    if config is None and config_path is not None:
+        source = YamlSource(config_path)
+        config = source.load()
+    
+    if config is None:
+        raise ConfigurationError(
+            "Dataset initialization failed: either config or config_path must be provided. "
+            "Please provide a DFMConfig object or a path to a configuration file.",
+            details="Both config and config_path are None. One must be provided."
+        )
+    
+    return config
+
+
+def normalize_target_series(target_series: Optional[Union[str, List[str]]]) -> List[str]:
+    """Normalize target_series to a list.
+    
+    Parameters
+    ----------
+    target_series : str, List[str], or None
+        Target series specification
+        
+    Returns
+    -------
+    List[str]
+        Normalized list of target series (empty list if None)
+    """
+    if target_series is None:
+        return []
+    elif isinstance(target_series, str):
+        return [target_series]
+    else:
+        return list(target_series)
+
+
+class BaseFactorModelDataset:
+    """Base dataset class for all factor model datasets.
+    
+    Provides common functionality for config loading and target series handling.
     """
     
     def __init__(
         self,
-        data: Union[torch.Tensor, np.ndarray]
+        config: Optional['DFMConfig'] = None,
+        config_path: Optional[Union[str, Path]] = None,
+        target_series: Optional[Union[str, List[str]]] = None,
     ):
-        """Initialize base dataset with data validation and conversion.
+        """Initialize base dataset with common attributes.
         
         Parameters
         ----------
-        data : torch.Tensor or np.ndarray
-            Data tensor/array (T x N) where T is time periods and N is number of series
+        config : DFMConfig, optional
+            Model configuration object
+        config_path : str or Path, optional
+            Path to configuration file
+        target_series : str or List[str], optional
+            Target series column names
         """
-        if isinstance(data, np.ndarray):
-            self.data = torch.tensor(data, dtype=DEFAULT_TORCH_DTYPE)
-        else:
-            self.data = data.float() if data.dtype != DEFAULT_TORCH_DTYPE else data
+        # Load config
+        self.config = load_config(config, config_path)
         
-        if self.data.ndim != 2:
-            raise ValueError(
-                f"Data must be 2D (T x N), got shape {self.data.shape}. "
-                f"Expected (time_steps, num_series)."
-            )
-        
-        self.T, self.N = self.data.shape
-        
-        if self.T == 0 or self.N == 0:
-            raise ValueError(
-                f"Data must have at least one time step and one series, got shape {self.data.shape}"
-            )
-    
-    def __len__(self) -> int:
-        """Return number of samples in the dataset."""
-        raise NotImplementedError("Subclasses must implement __len__")
-    
-    def __getitem__(self, idx: int):
-        """Get a sample from the dataset."""
-        raise NotImplementedError("Subclasses must implement __getitem__")
-    
-    def get_data(self) -> torch.Tensor:
-        """Get the full data tensor.
-        
-        Returns
-        -------
-        torch.Tensor
-            Full data sequence (T x N)
-        """
-        return self.data
-
+        # Normalize target_series and extract target_scaler
+        self.target_series = normalize_target_series(target_series)
+        self.target_scaler = get_config_attr(self.config, 'target_scaler', None)

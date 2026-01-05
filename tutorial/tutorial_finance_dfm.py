@@ -17,7 +17,7 @@ sys.path.insert(0, str(project_root / "src"))
 import pandas as pd
 import numpy as np
 from datetime import datetime
-from dfm_python import DFM, DFMDataModule
+from dfm_python import DFM, DFMDataset
 from dfm_python.config import DFMConfig
 from dfm_python.config.constants import TUTORIAL_MAX_PERIODS
 from dfm_python.utils.misc import TimeIndex
@@ -181,9 +181,9 @@ print(f"   Factor dynamics: AR(1) (always used, ar_lag parameter removed)")
 print(f"   Target series: {target_col}")
 
 # ============================================================================
-# Step 4: Create DataModule
+# Step 4: Create Dataset
 # ============================================================================
-print("\n[Step 4] Creating DataModule...")
+print("\n[Step 4] Creating Dataset...")
 
 # Create time index (assuming monthly data)
 # For finance data, date_id is an index, so we'll create a simple time index
@@ -198,19 +198,19 @@ time_list = [
 
 time_index = TimeIndex(time_list)
 
-# Create DataModule with preprocessed data
+# Create Dataset with preprocessed data
 # Data is already preprocessed, so pass it directly
-data_module = DFMDataModule(
+dataset = DFMDataset(
     config=config,
     data=df_processed,  # Pass DataFrame directly (already preprocessed)
     time_index=time_index,
     target_series=[target_col]  # Specify target series
 )
-data_module.setup()
+# Dataset initialization happens in __init__
 
-print(f"   DataModule created successfully")
-if hasattr(data_module, 'data_processed') and data_module.data_processed is not None:
-    print(f"   Processed data shape: {data_module.data_processed.shape}")
+print(f"   Dataset created successfully")
+if hasattr(data_module, 'data_processed') and dataset.data_processed is not None:
+    print(f"   Processed data shape: {dataset.data_processed.shape}")
 else:
     print(f"   Data shape: {df_processed.shape}")
 
@@ -225,14 +225,14 @@ print("\n[Step 5] Training DFM model...")
 model = DFM(config)
 
 # Get initialization parameters from datamodule
-init_params = data_module.get_initialization_params()
+init_params = dataset.get_initialization_params()
 X = init_params['X']
 # Note: Mx/Wx removed - target_scaler is used instead for inverse transformation
-# Target scaler is available via data_module.target_scaler
+# Target scaler is available via dataset.target_scaler
 
 # Fit model directly (DFM uses fit() method, not Lightning trainer)
 # Pass datamodule to extract all initialization parameters automatically
-model.fit(X=X, datamodule=data_module)
+model.fit(X=X, dataset =data_module)
 
 # Access results via property
 result = model.result
@@ -247,7 +247,7 @@ print(f"   Log-likelihood: {result.loglik:.4f}")
 # ============================================================================
 print("\n[Step 6] Making predictions...")
 
-# Predict with horizon=6 (uses target_series from DataModule)
+# Predict with horizon=6 (uses target_series from Dataset)
 X_forecast, Z_forecast = model.predict(horizon=6)
 
 print(f"   Forecast shape: {X_forecast.shape}")

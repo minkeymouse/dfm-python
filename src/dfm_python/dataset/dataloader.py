@@ -7,8 +7,8 @@ This module provides DataLoader factories for PyTorch-based DFM models:
 
 import torch
 from torch.utils.data import DataLoader
-from typing import Optional, Union
-from .ddfm_dataset import DDFMDataset
+from typing import Optional, Union, List, Tuple
+from .ddfm_dataset import DDFMDataset, AutoencoderDataset
 from .kdfm_dataset import KDFMDataset
 from ..logger import get_logger
 
@@ -139,5 +139,57 @@ def create_kdfm_dataloader(
         num_workers=num_workers,
         pin_memory=pin_memory,
         auto_pin_memory=False
+    )
+
+
+def create_autoencoder_dataloader(
+    dataset: AutoencoderDataset,
+    batch_size: int = 100,
+    num_workers: int = 0,
+    pin_memory: bool = True
+) -> DataLoader:
+    """Create DataLoader for autoencoder training.
+    
+    This factory creates a PyTorch DataLoader for autoencoder training during
+    the sequential MC loop in DDFM. Sequential processing is required for
+    correctness (optimizer state evolves between MC samples), so num_workers=0
+    and shuffle=False are enforced.
+    
+    Parameters
+    ----------
+    dataset : AutoencoderDataset
+        Dataset instance with corrupted inputs and clean targets
+    batch_size : int, default 100
+        Batch size for training (number of time steps per batch)
+    num_workers : int, default 0
+        Number of worker processes. Must be 0 for sequential processing.
+    pin_memory : bool, default True
+        Whether to pin memory for faster GPU transfer (if CUDA available)
+        
+    Returns
+    -------
+    DataLoader
+        Configured PyTorch DataLoader for autoencoder training
+        
+    Notes
+    -----
+    - shuffle=False: Time series order matters
+    - num_workers=0: Sequential processing required for optimizer state evolution
+    """
+    # Enforce sequential processing (required for correctness)
+    if num_workers != 0:
+        _logger.warning(
+            "Autoencoder DataLoader: num_workers must be 0 for sequential processing. "
+            "Setting num_workers=0."
+        )
+        num_workers = 0
+    
+    return _create_dataloader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,  # Time series order matters
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        auto_pin_memory=True
     )
 

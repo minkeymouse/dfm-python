@@ -13,13 +13,12 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, Optional, Tuple, Union, Dict, Any, cast, Sequence
 
 import numpy as np
-import pytorch_lightning as pl
 import torch
 from torch import Tensor
 import torch.nn as nn
 
 from ..config import KDFMConfig, KDFMResult
-from ..config.constants import DEFAULT_TORCH_DTYPE, DEFAULT_CLOCK_FREQUENCY, DEFAULT_REGULARIZATION, DEFAULT_GRAD_CLIP_VAL, DEFAULT_EIGENVALUE_MAX_MAGNITUDE, DEFAULT_EIGENVALUE_WARN_THRESHOLD, DEFAULT_IDENTITY_SCALE, DEFAULT_ZERO_VALUE, DEFAULT_FORECAST_HORIZON, DEFAULT_DTYPE, DEFAULT_KDFM_AR_ORDER, DEFAULT_KDFM_MA_ORDER, MIN_TIME_STEPS, MIN_VARIABLES, COMPUTATION_ERROR_TYPES
+from ..config.constants import DEFAULT_TORCH_DTYPE, DEFAULT_CLOCK_FREQUENCY, DEFAULT_REGULARIZATION, DEFAULT_GRAD_CLIP_VAL, DEFAULT_EIGENVALUE_MAX_MAGNITUDE, DEFAULT_EIGENVALUE_WARN_THRESHOLD, DEFAULT_IDENTITY_SCALE, DEFAULT_ZERO_VALUE, DEFAULT_FORECAST_HORIZON, DEFAULT_DTYPE, DEFAULT_KDFM_AR_ORDER, DEFAULT_KDFM_MA_ORDER, DEFAULT_KDFM_INIT_SAMPLE_SIZE, MIN_TIME_STEPS, MIN_VARIABLES, COMPUTATION_ERROR_TYPES, DEFAULT_ADAM_BETA1, DEFAULT_ADAM_BETA2, DEFAULT_ADAM_EPS, DEFAULT_LOSS_LOG_PRECISION
 from ..logger import get_logger
 from ..ssm.companion import CompanionSSM, MACompanionSSM
 from ..ssm.structural import StructuralIdentificationSSM
@@ -43,7 +42,7 @@ from ..config.types import (
 
 # Import type hints (optional, for better IDE support)
 if TYPE_CHECKING:
-    from ..datamodule import KDFMDataModule
+    from ..dataset.kdfm_dataset import KDFMDataset
 
 _logger = get_logger(__name__)
 
@@ -59,8 +58,8 @@ class KDFMTrainingState:
     converged: bool
 
 
-class KDFM(BaseFactorModel, pl.LightningModule):
-    """High-level API for Kernelized Dynamic Factor Model (PyTorch Lightning module).
+class KDFM(BaseFactorModel, nn.Module):
+    """High-level API for Kernelized Dynamic Factor Model.
     
     This class implements KDFM with two-stage VARMA architecture:
     - Stage 1 (AR): h_{t+1} = A^AR h_t + B ε_t, z_t = C h_t
@@ -70,32 +69,30 @@ class KDFM(BaseFactorModel, pl.LightningModule):
     Uses Krylov FFT for efficient O(T log T) forward pass.
     
     **API Differences from DFM/DDFM**:
-    - Training: Uses `training_step()` method (PyTorch Lightning), not `fit()`
+    - Training: Uses `train()` method
     - Prediction: `predict(horizon, last_observation)` - REQUIRES `last_observation` parameter
     - Result extraction: `get_result()` method (not `result` property)
     - Error handling: Raises exceptions (`NumericalError`, `PredictionError`, `ValueError`) instead of silent warnings
     
     See `BaseFactorModel` documentation for API comparison across models.
     
-    Example (Standard Lightning Pattern):
-        >>> from dfm_python import KDFM, KDFMDataModule, KDFMTrainer
+    Example:
+        >>> from dfm_python import KDFM, KDFMDataset
         >>> import pandas as pd
         >>> 
         >>> # Step 1: Load and preprocess data
         >>> df = pd.read_csv('data/your_data.csv')
         >>> df_processed = df[[col for col in df.columns if col != 'date']]
         >>> 
-        >>> # Step 2: Create DataModule
-        >>> dm = KDFMDataModule(config_path='config/kdfm_config.yaml', data=df_processed)
-        >>> dm.setup()
+        >>> # Step 2: Create Dataset
+        >>> dataset = KDFMDataset(config_path='config/kdfm_config.yaml', data=df_processed)
         >>> 
         >>> # Step 3: Create model and load config
         >>> model = KDFM(ar_order=1, ma_order=0)  # Uses DEFAULT_KDFM_AR_ORDER, DEFAULT_KDFM_MA_ORDER
         >>> model.load_config('config/kdfm_config.yaml')
         >>> 
-        >>> # Step 4: Create trainer and fit
-        >>> trainer = KDFMTrainer(max_epochs=100)  # DEFAULT_MAX_EPOCHS
-        >>> trainer.fit(model, dm)
+        >>> # Step 4: Train model
+        >>> model.train(dataset=dataset, max_epochs=DEFAULT_MAX_EPOCHS)
         >>> 
         >>> # Step 5: Predict
         >>> Xf, Zf = model.predict(horizon=6)
@@ -127,9 +124,9 @@ class KDFM(BaseFactorModel, pl.LightningModule):
             MA order q (0 = pure VAR)
         learning_rate : float, default=DEFAULT_LEARNING_RATE
             Learning rate for Adam optimizer (default: DEFAULT_LEARNING_RATE from constants)
-        max_epochs : int, default=100  # DEFAULT_MAX_EPOCHS
+        max_epochs : int, default=DEFAULT_MAX_EPOCHS
             Maximum training epochs
-        batch_size : int, default=32
+        batch_size : int, default=DEFAULT_BATCH_SIZE
             Batch size for training
         weight_decay : float, default=DEFAULT_REGULARIZATION_SCALE
             Weight decay (L2 regularization)
@@ -143,7 +140,7 @@ class KDFM(BaseFactorModel, pl.LightningModule):
             Additional arguments passed to BaseFactorModel
         """
         BaseFactorModel.__init__(self)
-        pl.LightningModule.__init__(self)
+        nn.Module.__init__(self)
         
         # Import constants for defaults (consolidated import)
         from ..config.constants import (
@@ -198,13 +195,6 @@ class KDFM(BaseFactorModel, pl.LightningModule):
         # Use automatic optimization for gradient descent
         self.automatic_optimization = True
     
-    def setup(self, stage: Optional[str] = None) -> None:
-        """Initialize model components when data dimensions are known.
-        
-        This is called by Lightning before training starts.
-        """
-        # Will be initialized in initialize_from_data() or first training step
-        pass
     
     def initialize_from_data(self, X: Tensor) -> None:
         """Initialize model parameters from data.
@@ -279,6 +269,7 @@ class KDFM(BaseFactorModel, pl.LightningModule):
         
         try:
             # Initialize AR stage (CompanionSSM)
+            # Note: Assigning nn.Module to attribute automatically registers it as submodule
             self.companion_ar = CompanionSSM(
                 n_vars=K,
                 lag_order=self.ar_order,
@@ -287,6 +278,10 @@ class KDFM(BaseFactorModel, pl.LightningModule):
                 norm_order=1
             )
             self.companion_ar.to(device)
+            # Explicitly register as submodule (ensures parameters are tracked)
+            # ensures parameters are tracked, especially when modules are created dynamically during initialize_from_data()
+            if 'companion_ar' not in self._modules:
+                self.add_module('companion_ar', self.companion_ar)
             
             # Initialize MA stage (MACompanionSSM, if q > 0)
             if self.ma_order > 0:
@@ -298,6 +293,9 @@ class KDFM(BaseFactorModel, pl.LightningModule):
                     norm_order=1
                 )
                 self.companion_ma.to(device)
+                # Explicitly register as submodule (ensures parameters are tracked)
+                if 'companion_ma' not in self._modules:
+                    self.add_module('companion_ma', self.companion_ma)
             else:
                 self.companion_ma = None
             
@@ -309,6 +307,25 @@ class KDFM(BaseFactorModel, pl.LightningModule):
                 align_with_latent_state=True
             )
             self.structural_id.to(device)
+            # Explicitly register as submodule (ensures parameters are tracked)
+            if 'structural_id' not in self._modules:
+                self.add_module('structural_id', self.structural_id)
+            
+            # Verify components are registered and have trainable parameters
+            # PyTorch automatically registers modules assigned to attributes, but verify for debugging
+            num_params_ar = sum(p.numel() for p in self.companion_ar.parameters() if p.requires_grad) if self.companion_ar is not None else 0
+            num_params_ma = sum(p.numel() for p in self.companion_ma.parameters() if p.requires_grad) if self.companion_ma is not None else 0
+            num_params_struct = sum(p.numel() for p in self.structural_id.parameters() if p.requires_grad) if self.structural_id is not None else 0
+            total_params = num_params_ar + num_params_ma + num_params_struct
+            _logger.debug(
+                f"KDFM component parameters: AR={num_params_ar}, MA={num_params_ma}, "
+                f"Structural={num_params_struct}, Total={total_params}"
+            )
+            if total_params == 0:
+                _logger.warning(
+                    "KDFM initialize_from_data: All components have 0 trainable parameters. "
+                    "This may indicate components are not properly initialized or parameters are frozen."
+                )
             
             _logger.info(
                 f"KDFM initialized from data: T={T}, N={N}, ar_order={self.ar_order}, "
@@ -487,94 +504,101 @@ class KDFM(BaseFactorModel, pl.LightningModule):
             # Pure VAR: no MA stage
             return z_t
     
-    def training_step(self, batch: Union[Tensor, Tuple[Tensor, Tensor]], batch_idx: int) -> Tensor:
-        """Training step for KDFM (PyTorch Lightning interface).
-        
-        This method implements the PyTorch Lightning training step, which is called
-        automatically during training. It handles:
-        1. Batch preparation (normalizing shapes, moving to device)
-        2. Model initialization (if not already initialized)
-        3. Forward pass through two-stage VARMA architecture
-        4. Loss computation (prediction + structural regularization)
-        
-        **Loss Components**:
-        - Prediction loss: MSE between predictions and targets
-        - Structural loss: Regularization encouraging S @ S.T ≈ I (orthogonality)
-        - Total loss: pred_loss + λ_struct * struct_loss (where λ_struct << 1)
+    def train(self, dataset: Any, device: Optional[torch.device] = None, max_epochs: Optional[int] = None) -> None:
+        """Train KDFM model.
         
         Parameters
         ----------
-        batch : Tensor or Tuple[Tensor, Tensor]
-            Training batch:
-            - If Tensor: Data tensor of shape (B, T, N) or (T, N)
-            - If Tuple: (data, target) where both are tensors of same shape
-            Data should be in PREPROCESSED scale (standardized, differenced)
-        batch_idx : int
-            Batch index (unused, kept for Lightning interface compatibility)
-            
-        Returns
-        -------
-        Tensor
-            Total training loss (scalar tensor):
-            - Loss value >= 0.0
-            - Loss is automatically logged by Lightning
-            - Loss is used for backpropagation and optimization
-            
-        Raises
-        ------
-        ModelNotInitializedError
-            If model components cannot be initialized from batch data
-        RuntimeError
-            If forward pass or loss computation fails
-            
-        Examples
-        --------
-        >>> model = KDFM(ar_order=1, ma_order=0)  # Uses DEFAULT_KDFM_AR_ORDER, DEFAULT_KDFM_MA_ORDER
-        >>> batch = torch.randn(32, 100, 5)  # (B=32, T=100, N=5)
-        >>> loss = model.training_step(batch, batch_idx=0)
-        >>> assert loss.item() >= 0.0
+        dataset : KDFMDataset
+            Dataset containing training data
+        device : torch.device, optional
+            Device to train on (default: auto-detect)
+        max_epochs : int, optional
+            Maximum number of training epochs (default: self.max_epochs)
         """
+        from torch.utils.data import DataLoader
+        
+        # Store dataset for later use
+        self._dataset = dataset
+        
         # Get device
-        device = next(self.parameters()).device
+        if device is None:
+            device = next(self.parameters()).device if any(self.parameters()) else torch.device('cpu')
+        self.to(device)
         
-        # Prepare batch
-        if isinstance(batch, Sequence) and not isinstance(batch, str) and len(batch) == 2:
-            data, target = batch
-        else:
-            # Unsupervised: use data as target
-            data = batch
-            target = data
-        
-        # Move to device
-        data = data.to(device)
-        target = target.to(device)
-        
-        # Initialize if needed
+        # Initialize from data if needed
         if self.companion_ar is None:
-            # Use first batch to determine dimensions
-            if data.ndim == 2:
-                self.initialize_from_data(data)
-            else:
-                self.initialize_from_data(data[0])
+            processed_data = dataset.get_processed_data()
+            if processed_data is not None:
+                if isinstance(processed_data, Tensor):
+                    sample_data = processed_data[:min(DEFAULT_KDFM_INIT_SAMPLE_SIZE, len(processed_data)), :]
+                    _logger.info(f"KDFM train: Initializing from sample data with shape {sample_data.shape}")
+                    self.initialize_from_data(sample_data.to(device))
         
-        # Forward pass
-        y_pred = self.forward(data)
+        # Create optimizer
+        params = self._collect_parameters()
+        if not params:
+            raise ModelNotInitializedError(
+                "KDFM has no trainable parameters. Call initialize_from_data() first.",
+                details="Model must be initialized before training"
+            )
         
-        # Store processed data for shape validation in update() (store first batch)
-        if self.data_processed is None:
-            from ..utils.common import ensure_numpy
-            # Store as numpy array in base class format
-            if data.ndim == 3:
-                # Batch format: take first sample
-                data_sample = data[0]
-            else:
-                data_sample = data
-            self.data_processed = ensure_numpy(data_sample, dtype=DEFAULT_DTYPE)
+        optimizer = torch.optim.Adam(
+            params,
+            lr=self.learning_rate,
+            weight_decay=self.weight_decay,
+            betas=(DEFAULT_ADAM_BETA1, DEFAULT_ADAM_BETA2),
+            eps=DEFAULT_ADAM_EPS
+        )
         
-        # Compute losses using training step handler
-        total_loss = self._compute_training_loss(y_pred, target, device)
+        # Create dataloader from dataset
+        # If dataset has train_dataset (from val_split), use it; otherwise use dataset itself
+        train_dataset = dataset.train_dataset if hasattr(dataset, 'train_dataset') and dataset.train_dataset is not None else dataset
+        train_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True)
         
-        return total_loss
+        # Training loop
+        max_epochs = max_epochs or self.max_epochs
+        self.training = True  # Set to training mode
+        
+        for epoch in range(max_epochs):
+            epoch_loss = 0.0
+            n_batches = 0
+            
+            for batch in train_loader:
+                # Prepare batch
+                if isinstance(batch, Sequence) and not isinstance(batch, str) and len(batch) == 2:
+                    data, target = batch
+                else:
+                    data = batch
+                    target = data
+                
+                data = data.to(device)
+                target = target.to(device)
+                
+                # Forward pass
+                y_pred = self.forward(data)
+                
+                # Compute loss
+                loss = self._compute_training_loss(y_pred, target, device)
+                
+                # Backward pass
+                optimizer.zero_grad()
+                loss.backward()
+                
+                # Gradient clipping
+                if self.grad_clip_val > 0:
+                    torch.nn.utils.clip_grad_norm_(params, self.grad_clip_val)
+                
+                optimizer.step()
+                
+                epoch_loss += loss.item()
+                n_batches += 1
+            
+            if epoch % 10 == 0 or epoch == max_epochs - 1:
+                avg_loss = epoch_loss / n_batches if n_batches > 0 else 0.0
+                _logger.info(f"KDFM Epoch {epoch}/{max_epochs}: loss={avg_loss:.{DEFAULT_LOSS_LOG_PRECISION}f}")
+        
+        self.training = False  # Set to evaluation mode
     
     def _compute_training_loss(
         self,
@@ -621,11 +645,6 @@ class KDFM(BaseFactorModel, pl.LightningModule):
         
         # Total loss: L_total = L_pred + λ_struct * L_struct
         total_loss = pred_loss + self.structural_reg_weight * struct_loss
-        
-        # Log losses
-        self.log('train_loss', total_loss, on_step=True, on_epoch=True, prog_bar=True)
-        self.log('pred_loss', pred_loss, on_step=True, on_epoch=True)
-        self.log('struct_loss', struct_loss, on_step=True, on_epoch=True)
         
         return total_loss
     
@@ -790,58 +809,23 @@ class KDFM(BaseFactorModel, pl.LightningModule):
                 params.extend(component.parameters())
         return params
     
-    def configure_optimizers(self) -> Union[torch.optim.Optimizer, List[torch.optim.Optimizer], Dict[str, Any]]:
-        """Configure optimizer for KDFM training (PyTorch Lightning interface).
-        
-        This method creates and configures the optimizer(s) for KDFM training.
-        Uses Adam optimizer with configurable learning rate, weight decay, and
-        gradient clipping. This method is called automatically by PyTorch Lightning
-        during training setup.
-        
-        **Optimizer Configuration**:
-        - Optimizer: Adam (adaptive learning rate, good for non-stationary loss landscapes)
-        - Learning rate: Configurable via `learning_rate` parameter (default: DEFAULT_LEARNING_RATE = 0.001)
-        - Weight decay: L2 regularization via `weight_decay` parameter (default: DEFAULT_REGULARIZATION_SCALE = 1e-5)
-        - Gradient clipping: Applied via `grad_clip_val` parameter (default: DEFAULT_GRAD_CLIP_VAL = 1.0 from constants)
-        
-        **Gradient Clipping**: Gradient clipping is applied automatically by Lightning
-        if `grad_clip_val` is set. This prevents gradient explosion, which is
-        particularly important for state-space models with near-unit-root eigenvalues.
-        
-        Returns
-        -------
-        torch.optim.Optimizer or List[torch.optim.Optimizer] or Dict[str, Any]
-            Optimizer configuration:
-            - If single optimizer: Returns optimizer directly
-            - If multiple optimizers: Returns list of optimizers
-            - If scheduler needed: Returns dict with 'optimizer' and 'lr_scheduler' keys
-            Currently returns list containing single Adam optimizer.
-            Returns dummy optimizer if model parameters not yet initialized (for Lightning compatibility).
-            
-        Examples
-        --------
-        >>> model = KDFM(ar_order=1, ma_order=0, learning_rate=DEFAULT_LEARNING_RATE)  # ar_order/ma_order use DEFAULT_KDFM_AR_ORDER, DEFAULT_KDFM_MA_ORDER
-        >>> optimizer_config = model.configure_optimizers()
-        >>> assert isinstance(optimizer_config, list)
-        >>> assert len(optimizer_config) == 1
-        >>> assert isinstance(optimizer_config[0], torch.optim.Optimizer)
-        >>> assert optimizer_config[0].param_groups[0]['lr'] == DEFAULT_LEARNING_RATE
-        """
+    def _create_optimizer(self) -> torch.optim.Optimizer:
+        """Create optimizer for KDFM training."""
         params = self._collect_parameters()
         
         if not params:
-            # Return dummy optimizer if no parameters yet (will be updated when model is initialized)
-            # Create a dummy parameter to satisfy Lightning's optimizer requirement
-            dummy_param = nn.Parameter(torch.tensor(DEFAULT_ZERO_VALUE))
-            return [torch.optim.Adam([dummy_param], lr=self.learning_rate)]
+            raise ModelNotInitializedError(
+                "KDFM has no trainable parameters. Call initialize_from_data() first.",
+                details="Model must be initialized before creating optimizer"
+            )
         
-        optimizer = torch.optim.Adam(
+        return torch.optim.Adam(
             params,
             lr=self.learning_rate,
-            weight_decay=self.weight_decay
+            weight_decay=self.weight_decay,
+            betas=(DEFAULT_ADAM_BETA1, DEFAULT_ADAM_BETA2),
+            eps=DEFAULT_ADAM_EPS
         )
-        
-        return [optimizer]
     
     def _check_trained(self) -> None:
         """Check if model is trained, raise error if not.
@@ -967,10 +951,10 @@ class KDFM(BaseFactorModel, pl.LightningModule):
         # Check if model is trained
         try:
             self._check_trained()
-        except ValueError as e:
+        except COMPUTATION_ERROR_TYPES as e:
             raise ModelNotTrainedError(
                 "KDFM prediction requires a trained model. "
-                "Please train the model using trainer.fit() before calling predict().",
+                "Please train the model using model.train() before calling predict().",
                 details=str(e)
             ) from e
         
@@ -1071,7 +1055,9 @@ class KDFM(BaseFactorModel, pl.LightningModule):
         if last_observation is not None:
             # Prepare last observation (normalize shape, move to device)
             from ..utils.common import ensure_tensor
-            last_obs_tensor = ensure_tensor(last_observation, device=self.device, dtype=DEFAULT_TORCH_DTYPE)
+            # Get device from model parameters (similar to DDFM)
+            device = next(self.parameters()).device if list(self.parameters()) else torch.device('cpu')
+            last_obs_tensor = ensure_tensor(last_observation, device=device, dtype=DEFAULT_TORCH_DTYPE)
             if last_obs_tensor.ndim == 1:
                 last_obs_tensor = last_obs_tensor.unsqueeze(0)  # (1, N)
             if last_obs_tensor.shape != (1, n_vars):
@@ -1335,7 +1321,8 @@ class KDFM(BaseFactorModel, pl.LightningModule):
             return None
         try:
             return getattr(result, 'n_vars', None)
-        except (AttributeError, TypeError):
+        except COMPUTATION_ERROR_TYPES:
+            # Uses COMPUTATION_ERROR_TYPES for consistent error handling (AttributeError, TypeError are included)
             return None
     
     def _compute_factor_state_from_observation(
@@ -1518,7 +1505,8 @@ class KDFM(BaseFactorModel, pl.LightningModule):
                     result_n_vars = self._get_result_n_vars(result)
                     if result_n_vars is not None:
                         n_vars = int(result_n_vars)
-                except (AttributeError, TypeError, ValueError):
+                except COMPUTATION_ERROR_TYPES:
+                    # Uses COMPUTATION_ERROR_TYPES for consistent error handling (AttributeError, TypeError, ValueError are included)
                     pass
         
         # Try 3: structural_id.n_vars
@@ -1527,7 +1515,8 @@ class KDFM(BaseFactorModel, pl.LightningModule):
                 structural_n_vars = getattr(structural_id, 'n_vars', None)
                 if structural_n_vars is not None:
                     n_vars = int(structural_n_vars)
-            except (AttributeError, TypeError, ValueError):
+            except COMPUTATION_ERROR_TYPES:
+                # Uses COMPUTATION_ERROR_TYPES for consistent error handling (AttributeError, TypeError, ValueError are included)
                 pass
         
         # Try 4: companion_ar shape
@@ -1619,7 +1608,7 @@ class KDFM(BaseFactorModel, pl.LightningModule):
         serialization.
         
         **CRITICAL**: This method requires the model to be trained and initialized.
-        Call `trainer.fit(model, data_module)` before calling this method.
+        Call `model.train(dataset=dataset)` before calling this method.
         
         Returns
         -------
@@ -1652,7 +1641,7 @@ class KDFM(BaseFactorModel, pl.LightningModule):
             self.companion_ar is not None,
             ModelNotInitializedError,
             "KDFM get_result requires initialized model components. "
-            "Train the model using trainer.fit() before calling get_result().",
+            "Train the model using model.train() before calling get_result().",
             details="companion_ar is None"
         )
         
@@ -1670,7 +1659,11 @@ class KDFM(BaseFactorModel, pl.LightningModule):
         
         # Extract companion matrices and parameters using helper method
         ar_transition, ar_input, ar_output = self._extract_companion_params(self.companion_ar)
-        ma_transition, ma_input, ma_output = self._extract_companion_params(self.companion_ma)
+        # MA stage is optional (only exists if ma_order > 0)
+        if self.companion_ma is not None:
+            ma_transition, ma_input, ma_output = self._extract_companion_params(self.companion_ma)
+        else:
+            ma_transition, ma_input, ma_output = (None, None, None)
         
         # Compute IRFs if all required parameters are available
         irf_reduced, irf_structural = self._compute_irfs_from_params(
@@ -1848,8 +1841,9 @@ class KDFM(BaseFactorModel, pl.LightningModule):
             
             return irf_reduced, irf_structural
             
-        except (ValueError, RuntimeError, TypeError, AttributeError) as e:
+        except COMPUTATION_ERROR_TYPES as e:
             # Re-raise as NumericalError for better error handling
+            # Uses COMPUTATION_ERROR_TYPES for consistent error handling (ValueError, RuntimeError, TypeError, AttributeError are included)
             # These are expected errors when IRF computation fails due to invalid state
             from ..utils.errors import NumericalError
             raise NumericalError(
@@ -1900,7 +1894,7 @@ class KDFM(BaseFactorModel, pl.LightningModule):
         Notes
         -----
         - This updates factors via companion matrix forward pass, NOT parameter retraining
-        - For parameter retraining, use trainer.fit() with concatenated data
+        - For parameter retraining, use model.train() with concatenated data
         - After update(), predict() will use the updated factor state
         - New data must have same number of series (N) as training data
         - User must preprocess data themselves (same preprocessing as training)

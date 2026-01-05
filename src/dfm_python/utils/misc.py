@@ -15,7 +15,6 @@ import pandas as pd
 if TYPE_CHECKING:
     import torch
     from ..config.schema import DFMConfig, DFMResult, FitParams
-    from ..datamodule import DFMDataModule
 else:
     torch = None
 
@@ -90,95 +89,6 @@ def resolve_param(
     if config_value is not None:
         return config_value
     return default
-
-
-def extract_param(
-    name: str,
-    kwargs: Optional[Dict[str, Any]] = None,
-    config: Optional[Any] = None,
-    defaults: Optional[Dict[str, Any]] = None,
-    default: Any = None
-) -> Any:
-    """Extract parameter with fallback chain: kwargs > config > defaults > default.
-    
-    Parameters
-    ----------
-    name : str
-        Parameter name
-    kwargs : Dict[str, Any], optional
-        Keyword arguments dict
-    config : Any, optional
-        Configuration object with attributes
-    defaults : Dict[str, Any], optional
-        Default values dictionary
-    default : Any, optional
-        Final fallback value
-        
-    Returns
-    -------
-    Any
-        Extracted parameter value
-    """
-    value = resolve_param(name=name, kwargs=kwargs, config=config, defaults=defaults)
-    return value if value is not None else default
-
-
-def extract_bool_param(
-    name: str,
-    kwargs: Optional[Dict[str, Any]] = None,
-    config: Optional[Any] = None,
-    defaults: Optional[Dict[str, Any]] = None,
-    default: bool = False
-) -> bool:
-    """Extract boolean parameter with fallback chain.
-    
-    Parameters
-    ----------
-    name : str
-        Parameter name
-    kwargs : Dict[str, Any], optional
-        Keyword arguments dict
-    config : Any, optional
-        Configuration object with attributes
-    defaults : Dict[str, Any], optional
-        Default values dictionary
-    default : bool, default False
-        Final fallback value
-        
-    Returns
-    -------
-    bool
-        Extracted boolean parameter value
-    """
-    value = resolve_param(name=name, kwargs=kwargs, config=config, defaults=defaults)
-    return value if value is not None else default
-
-
-def extract_opt_param(
-    name: str,
-    kwargs: Optional[Dict[str, Any]] = None,
-    config: Optional[Any] = None,
-    defaults: Optional[Dict[str, Any]] = None
-) -> Optional[Any]:
-    """Extract optional parameter with fallback chain.
-    
-    Parameters
-    ----------
-    name : str
-        Parameter name
-    kwargs : Dict[str, Any], optional
-        Keyword arguments dict
-    config : Any, optional
-        Configuration object with attributes
-    defaults : Dict[str, Any], optional
-        Default values dictionary
-        
-    Returns
-    -------
-    Optional[Any]
-        Extracted parameter value, or None if not found
-    """
-    return resolve_param(name=name, kwargs=kwargs, config=config, defaults=defaults)
 
 
 def get_config_attr(
@@ -292,20 +202,20 @@ def compute_default_horizon(
 
 
 def resolve_target_series(
-    datamodule: Optional[Any],
+    dataset: Optional[Any],
     series_ids: Optional[List[str]] = None,
     result: Optional[Any] = None,
     model_name: str = "model"
 ) -> Tuple[Optional[List[str]], Optional[List[int]]]:
-    """Resolve target series from DataModule.
+    """Resolve target series from Dataset.
     
-    This utility function resolves target series from the DataModule's target_series attribute
+    This utility function resolves target series from the Dataset's target_series attribute
     and maps them to indices in the series_ids list.
     
     Parameters
     ----------
-    datamodule : Any, optional
-        DataModule instance with target_series attribute
+    dataset : Any, optional
+        Dataset instance with target_series attribute
     series_ids : List[str], optional
         Available series IDs from config or result. Used for validation.
     result : Any, optional
@@ -328,10 +238,10 @@ def resolve_target_series(
     from ..utils.errors import DataError
     from ..config.constants import MAX_WARNING_ITEMS, MAX_ERROR_ITEMS
     
-    # Get target series from DataModule
+    # Get target series from Dataset
     target_series = None
-    if datamodule is not None:
-        target_series = getattr(datamodule, 'target_series', None)
+    if dataset is not None:
+        target_series = getattr(dataset, 'target_series', None)
         if target_series is not None and len(target_series) > 0:
             target_series = target_series if isinstance(target_series, list) else [target_series]
     
@@ -356,12 +266,6 @@ def resolve_target_series(
             )
     
     return target_series, target_indices
-
-
-
-
-
-
 
 
 # ============================================================================

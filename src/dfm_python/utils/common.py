@@ -263,8 +263,6 @@ def sanitize_array(
     return np.nan_to_num(arr, nan=nan_value, posinf=inf_value, neginf=neginf_value)
 
 
-
-
 def validate_matrix_shape(
     matrix: Union[np.ndarray, Tensor],
     expected_shape: Tuple[int, ...],
@@ -310,6 +308,196 @@ def validate_matrix_shape(
                 f"Shape: {actual_shape}, Expected: {expected_shape}",
                 details=f"Dimension {i} mismatch: actual={actual}, expected={expected}"
             )
+
+
+def compute_scale_stats(array: Union[np.ndarray, Tensor]) -> Tuple[float, float]:
+    """Compute mean and standard deviation of an array.
+    
+    Parameters
+    ----------
+    array : np.ndarray or Tensor
+        Array to compute statistics for
+        
+    Returns
+    -------
+    Tuple[float, float]
+        (mean, std) tuple
+    """
+    if isinstance(array, Tensor):
+        mean_val = array.mean().item()
+        std_val = array.std().item()
+    else:
+        mean_val = float(np.mean(array))
+        std_val = float(np.std(array))
+    return (mean_val, std_val)
+
+
+def standardize_with_ddof(
+    data: Union[np.ndarray, Tensor],
+    ddof: int = 1
+) -> Union[np.ndarray, Tensor]:
+    """Standardize data using sample standard deviation (ddof=1) to match pandas std() default.
+    
+    This function provides standardization with configurable ddof parameter, allowing
+    exact match with original TensorFlow DDFM which uses pandas std() with ddof=1 (sample std).
+    StandardScaler uses ddof=0 (population std), which creates a sqrt(n/(n-1)) scaling difference.
+    
+    Parameters
+    ----------
+    data : Union[np.ndarray, Tensor]
+        Input data to standardize
+    ddof : int, default 1
+        Degrees of freedom for standard deviation calculation (1 = sample std, 0 = population std)
+        
+    Returns
+    -------
+    Union[np.ndarray, Tensor]
+        Standardized data with mean≈0, std≈1 (using ddof for std calculation)
+    """
+    if isinstance(data, Tensor):
+        data_np = ensure_numpy(data)
+        mean = np.mean(data_np, axis=0, keepdims=True)
+        std = np.std(data_np, axis=0, ddof=ddof, keepdims=True)
+        # Avoid division by zero
+        std = np.where(std < 1e-10, 1.0, std)
+        data_standardized_np = (data_np - mean) / std
+        return ensure_tensor(data_standardized_np, dtype=data.dtype, device=data.device)
+    else:
+        mean = np.mean(data, axis=0, keepdims=True)
+        std = np.std(data, axis=0, ddof=ddof, keepdims=True)
+        # Avoid division by zero
+        std = np.where(std < 1e-10, 1.0, std)
+        return (data - mean) / std
+
+
+def check_and_standardize_data(
+    data: Union[np.ndarray, Tensor],
+    mean_threshold: float = 0.1,
+    std_min: float = 0.1,
+    std_max: float = 10.0,
+    apply_standardization: bool = True,
+    use_ddof_1: bool = False
+) -> Tuple[Union[np.ndarray, Tensor], bool]:
+    """Check if data is standardized and optionally apply standardization.
+    
+    Parameters
+    ----------
+    data : np.ndarray or Tensor
+        Data to check/standardize
+    mean_threshold : float, default 0.1
+        Maximum acceptable absolute mean for standardized data
+    std_min : float, default 0.1
+        Minimum acceptable std for standardized data
+    std_max : float, default 10.0
+        Maximum acceptable std for standardized data
+    apply_standardization : bool, default True
+        If True and data is not standardized, apply standardization
+    use_ddof_1 : bool, default False
+        If True, use ddof=1 (sample std) for standardization to match pandas std() default.
+        If False, use StandardScaler (ddof=0, population std). Set to True for DDFM to match original TensorFlow.
+        
+    Returns
+    -------
+    Tuple[Union[np.ndarray, Tensor], bool]
+        (standardized_data, was_standardized) tuple
+        was_standardized is True if standardization was applied, False if data was already standardized
+    """
+    data_mean, data_std = compute_scale_stats(data)
+    needs_standardization = (
+        abs(data_mean) > mean_threshold or
+        data_std < std_min or
+        data_std > std_max
+    )
+    
+    if needs_standardization and apply_standardization:
+        if use_ddof_1:
+            # Use ddof=1 (sample std) to match original TensorFlow DDFM pandas std() default
+            data_standardized = standardize_with_ddof(data, ddof=1)
+        else:
+            # Use StandardScaler (ddof=0, population std) for default behavior
+            from sklearn.preprocessing import StandardScaler
+            scaler = StandardScaler()
+            if isinstance(data, Tensor):
+                data_np = ensure_numpy(data)
+                data_standardized_np = scaler.fit_transform(data_np)
+                data_standardized = ensure_tensor(data_standardized_np, dtype=data.dtype, device=data.device)
+            else:
+                data_standardized = scaler.fit_transform(data)
+        return (data_standardized, True)
+    else:
+        return (data, False)
+
+
+def normalize_to_match_scale(
+    prediction: Union[np.ndarray, Tensor],
+    target: Union[np.ndarray, Tensor],
+    min_std: float = 1e-10,
+    raise_on_zero_std: bool = False
+) -> Tuple[Union[np.ndarray, Tensor], float, bool]:
+    """Normalize prediction to match target scale.
+    
+    This helper consolidates the common pattern of normalizing prediction arrays
+    to match target data scale, used in DDFM scale alignment checks.
+    
+    Parameters
+    ----------
+    prediction : np.ndarray or Tensor
+        Prediction array to normalize
+    target : np.ndarray or Tensor
+        Target array to match scale of
+    min_std : float, default 1e-10
+        Minimum standard deviation threshold for scale ratio computation
+    raise_on_zero_std : bool, default False
+        If True, raise DataError when prediction has zero std. If False, return prediction unchanged.
+        
+    Returns
+    -------
+    Tuple[Union[np.ndarray, Tensor], float, bool]
+        (normalized_prediction, scale_ratio, was_normalized)
+        - normalized_prediction: Prediction normalized to match target scale (or original if no normalization needed)
+        - scale_ratio: Ratio of prediction std to target std
+        - was_normalized: Whether normalization was applied
+        
+    Raises
+    ------
+    DataError
+        If raise_on_zero_std=True and prediction has zero std
+    """
+    from ..config.constants import MIN_STD_FOR_SCALE_CHECK, DEFAULT_SCALE_RATIO_MAX, DEFAULT_SCALE_RATIO_MIN
+    from .errors import DataError
+    
+    # Compute scale statistics
+    target_mean, target_std = compute_scale_stats(target)
+    pred_mean, pred_std = compute_scale_stats(prediction)
+    
+    # Compute scale ratio
+    scale_ratio = pred_std / target_std if target_std > min_std else float('inf')
+    
+    # Check if normalization is needed
+    if scale_ratio > DEFAULT_SCALE_RATIO_MAX or scale_ratio < DEFAULT_SCALE_RATIO_MIN:
+        # Normalization needed
+        if pred_std > min_std:
+            # Normalize: (pred - pred_mean) / pred_std * target_std + target_mean
+            if isinstance(prediction, Tensor):
+                # Keep as Tensor
+                normalized = (prediction - pred_mean) / pred_std * target_std + target_mean
+            else:
+                # Keep as numpy array
+                normalized = (prediction - pred_mean) / pred_std * target_std + target_mean
+            return (normalized, scale_ratio, True)
+        else:
+            # Prediction has zero std - cannot normalize
+            if raise_on_zero_std:
+                raise DataError(
+                    f"Cannot normalize prediction - prediction has zero std (pred_std={pred_std:.6f}). "
+                    f"This indicates prediction is constant or invalid.",
+                    details=f"target: mean={target_mean:.6f}, std={target_std:.6f}, prediction: mean={pred_mean:.6f}, std={pred_std:.6f}"
+                )
+            # Return original prediction unchanged
+            return (prediction, scale_ratio, False)
+    else:
+        # No normalization needed - scales already match
+        return (prediction, scale_ratio, False)
 
 
 def log_tensor_stats(

@@ -43,7 +43,9 @@ def compute_masked_loss(
     Returns
     -------
     loss : torch.Tensor
-        Scalar loss value averaged over all observed (masked) elements
+        Scalar loss value. Loss is computed over masked (observed) elements only,
+        but normalized by total number of elements (target.numel()) to match
+        original TensorFlow MeanSquaredError behavior.
         
     Examples
     --------
@@ -67,9 +69,13 @@ def compute_masked_loss(
     if mask.dtype != torch.bool:
         mask = mask.bool()
     
-    # Apply mask to target (zero out missing values)
+    # Apply mask to match original TensorFlow pattern:
+    # 1. Zero out missing values in target (target_clean)
+    # 2. Multiply prediction by mask (reconstructed_masked)
+    # This order matches the original TensorFlow implementation's mask application
     target_clean = torch.where(mask, target, torch.zeros_like(target))
-    diff = target_clean - reconstructed
+    reconstructed_masked = reconstructed * mask
+    diff = target_clean - reconstructed_masked
     
     if loss_function == 'huber':
         # Huber loss: more robust to outliers
@@ -85,8 +91,10 @@ def compute_masked_loss(
         # MSE loss (default)
         loss_values = diff ** 2
     
-    # Average over masked elements only
-    # Add small epsilon to denominator to avoid division by zero
-    loss = torch.sum(loss_values * mask) / (torch.sum(mask) + DEFAULT_EPSILON)
+    # Normalize by total elements (target.numel()) to match TensorFlow MeanSquaredError behavior.
+    # TensorFlow's MeanSquaredError divides by total elements, not just observed elements.
+    # This ensures consistent scaling regardless of missing data pattern.
+    loss = torch.sum(loss_values * mask) / (target.numel() + DEFAULT_EPSILON)
+    
     return loss
 

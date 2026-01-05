@@ -26,8 +26,10 @@ DEFAULT_MIN_DELTA = 1e-6  # Minimum change for improvement
 MIN_EIGENVALUE = 1e-8  # Minimum eigenvalue for positive definite matrices
 MIN_DIAGONAL_VARIANCE = 1e-8  # Minimum variance for diagonal elements
 MIN_OBSERVATION_NOISE = 1e-4  # Minimum observation noise for measurement error (used in EM updates)
+DEFAULT_DDFM_OBSERVATION_NOISE = 1e-15  # Default observation noise for DDFM state-space (matches original TensorFlow)
 MIN_FACTOR_VARIANCE = 1e-10  # Minimum variance for factors
 MIN_STD = 1e-8  # Minimum standard deviation
+MIN_STD_FOR_SCALE_CHECK = 1e-10  # Minimum standard deviation for scale ratio computation (more lenient than MIN_STD)
 DEFAULT_VARIANCE_FALLBACK = 1.0  # Default variance fallback value for numerical stability
 
 # Maximum eigenvalues
@@ -44,6 +46,7 @@ DEFAULT_CLEAN_INF = MAX_EIGENVALUE  # Default value for Inf replacement in clean
 # Identity matrix defaults
 DEFAULT_IDENTITY_SCALE = 1.0  # Default scale for create_scaled_identity(n, 1.0)
 DEFAULT_ZERO_VALUE = 0.0  # Default zero value for explicit zero assignments
+DEFAULT_INF_VALUE = float('inf')  # Default infinity value for loss/scale comparisons
 DEFAULT_XAVIER_GAIN = 1.0  # Default gain for Xavier initialization
 DEFAULT_OUTPUT_LAYER_GAIN = 0.1  # Default gain for output layer Xavier initialization (smaller for stability)
 
@@ -59,6 +62,24 @@ DEFAULT_REGULARIZATION = 1e-6  # Default regularization value
 DEFAULT_CLIP_THRESHOLD = 10.0  # Default clipping threshold (in standard deviations)
 DEFAULT_DATA_CLIP_THRESHOLD = 100.0  # Default data clipping threshold
 
+# Scale validation thresholds (for DDFM scale alignment checks)
+DEFAULT_SCALE_RATIO_MAX = 10.0  # Maximum acceptable scale ratio (prediction std / data std)
+DEFAULT_SCALE_RATIO_MIN = 0.1  # Minimum acceptable scale ratio (prediction std / data std)
+DEFAULT_STANDARDIZATION_MEAN_THRESHOLD = 0.1  # Maximum acceptable absolute mean for standardized data (mean should be ≈0)
+DEFAULT_STANDARDIZATION_STD_MIN = 0.1  # Minimum acceptable std for standardized data (std should be ≈1)
+DEFAULT_STANDARDIZATION_STD_MAX = 10.0  # Maximum acceptable std for standardized data (std should be ≈1)
+
+# Logging precision constants
+DEFAULT_SCALE_LOG_PRECISION = 6  # Default precision for scale logging format strings (e.g., .6f)
+DEFAULT_TIME_LOG_PRECISION = 2  # Default precision for time logging format strings (e.g., .2f)
+DEFAULT_LOSS_LOG_PRECISION = 6  # Default precision for loss/delta logging format strings (e.g., .6f)
+
+# Time conversion constants
+SECONDS_PER_MINUTE = 60  # Seconds per minute (for time conversion)
+
+# Logging level constants
+LOGGING_DEBUG_LEVEL = 10  # logging.DEBUG level for conditional checks
+
 # ============================================================================
 # Training Defaults
 # ============================================================================
@@ -68,16 +89,32 @@ DEFAULT_MAX_ITER = 100  # Default maximum EM iterations (general)
 DEFAULT_EM_MAX_ITER = 5000  # Default maximum EM iterations (DFM-specific)
 DEFAULT_MAX_EPOCHS = 100  # Default maximum training epochs
 DEFAULT_MAX_MCMC_ITER = 200  # Default maximum MCMC iterations
-DEFAULT_N_MC_SAMPLES = 200  # Default number of MC samples per MCMC iteration for DDFM denoising training (matches original paper's epochs=100 and typical usage)
+DEFAULT_N_MC_SAMPLES = 10  # Default number of MC samples per MCMC iteration for DDFM denoising training (matches original TensorFlow epochs=10 default, per experiment/config/model/ddfm.yaml)
 DEFAULT_FACTOR_ORDER = 1  # Default factor order for DDFM (AR(1) dynamics)
+DEFAULT_AR_ORDER_2 = 2  # Default AR order 2 for DDFM forecast (AR(2) dynamics)
 
 # Batch size defaults
 DEFAULT_BATCH_SIZE = 32  # Default batch size for neural networks
-DEFAULT_DDFM_BATCH_SIZE = 100  # Default batch size for DDFM
+DEFAULT_DDFM_WINDOW_SIZE = 100  # Default window size (time-step batch size) for DDFM
+DEFAULT_DDFM_BATCH_SIZE = 100  # Default batch size for DDFM (matches original TensorFlow batch_size=100)
+
+# Placeholder defaults (for DDFM placeholder MC dataset)
+DEFAULT_PLACEHOLDER_MC_SAMPLES = 1  # Minimal MC samples for placeholder dataset (replaced after on_train_start)
+DEFAULT_PLACEHOLDER_DATA_SHAPE_T = 100  # Default time steps for placeholder data shape
+DEFAULT_PLACEHOLDER_DATA_SHAPE_N = 10  # Default number of series for placeholder data shape
+DEFAULT_PLACEHOLDER_SEED = 42  # Seed for placeholder random state (common test value, placeholder gets replaced)
+DEFAULT_NUM_WORKERS = 0  # Default number of workers for DataLoader (0 = single-threaded)
+
+# Initialization sample size defaults
+DEFAULT_KDFM_INIT_SAMPLE_SIZE = 100  # Default sample size for KDFM initialization (first N rows used for initialize_from_data)
 
 # Learning rate defaults
 DEFAULT_LEARNING_RATE = 0.001  # Default learning rate
 DEFAULT_DDFM_LEARNING_RATE = 0.005  # Default learning rate for DDFM
+
+# Autoencoder training defaults (matches original TensorFlow pattern)
+DEFAULT_AUTOENCODER_FIT_EPOCHS = 1  # Number of epochs per MC sample (matches original TensorFlow: epochs=1 per autoencoder.fit() call)
+DEFAULT_AUTOENCODER_FIT_VERBOSE = 0  # Verbosity level for autoencoder.fit() (0 = silent, matches original TensorFlow verbose=0)
 
 # Gradient clipping
 DEFAULT_GRAD_CLIP_VAL = 1.0  # Default gradient clipping value
@@ -87,6 +124,15 @@ DEFAULT_WEIGHT_DECAY = 0.0  # Default weight decay (L2 regularization)
 
 # Learning rate decay
 DEFAULT_LR_DECAY_RATE = 0.96  # Default exponential decay rate for learning rate
+
+# Adam optimizer defaults
+DEFAULT_ADAM_BETA1 = 0.9  # Default beta1 (momentum decay) for Adam optimizer
+DEFAULT_ADAM_BETA2 = 0.999  # Default beta2 (squared gradient decay) for Adam optimizer
+DEFAULT_ADAM_EPS = 1e-8  # Default epsilon for Adam optimizer (PyTorch default)
+DEFAULT_TENSORFLOW_ADAM_EPS = 1e-7  # TensorFlow/Keras default epsilon for Adam optimizer (for comparison)
+
+# Random seed defaults
+DEFAULT_RANDOM_SEED_MAX = 2**31  # Maximum value for random seed generation (2147483647, 32-bit signed integer max)
 
 # Loss function defaults
 DEFAULT_HUBER_DELTA = 1.0  # Default delta parameter for Huber loss
@@ -137,8 +183,8 @@ DEFAULT_START_DATE = datetime(2000, 1, 1)
 # Default window size for DDFM
 DEFAULT_WINDOW_SIZE = 100
 DEFAULT_TENT_KERNEL_SIZE = 5  # Default tent kernel size for slower-frequency series aggregation
-# Note: DEFAULT_BATCH_SIZE is defined above (line 52) as 32 for general neural networks
-# Use DEFAULT_DDFM_BATCH_SIZE (100) for DDFM-specific batch size
+# Note: DEFAULT_BATCH_SIZE is defined above (line 88) as 32 for general neural networks
+# Use DEFAULT_DDFM_WINDOW_SIZE (100) for DDFM-specific window size (time-step batch size)
 
 # Warning/display limits
 MAX_WARNING_ITEMS = 5  # Maximum number of items to show in warning messages
@@ -157,7 +203,9 @@ MIN_VARIABLES = 1  # Minimum number of variables (N) required for data
 MIN_DDFM_TIME_STEPS = 2  # Minimum number of time steps (T) required for DDFM training (DDFM-specific, different from general MIN_TIME_STEPS=1)
 MIN_DDFM_DATASET_SIZE_WARNING = 10  # Minimum dataset size (T) below which DDFM denoising training warns about potential instability
 MIN_ITER_FOR_DELTA_COMPUTATION = 1  # Minimum iteration count required before computing delta (MSE change) in DDFM denoising training
+DEFAULT_MIN_ITER_FOR_CONVERGENCE_CHECK = 2  # Minimum iteration count required before checking convergence in DDFM (check from iteration 3 onwards)
 MIN_EPS_SHAPE_FOR_IDIO = 1  # Minimum eps shape dimension required for idiosyncratic component processing in DDFM
+MIN_SHAPE_FOR_AR2 = 2  # Minimum shape dimension for AR(2) forecast (need at least 2 previous time steps)
 
 # Idiosyncratic component defaults
 DEFAULT_IDIO_STD = 0.1  # Default idiosyncratic standard deviation (when estimation fails)
@@ -336,6 +384,7 @@ __all__ = [
     'MIN_OBSERVATION_NOISE',
     'MIN_FACTOR_VARIANCE',
     'MIN_STD',
+    'MIN_STD_FOR_SCALE_CHECK',
     'MAX_EIGENVALUE',
     'DEFAULT_EIGENVALUE_MAX_MAGNITUDE',
     'DEFAULT_EIGENVALUE_WARN_THRESHOLD',
@@ -351,6 +400,15 @@ __all__ = [
     'DEFAULT_REGULARIZATION',
     'DEFAULT_CLIP_THRESHOLD',
     'DEFAULT_DATA_CLIP_THRESHOLD',
+    'DEFAULT_SCALE_RATIO_MAX',
+    'DEFAULT_SCALE_RATIO_MIN',
+    'DEFAULT_STANDARDIZATION_MEAN_THRESHOLD',
+    'DEFAULT_STANDARDIZATION_STD_MIN',
+    'DEFAULT_STANDARDIZATION_STD_MAX',
+    'DEFAULT_SCALE_LOG_PRECISION',
+    'DEFAULT_TIME_LOG_PRECISION',
+    'DEFAULT_LOSS_LOG_PRECISION',
+    'SECONDS_PER_MINUTE',
     'MIN_CONDITION_NUMBER',
     'MAX_CONDITION_NUMBER',
     # Training
@@ -359,12 +417,26 @@ __all__ = [
     'DEFAULT_MAX_MCMC_ITER',
     'DEFAULT_N_MC_SAMPLES',
     'DEFAULT_BATCH_SIZE',  # General neural network default (32)
-    'DEFAULT_DDFM_BATCH_SIZE',  # DDFM-specific default (100)
+    'DEFAULT_DDFM_WINDOW_SIZE',  # DDFM-specific window size default (100)
+    'DEFAULT_DDFM_BATCH_SIZE',  # DDFM batch size default (100)
+    'DEFAULT_PLACEHOLDER_MC_SAMPLES',  # Placeholder MC samples default (1)
+    'DEFAULT_PLACEHOLDER_DATA_SHAPE_T',  # Placeholder data shape T default (100)
+    'DEFAULT_PLACEHOLDER_DATA_SHAPE_N',  # Placeholder data shape N default (10)
+    'DEFAULT_PLACEHOLDER_SEED',  # Placeholder random seed default (42)
+    'DEFAULT_NUM_WORKERS',  # DataLoader num_workers default (0)
+    'DEFAULT_KDFM_INIT_SAMPLE_SIZE',  # KDFM initialization sample size default (100)
     'DEFAULT_LEARNING_RATE',
     'DEFAULT_DDFM_LEARNING_RATE',
+    'DEFAULT_AUTOENCODER_FIT_EPOCHS',
+    'DEFAULT_AUTOENCODER_FIT_VERBOSE',
     'DEFAULT_GRAD_CLIP_VAL',
     'DEFAULT_WEIGHT_DECAY',
     'DEFAULT_LR_DECAY_RATE',
+    'DEFAULT_ADAM_BETA1',
+    'DEFAULT_ADAM_BETA2',
+    'DEFAULT_ADAM_EPS',
+    'DEFAULT_TENSORFLOW_ADAM_EPS',
+    'DEFAULT_RANDOM_SEED_MAX',
     'DEFAULT_HUBER_DELTA',
     'HUBER_QUADRATIC_COEFF',
     'DEFAULT_DDFM_CLIP_RANGE_DEEP',
@@ -377,6 +449,8 @@ __all__ = [
     'DEFAULT_STRUCTURAL_DIAG_SCALE',
     'DEFAULT_CHOLESKY_EPS',
     # Architecture
+    'DEFAULT_FACTOR_ORDER',
+    'DEFAULT_AR_ORDER_2',
     'DEFAULT_ENCODER_LAYERS',
     'DEFAULT_NUM_FACTORS',
     'DEFAULT_ACTIVATION',
@@ -396,9 +470,12 @@ __all__ = [
     # Dimension validation
     'MIN_TIME_STEPS',
     'MIN_VARIABLES',
+    'MIN_SHAPE_FOR_AR2',
     'MIN_DDFM_TIME_STEPS',
+    'MIN_SHAPE_FOR_AR2',
     'MIN_DDFM_DATASET_SIZE_WARNING',
     'MIN_ITER_FOR_DELTA_COMPUTATION',
+    'DEFAULT_MIN_ITER_FOR_CONVERGENCE_CHECK',
     'MIN_EPS_SHAPE_FOR_IDIO',
     'DEFAULT_IDIO_STD',
     'DEFAULT_IDIO_RHO0',

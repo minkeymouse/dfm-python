@@ -16,7 +16,7 @@ sys.path.insert(0, str(project_root / "src"))
 import pandas as pd
 import numpy as np
 from datetime import datetime
-from dfm_python import DFM, DFMDataModule
+from dfm_python import DFM, DFMDataset
 from dfm_python.config import DFMConfig
 from dfm_python.config.constants import TUTORIAL_MAX_PERIODS
 from dfm_python.utils.misc import TimeIndex
@@ -101,7 +101,7 @@ print("\n[Step 2.5] Creating preprocessing pipeline with sktime...")
 # Note: Target series will be kept raw (no differencing, no preprocessing pipeline)
 
 # Separate X (features) and y (target)
-# Note: date column will be removed by DataModule when time_index_column='date' is used
+# Note: date column will be removed by Dataset when time_index_column='date' is used
 if 'date' in df_processed.columns:
     df_for_preprocessing = df_processed.drop(columns=['date'])
 else:
@@ -147,7 +147,7 @@ if isinstance(X_preprocessed, np.ndarray):
 # Combine X (preprocessed) and y (raw) back together
 df_preprocessed = pd.concat([X_preprocessed, y], axis=1)
 
-# Add date column back for DataModule to extract (if it exists)
+# Add date column back for Dataset to extract (if it exists)
 if 'date' in df_processed.columns:
     df_preprocessed['date'] = df_processed['date'].values
 
@@ -236,28 +236,28 @@ print(f"   Max iterations: {config.max_iter} (reduced for tutorial)")
 print(f"   Target series: {', '.join(target_cols)} ({len(target_cols)} targets)")
 
 # ============================================================================
-# Step 4: Create DataModule
+# Step 4: Create Dataset
 # ============================================================================
-print("\n[Step 4] Creating DataModule...")
+print("\n[Step 4] Creating Dataset...")
 
-# Create DataModule with preprocessed data
+# Create Dataset with preprocessed data
 # Data is already preprocessed, so pass it directly
 # time_index='date' will extract time index from DataFrame and remove the column
-data_module = DFMDataModule(
+dataset = DFMDataset(
     config=config,
     data=df_processed,  # Pass DataFrame directly (already preprocessed)
     time_index='date',  # Extract time index from 'date' column and exclude it from data
     target_series=target_cols  # Specify multiple target series
 )
-data_module.setup()
+# Dataset initialization happens in __init__
 
-print(f"   DataModule created successfully")
-if hasattr(data_module, 'data_processed') and data_module.data_processed is not None:
-    print(f"   Processed data shape: {data_module.data_processed.shape}")
+print(f"   Dataset created successfully")
+if hasattr(data_module, 'data_processed') and dataset.data_processed is not None:
+    print(f"   Processed data shape: {dataset.data_processed.shape}")
 else:
     print(f"   Data shape: {df_processed.shape}")
-if data_module.time_index is not None:
-    print(f"   Time range: {data_module.time_index[0]} to {data_module.time_index[-1]}")
+if dataset.time_index is not None:
+    print(f"   Time range: {dataset.time_index[0]} to {dataset.time_index[-1]}")
 
 # ============================================================================
 # Step 5: Train Model
@@ -265,18 +265,18 @@ if data_module.time_index is not None:
 print("\n[Step 5] Training DFM model...")
 
 # Create DFM model with config
-# Note: mixed_freq is now auto-detected from DataModule
+# Note: mixed_freq is now auto-detected from Dataset
 # Mixed frequency will be automatically detected based on config frequencies
 model = DFM(config)
 
 # Get initialization parameters from datamodule
-init_params = data_module.get_initialization_params()
+init_params = dataset.get_initialization_params()
 X = init_params['X']
 
 
 # Fit model directly (DFM uses fit() method, not Lightning trainer)
 # Pass datamodule to extract all initialization parameters automatically
-model.fit(X=X, datamodule=data_module)
+model.fit(X=X, dataset =data_module)
 
 # Access results via property
 result = model.result
@@ -291,7 +291,7 @@ print(f"   Log-likelihood: {result.loglik:.4f}")
 # ============================================================================
 print("\n[Step 6] Making predictions...")
 
-# Predict with horizon=6 (uses target_series from DataModule)
+# Predict with horizon=6 (uses target_series from Dataset)
 X_forecast, Z_forecast = model.predict(horizon=6)
 
 print(f"   Forecast shape: {X_forecast.shape} (horizon x {len(target_cols)} targets)")

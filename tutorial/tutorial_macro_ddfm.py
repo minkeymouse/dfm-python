@@ -5,6 +5,10 @@ using macro data with KOEQUIPTE as the target variable.
 
 Target: KOEQUIPTE (Investment, Equipment, Estimation, SA)
 
+Note: DDFM uses noise injection integrated into the Autoencoder class.
+Noise is pre-sampled on GPU and injected by subtracting epsilon from clean data,
+following the original DDFM pattern: y_t^(mc) = ỹ_t - ε_t^(mc).
+
 """
 
 import sys
@@ -17,9 +21,9 @@ sys.path.insert(0, str(project_root / "src"))
 import pandas as pd
 import numpy as np
 from datetime import datetime
-from dfm_python import DDFM, DDFMDataModule, DDFMTrainer
+from dfm_python import DDFM, DDFMDataset
 from dfm_python.config import DDFMConfig
-from dfm_python.config.constants import TUTORIAL_MAX_PERIODS, DEFAULT_LEARNING_RATE, DEFAULT_BATCH_SIZE, DEFAULT_DDFM_LEARNING_RATE
+from dfm_python.config.constants import TUTORIAL_MAX_PERIODS, DEFAULT_LEARNING_RATE, DEFAULT_DDFM_WINDOW_SIZE, DEFAULT_DDFM_LEARNING_RATE
 from dfm_python.utils.misc import TimeIndex
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
@@ -157,7 +161,7 @@ if isinstance(df_preprocessed, np.ndarray):
 elif not isinstance(df_preprocessed, pd.DataFrame):
     df_preprocessed = pd.DataFrame(df_preprocessed)
 
-# Add date column back for DataModule to extract
+# Add date column back for Dataset to extract
 # Date column was separated earlier, so add it back now
 df_preprocessed['date'] = date_column.values
 
@@ -202,7 +206,7 @@ config = DDFMConfig(
     encoder_layers=[32, 16],  # Reduced for faster execution
     n_mc_samples=10,  # Number of MC samples per MCMC iteration (reduced for faster execution)
     learning_rate=DEFAULT_LEARNING_RATE,
-    batch_size=DEFAULT_BATCH_SIZE,
+    window_size=DEFAULT_DDFM_WINDOW_SIZE,  # Window size (time-step batch size) for training
     target_scaler=y_scaler  # Fitted scaler for target series inverse transformation
 )
 
@@ -211,31 +215,32 @@ print(f"   Number of factors: {config.num_factors} (DDFM uses num_factors parame
 print(f"   Factor dynamics: VAR(1) (always AR(1), not configurable)")
 print(f"   MC samples per iteration: {config.n_mc_samples}")
 print(f"   Target series: {target_col}")
+print(f"   Noise injection: Integrated in Autoencoder (pre-sampled on GPU)")
 
 # ============================================================================
-# Step 4: Create DataModule
+# Step 4: Create Dataset
 # ============================================================================
-print("\n[Step 4] Creating DataModule...")
+print("\n[Step 4] Creating Dataset...")
 
-# Create DDFMDataModule with preprocessed data
-# Data must be preprocessed before passing to DataModule
+# Create DDFMDataset with preprocessed data
+# Data must be preprocessed before passing to Dataset
 # Target series are specified separately - they remain in raw form (not preprocessed)
 # time_index_column='date' will extract time index from DataFrame and remove the column
-data_module = DDFMDataModule(
+dataset = DDFMDataset(
     config=config,
     data=df_processed,  # Pass DataFrame directly (not .values) - already preprocessed
     time_index_column='date',  # Extract time index from 'date' column and exclude it from data
     target_series=[target_col]  # Specify target series
 )
-data_module.setup()
+# Dataset initialization happens in __init__
 
-print(f"   DataModule created successfully")
-if hasattr(data_module, 'data_processed') and data_module.data_processed is not None:
-    print(f"   Processed data shape: {data_module.data_processed.shape}")
+print(f"   Dataset created successfully")
+if hasattr(data_module, 'data_processed') and dataset.data_processed is not None:
+    print(f"   Processed data shape: {dataset.data_processed.shape}")
 else:
     print(f"   Data shape: {df_processed.shape}")
-if data_module.time_index is not None:
-    print(f"   Time range: {data_module.time_index[0]} to {data_module.time_index[-1]}")
+if dataset.time_index is not None:
+    print(f"   Time range: {dataset.time_index[0]} to {dataset.time_index[-1]}")
 
 # ============================================================================
 # Step 5: Train Model
@@ -246,17 +251,31 @@ model = DDFM(
     encoder_layers=[32, 16],  # Reduced for faster execution
     num_factors=1,  # Reduced to 1 for faster execution
     n_mc_samples=10,  # Number of MC samples per MCMC iteration (reduced for faster execution)
-    max_iter=3,  # Maximum MCMC iterations (reduced for faster execution)
-    batch_size=DEFAULT_BATCH_SIZE,
+    max_epoch=3,  # Maximum epochs (MCMC iterations). One epoch = one MCMC iteration (reduced for faster execution)
+    window_size=DEFAULT_DDFM_WINDOW_SIZE,  # Window size (time-step batch size) for training
     learning_rate=DEFAULT_DDFM_LEARNING_RATE
 )
 # Load config to ensure all parameters are set correctly
 model.load_config(config)
 
-# Note: max_epochs in trainer corresponds to number of MCMC iterations (max_iter)
-# Each Lightning epoch = one MCMC iteration
-trainer = DDFMTrainer(max_epochs=3)  # Matches max_iter for faster execution
-trainer.fit(model, data_module)
+# Initialize networks before training (required for configure_optimizers)
+# Input dimension is determined from processed data
+input_dim = dataset.get_processed_data().shape[1]
+model.initialize_networks(input_dim)
+# Note: Device movement is handled automatically by Lightning
+# on_train_start() will move the model to the correct device
+
+# Note: For DDFM, max_epochs is set to model.max_epoch (number of MCMC iterations).
+# Each Lightning epoch = one MCMC iteration.
+# Training uses standard Lightning training loop with convergence callback.
+# Training stops early if convergence is achieved before max_epoch.
+# 
+# Noise injection is handled automatically by the Autoencoder class:
+# - Noise samples are pre-generated on GPU at the start of each epoch
+# - During training, noise is injected by subtracting epsilon: y_t^(mc) = ỹ_t - ε_t^(mc)
+# - This follows the original DDFM pattern for denoising autoencoder training
+# Note: trainer parameter removed - model.train() is called directly (plain PyTorch, no PyTorch Lightning)
+model.train(dataset=dataset)
 
 print("   Training completed!")
 
@@ -265,7 +284,7 @@ print("   Training completed!")
 # ============================================================================
 print("\n[Step 6] Making predictions...")
 
-# Predict with horizon=6 (uses target_series from DataModule)
+# Predict with horizon=6 (uses target_series from Dataset)
 X_forecast, Z_forecast = model.predict(horizon=6)
 
 print(f"   Forecast shape: {X_forecast.shape}")
