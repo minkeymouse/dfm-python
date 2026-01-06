@@ -3,6 +3,7 @@
 import pytest
 import numpy as np
 from dfm_python.functional.krylov import krylov, krylov_sequential
+from dfm_python.config.constants import DEFAULT_TORCH_DTYPE
 
 
 class TestKrylov:
@@ -13,8 +14,8 @@ class TestKrylov:
         import torch
         L = 5
         N = 3
-        A = torch.eye(N, dtype=torch.float32)
-        b = torch.ones(N, dtype=torch.float32)
+        A = torch.eye(N, dtype=DEFAULT_TORCH_DTYPE)
+        b = torch.ones(N, dtype=DEFAULT_TORCH_DTYPE)
         
         # Test basic krylov computation
         result = krylov(L, A, b)
@@ -27,8 +28,8 @@ class TestKrylov:
         import torch
         L = 4
         N = 2
-        A = torch.eye(N, dtype=torch.float32)
-        b = torch.tensor([1.0, 2.0], dtype=torch.float32)
+        A = torch.eye(N, dtype=DEFAULT_TORCH_DTYPE)
+        b = torch.tensor([1.0, 2.0], dtype=DEFAULT_TORCH_DTYPE)
         
         # Test basic sequential krylov computation
         result = krylov_sequential(L, A, b)

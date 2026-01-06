@@ -1,11 +1,12 @@
 """Inference process logging utilities.
 
 This module provides specialized logging for inference/prediction processes,
-including prediction steps and forecast generation for both DFM and DDFM.
+including prediction steps and forecast generation for DFM, DDFM, and KDFM.
 """
 
 import logging
-from typing import Optional, Dict, Any, Union, List
+from abc import ABC, abstractmethod
+from typing import Optional, Dict, Any, List
 import numpy as np
 from datetime import datetime
 
@@ -14,35 +15,28 @@ from .logger import get_logger
 _logger = get_logger(__name__)
 
 
-class InferenceLogger:
-    """Logger for tracking inference/prediction process for both DFM and DDFM.
+class BaseInferenceLogger(ABC):
+    """Base class for inference loggers.
     
-    This class provides structured logging for inference processes including:
-    - Inference start/end
-    - Prediction steps
-    - Forecast generation
-    - Prediction metrics
+    Provides common functionality for tracking inference/prediction processes.
+    Model-specific loggers should inherit from this class.
     """
     
     def __init__(
         self, 
-        model_name: str = "DFM", 
-        model_type: str = "dfm",
+        model_name: str,
         verbose: bool = True
     ):
-        """Initialize inference logger.
+        """Initialize base inference logger.
         
         Parameters
         ----------
-        model_name : str, default "DFM"
-            Name of the model being used for inference (e.g., "DFM", "DDFM")
-        model_type : str, default "dfm"
-            Type of model: "dfm" or "ddfm"
+        model_name : str
+            Name of the model (e.g., "DFM", "DDFM", "KDFM")
         verbose : bool, default True
             Whether to log detailed information
         """
         self.model_name = model_name
-        self.model_type = model_type.lower()
         self.verbose = verbose
         self.start_time: Optional[datetime] = None
         self.end_time: Optional[datetime] = None
@@ -64,7 +58,7 @@ class InferenceLogger:
         self.prediction_history = []
         
         _logger.info(f"{'='*70}")
-        _logger.info(f"Starting {self.model_name} {task} ({self.model_type.upper()})")
+        _logger.info(f"Starting {self.model_name} {task}")
         _logger.info(f"{'='*70}")
         
         if kwargs and self.verbose:
@@ -206,22 +200,47 @@ class InferenceLogger:
             _logger.info("")
 
 
+class DFMInferenceLogger(BaseInferenceLogger):
+    """Inference logger for DFM models."""
+    
+    def __init__(self, verbose: bool = True):
+        """Initialize DFM inference logger."""
+        super().__init__(model_name="DFM", verbose=verbose)
+
+
+class DDFMInferenceLogger(BaseInferenceLogger):
+    """Inference logger for DDFM models."""
+    
+    def __init__(self, verbose: bool = True):
+        """Initialize DDFM inference logger."""
+        super().__init__(model_name="DDFM", verbose=verbose)
+
+
+class KDFMInferenceLogger(BaseInferenceLogger):
+    """Inference logger for KDFM models."""
+    
+    def __init__(self, verbose: bool = True):
+        """Initialize KDFM inference logger."""
+        super().__init__(model_name="KDFM", verbose=verbose)
+
+
+# Backward compatibility alias
+InferenceLogger = BaseInferenceLogger
+
+
 # Convenience functions for simpler usage
 
 def log_inference_start(
     model_name: str = "DFM",
-    model_type: str = "dfm",
     task: str = "inference",
     **kwargs
-) -> InferenceLogger:
+) -> BaseInferenceLogger:
     """Create and start an inference logger.
     
     Parameters
     ----------
     model_name : str, default "DFM"
-        Name of the model being used (e.g., "DFM", "DDFM")
-    model_type : str, default "dfm"
-        Type of model: "dfm" or "ddfm"
+        Name of the model being used (e.g., "DFM", "DDFM", "KDFM")
     task : str, default "inference"
         Type of inference task
     **kwargs
@@ -229,16 +248,24 @@ def log_inference_start(
         
     Returns
     -------
-    InferenceLogger
+    BaseInferenceLogger
         Logger instance
     """
-    logger = InferenceLogger(model_name=model_name, model_type=model_type)
+    if model_name.upper() == "DFM":
+        logger = DFMInferenceLogger()
+    elif model_name.upper() == "DDFM":
+        logger = DDFMInferenceLogger()
+    elif model_name.upper() == "KDFM":
+        logger = KDFMInferenceLogger()
+    else:
+        logger = BaseInferenceLogger(model_name=model_name)
+    
     logger.start(task=task, **kwargs)
     return logger
 
 
 def log_inference_step(
-    logger: InferenceLogger,
+    logger: BaseInferenceLogger,
     step: int,
     description: Optional[str] = None,
     **kwargs
@@ -247,7 +274,7 @@ def log_inference_step(
     
     Parameters
     ----------
-    logger : InferenceLogger
+    logger : BaseInferenceLogger
         Inference logger instance
     step : int
         Step number
@@ -260,7 +287,7 @@ def log_inference_step(
 
 
 def log_inference_end(
-    logger: InferenceLogger,
+    logger: BaseInferenceLogger,
     success: bool = True,
     **kwargs
 ) -> None:
@@ -268,7 +295,7 @@ def log_inference_end(
     
     Parameters
     ----------
-    logger : InferenceLogger
+    logger : BaseInferenceLogger
         Inference logger instance
     success : bool, default True
         Whether inference completed successfully
@@ -309,4 +336,3 @@ def log_prediction(
             msg += f" | {key}: {value}"
     
     _logger.info(msg)
-

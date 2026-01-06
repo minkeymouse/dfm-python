@@ -24,10 +24,7 @@ and cannot be used interchangeably.
 - Use case: Dimensionality reduction, factor extraction
 
 **DDFM (Deep Dynamic Factor Model)**:
-- Training: Uses `train(dataset)` method
-  - MCMC training loop with max_epochs=model.max_epoch (each epoch = one MCMC iteration)
-  - Convergence checked automatically during training
-  - Training stops early if convergence is achieved before max_epoch
+- Training: Uses `fit()` method (consolidates model building, pre-training, and training)
 - Prediction: `predict(horizon)` - NO `last_observation` parameter
 - Result extraction: `get_result()` returns DDFMResult with uncertainty quantification
 - Architecture: Deep learning + Bayesian inference
@@ -54,13 +51,9 @@ explicit state management.
     forecasts = model.predict(horizon=8)
     
     # DDFM
-    model = DDFM(config=config)
-    model.load_config(config)
-    dataset = DDFMDataset(config=config, data=data)
-    # Note: For DDFM, max_epochs is set to model.max_epoch (number of MCMC iterations).
-    # Each training epoch = one MCMC iteration.
-    # Training uses simple training loop with automatic convergence checking.
-    model.train(dataset=dataset)
+    model = DDFM(dataset=dataset, config=config)
+    model.fit()  # Builds model, pre-trains, and trains
+    model.build_state_space()  # Required for prediction
     forecasts = model.predict(horizon=8)
 """
 

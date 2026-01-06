@@ -5,7 +5,6 @@ This package contains utility functions organized in modules:
 - common.py: Common tensor/numpy utilities
 - misc.py: Miscellaneous utilities (helpers, diagnostics, scaling)
 - metric.py: Metric calculation utilities (RMSE, MAE, MAPE, R2)
-- tensor_utils.py: Tensor conversion and manipulation utilities
 
 Validation functions are in numeric.validator.
 Helper functions are inlined into models or moved to numeric/functional.
@@ -22,7 +21,7 @@ from ..numeric.estimator import (
 )
 
 # Time utilities
-from ..dataset.process import TimeIndex, parse_timestamp
+from ..dataset.time import TimeIndex
 
 # Metric utilities
 from .metric import (
@@ -58,7 +57,8 @@ from ..numeric.tent import generate_tent_weights, generate_R_mat
 # Scaling utilities (from misc)
 from .misc import (
     _check_sklearn,
-    _get_scaler,
+    get_target_scaler,
+    select_columns_by_prefix,
 )
 
 # Validation utilities (from numeric.validator)
@@ -89,24 +89,10 @@ from .errors import (
     ConfigValidationError,
 )
 
-# Common utilities
-from .common import (
-    ensure_tensor,
-    ensure_numpy,
-    validate_matrix_shape,
-    compute_scale_stats,
-    check_and_standardize_data,
-    normalize_to_match_scale,
-    log_tensor_stats,
-    select_columns_by_prefix,
-    extract_tensor_value,
-)
+# Common utilities (moved from common.py - now using direct numpy/torch operations)
+# Note: ensure_numpy and sanitize_array removed - use np.asarray() or .cpu().numpy() directly
 
-# Preprocessing utilities
-from .preprocessing import (
-    preprocess_training_data,
-    adjust_mask_shape,
-)
+# Preprocessing utilities (removed - module doesn't exist)
 
 # Analytics utilities (from numeric.stability)
 from ..numeric.stability import (
@@ -134,24 +120,10 @@ from .misc import (
     get_clock_frequency,
 )
 
-# Tensor conversion utilities
-from .tensor_utils import (
-    normalize_tensor_shape,
-    validate_tensor_device,
-    batch_tensor_operation,
-)
-
-
-# Autoencoder functions are now in encoder.simple_autoencoder
-from ..encoder.simple_autoencoder import (
-    extract_decoder_params,
-    convert_decoder_to_numpy,
-)
+# Autoencoder functions should be imported directly from encoder.simple_autoencoder
+# Removed re-exports to avoid confusion - import from encoder module instead
 
 __all__ = [
-    # Autoencoder functions (from encoder.simple_autoencoder)
-    'extract_decoder_params',
-    'convert_decoder_to_numpy',
     # State-space utilities
     'estimate_var',
     'estimate_idio_dynamics',
@@ -185,7 +157,7 @@ __all__ = [
     'get_clock_frequency',
     # Scaling utilities
     '_check_sklearn',
-    '_get_scaler',
+    'get_target_scaler',
     # Validation utilities (from numeric.validator)
     'validate_ar_order',
     'validate_ma_order',
@@ -198,6 +170,7 @@ __all__ = [
     'validate_horizon',
     'validate_irf_horizon',
     # Exception classes (from errors.py)
+    'DFMError',  # Base exception class
     'ModelNotInitializedError',
     'ModelNotTrainedError',
     'ConfigurationError',
@@ -207,9 +180,7 @@ __all__ = [
     'DataValidationError',
     'NumericalStabilityError',
     'ConfigValidationError',
-    # Common utilities (new in Iteration 11)
-    'ensure_tensor',
-    'ensure_numpy',
+    # Common utilities (simplified - removed ensure_numpy, use np.asarray() or .cpu().numpy() directly)
     'safe_matrix_power',
     'extract_matrix_block',
     'validate_matrix_shape',
@@ -217,11 +188,9 @@ __all__ = [
     'check_and_standardize_data',
     'normalize_to_match_scale',
     'log_tensor_stats',
-    'select_columns_by_prefix',
+    'select_columns_by_prefix',  # From misc
     'extract_tensor_value',
     # Preprocessing utilities
-    'preprocess_training_data',
-    'adjust_mask_shape',
     # Model validation utilities (from numeric.validator)
     'validate_companion_stability',
     'validate_companion_matrix',
@@ -231,8 +200,4 @@ __all__ = [
     'validate_forecast_inputs',
     'validate_result_structure',
     'validate_parameter_shapes',
-    # Tensor conversion utilities
-    'normalize_tensor_shape',
-    'validate_tensor_device',
-    'batch_tensor_operation',
 ]

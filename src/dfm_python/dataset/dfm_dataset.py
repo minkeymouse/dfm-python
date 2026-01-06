@@ -24,8 +24,7 @@ from ..config.constants import (
     DEFAULT_NAN_K,
 )
 from ..utils.misc import get_clock_frequency
-from ..dataset.base import BaseFactorModelDataset
-from ..dataset.process import TimeIndex, parse_timestamp
+from ..dataset.time import TimeIndex
 from ..utils.errors import DataValidationError, ConfigurationError
 
 _logger = get_logger(__name__)
@@ -149,9 +148,9 @@ def extract_time_index_from_dataframe(
     time_data = df[time_cols]
     
     if len(time_cols) == 1:
-        time_list = [parse_timestamp(str(val)) for val in time_data.iloc[:, 0]]
+        time_list = pd.to_datetime(time_data.iloc[:, 0]).tolist()
     else:
-        time_list = [parse_timestamp(' '.join(str(val) for val in row)) for row in time_data.values]
+        time_list = [pd.to_datetime(' '.join(str(val) for val in row)) for row in time_data.values]
     
     return TimeIndex(time_list)
 
@@ -194,7 +193,7 @@ def extract_time_index_if_needed(
     return df, time_index
 
 
-class DFMDataset(BaseFactorModelDataset):
+class DFMDataset:
     """Dataset for DFM training.
     
     This dataset handles data loading, preprocessing, and mixed-frequency parameter setup
@@ -229,8 +228,10 @@ class DFMDataset(BaseFactorModelDataset):
         **kwargs
     ):
         """Initialize DFM dataset with data loading and preprocessing."""
-        # Initialize base class with common attributes
-        super().__init__(config=config, config_path=config_path, target_series=target_series)
+        # Store attributes (DFMDataset doesn't inherit from a class that accepts these)
+        self.config = config
+        self.config_path = config_path
+        self.target_series = target_series
         
         self.data_path = Path(data_path) if data_path is not None else None
         self.data = data
@@ -268,9 +269,11 @@ class DFMDataset(BaseFactorModelDataset):
                     details="Both data and data_path are None. One must be provided."
                 )
             
-            # Load data from file using read_data utility
-            from ..dataset.process import read_data
-            X, Time, Z = read_data(self.data_path)
+            # Load data from file using pandas
+            data = pd.read_csv(self.data_path)
+            X = data.drop(columns=[data.columns[0]]).values  # Assume first column is time
+            Time = pd.to_datetime(data.iloc[:, 0])
+            Z = None  # Z not used in current implementation
             self.data = X
             self.time_index = Time
         

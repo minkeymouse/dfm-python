@@ -1,12 +1,19 @@
-"""Tests for utils.common module."""
+"""Tests for utils.common module.
+
+NOTE: utils.common module was removed (2026-01-06) as over-engineered.
+These tests are kept for reference but marked as skipped since the module no longer exists.
+Functions were replaced with direct operations or utilities from config.types.
+"""
 
 import pytest
 import numpy as np
 import torch
 import pandas as pd
-from dfm_python.utils.common import ensure_tensor, ensure_numpy, validate_matrix_shape, log_tensor_stats, sanitize_array, select_columns_by_prefix, compute_scale_stats, normalize_to_match_scale
 from dfm_python.utils.errors import DataValidationError
-from dfm_python.config.constants import DEFAULT_ZERO_VALUE, MAX_EIGENVALUE
+from dfm_python.config.constants import DEFAULT_ZERO_VALUE, MAX_EIGENVALUE, DEFAULT_TORCH_DTYPE
+
+# Skip all tests - utils.common module was removed
+pytestmark = pytest.mark.skip(reason="utils.common module was removed (2026-01-06)")
 
 
 class TestEnsureTensor:
@@ -50,8 +57,8 @@ class TestEnsureTensor:
     def test_ensure_tensor_with_dtype(self):
         """Test ensure_tensor converts to specified dtype."""
         arr = np.array([1.0, 2.0, 3.0], dtype=np.float64)
-        tensor = ensure_tensor(arr, dtype=torch.float32)
-        assert tensor.dtype == torch.float32
+        tensor = ensure_tensor(arr, dtype=DEFAULT_TORCH_DTYPE)
+        assert tensor.dtype == DEFAULT_TORCH_DTYPE
     
     def test_ensure_tensor_with_requires_grad(self):
         """Test ensure_tensor sets requires_grad."""

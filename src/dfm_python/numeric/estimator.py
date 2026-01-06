@@ -44,7 +44,6 @@ from .stability import (
 )
 from ..utils.helper import handle_linear_algebra_error
 from ..utils.misc import get_config_attr
-from ..utils.common import ensure_numpy
 from ..config.constants import DEFAULT_DTYPE
 from .validator import validate_ndarray_ndim, validate_no_nan_inf
 from ..utils.errors import DataValidationError, NumericalError

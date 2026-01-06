@@ -18,7 +18,7 @@ from torch import Tensor
 import torch.nn as nn
 
 from ..config import KDFMConfig, KDFMResult
-from ..config.constants import DEFAULT_TORCH_DTYPE, DEFAULT_CLOCK_FREQUENCY, DEFAULT_REGULARIZATION, DEFAULT_GRAD_CLIP_VAL, DEFAULT_EIGENVALUE_MAX_MAGNITUDE, DEFAULT_EIGENVALUE_WARN_THRESHOLD, DEFAULT_IDENTITY_SCALE, DEFAULT_ZERO_VALUE, DEFAULT_FORECAST_HORIZON, DEFAULT_DTYPE, DEFAULT_KDFM_AR_ORDER, DEFAULT_KDFM_MA_ORDER, DEFAULT_KDFM_INIT_SAMPLE_SIZE, MIN_TIME_STEPS, MIN_VARIABLES, COMPUTATION_ERROR_TYPES, DEFAULT_ADAM_BETA1, DEFAULT_ADAM_BETA2, DEFAULT_ADAM_EPS, DEFAULT_LOSS_LOG_PRECISION
+from ..config.constants import DEFAULT_TORCH_DTYPE, DEFAULT_CLOCK_FREQUENCY, DEFAULT_REGULARIZATION, DEFAULT_GRAD_CLIP_VAL, DEFAULT_EIGENVALUE_MAX_MAGNITUDE, DEFAULT_EIGENVALUE_WARN_THRESHOLD, DEFAULT_IDENTITY_SCALE, DEFAULT_ZERO_VALUE, DEFAULT_FORECAST_HORIZON, DEFAULT_DTYPE, DEFAULT_KDFM_AR_ORDER, DEFAULT_KDFM_MA_ORDER, DEFAULT_KDFM_INIT_SAMPLE_SIZE, MIN_TIME_STEPS, MIN_VARIABLES, COMPUTATION_ERROR_TYPES, DEFAULT_ADAM_BETA1, DEFAULT_ADAM_BETA2, DEFAULT_ADAM_EPS, DEFAULT_LOSS_LOG_PRECISION, DEFAULT_LOG_INTERVAL
 from ..logger import get_logger
 from ..ssm.companion import CompanionSSM, MACompanionSSM
 from ..ssm.structural import StructuralIdentificationSSM
@@ -34,8 +34,9 @@ from ..utils.errors import (
     ConfigurationError
 )
 from ..utils.validation import check_condition, has_shape_with_min_dims
-from ..utils.common import ensure_numpy
+import torch
 from ..config.types import (
+    to_numpy, to_tensor,
     Device, ArrayLike, ForecastResult, Shape2D, Shape3D,
     ForecastHorizon, NumVars, LagOrder, OptionalTensor, OptionalArray
 )
@@ -594,7 +595,7 @@ class KDFM(BaseFactorModel, nn.Module):
                 epoch_loss += loss.item()
                 n_batches += 1
             
-            if epoch % 10 == 0 or epoch == max_epochs - 1:
+            if epoch % DEFAULT_LOG_INTERVAL == 0 or epoch == max_epochs - 1:
                 avg_loss = epoch_loss / n_batches if n_batches > 0 else 0.0
                 _logger.info(f"KDFM Epoch {epoch}/{max_epochs}: loss={avg_loss:.{DEFAULT_LOSS_LOG_PRECISION}f}")
         
@@ -1022,7 +1023,7 @@ class KDFM(BaseFactorModel, nn.Module):
         
         try:
             from ..numeric.validator import validate_companion_stability
-            A_np = ensure_numpy(result.A)
+            A_np = to_numpy(result.A)
             is_stable, max_eigenval = validate_companion_stability(
                 companion_matrix=A_np,
                 model_name="KDFM",
@@ -1054,10 +1055,9 @@ class KDFM(BaseFactorModel, nn.Module):
         # Get last factor state by running forward pass on last observation
         if last_observation is not None:
             # Prepare last observation (normalize shape, move to device)
-            from ..utils.common import ensure_tensor
             # Get device from model parameters (similar to DDFM)
             device = next(self.parameters()).device if list(self.parameters()) else torch.device('cpu')
-            last_obs_tensor = ensure_tensor(last_observation, device=device, dtype=DEFAULT_TORCH_DTYPE)
+            last_obs_tensor = to_tensor(last_observation, device=device).to(dtype=DEFAULT_TORCH_DTYPE)
             if last_obs_tensor.ndim == 1:
                 last_obs_tensor = last_obs_tensor.unsqueeze(0)  # (1, N)
             if last_obs_tensor.shape != (1, n_vars):
@@ -1084,7 +1084,7 @@ class KDFM(BaseFactorModel, nn.Module):
                 else:
                     z_t = structural_shocks.squeeze(0)  # (K,)
                 
-                Z_last = ensure_numpy(z_t)
+                Z_last = to_numpy(z_t)
                 # Validate factor state is finite
                 from ..numeric.validator import validate_no_nan_inf
                 validate_no_nan_inf(Z_last, name="factor state Z_last")
@@ -1121,7 +1121,7 @@ class KDFM(BaseFactorModel, nn.Module):
         
         # Forecast factors using VAR dynamics
         K = Z_last.shape[0]
-        A_np = ensure_numpy(result.A)
+        A_np = to_numpy(result.A)
         expected_shape = (self.ar_order * K, self.ar_order * K)
         if A_np.shape != expected_shape:
             raise DataValidationError(
@@ -1251,22 +1251,22 @@ class KDFM(BaseFactorModel, nn.Module):
         try:
             A = companion_ssm.get_companion_matrix()
             if A.ndim == 3:
-                A_np = ensure_numpy(A[0])
+                A_np = to_numpy(A[0])
             else:
-                A_np = ensure_numpy(A)
+                A_np = to_numpy(A)
             
             # Extract B and C parameters (they are nn.Parameter which are tensors)
             B_param = companion_ssm.B
             C_param = companion_ssm.C
             # Handle 3D case (n_kernels > 1) - extract first kernel
             if B_param.ndim > 2:
-                B_np = ensure_numpy(B_param[0])
+                B_np = to_numpy(B_param[0])
             else:
-                B_np = ensure_numpy(B_param)
+                B_np = to_numpy(B_param)
             if C_param.ndim > 2:
-                C_np = ensure_numpy(C_param[0])
+                C_np = to_numpy(C_param[0])
             else:
-                C_np = ensure_numpy(C_param)
+                C_np = to_numpy(C_param)
             
             return A_np, B_np, C_np
         except (AttributeError, KeyError, RuntimeError, ValueError) as e:
@@ -1361,7 +1361,7 @@ class KDFM(BaseFactorModel, nn.Module):
             else:
                 z_t = structural_shocks.squeeze(0)
             
-            Z_last = ensure_numpy(z_t)
+            Z_last = to_numpy(z_t)
             if np.any(np.isnan(Z_last)) or np.any(np.isinf(Z_last)):
                 # This method is used internally and should return zeros for invalid states
                 # The calling code (predict) will handle the error appropriately
@@ -1524,7 +1524,7 @@ class KDFM(BaseFactorModel, nn.Module):
             try:
                 if hasattr(companion_ar, 'A'):
                     A = companion_ar.A
-                    A_np = ensure_numpy(A)
+                    A_np = to_numpy(A)
                     if A_np.ndim == 3:
                         A_np = A_np[0]
                     if A_np.shape[0] > 0:
@@ -1646,16 +1646,18 @@ class KDFM(BaseFactorModel, nn.Module):
         )
         
         # Extract parameters and convert to numpy using utility function
-        ar_coeffs_np = ensure_numpy(self.companion_ar.extract_coefficients())
+        ar_coeffs = self.companion_ar.extract_coefficients()
+        ar_coeffs_np = to_numpy(ar_coeffs)
         
         ma_coeffs_np = None
         if self.companion_ma is not None:
-            ma_coeffs_np = ensure_numpy(self.companion_ma.extract_coefficients())
+            ma_coeffs = self.companion_ma.extract_coefficients()
+            ma_coeffs_np = to_numpy(ma_coeffs)
         
         # Get structural matrix
         S_np = None
         if self.structural_id is not None:
-            S_np = ensure_numpy(self.structural_id.get_structural_matrix())
+            S_np = to_numpy(self.structural_id.get_structural_matrix())
         
         # Extract companion matrices and parameters using helper method
         ar_transition, ar_input, ar_output = self._extract_companion_params(self.companion_ar)
@@ -1679,7 +1681,8 @@ class KDFM(BaseFactorModel, nn.Module):
         # KDFM uses a two-stage VARMA structure rather than traditional factor model,
         # so some result fields (x_sm, Z) are minimal placeholders
         # Get target scaler from model if available
-        target_scaler = getattr(self, 'target_scaler', None)
+        from ..utils.misc import get_target_scaler
+        target_scaler = get_target_scaler(model=self)
         
         result = KDFMResult(
             x_sm=np.zeros((1, n_vars), dtype=DEFAULT_DTYPE),
@@ -1800,19 +1803,18 @@ class KDFM(BaseFactorModel, nn.Module):
         
         try:
             from ..config.constants import DEFAULT_IRF_HORIZON
-            from ..utils.common import ensure_tensor
             
-            # Convert to tensors for IRF computation (using common utility)
-            ar_transition_t = ensure_tensor(ar_transition, dtype=DEFAULT_TORCH_DTYPE)
-            ar_input_t = ensure_tensor(ar_input, dtype=DEFAULT_TORCH_DTYPE)
-            ar_output_t = ensure_tensor(ar_output, dtype=DEFAULT_TORCH_DTYPE)
-            structural_matrix_t = ensure_tensor(structural_matrix, dtype=DEFAULT_TORCH_DTYPE)
+            # Convert to tensors for IRF computation
+            ar_transition_t = to_tensor(ar_transition).to(dtype=DEFAULT_TORCH_DTYPE)
+            ar_input_t = to_tensor(ar_input).to(dtype=DEFAULT_TORCH_DTYPE)
+            ar_output_t = to_tensor(ar_output).to(dtype=DEFAULT_TORCH_DTYPE)
+            structural_matrix_t = to_tensor(structural_matrix).to(dtype=DEFAULT_TORCH_DTYPE)
             
             # Handle MA stage parameters
             if self.ma_order > 0 and ma_transition is not None and ma_input is not None and ma_output is not None:
-                ma_transition_t = ensure_tensor(ma_transition, dtype=DEFAULT_TORCH_DTYPE)
-                ma_input_t = ensure_tensor(ma_input, dtype=DEFAULT_TORCH_DTYPE)
-                ma_output_t = ensure_tensor(ma_output, dtype=DEFAULT_TORCH_DTYPE)
+                ma_transition_t = to_tensor(ma_transition).to(dtype=DEFAULT_TORCH_DTYPE)
+                ma_input_t = to_tensor(ma_input).to(dtype=DEFAULT_TORCH_DTYPE)
+                ma_output_t = to_tensor(ma_output).to(dtype=DEFAULT_TORCH_DTYPE)
             else:
                 # VAR model (no MA stage) - use identity matrices
                 K = ar_output_t.shape[0]
@@ -1835,9 +1837,9 @@ class KDFM(BaseFactorModel, nn.Module):
             
             # Convert back to numpy using utility function
             if irf_reduced is not None:
-                irf_reduced = ensure_numpy(irf_reduced)
+                irf_reduced = to_numpy(irf_reduced)
             if irf_structural is not None:
-                irf_structural = ensure_numpy(irf_structural)
+                irf_structural = to_numpy(irf_structural)
             
             return irf_reduced, irf_structural
             
@@ -1908,8 +1910,6 @@ class KDFM(BaseFactorModel, nn.Module):
         ModelNotInitializedError
             If model components are not initialized
         """
-        from ..utils.common import ensure_tensor, ensure_numpy
-        
         # Validate and convert data (no preprocessing - user must preprocess)
         from ..numeric.validator import validate_and_convert_update_data
         data_new = validate_and_convert_update_data(
@@ -1921,8 +1921,7 @@ class KDFM(BaseFactorModel, nn.Module):
         
         # Convert to tensor
         device = next(self.parameters()).device if self.companion_ar is not None else torch.device('cpu')
-        data_tensor = ensure_tensor(data_new, dtype=DEFAULT_TORCH_DTYPE)
-        data_tensor = data_tensor.to(device)
+        data_tensor = to_tensor(data_new, device=device).to(dtype=DEFAULT_TORCH_DTYPE)
         
         # Check if model is initialized
         check_condition(
@@ -1938,7 +1937,7 @@ class KDFM(BaseFactorModel, nn.Module):
             factors_new = self.forward(data_tensor)  # (T_new x K)
         
         # Convert to numpy
-        factors_new_np = ensure_numpy(factors_new, dtype=DEFAULT_DTYPE)
+        factors_new_np = to_numpy(factors_new).astype(DEFAULT_DTYPE)
         
         # Get current result (compute if needed)
         result = self._ensure_result()
@@ -1948,7 +1947,7 @@ class KDFM(BaseFactorModel, nn.Module):
         
         # Ensure data_processed is numpy array
         if isinstance(self.data_processed, torch.Tensor):
-            self.data_processed = ensure_numpy(self.data_processed, dtype=DEFAULT_DTYPE)
+            self.data_processed = np.asarray(self.data_processed, dtype=DEFAULT_DTYPE)
         
         if self.data_processed is not None:
             self.data_processed = np.vstack([self.data_processed, data_new])

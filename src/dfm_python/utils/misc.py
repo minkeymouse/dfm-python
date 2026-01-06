@@ -34,7 +34,6 @@ _logger = get_logger(__name__)
 
 def resolve_param(
     override: Optional[Any] = None,
-    config_value: Optional[Any] = None,
     default: Any = None,
     *,
     name: Optional[str] = None,
@@ -42,38 +41,8 @@ def resolve_param(
     config: Optional[Any] = None,
     defaults: Optional[Dict[str, Any]] = None
 ) -> Any:
-    """Resolve parameter value from multiple sources with priority.
-    
-    Supports two calling patterns:
-    1. Legacy: resolve_param(override, config_value, default)
-    2. New: resolve_param(name=name, kwargs=kwargs, config=config, defaults=defaults)
-    
-    Priority (new pattern): kwargs[name] > config.name > defaults[name] > None
-    Priority (legacy pattern): override > config_value > default
-    
-    Parameters
-    ----------
-    override : Any, optional
-        Parameter override value (highest priority in legacy mode)
-    config_value : Any, optional
-        Configuration value (medium priority in legacy mode)
-    default : Any, optional
-        Default value (lowest priority in legacy mode)
-    name : str, optional
-        Parameter name (for new pattern)
-    kwargs : Dict[str, Any], optional
-        Keyword arguments dict (for new pattern)
-    config : Any, optional
-        Configuration object with attributes (for new pattern)
-    defaults : Dict[str, Any], optional
-        Default values dictionary (for new pattern)
-        
-    Returns
-    -------
-    Any
-        Resolved parameter value
-    """
-    # New pattern: extract by name from multiple sources
+    """Resolve parameter value from multiple sources with priority."""
+    # Named pattern: extract by name from multiple sources
     if name is not None:
         if kwargs is not None and name in kwargs:
             return kwargs.pop(name) if isinstance(kwargs, dict) else kwargs.get(name)
@@ -83,11 +52,9 @@ def resolve_param(
             return defaults[name]
         return None
     
-    # Legacy pattern: override > config_value > default
+    # Simple pattern: override > default
     if override is not None:
         return override
-    if config_value is not None:
-        return config_value
     return default
 
 
@@ -97,40 +64,7 @@ def get_config_attr(
     default: Any = None,
     required: bool = False
 ) -> Any:
-    """Get configuration attribute with fallback and validation.
-    
-    This helper standardizes config attribute access, replacing
-    getattr(config, 'attr', default) patterns throughout the codebase.
-    
-    Parameters
-    ----------
-    config : Any, optional
-        Configuration object
-    attr_name : str
-        Attribute name to access
-    default : Any, optional
-        Default value if attribute not found
-    required : bool, default False
-        If True, raise ConfigValidationError if attribute not found
-        
-    Returns
-    -------
-    Any
-        Attribute value, default value, or None
-        
-    Raises
-    ------
-    ConfigValidationError
-        If required=True and attribute not found
-        
-    Examples
-    --------
-    >>> # Basic usage
-    >>> clip_enabled = get_config_attr(config, 'clip_ar_coefficients', True)
-    
-    >>> # Required attribute
-    >>> clock = get_config_attr(config, 'clock', required=True)
-    """
+    """Get configuration attribute with fallback and validation."""
     if config is None:
         if required:
             raise ConfigValidationError(f"Config is None, cannot access required attribute '{attr_name}'")
@@ -274,13 +208,50 @@ def resolve_target_series(
 # These functions have been moved to other modules but are re-exported here
 # to maintain backward compatibility with existing code.
 
-# Preprocessing functions (moved to dataset.process)
-from ..dataset.process import (
-    _check_sklearn,
-    _get_scaler,
-    TimeIndex,
-    parse_timestamp,
-)
+# Scaling utilities (moved from dataset.process)
+from sklearn.preprocessing import StandardScaler, RobustScaler
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from sklearn.base import BaseEstimator
+
+def _check_sklearn():
+    """Check if sklearn is available."""
+    try:
+        import sklearn
+        return True
+    except ImportError:
+        return False
+
+def select_columns_by_prefix(df: pd.DataFrame, prefixes: List[str], count_per_prefix: int = 2) -> List[str]:
+    """Select columns from DataFrame that start with given prefixes."""
+    selected = []
+    for prefix in prefixes:
+        matching = [col for col in df.columns if col.startswith(prefix)]
+        selected.extend(matching[:count_per_prefix])
+    return selected
+
+
+def get_target_scaler(dataset: Optional[Any] = None, model: Optional[Any] = None) -> Optional[Any]:
+    """Get target scaler from dataset or model.
+    
+    Parameters
+    ----------
+    dataset : Any, optional
+        Dataset instance (DFMDataset, DDFMDataset, KDFMDataset)
+    model : Any, optional
+        Model instance (DFM, DDFM, KDFM)
+        
+    Returns
+    -------
+    Any or None
+        Target scaler from dataset or model, or None if not available
+    """
+    if dataset is not None:
+        return getattr(dataset, 'target_scaler', None)
+    if model is not None:
+        return getattr(model, 'target_scaler', None)
+    return None
 
 # Metric functions (moved to metric.py)
 from .metric import (

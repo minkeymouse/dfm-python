@@ -15,18 +15,17 @@ if TYPE_CHECKING:
     from ..config import DFMConfig
 
 from ..logger import get_logger
-from .base import BaseFactorModelDataset
 from ..config.constants import DEFAULT_TORCH_DTYPE
 from ..config import DFMConfig
-from ..dataset.process import TimeIndex
+from ..dataset.time import TimeIndex
 from ..utils.errors import ConfigurationError, DataValidationError
 from ..utils.misc import get_config_attr
-from ..utils.common import ensure_numpy
+import torch
 
 _logger = get_logger(__name__)
 
 
-class KDFMDataset(BaseFactorModelDataset, Dataset):
+class KDFMDataset(Dataset):
     """PyTorch Dataset for full sequence time series data.
     
     This dataset is designed for PyTorch-based models that process the entire
@@ -69,8 +68,13 @@ class KDFMDataset(BaseFactorModelDataset, Dataset):
         # Preprocessed data mode parameter
         data_processed: Optional[torch.Tensor] = None,
     ):
-        # Initialize base class with common attributes
-        super().__init__(config=config, config_path=config_path, target_series=target_series)
+        # Initialize base class (Dataset.__init__() doesn't accept arguments)
+        super().__init__()
+        
+        # Store attributes for potential future use
+        self.config = config
+        self.config_path = config_path
+        self.target_series = target_series
         
         # Determine initialization mode
         if data_processed is not None:
@@ -167,6 +171,6 @@ class KDFMDataset(BaseFactorModelDataset, Dataset):
         else:
             # If initialized from preprocessed data, return minimal params
             return {
-                'X': ensure_numpy(self.data_processed) if hasattr(self, 'data_processed') else ensure_numpy(self.data),
+                'X': np.asarray(self.data_processed) if hasattr(self, 'data_processed') else np.asarray(self.data),
                 'target_scaler': self.target_scaler if hasattr(self, 'target_scaler') else None,
             }

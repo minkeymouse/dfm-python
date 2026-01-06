@@ -2,12 +2,9 @@
 
 import pytest
 import numpy as np
-from dfm_python.utils.helper import (
-    handle_linear_algebra_error,
-    validate_finite_array
-)
+from dfm_python.utils.helper import handle_linear_algebra_error
 from dfm_python.utils.misc import get_config_attr
-from dfm_python.utils.errors import NumericalError, ConfigValidationError
+from dfm_python.utils.errors import ConfigValidationError
 
 
 class TestHandleLinearAlgebraError:
@@ -166,30 +163,4 @@ class TestGetConfigAttr:
             get_config_attr(None, 'required_attr', required=True)
 
 
-class TestValidateFiniteArray:
-    """Test suite for validate_finite_array."""
-    
-    def test_valid_finite_array(self):
-        """Test validation of finite array."""
-        arr = np.array([1.0, 2.0, 3.0])
-        validate_finite_array(arr, "test array")
-        # Should not raise
-    
-    def test_array_with_nan(self):
-        """Test validation fails on NaN."""
-        arr = np.array([1.0, np.nan, 3.0])
-        with pytest.raises(NumericalError):
-            validate_finite_array(arr, "test array")
-    
-    def test_array_with_inf(self):
-        """Test validation fails on Inf."""
-        arr = np.array([1.0, np.inf, 3.0])
-        with pytest.raises(NumericalError):
-            validate_finite_array(arr, "test array")
-    
-    def test_array_with_context(self):
-        """Test validation with context message."""
-        arr = np.array([1.0, np.nan, 3.0])
-        with pytest.raises(NumericalError, match=".*DDFM prediction.*"):
-            validate_finite_array(arr, "forecast", context="DDFM prediction")
 

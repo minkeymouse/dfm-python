@@ -1,136 +1,354 @@
-"""PyTorch Dataset for Deep Dynamic Factor Model (DDFM).
-
-This module provides dataset implementation for DDFM training.
-Handles data loading and scaling.
-"""
+"""PyTorch Dataset for Deep Dynamic Factor Model (DDFM)."""
 
 import torch
 from torch.utils.data import Dataset
 import numpy as np
 import pandas as pd
-from typing import Tuple, Optional, Union, List, Any
+try:
+    import polars as pl
+    _has_polars = True
+    PolarsDataFrame = pl.DataFrame
+except ImportError:
+    pl = None
+    _has_polars = False
+    PolarsDataFrame = type(None)  # Dummy type for type hints when polars not available
+from typing import Tuple, List, Optional, Union
+from sklearn.preprocessing import StandardScaler, RobustScaler, MinMaxScaler
 
 from ..config.constants import DEFAULT_TORCH_DTYPE
-from ..config import DFMConfig
-from ..dataset.base import BaseFactorModelDataset
-from ..logger import get_logger
-
-_logger = get_logger(__name__)
 
 
-class DDFMDataset(BaseFactorModelDataset, Dataset):
-    """PyTorch Dataset for DDFM training.
+class DDFMDataset(Dataset):
+    """Dataset for DDFM training.
     
-    Handles data loading and scaling. Data should be preprocessed (imputation, etc.) before passing.
+    Scales target series if scaler provided. Feature series are used as-is.
     
     Parameters
     ----------
-    config : DFMConfig, optional
-        Model configuration object
-    data : pd.DataFrame
-        Preprocessed data (imputation done, but scaling handled here)
-    target_series : str or List[str], optional
-        Target series column names
-    scaler : sklearn scaler, optional
-        sklearn scaler instance (e.g., StandardScaler, RobustScaler). Defaults to StandardScaler().
+    data : pd.DataFrame | PolarsDataFrame
+        Input data. Target series will be scaled if scaler provided.
+    time_idx : str
+        Time index column name.
+    target_series : List[str]
+        Target series column names to scale.
+    target_scaler : StandardScaler | RobustScaler | MinMaxScaler, optional
+        Scaler instance to scale target series. If None, no scaling.
     """
     
     def __init__(
         self,
-        data: pd.DataFrame,
-        config: Optional[DFMConfig] = None,
-        target_series: Optional[Union[str, List[str]]] = None,
-        scaler: Optional[Any] = None,
+        data: Union[pd.DataFrame, PolarsDataFrame],
+        time_idx: str,
+        target_series: List[str],
+        target_scaler: Optional[Union[StandardScaler, RobustScaler, MinMaxScaler]] = None,
     ):
-        # Initialize base class
-        super().__init__(config=config, target_series=target_series)
+        if _has_polars and isinstance(data, pl.DataFrame):
+            data = data.to_pandas()
         
-        # Convert to DataFrame if needed
-        if isinstance(data, np.ndarray):
-            data = pd.DataFrame(data)
+        data = data.copy()
+        data.sort_index(inplace=True)
         
-        # Handle scaling
-        if scaler is not None:
-            self.scaler = scaler
+        self.time_idx = time_idx
+        
+        # Extract time index values
+        if time_idx and time_idx in data.columns:
+            self.time_index = pd.Index(data[time_idx])
         else:
-            try:
-                from sklearn.preprocessing import StandardScaler
-                self.scaler = StandardScaler()
-            except ImportError:
-                raise ImportError(
-                    "sklearn is required for data scaling. Install with: pip install scikit-learn"
-                )
+            self.time_index = data.index
         
-        # Fit and transform using scaler
-        self.scaler.fit(data.values)
-        data_scaled = self.scaler.transform(data.values)
-        self.data_processed = torch.tensor(data_scaled, dtype=DEFAULT_TORCH_DTYPE)
-    
-    def get_processed_data(self) -> torch.Tensor:
-        """Get processed data tensor."""
-        return self.data_processed
-
-
-class AutoencoderDataset(Dataset):
-    """Dataset for autoencoder training with corrupted inputs and clean targets.
-    
-    This dataset is used during the sequential MC loop in DDFM training.
-    It provides efficient batching for autoencoder.fit() calls.
-    
-    Parameters
-    ----------
-    x_corrupted : torch.Tensor
-        Corrupted input data (T, N_input) - corrupted/noisy input
-    y_clean : torch.Tensor
-        Clean target data (T, N) - clean target for reconstruction
-    mask : torch.Tensor
-        Missing data mask (T, N), True where data is missing
-    """
-    
-    def __init__(
-        self,
-        x_corrupted: torch.Tensor,
-        y_clean: torch.Tensor,
-        mask: torch.Tensor
-    ):
-        self.x_corrupted = x_corrupted
-        self.y_clean = y_clean
-        self.mask = mask
-        
-        # Verify shapes
-        T_x, N_input = x_corrupted.shape
-        T_y, N = y_clean.shape
-        T_m, N_m = mask.shape
-        
-        if T_x != T_y or T_x != T_m:
+        target_series_list = list(target_series)
+        missing_cols = [col for col in target_series_list if col not in data.columns]
+        if missing_cols:
             raise ValueError(
-                f"Time dimension mismatch: x_corrupted.shape={x_corrupted.shape}, "
-                f"y_clean.shape={y_clean.shape}, mask.shape={mask.shape}"
+                f"target_series columns {missing_cols} not found in data. "
+                f"Available columns: {list(data.columns)}"
             )
-        if N != N_m:
-            raise ValueError(
-                f"Feature dimension mismatch: y_clean.shape={y_clean.shape}, mask.shape={mask.shape}"
-            )
+        self.target_series = target_series_list
+        self.data_original = data.copy()
+        self.target_scaler = target_scaler
+        
+        y = data[target_series_list]
+        X = data.drop(columns=target_series_list)
+        
+        if target_scaler is not None:
+            self.target_scaler.fit(y.values)
+            y_scaled = self.target_scaler.transform(y.values)
+            y = pd.DataFrame(y_scaled, index=y.index, columns=y.columns)
+        
+        self.data = pd.concat([X, y], axis=1)
+        self.X = X.values
+        self.y = y.values
+        self.missing_y = y.isna().values
+        self.observed_y = ~self.missing_y
+
+    @property
+    def target_nan_ratio(self) -> float:
+        """Target interpolate ratio."""
+        return self.missing_y.sum() / self.missing_y.size
+
+    @property
+    def target_shape(self) -> Tuple[int, int]:
+        """Target shape."""
+        return self.y.shape
     
-    def __len__(self) -> int:
-        """Return number of time steps."""
-        return self.x_corrupted.shape[0]
+    @property
+    def feature_shape(self) -> Tuple[int, int]:
+        """Feature shape."""
+        return self.X.shape
+
+    @property
+    def data_shape(self) -> Tuple[int, int]:
+        """Data shape."""
+        return self.feature_shape[0], self.feature_shape[1] + self.target_shape[1]
+
+    @property
+    def colnames(self) -> List[str]:
+        """Column names from original data."""
+        return list(self.data_original.columns)
+
+    @property
+    def target_columns(self) -> List[str]:
+        """Target series column names."""
+        return self.target_series
     
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Get data for a single time step.
+    @property
+    def feature_columns(self) -> List[str]:
+        """Feature column names (non-target series)."""
+        return [col for col in self.colnames if col not in self.target_series]
+    
+    @property
+    def all_columns_are_targets(self) -> bool:
+        """Whether all columns are target series."""
+        return len(self.target_series) == len(self.colnames)
+    
+    def split_features_and_targets(self, data: pd.DataFrame) -> Tuple[Optional[pd.DataFrame], pd.DataFrame]:
+        """Split DataFrame into features (X) and targets (y).
         
         Parameters
         ----------
-        idx : int
-            Time step index
+        data : pd.DataFrame
+            Input DataFrame to split
             
         Returns
         -------
-        x : torch.Tensor
-            Corrupted input (N_input,)
-        y : torch.Tensor
-            Clean target (N,)
-        mask : torch.Tensor
-            Missing data mask (N,)
+        X : Optional[pd.DataFrame]
+            Features DataFrame (None if all columns are targets)
+        y : pd.DataFrame
+            Targets DataFrame (all columns if all columns are targets, target columns only otherwise)
         """
-        return self.x_corrupted[idx], self.y_clean[idx], self.mask[idx]
+        if self.all_columns_are_targets:
+            return None, data
+        else:
+            X = data.drop(columns=self.target_series)
+            y = data[self.target_series]
+            return X, y
+    
+    @property
+    def target_indices(self) -> np.ndarray:
+        """Target series column indices in original data."""
+        return np.array([self.colnames.index(col) for col in self.target_series])
+    
+    @classmethod
+    def from_dataset(cls, new_data: Union[pd.DataFrame, PolarsDataFrame], dataset: 'DDFMDataset') -> 'DDFMDataset':
+        """Create new dataset with new data, preserving configuration.
+        
+        Parameters
+        ----------
+        new_data : pd.DataFrame | PolarsDataFrame
+            New data (same columns as original).
+        dataset : DDFMDataset
+            Original dataset to copy configuration from.
+            
+        Returns
+        -------
+        DDFMDataset
+            New dataset with same time_idx, target_series, target_scaler.
+        """
+        return cls(
+            data=new_data,
+            time_idx=dataset.time_idx,
+            target_series=dataset.target_series,
+            target_scaler=dataset.target_scaler
+        )
+    
+    def create_autoencoder_dataset(
+        self,
+        X: Optional[torch.Tensor],
+        y_tmp: torch.Tensor,
+        y_actual: torch.Tensor,
+        eps_draw: torch.Tensor
+    ) -> 'AutoencoderDataset':
+        """Create a single AutoencoderDataset with corrupted targets.
+        
+        Parameters
+        ----------
+        X : torch.Tensor, optional
+            Features (T, N_features) - already on device.
+        y_tmp : torch.Tensor
+            Target data (T, num_target_series) - already on device.
+        y_actual : torch.Tensor
+            Clean targets (T, num_target_series) - already on device.
+        eps_draw : torch.Tensor
+            Noise sample (T, num_target_series) - already on device.
+            
+        Returns
+        -------
+        AutoencoderDataset
+            Dataset with corrupted targets.
+        """
+        y_corrupted = y_tmp - eps_draw
+        return AutoencoderDataset(
+            X=X,
+            y_corrupted=y_corrupted,
+            y_clean=y_actual
+        )
+    
+    def create_pretrain_dataset(
+        self,
+        data: pd.DataFrame,
+        device: Optional[torch.device] = None
+    ) -> 'AutoencoderDataset':
+        """Create AutoencoderDataset for pre-training (no corruption, clean data).
+        
+        Parameters
+        ----------
+        data : pd.DataFrame
+            Pre-training data (may contain NaN values, handled by masked loss).
+        device : torch.device, optional
+            Device for tensors. Defaults to 'cuda'.
+            
+        Returns
+        -------
+        AutoencoderDataset
+            Dataset with clean data (y_corrupted = y_clean for pre-training).
+        """
+        if device is None:
+            device = torch.device('cuda')
+        
+        # Split into X (features) and y (targets)
+        if self.all_columns_are_targets:
+            X_df = None
+            y_df = data
+        else:
+            X_df = data.drop(columns=self.target_series)
+            y_df = data[self.target_series]
+        
+        # Convert to tensors
+        X = None if X_df is None else torch.from_numpy(X_df.values).to(dtype=DEFAULT_TORCH_DTYPE, device=device)
+        y = torch.from_numpy(y_df.values).to(dtype=DEFAULT_TORCH_DTYPE, device=device)
+        
+        # For pre-training: y_corrupted = y_clean (no corruption)
+        return AutoencoderDataset(
+            X=X,
+            y_corrupted=y,
+            y_clean=y
+        )
+    
+    def create_autoencoder_datasets_list(
+        self,
+        n_mc_samples: int,
+        mu_eps: np.ndarray,
+        std_eps: np.ndarray,
+        X: Union[np.ndarray, pd.DataFrame],
+        y_tmp: Union[np.ndarray, pd.DataFrame],
+        y_actual: np.ndarray,
+        rng: np.random.RandomState,
+        device: Optional[torch.device] = None
+    ) -> List['AutoencoderDataset']:
+        """Create AutoencoderDataset instances with pre-sampled MC noise.
+        
+        Parameters
+        ----------
+        n_mc_samples : int
+            Number of Monte Carlo samples.
+        mu_eps : np.ndarray
+            Noise mean (num_target_series,).
+        std_eps : np.ndarray
+            Noise std (num_target_series,).
+        X : np.ndarray | pd.DataFrame
+            Features (T x N_features) - lags, dummies, etc. Not corrupted.
+        y_tmp : np.ndarray | pd.DataFrame
+            Target data (T x num_target_series) to corrupt.
+        y_actual : np.ndarray
+            Clean targets (T x num_target_series) for reconstruction.
+        rng : np.random.RandomState
+            Random number generator.
+        device : torch.device, optional
+            Device for tensors. Defaults to 'cuda'.
+            
+        Returns
+        -------
+        List[AutoencoderDataset]
+            One dataset per MC sample.
+        """
+        if device is None:
+            device = torch.device('cuda')
+        
+        X_array = X.values if isinstance(X, pd.DataFrame) else X
+        y_tmp_array = y_tmp.values if isinstance(y_tmp, pd.DataFrame) else y_tmp
+        
+        T = y_tmp_array.shape[0]
+        has_features = X_array.size > 0
+        
+        # Pre-sample all MC noise at once (efficient)
+        eps_draws = rng.multivariate_normal(mu_eps, np.diag(std_eps), (n_mc_samples, T))
+        
+        # Convert to tensors once (efficient)
+        X_tensor = torch.from_numpy(X_array).to(dtype=DEFAULT_TORCH_DTYPE, device=device) if has_features else None
+        y_tmp_tensor = torch.from_numpy(y_tmp_array).to(dtype=DEFAULT_TORCH_DTYPE, device=device)
+        y_actual_tensor = torch.from_numpy(y_actual).to(dtype=DEFAULT_TORCH_DTYPE, device=device)
+        eps_draws_tensor = torch.from_numpy(eps_draws).to(dtype=DEFAULT_TORCH_DTYPE, device=device)
+        
+        # Create datasets using the single-dataset method
+        datasets = []
+        for i in range(n_mc_samples):
+            dataset = self.create_autoencoder_dataset(
+                X=X_tensor,
+                y_tmp=y_tmp_tensor,
+                y_actual=y_actual_tensor,
+                eps_draw=eps_draws_tensor[i, :, :]
+            )
+            datasets.append(dataset)
+        
+        return datasets
+
+
+class AutoencoderDataset:
+    """Container for autoencoder training data with corrupted inputs and clean targets.
+    
+    Stores pre-loaded tensors for efficient direct slicing (no DataLoader needed).
+    All tensors are expected to be on the correct device.
+    
+    Parameters
+    ----------
+    X : torch.Tensor, optional
+        Features (T, N_features) - lags, dummies, etc. Not corrupted.
+    y_corrupted : torch.Tensor
+        Corrupted targets (T, num_target_series).
+    y_clean : torch.Tensor
+        Clean targets (T, num_target_series) for reconstruction.
+    """
+    
+    def __init__(
+        self,
+        X: Optional[torch.Tensor],
+        y_corrupted: torch.Tensor,
+        y_clean: torch.Tensor
+    ):
+        self.X = X
+        self.y_corrupted = y_corrupted
+        self.y_clean = y_clean
+        # Pre-compute full_input once (optimization: avoid torch.cat on every access)
+        if self.X is not None:
+            self._full_input = torch.cat([self.X, self.y_corrupted], dim=1)
+        else:
+            self._full_input = self.y_corrupted
+    
+    @property
+    def full_input(self) -> torch.Tensor:
+        """Full autoencoder input: clean X features + corrupted y targets."""
+        return self._full_input
+    
+    def __len__(self) -> int:
+        """Return number of time steps."""
+        return self.y_corrupted.shape[0]

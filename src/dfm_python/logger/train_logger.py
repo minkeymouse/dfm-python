@@ -5,7 +5,8 @@ including EM iterations (DFM), epochs (DDFM), convergence tracking, and training
 """
 
 import logging
-from typing import Optional, Dict, Any, List, Union
+from abc import ABC, abstractmethod
+from typing import Optional, Dict, Any, List
 import numpy as np
 from datetime import datetime
 
@@ -14,39 +15,28 @@ from .logger import get_logger
 _logger = get_logger(__name__)
 
 
-class TrainLogger:
-    """Logger for tracking training process for both DFM and DDFM.
+class BaseTrainLogger(ABC):
+    """Base class for training loggers.
     
-    This class provides structured logging for training processes including:
-    - Training start/end
-    - EM iterations (DFM) or epochs (DDFM)
-    - Convergence status
-    - Training metrics (loss, log-likelihood, etc.)
-    - Validation metrics (for DDFM)
-    - Model-specific information
-    
-    Supports both DFM (EM algorithm) and DDFM (gradient descent) workflows.
+    Provides common functionality for tracking training processes.
+    Model-specific loggers should inherit from this class.
     """
     
     def __init__(
         self, 
-        model_name: str = "DFM", 
-        model_type: str = "dfm",
+        model_name: str,
         verbose: bool = True
     ):
-        """Initialize training logger.
+        """Initialize base training logger.
         
         Parameters
         ----------
-        model_name : str, default "DFM"
-            Name of the model being trained (e.g., "DFM", "DDFM")
-        model_type : str, default "dfm"
-            Type of model: "dfm" (EM algorithm) or "ddfm" (gradient descent)
+        model_name : str
+            Name of the model (e.g., "DFM", "DDFM", "KDFM")
         verbose : bool, default True
             Whether to log detailed information
         """
         self.model_name = model_name
-        self.model_type = model_type.lower()
         self.verbose = verbose
         self.start_time: Optional[datetime] = None
         self.end_time: Optional[datetime] = None
@@ -76,7 +66,7 @@ class TrainLogger:
         self.metrics_history = []
         
         _logger.info(f"{'='*70}")
-        _logger.info(f"Starting {self.model_name} training ({self.model_type.upper()})")
+        _logger.info(f"Starting {self.model_name} training")
         _logger.info(f"{'='*70}")
         
         if config and self.verbose:
@@ -162,7 +152,7 @@ class TrainLogger:
         learning_rate: Optional[float] = None,
         **kwargs
     ) -> None:
-        """Log training epoch information (for DDFM).
+        """Log training epoch information (for DDFM/KDFM).
         
         Parameters
         ----------
@@ -233,11 +223,11 @@ class TrainLogger:
         num_iter : int, optional
             Number of EM iterations completed (for DFM)
         num_epochs : int, optional
-            Number of epochs completed (for DDFM)
+            Number of epochs completed (for DDFM/KDFM)
         final_loglik : float, optional
             Final log-likelihood value (for DFM)
         final_loss : float, optional
-            Final training loss (for DDFM)
+            Final training loss (for DDFM/KDFM)
         reason : str, optional
             Reason for stopping (e.g., "converged", "max_iterations", "max_epochs", "early_stopping")
         """
@@ -248,16 +238,16 @@ class TrainLogger:
             self.epochs = num_epochs
         
         _logger.info("")
-        if self.model_type == "dfm":
+        if num_iter is not None:
             if converged:
-                _logger.info(f"✓ Training converged after {num_iter or self.iterations} EM iterations")
+                _logger.info(f"✓ Training converged after {num_iter} EM iterations")
             else:
-                _logger.warning(f"⚠ Training did not converge after {num_iter or self.iterations} EM iterations")
-        else:  # ddfm
+                _logger.warning(f"⚠ Training did not converge after {num_iter} EM iterations")
+        elif num_epochs is not None:
             if converged:
-                _logger.info(f"✓ Training converged after {num_epochs or self.epochs} epochs")
+                _logger.info(f"✓ Training converged after {num_epochs} epochs")
             else:
-                _logger.warning(f"⚠ Training did not converge after {num_epochs or self.epochs} epochs")
+                _logger.warning(f"⚠ Training did not converge after {num_epochs} epochs")
         
         if reason:
             _logger.info(f"  Reason: {reason}")
@@ -290,31 +280,30 @@ class TrainLogger:
             
             _logger.info(f"  Duration: {duration:.2f} seconds ({duration/60:.2f} minutes)")
             
-            if self.model_type == "dfm":
+            if self.iterations > 0:
                 _logger.info(f"  EM Iterations: {self.iterations}")
-            else:  # ddfm
+            if self.epochs > 0:
                 _logger.info(f"  Epochs: {self.epochs}")
             
             _logger.info(f"  Converged: {self.converged}")
             
             # Log summary metrics from history
             if self.metrics_history:
-                if self.model_type == "dfm":
-                    logliks = [m.get("loglik") for m in self.metrics_history if m.get("loglik") is not None]
-                    if logliks:
-                        _logger.info(f"  Initial log-likelihood: {logliks[0]:.6f}")
-                        _logger.info(f"  Final log-likelihood: {logliks[-1]:.6f}")
-                        if len(logliks) > 1:
-                            improvement = logliks[-1] - logliks[0]
-                            _logger.info(f"  Improvement: {improvement:.6f}")
-                else:  # ddfm
-                    losses = [m.get("train_loss") for m in self.metrics_history if m.get("train_loss") is not None]
-                    if losses:
-                        _logger.info(f"  Initial train loss: {losses[0]:.6f}")
-                        _logger.info(f"  Final train loss: {losses[-1]:.6f}")
-                        if len(losses) > 1:
-                            improvement = losses[0] - losses[-1]  # Loss decreases
-                            _logger.info(f"  Improvement: {improvement:.6f}")
+                logliks = [m.get("loglik") for m in self.metrics_history if m.get("loglik") is not None]
+                if logliks:
+                    _logger.info(f"  Initial log-likelihood: {logliks[0]:.6f}")
+                    _logger.info(f"  Final log-likelihood: {logliks[-1]:.6f}")
+                    if len(logliks) > 1:
+                        improvement = logliks[-1] - logliks[0]
+                        _logger.info(f"  Improvement: {improvement:.6f}")
+                
+                losses = [m.get("train_loss") for m in self.metrics_history if m.get("train_loss") is not None]
+                if losses:
+                    _logger.info(f"  Initial train loss: {losses[0]:.6f}")
+                    _logger.info(f"  Final train loss: {losses[-1]:.6f}")
+                    if len(losses) > 1:
+                        improvement = losses[0] - losses[-1]  # Loss decreases
+                        _logger.info(f"  Improvement: {improvement:.6f}")
             
             for key, value in kwargs.items():
                 if isinstance(value, (int, float)):
@@ -328,22 +317,47 @@ class TrainLogger:
             _logger.info("")
 
 
+class DFMTrainLogger(BaseTrainLogger):
+    """Training logger for DFM models (EM algorithm)."""
+    
+    def __init__(self, verbose: bool = True):
+        """Initialize DFM training logger."""
+        super().__init__(model_name="DFM", verbose=verbose)
+
+
+class DDFMTrainLogger(BaseTrainLogger):
+    """Training logger for DDFM models (gradient descent)."""
+    
+    def __init__(self, verbose: bool = True):
+        """Initialize DDFM training logger."""
+        super().__init__(model_name="DDFM", verbose=verbose)
+
+
+class KDFMTrainLogger(BaseTrainLogger):
+    """Training logger for KDFM models (gradient descent)."""
+    
+    def __init__(self, verbose: bool = True):
+        """Initialize KDFM training logger."""
+        super().__init__(model_name="KDFM", verbose=verbose)
+
+
+# Backward compatibility alias
+TrainLogger = BaseTrainLogger
+
+
 # Convenience functions for simpler usage
 
 def log_training_start(
     model_name: str = "DFM",
-    model_type: str = "dfm",
     config: Optional[Dict[str, Any]] = None,
     data_info: Optional[Dict[str, Any]] = None
-) -> TrainLogger:
+) -> BaseTrainLogger:
     """Create and start a training logger.
     
     Parameters
     ----------
     model_name : str, default "DFM"
-        Name of the model being trained (e.g., "DFM", "DDFM")
-    model_type : str, default "dfm"
-        Type of model: "dfm" (EM algorithm) or "ddfm" (gradient descent)
+        Name of the model being trained (e.g., "DFM", "DDFM", "KDFM")
     config : dict, optional
         Training configuration to log
     data_info : dict, optional
@@ -351,16 +365,24 @@ def log_training_start(
         
     Returns
     -------
-    TrainLogger
+    BaseTrainLogger
         Logger instance
     """
-    logger = TrainLogger(model_name=model_name, model_type=model_type)
+    if model_name.upper() == "DFM":
+        logger = DFMTrainLogger()
+    elif model_name.upper() == "DDFM":
+        logger = DDFMTrainLogger()
+    elif model_name.upper() == "KDFM":
+        logger = KDFMTrainLogger()
+    else:
+        logger = BaseTrainLogger(model_name=model_name)
+    
     logger.start(config=config, data_info=data_info)
     return logger
 
 
 def log_training_step(
-    logger: TrainLogger,
+    logger: BaseTrainLogger,
     iteration: int,
     loglik: Optional[float] = None,
     delta: Optional[float] = None,
@@ -370,7 +392,7 @@ def log_training_step(
     
     Parameters
     ----------
-    logger : TrainLogger
+    logger : BaseTrainLogger
         Training logger instance
     iteration : int
         Current iteration number
@@ -385,7 +407,7 @@ def log_training_step(
 
 
 def log_training_end(
-    logger: TrainLogger,
+    logger: BaseTrainLogger,
     success: bool = True,
     **kwargs
 ) -> None:
@@ -393,7 +415,7 @@ def log_training_end(
     
     Parameters
     ----------
-    logger : TrainLogger
+    logger : BaseTrainLogger
         Training logger instance
     success : bool, default True
         Whether training completed successfully
@@ -448,7 +470,7 @@ def log_training_epoch(
     learning_rate: Optional[float] = None,
     **kwargs
 ) -> None:
-    """Log training epoch (convenience function for DDFM).
+    """Log training epoch (convenience function for DDFM/KDFM).
     
     Parameters
     ----------
@@ -500,15 +522,15 @@ def log_convergence(
     num_iter : int, optional
         Number of EM iterations completed (for DFM)
     num_epochs : int, optional
-        Number of epochs completed (for DDFM)
+        Number of epochs completed (for DDFM/KDFM)
     final_loglik : float, optional
         Final log-likelihood value (for DFM)
     final_loss : float, optional
-        Final training loss (for DDFM)
+        Final training loss (for DDFM/KDFM)
     reason : str, optional
         Reason for stopping
     model_type : str, default "dfm"
-        Type of model: "dfm" or "ddfm"
+        Type of model: "dfm", "ddfm", or "kdfm"
     """
     model_type = model_type.lower()
     
@@ -517,7 +539,7 @@ def log_convergence(
             _logger.info(f"✓ EM algorithm converged after {num_iter} iterations")
         else:
             _logger.warning(f"⚠ EM algorithm did not converge after {num_iter} iterations")
-    else:  # ddfm
+    else:  # ddfm or kdfm
         if converged:
             _logger.info(f"✓ Training converged after {num_epochs} epochs")
         else:
@@ -530,4 +552,3 @@ def log_convergence(
         _logger.info(f"  Final log-likelihood: {final_loglik:.6f}")
     if final_loss is not None:
         _logger.info(f"  Final training loss: {final_loss:.6f}")
-

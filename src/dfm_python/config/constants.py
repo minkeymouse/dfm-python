@@ -47,8 +47,10 @@ DEFAULT_CLEAN_INF = MAX_EIGENVALUE  # Default value for Inf replacement in clean
 DEFAULT_IDENTITY_SCALE = 1.0  # Default scale for create_scaled_identity(n, 1.0)
 DEFAULT_ZERO_VALUE = 0.0  # Default zero value for explicit zero assignments
 DEFAULT_INF_VALUE = float('inf')  # Default infinity value for loss/scale comparisons
-DEFAULT_XAVIER_GAIN = 1.0  # Default gain for Xavier initialization
-DEFAULT_OUTPUT_LAYER_GAIN = 0.1  # Default gain for output layer Xavier initialization (smaller for stability)
+DEFAULT_XAVIER_GAIN = 1.0  # Default gain for Xavier initialization (matches TensorFlow GlorotNormal)
+DEFAULT_OUTPUT_LAYER_GAIN = 1.0  # Default gain for output layer Xavier initialization (matches original TensorFlow DDFM GlorotNormal for all layers)
+# NOTE: Original TensorFlow DDFM uses GlorotNormal (gain=1.0) for all layers including output layer.
+# Updated to match original TensorFlow behavior to address training divergence (encoder weights too small, near-zero factors).
 
 # Companion matrix initialization defaults
 DEFAULT_INIT_SCALE = 0.01  # Default initialization scale for companion matrix B and C matrices
@@ -98,12 +100,20 @@ DEFAULT_BATCH_SIZE = 32  # Default batch size for neural networks
 DEFAULT_DDFM_WINDOW_SIZE = 100  # Default window size (time-step batch size) for DDFM
 DEFAULT_DDFM_BATCH_SIZE = 100  # Default batch size for DDFM (matches original TensorFlow batch_size=100)
 
+# DDFM target interpolation defaults
+DEFAULT_MIN_TARGET_INTERPOLATE_RATIO = 0.3  # Default minimum target interpolate ratio threshold for DDFM (ratio of missing target values above which interpolation is skipped)
+
+# MCMC training defaults (for DDFM sequential MC processing)
+DEFAULT_MCMC_EPOCHS = 1  # Default epochs per MC sample (MCMC training pattern: one epoch per MC sample)
+DEFAULT_MCMC_VERBOSE = 0  # Default verbosity for MCMC training (silent training)
+
 # Placeholder defaults (for DDFM placeholder MC dataset)
 DEFAULT_PLACEHOLDER_MC_SAMPLES = 1  # Minimal MC samples for placeholder dataset (replaced after on_train_start)
 DEFAULT_PLACEHOLDER_DATA_SHAPE_T = 100  # Default time steps for placeholder data shape
 DEFAULT_PLACEHOLDER_DATA_SHAPE_N = 10  # Default number of series for placeholder data shape
 DEFAULT_PLACEHOLDER_SEED = 42  # Seed for placeholder random state (common test value, placeholder gets replaced)
 DEFAULT_NUM_WORKERS = 0  # Default number of workers for DataLoader (0 = single-threaded)
+DEFAULT_CUDA_DEVICE_INDEX = 0  # Default CUDA device index for GPU operations (0 = first GPU)
 
 # Initialization sample size defaults
 DEFAULT_KDFM_INIT_SAMPLE_SIZE = 100  # Default sample size for KDFM initialization (first N rows used for initialize_from_data)
@@ -125,11 +135,18 @@ DEFAULT_WEIGHT_DECAY = 0.0  # Default weight decay (L2 regularization)
 # Learning rate decay
 DEFAULT_LR_DECAY_RATE = 0.96  # Default exponential decay rate for learning rate
 
+# Optimizer defaults
+VALID_OPTIMIZERS = {'Adam', 'AdamW', 'SGD'}  # Valid optimizer types for DDFM
+
 # Adam optimizer defaults
 DEFAULT_ADAM_BETA1 = 0.9  # Default beta1 (momentum decay) for Adam optimizer
 DEFAULT_ADAM_BETA2 = 0.999  # Default beta2 (squared gradient decay) for Adam optimizer
-DEFAULT_ADAM_EPS = 1e-8  # Default epsilon for Adam optimizer (PyTorch default)
-DEFAULT_TENSORFLOW_ADAM_EPS = 1e-7  # TensorFlow/Keras default epsilon for Adam optimizer (for comparison)
+DEFAULT_ADAM_EPS = 1e-7  # Default epsilon for Adam optimizer (matches TensorFlow default for DDFM compatibility)
+DEFAULT_PYTORCH_ADAM_EPS = 1e-8  # PyTorch default epsilon for Adam optimizer (for reference)
+
+# Batch normalization defaults (matching TensorFlow/Keras defaults)
+DEFAULT_BATCH_NORM_MOMENTUM = 0.99  # TensorFlow/Keras BatchNormalization default momentum
+DEFAULT_BATCH_NORM_EPS = 1e-3  # TensorFlow/Keras BatchNormalization default epsilon
 
 # Random seed defaults
 DEFAULT_RANDOM_SEED_MAX = 2**31  # Maximum value for random seed generation (2147483647, 32-bit signed integer max)
@@ -163,7 +180,7 @@ CHOLESKY_LOG_DET_FACTOR = 2.0  # Factor for log determinant computation from Cho
 # ============================================================================
 
 # Encoder layer defaults
-DEFAULT_ENCODER_LAYERS = [64, 32]  # Default encoder layer sizes
+DEFAULT_ENCODER_LAYERS = [16, 4]  # Default encoder layer sizes (matches experiment config and ddfm.py default parameter)
 DEFAULT_NUM_FACTORS = 3  # Default number of factors for DDFM
 DEFAULT_ACTIVATION = 'relu'  # Default activation function for DDFM
 DEFAULT_DECODER = 'linear'  # Default decoder type for DDFM
@@ -196,6 +213,7 @@ DEFAULT_MIN_OBS_IDIO = 5  # Default minimum observations for idio estimation
 DEFAULT_MIN_OBS_VAR = 7  # Minimum observations for VAR estimation (order + 5)
 DEFAULT_MIN_OBS_PRETRAIN = 50  # Minimum observations for DDFM pre-training without interpolation
 DEFAULT_MULT_EPOCH_PRETRAIN = 1  # Multiplier for DDFM pre-training epochs
+DEFAULT_PRETRAIN_EPOCHS = 200  # Default number of epochs for DDFM pre-training (matching original paper)
 
 # Dimension validation bounds
 MIN_TIME_STEPS = 1  # Minimum number of time steps (T) required for data
@@ -424,6 +442,7 @@ __all__ = [
     'DEFAULT_PLACEHOLDER_DATA_SHAPE_N',  # Placeholder data shape N default (10)
     'DEFAULT_PLACEHOLDER_SEED',  # Placeholder random seed default (42)
     'DEFAULT_NUM_WORKERS',  # DataLoader num_workers default (0)
+    'DEFAULT_CUDA_DEVICE_INDEX',  # CUDA device index default (0 = first GPU)
     'DEFAULT_KDFM_INIT_SAMPLE_SIZE',  # KDFM initialization sample size default (100)
     'DEFAULT_LEARNING_RATE',
     'DEFAULT_DDFM_LEARNING_RATE',
@@ -432,10 +451,13 @@ __all__ = [
     'DEFAULT_GRAD_CLIP_VAL',
     'DEFAULT_WEIGHT_DECAY',
     'DEFAULT_LR_DECAY_RATE',
+    'VALID_OPTIMIZERS',
     'DEFAULT_ADAM_BETA1',
     'DEFAULT_ADAM_BETA2',
     'DEFAULT_ADAM_EPS',
     'DEFAULT_TENSORFLOW_ADAM_EPS',
+    'DEFAULT_BATCH_NORM_MOMENTUM',
+    'DEFAULT_BATCH_NORM_EPS',
     'DEFAULT_RANDOM_SEED_MAX',
     'DEFAULT_HUBER_DELTA',
     'HUBER_QUADRATIC_COEFF',
@@ -467,6 +489,7 @@ __all__ = [
     'DEFAULT_MIN_OBS_VAR',
     'DEFAULT_MIN_OBS_PRETRAIN',
     'DEFAULT_MULT_EPOCH_PRETRAIN',
+    'DEFAULT_PRETRAIN_EPOCHS',
     # Dimension validation
     'MIN_TIME_STEPS',
     'MIN_VARIABLES',

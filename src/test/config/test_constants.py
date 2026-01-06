@@ -28,6 +28,8 @@ from dfm_python.config.constants import (
     MIN_SHAPE_FOR_AR2,
     DEFAULT_DDFM_CLIP_RANGE_DEEP,
     DEFAULT_DDFM_CLIP_RANGE_SHALLOW,
+    DEFAULT_NUM_WORKERS,
+    DEFAULT_CUDA_DEVICE_INDEX,
     COMPUTATION_ERROR_TYPES,
 )
 
@@ -221,6 +223,24 @@ class TestConstants:
         assert DEFAULT_DDFM_CLIP_RANGE_SHALLOW > 0
         # Verify shallow range is greater than deep range (shallow networks can handle larger values)
         assert DEFAULT_DDFM_CLIP_RANGE_SHALLOW > DEFAULT_DDFM_CLIP_RANGE_DEEP
+    
+    def test_default_num_workers(self):
+        """Test DEFAULT_NUM_WORKERS constant."""
+        assert DEFAULT_NUM_WORKERS is not None
+        assert isinstance(DEFAULT_NUM_WORKERS, int)
+        assert DEFAULT_NUM_WORKERS == 0  # Default number of workers for DataLoader (0 = single-threaded)
+        # Verify it's used in models/ddfm.py and encoder/simple_autoencoder.py for DataLoader initialization
+        # This replaces hardcoded num_workers=0 throughout the codebase
+        assert DEFAULT_NUM_WORKERS >= 0
+    
+    def test_default_cuda_device_index(self):
+        """Test DEFAULT_CUDA_DEVICE_INDEX constant."""
+        assert DEFAULT_CUDA_DEVICE_INDEX is not None
+        assert isinstance(DEFAULT_CUDA_DEVICE_INDEX, int)
+        assert DEFAULT_CUDA_DEVICE_INDEX == 0  # Default CUDA device index for GPU operations (0 = first GPU)
+        # Verify it's used in models/ddfm.py for GPU device name logging
+        # This replaces hardcoded device index 0 in GPU operations
+        assert DEFAULT_CUDA_DEVICE_INDEX >= 0
     
     def test_computation_error_types(self):
         """Test COMPUTATION_ERROR_TYPES constant."""

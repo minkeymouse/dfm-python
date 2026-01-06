@@ -6,442 +6,248 @@ This module contains DDFM-specific encoder networks and decoder parameter extrac
 import numpy as np
 import torch
 import torch.nn as nn
-from typing import Tuple, List, Any, Optional
+from typing import Tuple, List, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..dataset.ddfm_dataset import AutoencoderDataset
 
 from ..logger import get_logger
 from ..utils.errors import ConfigurationError, DataValidationError
-from ..utils.common import ensure_numpy, sanitize_array
-from ..numeric.stability import create_scaled_identity
-from ..config.constants import DEFAULT_TORCH_DTYPE, DEFAULT_ZERO_VALUE, DEFAULT_FACTOR_ORDER
+from ..config.constants import (
+    DEFAULT_TORCH_DTYPE,
+    DEFAULT_ZERO_VALUE,
+    DEFAULT_XAVIER_GAIN,
+    DEFAULT_OUTPUT_LAYER_GAIN,
+    DEFAULT_BATCH_NORM_MOMENTUM,
+    DEFAULT_BATCH_NORM_EPS,
+)
 
 _logger = get_logger(__name__)
 
 
-def _get_decoder_layer(decoder: Any) -> nn.Linear:
-    """Extract the Linear layer from a decoder module."""
-    if hasattr(decoder, 'decoder'):
-        return decoder.decoder
-    elif hasattr(decoder, 'output_layer'):
-        return decoder.output_layer
-    elif isinstance(decoder, nn.Linear):
-        return decoder
-    else:
-        raise DataValidationError(
-            f"decoder must have 'decoder', 'output_layer', or be a Linear layer. Got: {type(decoder)}"
-        )
-
-
 class Encoder(nn.Module):
-    """Nonlinear encoder network for DDFM."""
+    """Nonlinear encoder network for DDFM.
+    
+    Matches TensorFlow implementation:
+    - First layer: Dense → ReLU
+    - Subsequent layers: BatchNorm → Dense → ReLU
+    """
     
     def __init__(
         self,
         input_dim: int,
-        hidden_dims: List[int],
-        output_dim: int,
-        activation: str = 'tanh',
-        use_batch_norm: bool = True,
+        encoder_dims: List[int],
+        activation: str = 'relu',
     ):
         super().__init__()
         
+        if len(encoder_dims) == 0:
+            raise ValueError("encoder_dims must have at least one element")
+        
         self.layers = nn.ModuleList()
-        self.use_batch_norm = use_batch_norm
-        self.batch_norms = nn.ModuleList() if use_batch_norm else None
+        self.batch_norms = nn.ModuleList()
         
-        if activation == 'tanh':
-            self.activation = nn.Tanh()
-        elif activation == 'relu':
-            self.activation = nn.ReLU()
-        elif activation == 'sigmoid':
-            self.activation = nn.Sigmoid()
-        else:
+        # Activation function
+        activations = {'tanh': nn.Tanh(), 'relu': nn.ReLU(), 'sigmoid': nn.Sigmoid()}
+        if activation not in activations:
             raise ConfigurationError(f"Unknown activation: {activation}")
+        self.activation = activations[activation]
         
-        from ..config.constants import DEFAULT_XAVIER_GAIN, DEFAULT_OUTPUT_LAYER_GAIN, DEFAULT_ZERO_VALUE
-        
+        # First layer: Dense → ReLU (no BatchNorm before it, matching TensorFlow)
         prev_dim = input_dim
-        for hidden_dim in hidden_dims:
-            layer = nn.Linear(prev_dim, hidden_dim)
-            # Use Xavier (GlorotNormal) for all layers, matching original TensorFlow DDFM
-            nn.init.xavier_normal_(layer.weight, gain=DEFAULT_XAVIER_GAIN)
-            if layer.bias is not None:
-                nn.init.constant_(layer.bias, DEFAULT_ZERO_VALUE)
+        first_layer = nn.Linear(prev_dim, encoder_dims[0])
+        self._init_linear(first_layer)
+        self.layers.append(first_layer)
+        prev_dim = encoder_dims[0]
+        
+        # Subsequent layers: BatchNorm → Dense → ReLU (matching TensorFlow loop)
+        for dim in encoder_dims[1:]:
+            self.batch_norms.append(nn.BatchNorm1d(prev_dim, momentum=DEFAULT_BATCH_NORM_MOMENTUM, eps=DEFAULT_BATCH_NORM_EPS))
+            layer = nn.Linear(prev_dim, dim)
+            self._init_linear(layer)
             self.layers.append(layer)
-            if use_batch_norm:
-                self.batch_norms.append(nn.BatchNorm1d(hidden_dim))
-            prev_dim = hidden_dim
-        
-        self.output_layer = nn.Linear(prev_dim, output_dim)
-        nn.init.xavier_normal_(self.output_layer.weight, gain=DEFAULT_OUTPUT_LAYER_GAIN)
-        if self.output_layer.bias is not None:
-            nn.init.constant_(self.output_layer.bias, DEFAULT_ZERO_VALUE)
+            prev_dim = dim
+    
+    @staticmethod
+    def _init_linear(layer: nn.Linear) -> None:
+        """Initialize linear layer weights and bias."""
+        nn.init.xavier_normal_(layer.weight, gain=DEFAULT_XAVIER_GAIN)
+        nn.init.constant_(layer.bias, DEFAULT_ZERO_VALUE)
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        for i, layer in enumerate(self.layers):
-            x = layer(x)
-            if self.use_batch_norm:
-                x = self.batch_norms[i](x)
-            x = self.activation(x)
-        return self.output_layer(x)
-
-
-class Autoencoder(nn.Module):
-    """Autoencoder combining encoder and decoder with noise injection for DDFM.
-    
-    Implements Algorithm 1 step 3: ε_t^(mc) ~ N(0, Σ_ε)
-    Following original DDFM pattern: x_sim_den = x_sim_den - eps_draws
-    """
-    
-    def __init__(self, encoder: Encoder, decoder: Any, num_series: Optional[int] = None, Sigma_eps: Optional[torch.Tensor] = None, seed: Optional[int] = None):
-        super().__init__()
-        self.encoder = encoder
-        self.decoder = decoder
+        """Forward pass: Dense → ReLU → BatchNorm → Dense → ReLU → ..."""
+        # First layer: Dense → ReLU
+        x = self.activation(self.layers[0](x))
         
-        # Noise injection for DDFM denoising training
-        self._noise_samples: Optional[torch.Tensor] = None
-        self._num_series = num_series
-        if num_series is not None:
-            from ..config.constants import DEFAULT_TORCH_DTYPE, DEFAULT_EPSILON
-            if Sigma_eps is None:
-                Sigma_eps = torch.ones(num_series, dtype=DEFAULT_TORCH_DTYPE) * DEFAULT_EPSILON
-            elif Sigma_eps.ndim == 0:
-                Sigma_eps = torch.ones(num_series, dtype=DEFAULT_TORCH_DTYPE) * Sigma_eps.item()
-            elif Sigma_eps.shape[0] != num_series:
-                raise ValueError(f"Sigma_eps must have shape ({num_series},) or be scalar, got {Sigma_eps.shape}")
-            self.register_buffer('Sigma_eps', Sigma_eps)
-            
-            if seed is not None:
-                self._generator = torch.Generator()
-                self._generator.manual_seed(seed)
-            else:
-                self._generator = None
-        else:
-            self.register_buffer('Sigma_eps', None)
-            self._generator = None
-    
-    def generate_noise_samples(self, n_mc_samples: int, T: int, device: Optional[torch.device] = None) -> None:
-        """Pre-generate noise samples: ε_t^(mc) ~ N(0, Σ_ε) for all MC samples."""
-        if self._num_series is None:
-            return
-        device = device or self.Sigma_eps.device
-        Sigma_eps = self.Sigma_eps.to(device)
-        from ..config.constants import DEFAULT_TORCH_DTYPE
-        # Move generator to device if it exists and is on a different device
-        generator = self._generator
-        if generator is not None and generator.device != device:
-            generator = torch.Generator(device=device)
-            if hasattr(self._generator, 'initial_seed'):
-                generator.manual_seed(self._generator.initial_seed())
-        noise = torch.randn(
-            n_mc_samples, T, self._num_series,
-            device=device,
-            dtype=DEFAULT_TORCH_DTYPE,
-            generator=generator
-        ) * Sigma_eps[None, None, :]
-        self._noise_samples = noise
-    
-    def inject_noise(self, x: torch.Tensor, sample_idx: Optional[int] = None, start_idx: Optional[int] = None, end_idx: Optional[int] = None, training: bool = True) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Inject noise by subtracting epsilon: y_t^(mc) = ỹ_t - ε_t^(mc).
+        # Subsequent layers: BatchNorm → Dense → ReLU
+        for i in range(1, len(self.layers)):
+            x = self.batch_norms[i - 1](x)
+            x = self.activation(self.layers[i](x))
         
-        Following original DDFM pattern: x_sim_den = x_sim_den - eps_draws
-        """
-        if not training or self._noise_samples is None:
-            return x, torch.ones_like(x, dtype=torch.bool)
-        
-        if sample_idx is None:
-            raise ValueError("sample_idx is required when using pre-sampled noise")
-        
-        noise_samples = self._noise_samples.to(x.device)
-        noise = noise_samples[sample_idx]
-        if start_idx is not None and end_idx is not None:
-            noise = noise[start_idx:end_idx]
-        
-        if noise.shape[0] < x.shape[0]:
-            pad = torch.zeros(x.shape[0] - noise.shape[0], noise.shape[1], device=x.device, dtype=noise.dtype)
-            noise = torch.cat([noise, pad], dim=0)
-        noise = noise[:x.shape[0]]
-        
-        return x - noise, torch.ones_like(x, dtype=torch.bool)
-    
-    def update_Sigma_eps(self, Sigma_eps: torch.Tensor) -> None:
-        """Update Sigma_eps (Σ_ε) buffer."""
-        if self._num_series is None:
-            return
-        from ..config.constants import DEFAULT_TORCH_DTYPE
-        if Sigma_eps.ndim == 0:
-            Sigma_eps = torch.ones(self._num_series, dtype=DEFAULT_TORCH_DTYPE, device=Sigma_eps.device) * Sigma_eps.item()
-        elif Sigma_eps.shape[0] != self._num_series:
-            raise ValueError(f"Sigma_eps must have shape ({self._num_series},) or be scalar, got {Sigma_eps.shape}")
-        self.Sigma_eps = Sigma_eps.to(self.Sigma_eps.device)
-    
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.decoder(self.encoder(x))
-    
-    def encode(self, x: torch.Tensor) -> torch.Tensor:
-        return self.encoder(x)
-    
-    def decode(self, factors: torch.Tensor) -> torch.Tensor:
-        return self.decoder(factors)
-    
-    def predict(self, x: torch.Tensor) -> torch.Tensor:
-        """Predict (inference mode) - matches original TensorFlow autoencoder.predict().
-        
-        Parameters
-        ----------
-        x : torch.Tensor
-            Input data (T x N) or (batch_size, T, N)
-            
-        Returns
-        -------
-        torch.Tensor
-            Reconstructed output (same shape as input)
-        """
-        self.eval()
-        with torch.no_grad():
-            return self.forward(x)
-    
-    def fit(
-        self,
-        x: torch.Tensor,
-        y: torch.Tensor,
-        epochs: int = 1,
-        batch_size: int = 100,
-        optimizer: Optional[torch.optim.Optimizer] = None,
-        loss_fn: Optional[torch.nn.Module] = None,
-        mask: Optional[torch.Tensor] = None,
-        verbose: int = 0
-    ) -> None:
-        """Fit autoencoder on data - matches original TensorFlow autoencoder.fit().
-        
-        This method trains the autoencoder for specified number of epochs, matching
-        the original TensorFlow DDFM pattern where autoencoder.fit() is called
-        separately for each MC sample with epochs=1. Uses DataLoader for efficient batching.
-        
-        Original TensorFlow usage (DDFM/models/ddfm.py line 246):
-            self.autoencoder.fit(x_sim_den[i, :, :], self.z_actual, epochs=1, batch_size=self.batch_size, verbose=0)
-        
-        Parameters
-        ----------
-        x : torch.Tensor
-            Input data (T x N) - corrupted/noisy input
-        y : torch.Tensor
-            Target data (T x N) - clean target for reconstruction
-        epochs : int, default 1
-            Number of epochs to train (original DDFM uses epochs=1 per MC sample)
-        batch_size : int, default 100
-            Batch size for training (number of time steps per batch).
-            Keras splits data into batches and processes each batch separately.
-        optimizer : torch.optim.Optimizer, optional
-            Optimizer to use. If None, creates Adam optimizer with default lr=0.001
-        loss_fn : torch.nn.Module, optional
-            Loss function. If None, uses MSE loss
-        mask : torch.Tensor, optional
-            Missing data mask (T x N), True where data is missing
-        verbose : int, default 0
-            Verbosity level (0 = silent, 1 = print loss)
-            
-        Notes
-        -----
-        - This method sets model to training mode and trains for specified epochs
-        - After training, model remains in training mode (unlike predict() which uses eval mode)
-        - Matches original TensorFlow behavior where fit() is called in a loop for each MC sample
-        - Uses DataLoader for efficient batching (sequential processing maintained with num_workers=0)
-        """
-        if optimizer is None:
-            optimizer = torch.optim.Adam(self.parameters(), lr=0.001)
-        
-        if loss_fn is None:
-            loss_fn = torch.nn.MSELoss()
-        
-        self.train()
-        
-        # Create dataset and dataloader for efficient batching
-        from ..dataset.ddfm_dataset import AutoencoderDataset
-        from ..dataset.dataloader import create_autoencoder_dataloader
-        
-        # Prepare mask: if None, create all-True mask
-        if mask is None:
-            T, N = y.shape
-            mask = torch.ones(T, N, dtype=torch.bool, device=y.device)
-        
-        dataset = AutoencoderDataset(x, y, mask)
-        dataloader = create_autoencoder_dataloader(
-            dataset,
-            batch_size=batch_size,
-            num_workers=0,  # Sequential processing required
-            pin_memory=torch.cuda.is_available()
-        )
-        
-        for epoch in range(epochs):
-            epoch_loss = 0.0
-            n_batches = 0
-            
-            for batch_x, batch_y, batch_mask in dataloader:
-                # Forward pass
-                reconstructed = self.forward(batch_x)
-                
-                # Compute loss - masked_loss_fn always requires 3 args
-                if batch_mask.shape == reconstructed.shape:
-                    loss = loss_fn(reconstructed, batch_y, batch_mask)
-                else:
-                    # Create all-True mask if shape mismatch
-                    all_true_mask = torch.ones_like(reconstructed, dtype=torch.bool)
-                    loss = loss_fn(reconstructed, batch_y, all_true_mask)
-                
-                # Backward pass
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-                
-                epoch_loss += loss.item()
-                n_batches += 1
-            
-            if verbose > 0:
-                avg_loss = epoch_loss / n_batches if n_batches > 0 else 0.0
-                _logger.info(f"Epoch {epoch + 1}/{epochs}, loss={avg_loss:.6f}")
+        return x
 
 
 def extract_decoder_params(decoder) -> Tuple[np.ndarray, np.ndarray]:
-    """Extract observation matrix C and bias from trained decoder."""
-    decoder_layer = _get_decoder_layer(decoder)
-    weight = ensure_numpy(decoder_layer.weight.data)
-    bias = ensure_numpy(decoder_layer.bias.data) if decoder_layer.bias is not None else np.zeros(weight.shape[0])
+    """Extract observation matrix C and bias from decoder.
     
-    C = weight
+    This is a convenience function that delegates to the decoder's extract_params method.
+    For backward compatibility, it also handles nn.Linear directly.
     
-    if np.any(np.isnan(C)):
-        nan_count = np.sum(np.isnan(C))
-        nan_ratio = nan_count / C.size
-        _logger.warning(
-            f"extract_decoder_params: C matrix contains {nan_count}/{C.size} NaN values ({nan_ratio:.1%}). "
-            f"Replacing with zeros."
-        )
-        C = sanitize_array(C)
+    Parameters
+    ----------
+    decoder : LinearDecoder | MLPDecoder | nn.Linear
+        Decoder instance or Linear layer
+        
+    Returns
+    -------
+    Tuple[np.ndarray, np.ndarray]
+        (weight, bias) where weight is (output_dim, input_dim) and bias is (output_dim,)
+    """
+    # If decoder has extract_params method, use it (preferred)
+    if hasattr(decoder, 'extract_params'):
+        return decoder.extract_params()
     
-    return C, bias
+    # Backward compatibility: handle nn.Linear directly
+    if isinstance(decoder, nn.Linear):
+        weight = decoder.weight.data.cpu().numpy()
+        bias = decoder.bias.data.cpu().numpy() if decoder.bias is not None else np.zeros(weight.shape[0])
+        if np.any(np.isnan(weight)):
+            _logger.warning("extract_decoder_params: C matrix contains NaN values. Replacing with zeros.")
+            weight = np.nan_to_num(weight, nan=0.0)
+        return weight, bias
+    
+    raise DataValidationError(
+        f"decoder must have 'extract_params' method or be a Linear layer. Got: {type(decoder)}"
+    )
 
 
 class SimpleAutoencoder(nn.Module):
-    """Simple autoencoder for DDFM (matching original TensorFlow structure).
-    
-    This is a minimal autoencoder that combines encoder and decoder with
-    simple training interface matching the original TensorFlow DDFM.
-    """
+    """Simple autoencoder for DDFM."""
     
     def __init__(self, encoder: nn.Module, decoder: nn.Module):
-        """Initialize simple autoencoder.
-        
-        Parameters
-        ----------
-        encoder : nn.Module
-            Encoder network
-        decoder : nn.Module
-            Decoder network
-        """
         super().__init__()
         self.encoder = encoder
         self.decoder = decoder
     
+    @classmethod
+    def build(
+        cls,
+        input_dim: int,
+        encoder_size: Tuple[int, ...],
+        decoder_size: Optional[Tuple[int, ...]] = None,
+        decoder_type: str = "linear",
+        output_dim: Optional[int] = None,
+        activation: str = 'relu',
+        seed: Optional[int] = None
+    ) -> "SimpleAutoencoder":
+        """Build autoencoder with encoder and decoder."""
+        if output_dim is None:
+            output_dim = input_dim
+        
+        if seed is not None:
+            torch.manual_seed(seed)
+        
+        if len(encoder_size) == 0:
+            raise ValueError("encoder_size must have at least one element (latent dimension)")
+        
+        encoder = Encoder(input_dim, list(encoder_size), activation)
+        
+        from ..decoder import LinearDecoder, MLPDecoder
+        
+        latent_dim = encoder_size[-1]
+        if decoder_type == "mlp":
+            if decoder_size is None or len(decoder_size) == 0:
+                raise ValueError("decoder_size must be provided when decoder_type='mlp'")
+            decoder = MLPDecoder(latent_dim, output_dim, list(decoder_size), activation, seed)
+        else:
+            decoder = LinearDecoder(latent_dim, output_dim, seed)
+        
+        return cls(encoder=encoder, decoder=decoder)
+    
+    @classmethod
+    def from_dataset(
+        cls,
+        dataset: 'AutoencoderDataset',
+        encoder_size: Tuple[int, ...],
+        decoder_size: Optional[Tuple[int, ...]] = None,
+        decoder_type: str = "linear",
+        activation: str = 'relu',
+        seed: Optional[int] = None
+    ) -> "SimpleAutoencoder":
+        """Build autoencoder from AutoencoderDataset dimensions."""
+        return cls.build(
+            input_dim=dataset.full_input.shape[1],
+            encoder_size=encoder_size,
+            decoder_size=decoder_size,
+            decoder_type=decoder_type,
+            output_dim=dataset.y_clean.shape[1],
+            activation=activation,
+            seed=seed
+        )
+    
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass through autoencoder."""
         return self.decoder(self.encoder(x))
     
     def predict(self, x: torch.Tensor) -> torch.Tensor:
-        """Predict (inference mode) - matches original TensorFlow autoencoder.predict()."""
+        """Predict in inference mode."""
         self.eval()
         with torch.no_grad():
             return self.forward(x)
     
     def fit(
         self,
-        x: Any,
-        y: Any,
+        dataset: 'AutoencoderDataset',
         epochs: int = 1,
         batch_size: int = 100,
         learning_rate: float = 0.005,
         optimizer_type: str = 'Adam',
         decay_learning_rate: bool = True,
-        verbose: int = 0
+        optimizer: Optional[torch.optim.Optimizer] = None,
+        scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None,
+        target_indices: Optional[torch.Tensor] = None
     ) -> None:
-        """Fit autoencoder on data - matches original TensorFlow autoencoder.fit().
+        """Fit autoencoder on AutoencoderDataset."""
+        if optimizer is None:
+            optimizers = {
+                'Adam': lambda: torch.optim.Adam(self.parameters(), lr=learning_rate),
+                'SGD': lambda: torch.optim.SGD(self.parameters(), lr=learning_rate)
+            }
+            optimizer = optimizers.get(optimizer_type, optimizers['Adam'])()
         
-        Parameters
-        ----------
-        x : array-like
-            Input data (T x N) - corrupted/noisy input
-        y : array-like
-            Target data (T x N) - clean target for reconstruction
-        epochs : int, default 1
-            Number of epochs to train
-        batch_size : int, default 100
-            Batch size for training
-        learning_rate : float, default 0.005
-            Learning rate for optimizer
-        optimizer_type : str, default 'Adam'
-            Optimizer type ('Adam' or 'SGD')
-        decay_learning_rate : bool, default True
-            Whether to use learning rate decay
-        verbose : int, default 0
-            Verbosity level (0 = silent)
-        """
-        from ..utils.common import ensure_tensor
-        from ..config.constants import DEFAULT_TORCH_DTYPE
-        
-        optimizer = torch.optim.Adam(self.parameters(), lr=learning_rate) if optimizer_type == 'Adam' else torch.optim.SGD(self.parameters(), lr=learning_rate)
-        if decay_learning_rate:
-            scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.96)
+        # Only create scheduler if none provided and decay is enabled
+        # If scheduler is provided (e.g., from DDFM), use it instead of creating a new one
+        if scheduler is None and decay_learning_rate:
+            from ..config.constants import DEFAULT_LR_DECAY_RATE
+            # Note: TensorFlow uses ExponentialDecay with decay_steps=epochs (10) and staircase=True
+            # This decays every 10 optimizer steps. We use StepLR with step_size=10 to match this.
+            # However, if we're called from DDFM, the scheduler is already created and passed in.
+            scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=DEFAULT_LR_DECAY_RATE)
         
         self.train()
-        x_tensor = ensure_tensor(x, dtype=DEFAULT_TORCH_DTYPE)
-        y_tensor = ensure_tensor(y, dtype=DEFAULT_TORCH_DTYPE)
+        full_input = dataset.full_input
+        y_clean = dataset.y_clean
+        T = len(dataset)
         
         for epoch in range(epochs):
-            for i in range(0, len(x_tensor), batch_size):
-                batch_x = x_tensor[i:i+batch_size]
-                batch_y = y_tensor[i:i+batch_size]
+            for i in range(0, T, batch_size):
+                batch_input = full_input[i:i+batch_size]
+                batch_target = y_clean[i:i+batch_size]
                 
                 optimizer.zero_grad()
-                pred = self.forward(batch_x)
-                # Masked loss for missing data
-                mask = ~torch.isnan(batch_y)
-                if mask.any():
-                    loss = nn.functional.mse_loss(pred[mask], batch_y[mask])
-                else:
-                    loss = nn.functional.mse_loss(pred, batch_y)
+                pred = self.forward(batch_input)
+                if target_indices is not None:
+                    pred = pred[:, target_indices]
+                
+                # Match TensorFlow's mse_missing: set NaN to 0 in both y_actual and y_predicted
+                # TensorFlow: y_actual_ = tf.where(tf.math.is_nan(y_actual), tf.zeros_like(y_actual), y_actual)
+                #            y_predicted_ = tf.multiply(y_predicted, mask)
+                #            mse_loss(y_actual_, y_predicted_)
+                mask = ~torch.isnan(batch_target)
+                y_actual_ = torch.where(torch.isnan(batch_target), torch.zeros_like(batch_target), batch_target)
+                y_predicted_ = pred * mask.float()  # Convert mask to float for multiplication
+                loss = torch.nn.functional.mse_loss(y_predicted_, y_actual_, reduction='mean')
                 loss.backward()
                 optimizer.step()
             
-            if decay_learning_rate:
+            if scheduler is not None:
                 scheduler.step()
-
-
-def convert_decoder_to_numpy(
-    decoder: Any,
-    has_bias: bool = True,
-    factor_order: int = DEFAULT_FACTOR_ORDER,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Convert PyTorch decoder to NumPy arrays for state-space model."""
-    try:
-        linear_layer = _get_decoder_layer(decoder)
-    except DataValidationError:
-        linear_layers = [m for m in decoder.modules() if isinstance(m, nn.Linear)]
-        if not linear_layers:
-            raise DataValidationError("No Linear layer found in decoder")
-        linear_layer = linear_layers[-1]
-    
-    weight = ensure_numpy(linear_layer.weight.data)
-    bias = ensure_numpy(linear_layer.bias.data) if (has_bias and linear_layer.bias is not None) else np.zeros(weight.shape[0])
-    
-    N, m = weight.shape
-    
-    if factor_order == 1:
-        from ..config.constants import DEFAULT_IDENTITY_SCALE
-        emission = np.hstack([
-            weight,
-            create_scaled_identity(N, DEFAULT_IDENTITY_SCALE)
-        ])
-    else:
-        raise NotImplementedError(f"Only VAR(1) (factor_order=1) is supported. Got: {factor_order}")
-    
-    return bias, emission
-

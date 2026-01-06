@@ -7,8 +7,8 @@ from dfm_python.config.schema.results import (
     DFMResult,
     DDFMResult,
     KDFMResult,
-    FitParams
 )
+from dfm_python.config.schema.params import DFMFitParams
 from dfm_python.numeric.stability import create_scaled_identity
 from dfm_python.config.constants import DEFAULT_IDENTITY_SCALE, DEFAULT_MAX_ITER, DEFAULT_EM_THRESHOLD, DEFAULT_REGULARIZATION_SCALE
 
@@ -176,12 +176,12 @@ class TestKDFMResult:
         assert "IRFs computed: Structural" in summary
 
 
-class TestFitParams:
-    """Test suite for FitParams."""
+class TestDFMFitParams:
+    """Test suite for DFMFitParams."""
     
-    def test_fit_params_initialization(self):
-        """Test FitParams can be initialized."""
-        params = FitParams(
+    def test_dfm_fit_params_initialization(self):
+        """Test DFMFitParams can be initialized."""
+        params = DFMFitParams(
             max_iter=DEFAULT_MAX_ITER,
             threshold=DEFAULT_EM_THRESHOLD,
             regularization_scale=DEFAULT_REGULARIZATION_SCALE

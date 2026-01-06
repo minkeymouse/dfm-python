@@ -26,8 +26,8 @@ from typing import Tuple, Optional
 import numpy as np
 import torch
 from ..logger import get_logger
-from ..utils.common import ensure_numpy
 from ..utils.errors import DataValidationError
+from ..config.types import to_numpy
 
 _logger = get_logger(__name__)
 
@@ -184,7 +184,7 @@ def compute_irf(
     
     # Validate eigenvalue stability (warn if near-unstable)
     try:
-        A_ar_eigenvalues = ensure_numpy(torch.linalg.eigvals(A_ar))
+        A_ar_eigenvalues = to_numpy(torch.linalg.eigvals(A_ar))
         validate_eigenvalue_bounds(A_ar_eigenvalues, max_magnitude=DEFAULT_EIGENVALUE_MAX_MAGNITUDE, warn_threshold=DEFAULT_EIGENVALUE_WARN_THRESHOLD)
     except (ValueError, RuntimeError, AttributeError):
         pass  # Skip eigenvalue check if computation fails
@@ -231,7 +231,7 @@ def compute_irf(
                 )
             
             # Convert to numpy and store
-            irf_reduced[h] = ensure_numpy(K_h)
+            irf_reduced[h] = to_numpy(K_h)
             
             # Structural IRF: K_h^struct = K_h S
             if structural:
@@ -249,7 +249,7 @@ def compute_irf(
                         )
                     )
                 
-                irf_structural[h] = ensure_numpy(K_h_struct)
+                irf_structural[h] = to_numpy(K_h_struct)
             
             # Update powers for next iteration
             if h < horizon - 1:

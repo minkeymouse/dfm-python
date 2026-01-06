@@ -10,7 +10,7 @@ Note: Series are specified via frequency dict mapping column names to frequencie
 from .schema import (
     BaseModelConfig, DFMConfig, DDFMConfig, KDFMConfig,
     BaseResult, DFMResult, DDFMResult, KDFMResult,
-    DFMFitParams, DDFMFitParams, FitParams, DFMParams, DDFMParams,  # Aliases for backward compatibility
+    DFMFitParams, DDFMFitParams, FitParams,  # FitParams is backward compatibility alias
 )
 # DEFAULT_BLOCK_NAME is imported lazily where needed to avoid circular imports
 from .constants import (
@@ -109,7 +109,7 @@ __all__ = [
     'DFMConfig', 'DDFMConfig', 'KDFMConfig',
     # Parameter overrides
     'DFMFitParams', 'DDFMFitParams',
-    'FitParams', 'DFMParams', 'DDFMParams',  # Backward compatibility aliases
+    'FitParams',  # Backward compatibility alias
     # Model-specific results (from results.py)
     'DFMResult', 'DDFMResult', 'KDFMResult',
     # Utilities

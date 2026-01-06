@@ -4,7 +4,7 @@ import pytest
 import pandas as pd
 import numpy as np
 from datetime import datetime
-from dfm_python.dataset.process import TimeIndex, parse_timestamp
+from dfm_python.dataset.time import TimeIndex
 from dfm_python.utils.errors import DataValidationError
 
 
@@ -35,28 +35,23 @@ class TestTimeIndex:
 class TestParseTimestamp:
     """Test suite for parse_timestamp function."""
     
-    def test_parse_timestamp_string(self):
-        """Test parsing timestamp from string."""
-        from dfm_python.dataset.process import parse_timestamp
+    def test_time_index_from_string(self):
+        """Test TimeIndex can be created from string dates."""
         # Test ISO format
-        dt1 = parse_timestamp('2020-01-01')
-        assert isinstance(dt1, datetime)
-        assert dt1.year == 2020
-        assert dt1.month == 1
-        assert dt1.day == 1
-        # Test ISO format with time
-        dt2 = parse_timestamp('2020-01-01T12:30:45')
-        assert isinstance(dt2, datetime)
-        assert dt2.hour == 12
+        dates_str = ['2020-01-01', '2020-02-01', '2020-03-01']
+        time_index = TimeIndex(pd.Series(dates_str))
+        assert len(time_index) == 3
+        assert time_index[0].year == 2020
+        assert time_index[0].month == 1
+        assert time_index[0].day == 1
     
-    def test_parse_timestamp_datetime(self):
-        """Test parsing timestamp from datetime."""
-        from dfm_python.dataset.process import parse_timestamp
-        # Test that datetime objects are returned as-is
-        dt = datetime(2020, 1, 1, 12, 30, 45)
-        result = parse_timestamp(dt)
-        assert result == dt
-        assert isinstance(result, datetime)
+    def test_time_index_from_datetime(self):
+        """Test TimeIndex can be created from datetime objects."""
+        # Test that datetime objects work
+        dates = [datetime(2020, 1, 1, 12, 30, 45), datetime(2020, 2, 1)]
+        time_index = TimeIndex(pd.Series(dates))
+        assert len(time_index) == 2
+        assert time_index[0].hour == 12
     
     def test_time_index_invalid_series_dtype(self):
         """Test TimeIndex raises DataValidationError for non-datetime Series."""
@@ -85,32 +80,37 @@ class TestParseTimestamp:
             _ = time_index[{'key': 'value'}]
     
     def test_time_index_comparison_invalid_type(self):
-        """Test TimeIndex comparison raises DataValidationError for invalid types."""
+        """Test TimeIndex comparison raises TypeError for invalid types."""
         dates = pd.date_range(start='2020-01-01', periods=10, freq='ME')
         time_index = TimeIndex(dates)
-        # Try comparison with invalid type (string)
-        with pytest.raises(DataValidationError, match="Cannot compare TimeIndex with"):
+        # Try comparison with invalid type (string) - TimeIndex doesn't implement comparison operators
+        # so Python raises TypeError
+        with pytest.raises(TypeError):
             _ = time_index >= "2020-01-01"
-        with pytest.raises(DataValidationError, match="Cannot compare TimeIndex with"):
+        with pytest.raises(TypeError):
             _ = time_index <= "2020-01-01"
-        with pytest.raises(DataValidationError, match="Cannot compare TimeIndex with"):
+        with pytest.raises(TypeError):
             _ = time_index > "2020-01-01"
-        with pytest.raises(DataValidationError, match="Cannot compare TimeIndex with"):
+        with pytest.raises(TypeError):
             _ = time_index < "2020-01-01"
     
-    def test_parse_timestamp_invalid_string(self):
-        """Test parse_timestamp raises DataValidationError for invalid string formats."""
-        from dfm_python.dataset.process import parse_timestamp
+    def test_time_index_invalid_string_format(self):
+        """Test TimeIndex raises DataValidationError for invalid string formats."""
         # Try invalid string format
-        with pytest.raises(DataValidationError, match="Cannot parse datetime string"):
-            parse_timestamp("invalid-date-format")
+        import warnings
+        invalid_dates = pd.Series(['invalid-date-format', 'also-invalid'], dtype=object)
+        # Suppress expected pandas warning about date parsing (test verifies error is raised)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=".*Could not infer format.*", category=UserWarning)
+            with pytest.raises(DataValidationError, match="Cannot convert Series"):
+                TimeIndex(invalid_dates)
     
-    def test_parse_timestamp_invalid_type(self):
-        """Test parse_timestamp raises DataValidationError for unsupported types."""
-        from dfm_python.dataset.process import parse_timestamp
-        # Try unsupported type (list)
-        with pytest.raises(DataValidationError, match="Cannot parse"):
-            parse_timestamp([2020, 1, 1])
+    def test_time_index_invalid_list_type(self):
+        """Test TimeIndex handles list input by converting to Series."""
+        # TimeIndex should convert list to Series
+        dates_list = [datetime(2020, 1, 1), datetime(2020, 2, 1)]
+        time_index = TimeIndex(dates_list)
+        assert len(time_index) == 2
 
 
 

@@ -17,17 +17,22 @@ from .pca import (
 
 from .simple_autoencoder import (
     Encoder,
-    Autoencoder,
+    SimpleAutoencoder,
     extract_decoder_params,
-    convert_decoder_to_numpy,
 )
 
-from .variational_autoencoder import (
-    AutoencoderEncoder,
-    VariationalEncoder,
-)
+# Variational autoencoder imports (optional - file may be empty)
+try:
+    from .variational_autoencoder import (
+        AutoencoderEncoder,
+        VariationalEncoder,
+    )
+except ImportError:
+    # Variational autoencoder not implemented yet
+    AutoencoderEncoder = None
+    VariationalEncoder = None
 
-from ..decoder import Decoder
+from ..decoder import LinearDecoder, MLPDecoder
 
 __all__ = [
     # Base
@@ -37,13 +42,13 @@ __all__ = [
     'compute_principal_components',
     # DDFM Encoder
     'Encoder',
-    'Autoencoder',
+    'SimpleAutoencoder',
     'extract_decoder_params',
-    'convert_decoder_to_numpy',
     # Autoencoder/VAE
     'AutoencoderEncoder',
     'VariationalEncoder',
     # Decoder
-    'Decoder',
+    'LinearDecoder',
+    'MLPDecoder',
 ]
 

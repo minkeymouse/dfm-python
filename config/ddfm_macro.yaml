@@ -5,32 +5,24 @@
 # Target: KOEQUIPTE (Investment, Equipment, Estimation, SA)
 
 # Neural Network Architecture
-encoder_layers:
-  - 64
-  - 32
-num_factors: 2  # Number of factors (DDFM does not use block structure)
+encoder_layers: [64, 32, 2]  # Hidden layers: [64, 32] -> latent: 2 factors
 activation: relu  # Activation function: 'tanh', 'relu', 'sigmoid'
-use_batch_norm: true
+use_batch_norm: true  # Use batch normalization
 
 # Training Parameters
-learning_rate: 0.001
-epochs: 1  # Number of MC samples per MCMC iteration (default: 1 for ~100x speedup vs original DDFM). Note: This is NOT training epochs, but MC samples.
-batch_size: 100  # DDFM-specific default batch size
-factor_order: 1  # VAR lag order for factor dynamics (must be 1)
-
-# Idiosyncratic Components
-use_idiosyncratic: true
-min_obs_idio: 5  # Minimum observations for idio AR(1) estimation
+learning_rate: 0.001  # Learning rate for optimizer
+n_mc_samples: 1  # Number of MC samples per MCMC iteration (reduced for faster execution)
+window_size: 100  # Time-step batch size for training
 
 # MCMC/Iterative Parameters
-max_iter: 200  # Maximum MCMC iterations for iterative factor extraction
-tolerance: 0.0005  # Convergence tolerance for MCMC iterations
+max_epoch: 200  # Maximum MCMC iterations
+tolerance: 0.0005  # Convergence tolerance
 disp: 10  # Display frequency for training progress
+seed: null  # Random seed (None uses default)
 
-# Data Handling
+# Data Handling (used by Dataset, not Model)
 clock: w  # Weekly clock frequency (base frequency for latent factors)
-target_scaler: standard  # Scaler for target series only: 'standard', 'robust', 'minmax', 'maxabs', 'quantile', or null (no scaling)
-# Note: nan_method and nan_k are internal constants (not user-configurable)
+target_scaler: standard  # Scaler for target series: 'standard', 'robust', 'minmax', 'maxabs', 'quantile', or null
 
 # Frequency mapping for mixed-frequency macro data
 # Clock is weekly (w), so monthly series are slower frequency
@@ -60,4 +52,3 @@ frequency:
   KORCNST: w  # Retail, Construction (weekly)
   KORMACH: w  # Retail, Machinery (weekly)
   KOROCOINF: w  # Retail, Other Consumer & Information (weekly)
-

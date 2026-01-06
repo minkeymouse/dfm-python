@@ -22,6 +22,7 @@ from dfm_python.numeric.stability import (
 )
 from dfm_python.utils.errors import DataValidationError, DataError, NumericalError
 from dfm_python.config.constants import (
+    DEFAULT_TORCH_DTYPE,
     DEFAULT_VARIANCE_FALLBACK,
     CHOLESKY_LOG_DET_FACTOR,
     SYMMETRY_AVERAGE_FACTOR,
@@ -351,9 +352,9 @@ class TestStability:
     def test_extract_matrix_block_torch(self):
         """Test extract_matrix_block with PyTorch tensor."""
         import torch
-        matrix = torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]], dtype=torch.float32)
+        matrix = torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]], dtype=DEFAULT_TORCH_DTYPE)
         result = extract_matrix_block(matrix, 0, 2, 1, 3)
-        expected = torch.tensor([[2.0, 3.0], [5.0, 6.0]], dtype=torch.float32)
+        expected = torch.tensor([[2.0, 3.0], [5.0, 6.0]], dtype=DEFAULT_TORCH_DTYPE)
         assert torch.allclose(result, expected)
         assert result.shape == (2, 2)
     

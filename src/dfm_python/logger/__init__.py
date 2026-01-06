@@ -2,8 +2,8 @@
 
 This package provides:
 - Basic logging configuration (get_logger, setup_logging)
-- Training process tracking (TrainLogger)
-- Inference process tracking (InferenceLogger)
+- Training process tracking (BaseTrainLogger and model-specific loggers)
+- Inference process tracking (BaseInferenceLogger and model-specific loggers)
 """
 
 from .logger import (
@@ -13,7 +13,11 @@ from .logger import (
 )
 
 from .train_logger import (
-    TrainLogger,
+    BaseTrainLogger,
+    DFMTrainLogger,
+    DDFMTrainLogger,
+    KDFMTrainLogger,
+    TrainLogger,  # Backward compatibility alias
     log_training_start,
     log_training_step,
     log_training_end,
@@ -23,7 +27,11 @@ from .train_logger import (
 )
 
 from .inference_logger import (
-    InferenceLogger,
+    BaseInferenceLogger,
+    DFMInferenceLogger,
+    DDFMInferenceLogger,
+    KDFMInferenceLogger,
+    InferenceLogger,  # Backward compatibility alias
     log_inference_start,
     log_inference_step,
     log_inference_end,
@@ -35,16 +43,24 @@ __all__ = [
     'get_logger',
     'setup_logging',
     'configure_logging',
-    # Training tracking
-    'TrainLogger',
+    # Training tracking - base and model-specific
+    'BaseTrainLogger',
+    'DFMTrainLogger',
+    'DDFMTrainLogger',
+    'KDFMTrainLogger',
+    'TrainLogger',  # Backward compatibility
     'log_training_start',
     'log_training_step',
     'log_training_end',
     'log_em_iteration',
     'log_training_epoch',
     'log_convergence',
-    # Inference tracking
-    'InferenceLogger',
+    # Inference tracking - base and model-specific
+    'BaseInferenceLogger',
+    'DFMInferenceLogger',
+    'DDFMInferenceLogger',
+    'KDFMInferenceLogger',
+    'InferenceLogger',  # Backward compatibility
     'log_inference_start',
     'log_inference_step',
     'log_inference_end',

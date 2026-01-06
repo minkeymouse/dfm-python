@@ -138,7 +138,3 @@ __all__.extend([
     'KDFMDataset',  # KDFM Dataset class
 ])
 
-# Trainer classes (DEPRECATED - removed, kept stubs in trainer/__init__.py for backward compatibility)
-# Note: Trainer classes have been removed. Use model.train() or model.fit() methods instead.
-
-

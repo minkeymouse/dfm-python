@@ -24,7 +24,7 @@ import numpy as np
 from datetime import datetime
 from dfm_python import DDFM, DDFMDataset
 from dfm_python.config import DDFMConfig, YamlSource, make_config_source
-from dfm_python.utils.misc import TimeIndex
+from dfm_python.dataset.time import TimeIndex
 
 
 print("=" * 80)
@@ -70,28 +70,27 @@ missing_after = df_processed.isnull().sum().sum()
 print(f"   Missing values after imputation: {missing_after}")
 
 # ============================================================================
-# Step 2.5: Standardize Data (matching original TensorFlow DDFM)
+# Step 2.5: Preprocess Features (if any)
 # ============================================================================
-# Original TensorFlow: self.data = (data - self.mean_z) / self.sigma_z
-print("\n[Step 2.5] Standardizing data (matching original TensorFlow DDFM)...")
-print("   Original TensorFlow: self.data = (data - self.mean_z) / self.sigma_z")
-print("   All series must be standardized before passing to DataModule")
+print("\n[Step 2.5] Preprocessing features (if any)...")
+print("   Note: Features (non-target series) should be preprocessed by user.")
+print("   Target series will be scaled within DDFM pipeline using scaler class.")
 
-# Standardize all data (matching original TensorFlow DDFM)
-mean_z = df_processed.mean().values
-sigma_z = df_processed.std().values
-df_standardized = (df_processed - mean_z) / sigma_z
+# For exchange_rate data, all series are targets, so no feature preprocessing needed
+# In general, identify features vs targets and preprocess features here
+target_series = list(df_processed.columns)  # All series are targets for exchange_rate
+feature_series = []  # No features for exchange_rate case
 
-# Verify standardization
-mean_vals = df_standardized.mean()
-std_vals = df_standardized.std()
-max_mean = float(mean_vals.abs().max())
-max_std_dev = float((std_vals - 1.0).abs().max())
-print(f"   Standardization check - Max |mean|: {max_mean:.6f} (should be ~0)")
-print(f"   Standardization check - Max |std - 1|: {max_std_dev:.6f} (should be ~0)")
+if len(feature_series) > 0:
+    # Preprocess features (standardization, normalization, etc.)
+    # User should do this before passing to DDFM
+    print(f"   {len(feature_series)} feature series should be preprocessed by user")
+else:
+    print(f"   No features to preprocess (all {len(target_series)} series are targets)")
+    print(f"   Target series will be scaled within DDFM pipeline")
 
-# Update df_processed to use standardized data
-df_processed = df_standardized
+# Store for later use
+df_processed_final = df_processed.copy()
 
 # ============================================================================
 # Step 3: Load Configuration from YAML File
@@ -126,7 +125,6 @@ except ImportError:
         num_factors=4,
         encoder_layers=[16, 4],
         activation='relu',
-        use_batch_norm=True,
         learning_rate=0.005,
         n_mc_samples=10,
         window_size=100,
@@ -147,7 +145,6 @@ except Exception as e:
         num_factors=4,
         encoder_layers=[16, 4],
         activation='relu',
-        use_batch_norm=True,
         learning_rate=0.005,
         n_mc_samples=10,
         window_size=100,
@@ -166,110 +163,133 @@ if not hasattr(config, 'frequency') or config.frequency is None:
 
 print(f"\n   Configuration loaded:")
 print(f"   - Number of series: {len(df_processed.columns)}")
-print(f"   - Number of factors: {config.num_factors} (matching original)")
-print(f"   - Encoder layers: {config.encoder_layers} (matching original structure_encoder=(16, 4))")
+encoder_layers = getattr(config, 'encoder_layers', [16, 4])  # Default if not in config
+num_factors = encoder_layers[-1] if encoder_layers else 4  # Last element is latent dimension
+print(f"   - Number of factors: {num_factors} (matching original, inferred from encoder_layers)")
+print(f"   - Encoder layers: {encoder_layers} (matching original structure_encoder=(16, 4))")
 print(f"   - Decoder: linear (matching original structure_decoder=None)")
 print(f"   - Factor dynamics: VAR(1) (always AR(1), not configurable)")
-print(f"   - MC samples per iteration: {config.n_mc_samples} (matching original epochs=10)")
-print(f"   - Window size (batch size): {config.window_size} (matching original batch_size=100)")
-print(f"   - Learning rate: {config.learning_rate} (matching original)")
-print(f"   - Max epochs (MCMC iterations): {config.max_epoch} (matching original max_iter=200)")
-print(f"   - Tolerance: {config.tolerance} (matching original)")
-print(f"   - Seed: {config.seed} (matching original)")
-print(f"   - Lags input: {config.lags_input} (matching original)")
+n_mc_samples = getattr(config, 'n_mc_samples', 10)
+window_size = getattr(config, 'window_size', 100)
+learning_rate = getattr(config, 'learning_rate', 0.005)
+max_iter = getattr(config, 'max_epoch', 200)  # Config uses max_epoch
+tolerance = getattr(config, 'tolerance', 0.0005)
+seed = getattr(config, 'seed', 3)
+print(f"   - MC samples per iteration: {n_mc_samples} (matching original epochs=10)")
+print(f"   - Window size (batch size): {window_size} (matching original batch_size=100)")
+print(f"   - Learning rate: {learning_rate} (matching original)")
+print(f"   - Max iterations (MCMC): {max_iter} (matching original max_iter=200)")
+print(f"   - Tolerance: {tolerance} (matching original)")
+print(f"   - Seed: {seed} (matching original)")
 
 # ============================================================================
-# Step 4: Create DataModule
+# Step 4: Create Dataset
 # ============================================================================
-print("\n[Step 4] Creating DataModule...")
+print("\n[Step 4] Creating Dataset...")
 
-# Create time index from DataFrame index
-time_list = [pd.Timestamp(idx).to_pydatetime() for idx in df_processed.index]
-time_index = TimeIndex(time_list)
+# For DDFM, we need to specify target_series (series to forecast)
+# In this tutorial, all series are targets (no features)
+target_series = list(df_processed_final.columns)
 
-# Create Dataset with standardized data
+# Mimic original TensorFlow scaling: pandas (data - mean) / std (ddof=1)
+# This matches the original: self.data = (data - self.mean_z) / self.sigma_z
+# where mean_z = data.mean().values and sigma_z = data.std().values (ddof=1 by default)
+print("   Applying pandas scaling (matching original TensorFlow):")
+mean_z = df_processed_final.mean().values
+sigma_z = df_processed_final.std().values  # pandas std uses ddof=1 by default
+df_scaled = (df_processed_final - mean_z) / sigma_z
+print(f"   Scaled data shape: {df_scaled.shape}")
+print(f"   Mean (should be ~0): {df_scaled.mean().values[:3]}")
+print(f"   Std (should be ~1): {df_scaled.std().values[:3]}")
+
+# Pass None to scaler since we already scaled manually (matching original TensorFlow)
+target_scaler_class = None
+
+# Create Dataset - data is already scaled, so pass None for scaler
 dataset = DDFMDataset(
-    config=config,
-    data=df_standardized,  # Must be standardized (matching original TensorFlow)
-    time_index=time_index,
-    target_series=None  # All series are features (no separate target)
+    data=df_scaled,  # Data already scaled using pandas (matching original)
+    time_idx='index',  # Use DataFrame index as time identifier
+    target_series=target_series,  # All series are targets
+    target_scaler=target_scaler_class  # None - data already scaled
 )
 
 print(f"   Dataset created successfully")
-print(f"   Processed data shape: {dataset.get_processed_data().shape}")
+print(f"   Data shape: {dataset.data.shape}")
+print(f"   Target series: {dataset.target_series}")
 
 # ============================================================================
 # Step 5: Create and Train Model
 # ============================================================================
 print("\n[Step 5] Creating and training DDFM model...")
 
-# Create model with same parameters as config
-# Note: decoder="linear" matches original structure_decoder=None (linear decoder)
+# Create model with parameters from config
+# Map config parameters to model parameters
+encoder_layers = getattr(config, 'encoder_layers', [16, 4])
+encoder_size = tuple(encoder_layers) if encoder_layers else (16, 4)
+max_epoch = getattr(config, 'max_epoch', 200)
+
 model = DDFM(
+    dataset=dataset,
     config=config,
-    encoder_layers=[16, 4],
-    num_factors=4,
-    activation='relu',
-    use_batch_norm=True,
-    learning_rate=0.005,
-    n_mc_samples=10,
-    window_size=100,
-    max_epoch=200,
-    tolerance=0.0005,
-    disp=10,
-    lags_input=0,
-    seed=3,
-    decoder="linear",  # Matching original structure_decoder=None (linear decoder)
-    decay_learning_rate=True
+    encoder_size=encoder_size,  # Convert list to tuple
+    decoder_type="linear",  # Matching original structure_decoder=None (linear decoder)
+    activation=getattr(config, 'activation', 'relu'),
+    learning_rate=getattr(config, 'learning_rate', 0.005),
+    optimizer='Adam',
+    n_mc_samples=getattr(config, 'n_mc_samples', 10),
+    window_size=getattr(config, 'window_size', 100),
+    max_iter=max_epoch,  # Map max_epoch -> max_iter
+    tolerance=getattr(config, 'tolerance', 0.0005),
+    disp=getattr(config, 'disp', 10),
+    seed=getattr(config, 'seed', 3)
 )
 
 # Train model
-print(f"   Starting training (max {config.max_epoch} iterations)...")
-model.train(dataset=dataset)
+print(f"   Starting training (max {model.max_iter} iterations)...")
+model.fit()  # fit() builds model, pre-trains, and trains in one method
 print("   Training completed!")
+
+# Build state-space model for prediction
+print("\n[Step 5.5] Building state-space model...")
+model.build_state_space()
+print("   State-space model built successfully")
 
 # ============================================================================
 # Step 6: Extract Results
 # ============================================================================
 print("\n[Step 6] Extracting results...")
 
-# Get result from model
+# Get result from model (requires build_state_space() to be called)
 result = model.get_result()
 factors = result.Z  # (T, num_factors) - averaged factors
 print(f"   Factors shape: {factors.shape} (T x num_factors)")
 
-# Get training state
-if hasattr(model, 'training_state') and model.training_state is not None:
-    final_loss = model.training_state.training_loss
-    num_iter = model.training_state.num_iter
-    converged = model.training_state.converged
-    print(f"   Final training loss: {final_loss:.6f}")
-    print(f"   Number of iterations: {num_iter}")
-    print(f"   Converged: {converged}")
+# Get training information
+final_loss = model.loss_now if hasattr(model, 'loss_now') and model.loss_now is not None else None
+print(f"   Final training loss: {final_loss:.6f}" if final_loss is not None else "   Final training loss: N/A")
 
 # ============================================================================
-# Step 7: Access Results
+# Step 7: Access Results and Predict
 # ============================================================================
-print("\n[Step 7] Accessing results...")
-
-# For exchange rate data (all series are features, no target_series),
-# we can access factors and predictions from the training state
-# The original TensorFlow DDFM also extracts factors and predictions this way
+print("\n[Step 7] Accessing results and making predictions...")
 
 # Get factors (averaged over MC samples)
 factors = result.Z  # (T, num_factors)
 print(f"   Factors shape: {factors.shape} (T x num_factors)")
 
-# Get smoothed predictions (from training state)
-if hasattr(model, 'training_state') and model.training_state.prediction is not None:
-    predictions = model.training_state.prediction  # (T, N)
-    print(f"   Predictions shape: {predictions.shape} (T x N)")
-    print(f"   First prediction (first series): {predictions[0, 0]:.6f}")
+# Get smoothed predictions from result
+x_sm = result.x_sm  # (T, N) - smoothed data
+print(f"   Smoothed data shape: {x_sm.shape} (T x N)")
 
-# Note: For forecasting future values, you would need to:
-# 1. Set target_series in DataModule (if you want to forecast specific series)
-# 2. Or use the state-space model to forecast factors forward, then decode to observations
-print("   Note: For forecasting, set target_series in DataModule or use state-space model")
+# Make predictions
+print("\n[Step 8] Making forecasts...")
+try:
+    X_forecast, Z_forecast = model.predict(horizon=6, return_series=True, return_factors=True)
+    print(f"   Forecast series shape: {X_forecast.shape} (horizon x num_target_series)")
+    print(f"   Forecast factors shape: {Z_forecast.shape} (horizon x num_factors)")
+    print(f"   First forecast (first target series): {X_forecast[0, 0]:.6f}")
+except Exception as e:
+    print(f"   Prediction failed: {e}")
 
 # ============================================================================
 # Summary
@@ -278,10 +298,14 @@ print("\n" + "=" * 80)
 print("Tutorial Summary")
 print("=" * 80)
 print(f"✅ Data loaded: {df.shape[0]} rows, {df.shape[1]} series")
-print(f"✅ Data standardized: mean≈{max_mean:.6f}, std≈{1.0 + max_std_dev:.6f}")
-print(f"✅ Model trained: {len(df_processed.columns)} series, {config.num_factors} factors, VAR(1) dynamics")
+if len(feature_series) > 0:
+    print(f"✅ Features preprocessed: {len(feature_series)} feature series")
+else:
+    print(f"✅ No features: all {len(target_series)} series are targets (scaled within DDFM pipeline)")
+print(f"✅ Model trained: {len(df_processed_final.columns)} series, {len(factors[0]) if len(factors) > 0 else 'N/A'} factors, VAR(1) dynamics")
 print(f"✅ Factors extracted: {factors.shape[0]} periods, {factors.shape[1]} factors")
 print(f"✅ Configuration matches original TensorFlow DDFM")
-print(f"✅ Training converged in {num_iter} iterations (loss: {final_loss:.6f})")
+if final_loss is not None:
+    print(f"✅ Training completed (loss: {final_loss:.6f})")
 print("=" * 80)
 

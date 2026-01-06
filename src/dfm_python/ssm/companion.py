@@ -11,8 +11,8 @@ import torch.nn as nn
 from einops import rearrange
 
 from ..utils.errors import ConfigurationError, NumericalError, NumericalStabilityError
-from ..utils.common import ensure_numpy
-from ..config.types import Tensor, Device, Shape2D, Shape3D, NumVars, LagOrder, OptionalTensor
+import torch
+from ..config.types import Tensor, Device, Shape2D, Shape3D, NumVars, LagOrder, OptionalTensor, to_numpy
 from ..config.constants import (
     DEFAULT_EIGENVALUE_MAX_MAGNITUDE,
     MIN_OBSERVATION_NOISE,
@@ -660,9 +660,9 @@ class CompanionSSM(CompanionSSMBase):
             
             # Get first kernel for eigenvalue computation
             if A.ndim == 3:
-                A_np = ensure_numpy(A[0])  # (latent_dim, latent_dim)
+                A_np = to_numpy(A[0])  # (latent_dim, latent_dim)
             elif A.ndim == 2:
-                A_np = ensure_numpy(A)
+                A_np = to_numpy(A)
             else:
                 raise NumericalError(
                     f"Invalid companion matrix shape: {A.shape}",

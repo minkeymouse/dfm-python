@@ -17,7 +17,6 @@ from torch import Tensor
 from ..logger import get_logger
 from ..utils.errors import DataValidationError, DataError, NumericalError
 from ..utils.helper import handle_linear_algebra_error
-from ..utils.common import sanitize_array
 from ..config.constants import (
     MIN_EIGENVALUE,
     MIN_DIAGONAL_VARIANCE,
@@ -115,7 +114,7 @@ def clean_matrix(
         matrix_type = MATRIX_TYPE_GENERAL
     
     if matrix_type == MATRIX_TYPE_COVARIANCE:
-        M = sanitize_array(M, nan_value=default_nan, inf_value=MAX_EIGENVALUE)
+        M = np.nan_to_num(M, nan=default_nan, posinf=MAX_EIGENVALUE, neginf=-MAX_EIGENVALUE)
         M = ensure_symmetric(M)
         def _apply_eigenvalue_cleaning():
             eigenvals = np.linalg.eigvals(M)
@@ -138,19 +137,14 @@ def clean_matrix(
     elif matrix_type == MATRIX_TYPE_DIAGONAL:
         diag = np.diag(M)
         default_inf_val = default_inf if default_inf is not None else DEFAULT_MAX_VARIANCE
-        diag = sanitize_array(
-            diag,
-            nan_value=default_nan,
-            inf_value=default_inf_val,
-            neginf_value=default_nan
-        )
+        diag = np.nan_to_num(diag, nan=default_nan, posinf=default_inf_val, neginf=default_nan)
         diag = np.maximum(diag, MIN_DIAGONAL_VARIANCE)
         M = np.diag(diag)
     elif matrix_type == MATRIX_TYPE_LOADING:
-        M = sanitize_array(M, nan_value=default_nan, inf_value=DEFAULT_EIGENVALUE_MAX_MAGNITUDE)
+        M = np.nan_to_num(M, nan=default_nan, posinf=DEFAULT_EIGENVALUE_MAX_MAGNITUDE, neginf=-DEFAULT_EIGENVALUE_MAX_MAGNITUDE)
     else:
         default_inf_val = default_inf if default_inf is not None else MAX_EIGENVALUE
-        M = sanitize_array(M, nan_value=default_nan, inf_value=default_inf_val)
+        M = np.nan_to_num(M, nan=default_nan, posinf=default_inf_val, neginf=-default_inf_val)
     return M
 
 

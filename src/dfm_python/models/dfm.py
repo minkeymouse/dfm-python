@@ -41,6 +41,7 @@ from ..config.constants import (
     DEFAULT_DTYPE,
     DEFAULT_CLOCK_FREQUENCY,
     DEFAULT_HIERARCHY_VALUE,
+    DEFAULT_FACTOR_ORDER,
     DEFAULT_IDENTITY_SCALE,
     DEFAULT_ZERO_VALUE,
 )
@@ -99,51 +100,7 @@ class DFMTrainingState:
 
 
 class DFM(BaseFactorModel):
-    """High-level API for Linear Dynamic Factor Model.
-    
-    This class implements the EM algorithm for DFM estimation using NumPy and pykalman.
-    It inherits from BaseFactorModel since all calculations
-    are performed in NumPy.
-    
-    **Note**: All calculations are performed in NumPy (using pykalman) for better
-    numerical stability. Parameters are stored as NumPy arrays (no PyTorch dependencies).
-    
-    **Block Structure**: The model supports block-structured factors (factors organized
-    in blocks). Block structure is established during initialization and is preserved
-    during EM updates. pykalman handles the E-step (Kalman filter/smoother), while
-    the M-step uses custom code that maintains block structure, mixed-frequency handling,
-    and idiosyncratic components.
-    
-    Example:
-        >>> from dfm_python import DFM, DFMDataset
-        >>> from dfm_python.config import DFMConfig
-        >>> import pandas as pd
-        >>> 
-        >>> # Step 1: Load and preprocess data
-        >>> df = pd.read_csv('data/finance.csv')
-        >>> 
-        >>> # Step 2: Create config
-        >>> config = DFMConfig(
-        ...     frequency={'series1': 'm', 'series2': 'm'},
-        ...     blocks={'Block1': {'num_factors': 1, 'series': ['series1', 'series2']}},
-        ...     clock='m'
-        ... )
-        >>> 
-        >>> # Step 3: Create model with config
-        >>> model = DFM(config=config)
-        >>> 
-        >>> # Step 4: Create Dataset and fit
-        >>> dataset = DFMDataset(config=config, data=df, target_series=['series1'])
-        >>> init_params = dataset.get_initialization_params()
-        >>> model.fit(X=init_params['X'], dataset=dataset)
-        >>> 
-        >>> # Step 5: Access results
-        >>> result = model.result
-        >>> print(result.summary())
-        >>> 
-        >>> # Step 6: Predict
-        >>> X_forecast, Z_forecast = model.predict(horizon=6)
-    """
+    """Linear Dynamic Factor Model using EM algorithm with NumPy and pykalman."""
     
     def __init__(
         self,
@@ -192,9 +149,13 @@ class DFM(BaseFactorModel):
         config = self._initialize_config(config)
         
         # Resolve parameters using consolidated helper
+        # If parameters not explicitly passed, use config values if available, otherwise use defaults
         from ..utils.misc import resolve_param
-        self.threshold = resolve_param(threshold, default=DEFAULT_CONVERGENCE_THRESHOLD)
-        self.max_iter = resolve_param(max_iter, default=DEFAULT_MAX_ITER)
+        # Check config for max_iter and threshold if not explicitly passed
+        config_max_iter = getattr(config, 'max_iter', None) if config is not None else None
+        config_threshold = getattr(config, 'threshold', None) if config is not None else None
+        self.threshold = resolve_param(threshold, default=resolve_param(config_threshold, default=DEFAULT_CONVERGENCE_THRESHOLD))
+        self.max_iter = resolve_param(max_iter, default=resolve_param(config_max_iter, default=DEFAULT_MAX_ITER))
         self.nan_method = resolve_param(nan_method, default=DEFAULT_NAN_METHOD)
         self.nan_k = resolve_param(nan_k, default=DEFAULT_NAN_K)
         # Mixed frequency: auto-detected from Dataset or config during fit()
@@ -230,7 +191,7 @@ class DFM(BaseFactorModel):
             else np.ones(config.get_blocks_array().shape[1]),
             dtype=DEFAULT_DTYPE
         )
-        self.p = 1  # Factors always use AR(1) dynamics (simplified)
+        self.p = DEFAULT_FACTOR_ORDER  # Factors always use AR(1) dynamics (simplified)
         self.blocks = np.array(config.get_blocks_array(), dtype=DEFAULT_DTYPE)
         
         # Parameters stored as NumPy arrays (no PyTorch dependencies)
@@ -274,14 +235,14 @@ class DFM(BaseFactorModel):
         A, C, Q, R, Z_0, V_0 : np.ndarray
             Parameter arrays
         """
-        from ..utils.common import ensure_numpy
+        import torch
         # Convert to numpy and ensure dtype (only if necessary)
-        self.A = ensure_numpy(A, dtype=DEFAULT_DTYPE) if A is not None else None
-        self.C = ensure_numpy(C, dtype=DEFAULT_DTYPE) if C is not None else None
-        self.Q = ensure_numpy(Q, dtype=DEFAULT_DTYPE) if Q is not None else None
-        self.R = ensure_numpy(R, dtype=DEFAULT_DTYPE) if R is not None else None
-        self.Z_0 = ensure_numpy(Z_0, dtype=DEFAULT_DTYPE) if Z_0 is not None else None
-        self.V_0 = ensure_numpy(V_0, dtype=DEFAULT_DTYPE) if V_0 is not None else None
+        self.A = np.asarray(A, dtype=DEFAULT_DTYPE) if A is not None else None
+        self.C = np.asarray(C, dtype=DEFAULT_DTYPE) if C is not None else None
+        self.Q = np.asarray(Q, dtype=DEFAULT_DTYPE) if Q is not None else None
+        self.R = np.asarray(R, dtype=DEFAULT_DTYPE) if R is not None else None
+        self.Z_0 = np.asarray(Z_0, dtype=DEFAULT_DTYPE) if Z_0 is not None else None
+        self.V_0 = np.asarray(V_0, dtype=DEFAULT_DTYPE) if V_0 is not None else None
     
     def _initialize_clock_freq_idio(
         self,
@@ -674,67 +635,7 @@ class DFM(BaseFactorModel):
         clock: str = DEFAULT_CLOCK_FREQUENCY,
         tent_weights_dict: Optional[Dict[str, np.ndarray]] = None,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Initialize DFM state-space parameters (A, C, Q, R, Z_0, V_0).
-        
-        Note: pykalman handles the E-step (Kalman filtering), but we still need to initialize
-        the state-space structure because:
-        1. Block structure must be established (factors organized by blocks)
-        2. Mixed-frequency constraints need tent kernel setup
-        3. Idiosyncratic components require initialization
-        4. Initial parameter estimates are needed for EM algorithm
-        
-        This uses a sequential residual-based PCA approach:
-        1. Handle missing data (spline interpolation)
-        2. Extract factors block-by-block:
-           - Block 1: PCA on original data (after cleaning)
-           - Block 2+: PCA on residuals (after removing previous blocks' contributions)
-        3. Build transition matrices for each block (VAR regression on extracted factors)
-        4. Initialize idiosyncratic components (AR(1) for clock freq, tent chain for slower freq)
-        
-        **Key insight**: The first block extracts factors from original data. Subsequent blocks
-        extract factors from residuals, ensuring each block captures different variance components
-        and factors are orthogonal across blocks.
-        
-        Parameters
-        ----------
-        x : np.ndarray
-            Standardized data matrix (T x N)
-        r : np.ndarray
-            Number of factors per block (n_blocks,)
-        p : int
-            AR lag order (typically 1)
-        blocks : np.ndarray
-            Block structure array (N x n_blocks)
-        opt_nan : dict
-            Missing data handling options {'method': int, 'k': int}
-        R_mat : np.ndarray, optional
-            Constraint matrix for tent kernel aggregation
-        q : np.ndarray, optional
-            Constraint vector for tent kernel aggregation
-        n_slower_freq : int
-            Number of slower-frequency series
-        idio_indicator : np.ndarray, optional
-            Indicator array (1 for clock frequency, 0 for slower frequencies)
-        clock : str
-            Clock frequency ('d', 'w', 'm', 'q', 'sa', 'a')
-        tent_weights_dict : dict, optional
-            Dictionary mapping frequency pairs to tent weights
-            
-        Returns
-        -------
-        A : np.ndarray
-            Initial transition matrix (m x m)
-        C : np.ndarray
-            Initial observation/loading matrix (N x m)
-        Q : np.ndarray
-            Initial process noise covariance (m x m)
-        R : np.ndarray
-            Initial observation noise covariance (N x N)
-        Z_0 : np.ndarray
-            Initial state vector (m,)
-        V_0 : np.ndarray
-            Initial state covariance (m x m)
-        """
+        """Initialize DFM state-space parameters using sequential residual-based PCA."""
         T, N = x.shape
         dtype = DEFAULT_DTYPE
         
@@ -852,7 +753,8 @@ class DFM(BaseFactorModel):
         if dataset is not None:
             self._dataset = dataset  # Store for later use in predict()
             # Store target_scaler for inverse transformation in predict()
-            self.target_scaler = getattr(dataset, 'target_scaler', None)
+            from ..utils.misc import get_target_scaler
+            self.target_scaler = get_target_scaler(dataset=dataset)
             init_params = dataset.get_initialization_params()
             X_np = init_params['X']
             R_mat = init_params['R_mat']
@@ -868,9 +770,12 @@ class DFM(BaseFactorModel):
             if self._mixed_freq is None:
                 self._mixed_freq = is_mixed_freq
         else:
-            # Convert to NumPy using utility function
-            from ..utils.common import ensure_numpy
-            X_np = ensure_numpy(X, dtype=DEFAULT_DTYPE)
+            # Convert to NumPy
+            import torch
+            if torch.is_tensor(X):
+                X_np = X.cpu().numpy().astype(DEFAULT_DTYPE)
+            else:
+                X_np = np.asarray(X, dtype=DEFAULT_DTYPE)
             
             # Setup mixed-frequency parameters (fallback if no datamodule)
             # Auto-detect from config if not explicitly set
@@ -1141,7 +1046,8 @@ class DFM(BaseFactorModel):
         x_sm = Z @ C.T
         
         # Get target scaler from dataset if available
-        target_scaler = getattr(self, 'target_scaler', None)
+        from ..utils.misc import get_target_scaler
+        target_scaler = get_target_scaler(model=self)
         
         return DFMResult(
             x_sm=x_sm, Z=Z, C=C, R=R, A=A, Q=Q,
@@ -1431,17 +1337,18 @@ class DFM(BaseFactorModel):
         # Transform factors to target observations (in standardized scale)
         X_forecast_std = Z_forecast @ C_target.T  # (horizon x len(target))
         
-        # Unstandardize using scaler if available, otherwise return as-is
+        # Unscale target series using fitted scaler if available
         if target_scaler is not None and hasattr(target_scaler, 'inverse_transform'):
-            # Reshape for scaler: scaler expects (n_samples, n_features)
             X_forecast = target_scaler.inverse_transform(X_forecast_std)
         else:
-            # No scaler - assume already in original scale
             X_forecast = X_forecast_std
         
         # Ensure X_forecast is numpy array and validate it's finite
-        from ..utils.common import ensure_numpy
-        X_forecast = ensure_numpy(X_forecast, dtype=DEFAULT_DTYPE)
+        import torch
+        if torch.is_tensor(X_forecast):
+            X_forecast = X_forecast.cpu().numpy().astype(DEFAULT_DTYPE)
+        else:
+            X_forecast = np.asarray(X_forecast, dtype=DEFAULT_DTYPE)
         validate_no_nan_inf(X_forecast, name="forecast X_forecast")
         
         # Validate forecast values are within reasonable bounds (only if scaler available)
@@ -1449,8 +1356,8 @@ class DFM(BaseFactorModel):
         if target_scaler is not None:
             # Try to extract scale for validation (optional - don't fail if unavailable)
             try:
-                from ..dataset.process import _get_scaler
-                scaler = _get_scaler(target_scaler)
+                # target_scaler is already an instance (fitted in dataset)
+                scaler = target_scaler
                 if scaler is not None and hasattr(scaler, 'scale_'):
                     scale_vals = scaler.scale_
                     if scale_vals is not None and len(scale_vals) > 0:

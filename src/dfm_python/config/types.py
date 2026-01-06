@@ -212,34 +212,53 @@ def get_array_shape(arr: ArrayLike) -> Shape:
 def to_numpy(arr: ArrayLike) -> np.ndarray:
     """Convert array-like to numpy array.
     
-    **Note**: For more flexible conversion (handles lists, tuples, scalars),
-    use `ensure_numpy()` from `utils.common` instead.
+    Automatically detaches tensors that require grad to avoid RuntimeError.
     """
     if is_numpy_array(arr):
         return arr
     elif is_torch_tensor(arr):
-        # Use local import to avoid circular dependency with utils.common
-        from ..utils.common import ensure_numpy
-        return ensure_numpy(arr)
+        import torch
+        if torch.is_tensor(arr):
+            # Detach if tensor requires grad to avoid RuntimeError
+            if arr.requires_grad:
+                arr = arr.detach()
+            return arr.cpu().numpy()
+        else:
+            return np.asarray(arr)
     else:
-        # Use local import to avoid circular dependency
-        from ..utils.errors import DataValidationError
-        raise DataValidationError(
-            f"Cannot convert {type(arr)} to numpy array",
-            details=f"Input type: {type(arr).__name__}, value shape: {getattr(arr, 'shape', 'N/A')}"
-        )
+        return np.asarray(arr)
 
 
-def to_tensor(arr: ArrayLike, device: Optional[Device] = None) -> Tensor:
-    """Convert array-like to torch tensor."""
+def to_tensor(arr: ArrayLike, device: Optional[Device] = None, dtype: Optional['torch.dtype'] = None) -> Tensor:
+    """Convert array-like to torch tensor.
+    
+    Parameters
+    ----------
+    arr : ArrayLike
+        Array-like object to convert
+    device : Optional[Device]
+        Target device for tensor (default: None)
+    dtype : Optional[torch.dtype]
+        Target dtype for tensor (default: None)
+        
+    Returns
+    -------
+    Tensor
+        PyTorch tensor with specified device and dtype
+    """
     if is_torch_tensor(arr):
+        result = arr
         if device is not None:
-            return arr.to(device)
-        return arr
+            result = result.to(device)
+        if dtype is not None:
+            result = result.to(dtype)
+        return result
     elif is_numpy_array(arr):
         tensor = torch.from_numpy(arr)
         if device is not None:
             tensor = tensor.to(device)
+        if dtype is not None:
+            tensor = tensor.to(dtype)
         return tensor
     else:
         # Use local import to avoid circular dependency

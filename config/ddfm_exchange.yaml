@@ -5,36 +5,24 @@
 # Date range: 1990-01-01 to 2010-10-10
 
 # Neural Network Architecture (matching original TensorFlow DDFM)
-encoder_layers:
-  - 16
-  - 4
-num_factors: 4  # Matching original structure_encoder=(16, 4) -> 4 factors
+encoder_layers: [16, 4]  # Hidden layers: [16] -> latent: 4 (matching original structure_encoder=(16, 4))
 activation: relu  # Matching original link='relu'
 use_batch_norm: true  # Matching original batch_norm=True
-# Note: decoder="linear" is set in model initialization, not in config
-# Matching original structure_decoder=None (linear decoder)
 
 # Training Parameters (matching original TensorFlow DDFM)
 learning_rate: 0.005  # Matching original learning_rate=0.005
-epochs: 10  # Matching original epochs=10 (number of MC samples per MCMC iteration)
-batch_size: 100  # Matching original batch_size=100 (time-step batch size)
-factor_order: 1  # VAR lag order for factor dynamics (must be 1)
-
-# Idiosyncratic Components
-use_idiosyncratic: true
-min_obs_idio: 5  # Minimum observations for idio AR(1) estimation
+n_mc_samples: 10  # Number of MC samples per MCMC iteration (matching original epochs=10)
+window_size: 100  # Time-step batch size for training (matching original batch_size=100)
 
 # MCMC/Iterative Parameters (matching original TensorFlow DDFM)
-max_iter: 200  # Matching original max_iter=200 (maximum MCMC iterations)
-tolerance: 0.0005  # Matching original tolerance=0.0005
-disp: 10  # Matching original disp=10 (print every 10 iterations)
-seed: 3  # Matching original seed=3
-lags_input: 0  # Matching original lags_input=0
+max_epoch: 200  # Maximum MCMC iterations (matching original max_iter=200)
+tolerance: 0.0005  # Convergence tolerance (matching original tolerance=0.0005)
+disp: 10  # Display frequency for training progress (matching original disp=10)
+seed: 3  # Random seed (matching original seed=3)
 
-# Data Handling
+# Data Handling (used by Dataset, not Model)
 clock: d  # Daily clock frequency (all series are daily)
-target_scaler: null  # No target series - all series are features
-# Note: nan_method and nan_k are internal constants (not user-configurable)
+target_scaler: null  # No target scaler - data should be pre-scaled before passing to Dataset
 
 # Frequency mapping (all series are daily)
 # If not specified, all series use clock frequency (d)
@@ -48,4 +36,3 @@ target_scaler: null  # No target series - all series are features
 #   JPY_USD: d
 #   SGD_USD: d
 #   NZD_USD: d
-

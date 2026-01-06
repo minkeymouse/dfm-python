@@ -11,15 +11,13 @@ from .model import BaseModelConfig, DFMConfig, DDFMConfig, KDFMConfig
 from .results import BaseResult, DFMResult, DDFMResult, KDFMResult
 from .params import DFMFitParams, DDFMFitParams
 
-# Backward compatibility aliases
+# Backward compatibility alias
 FitParams = DFMFitParams
-DFMParams = DFMFitParams  # Legacy name
-DDFMParams = DDFMFitParams  # Legacy name
 
 __all__ = [
     'BaseModelConfig', 'DFMConfig', 'DDFMConfig', 'KDFMConfig',
     'BaseResult', 'DFMResult', 'DDFMResult', 'KDFMResult',
     'DFMFitParams', 'DDFMFitParams',
-    'FitParams', 'DFMParams', 'DDFMParams',  # Backward compatibility aliases
+    'FitParams',  # Backward compatibility alias
 ]
 

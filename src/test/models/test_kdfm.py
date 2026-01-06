@@ -183,19 +183,19 @@ class TestKDFM:
         model.initialize_from_data(X)
         
         # Create scenario where Z_last contains NaN/Inf after processing
-        # We'll manually inject NaN into the result by patching ensure_numpy to return NaN
-        from dfm_python.utils.common import ensure_numpy as original_ensure_numpy
+        # We'll manually inject NaN into the result by patching to_numpy to return NaN
+        from dfm_python.config.types import to_numpy as original_to_numpy
         
-        def mock_ensure_numpy_with_nan(tensor):
-            """Mock ensure_numpy to return NaN array."""
-            result = original_ensure_numpy(tensor)
+        def mock_to_numpy_with_nan(tensor):
+            """Mock to_numpy to return NaN array."""
+            result = original_to_numpy(tensor)
             # Replace with NaN to trigger the NaN/Inf fallback path
             return np.full_like(result, np.nan, dtype=result.dtype)
         
-        # Patch ensure_numpy temporarily
+        # Patch to_numpy temporarily
         import dfm_python.models.kdfm as kdfm_module
-        original_ensure_numpy_ref = kdfm_module.ensure_numpy
-        kdfm_module.ensure_numpy = mock_ensure_numpy_with_nan
+        original_to_numpy_ref = kdfm_module.to_numpy
+        kdfm_module.to_numpy = mock_to_numpy_with_nan
         
         try:
             observation = torch.randn(1, 5)
@@ -211,8 +211,8 @@ class TestKDFM:
             assert np.all(result == 0)
             assert result.dtype == DEFAULT_DTYPE
         finally:
-            # Restore original ensure_numpy
-            kdfm_module.ensure_numpy = original_ensure_numpy_ref
+            # Restore original to_numpy
+            kdfm_module.to_numpy = original_to_numpy_ref
     
     def test_compute_factor_state_from_observation_uses_default_dtype_on_exception(self):
         """Test _compute_factor_state_from_observation returns DEFAULT_DTYPE when caught exception occurs."""

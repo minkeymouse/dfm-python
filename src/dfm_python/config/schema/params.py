@@ -33,6 +33,35 @@ class DFMFitParams:
     threshold: Optional[float] = None
     regularization_scale: Optional[float] = None
 
+@dataclass
+class DDFMTrainingState:
+    """Training state for DDFM model.
+    
+    Stores the current state of DDFM training, including convergence status,
+    loss, factors, and residuals. Used for checkpointing and resuming training.
+    
+    Attributes
+    ----------
+    num_iter : int
+        Current iteration number in MCMC training loop.
+    loss_now : float, optional
+        Current training loss value.
+    converged : bool
+        Whether training has converged.
+    eps : np.ndarray, optional
+        Idiosyncratic residuals (T x num_target_series).
+    factors : np.ndarray, optional
+        Extracted factors (n_mc_samples x T x num_factors) or (T x num_factors).
+    last_neurons : np.ndarray, optional
+        Last layer neurons for MLP decoder (n_mc_samples x T x num_neurons) or (T x num_neurons).
+        For linear decoder, this equals factors.
+    """
+    num_iter: int = 0
+    loss_now: Optional[float] = None
+    converged: bool = False
+    eps: Optional[np.ndarray] = None
+    factors: Optional[np.ndarray] = None
+    last_neurons: Optional[np.ndarray] = None
 
 @dataclass
 class DDFMFitParams:

@@ -25,9 +25,8 @@ from datetime import datetime
 from dfm_python import DDFM, DDFMDataset
 from dfm_python.config import DDFMConfig
 from dfm_python.config.constants import TUTORIAL_MAX_PERIODS, DEFAULT_LEARNING_RATE, DEFAULT_DDFM_WINDOW_SIZE, DEFAULT_DDFM_LEARNING_RATE
-from dfm_python.utils.misc import TimeIndex
-from dfm_python.utils.common import select_columns_by_prefix
-from dfm_python.dataset.process import parse_timestamp
+from dfm_python.dataset.time import TimeIndex
+from dfm_python.utils.misc import select_columns_by_prefix
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sktime.transformations.series.impute import Imputer
@@ -235,37 +234,39 @@ else:
 # ============================================================================
 print("\n[Step 5] Training DDFM model...")
 
+# Create model with parameters from config
+# Map config parameters to model parameters
+encoder_layers = getattr(config, 'encoder_layers', [32, 1])
+encoder_size = tuple(encoder_layers) if encoder_layers else (32, 1)
+use_batch_norm = getattr(config, 'use_batch_norm', True)
+max_epoch = getattr(config, 'max_epoch', 3)  # Reduced for faster execution
+
 model = DDFM(
-    encoder_layers=[32, 16],  # Reduced for faster execution
-    num_factors=1,  # Reduced to 1 for faster execution
-    n_mc_samples=10,  # Number of MC samples per MCMC iteration (reduced for faster execution)
-    max_epoch=3,  # Maximum epochs (MCMC iterations). One epoch = one MCMC iteration (reduced for faster execution)
-    window_size=DEFAULT_DDFM_WINDOW_SIZE,  # Window size (time-step batch size) for training
-    learning_rate=DEFAULT_DDFM_LEARNING_RATE
+    dataset=dataset,
+    config=config,
+    encoder_size=encoder_size,  # Convert list to tuple
+    decoder_type="linear",
+    activation=getattr(config, 'activation', 'relu'),
+    batch_norm=use_batch_norm,  # Map use_batch_norm -> batch_norm
+    learning_rate=getattr(config, 'learning_rate', DEFAULT_DDFM_LEARNING_RATE),
+    optimizer='Adam',
+    n_mc_samples=getattr(config, 'n_mc_samples', 1),
+    window_size=getattr(config, 'window_size', DEFAULT_DDFM_WINDOW_SIZE),
+    max_iter=max_epoch,  # Map max_epoch -> max_iter
+    tolerance=getattr(config, 'tolerance', 0.0005),
+    disp=getattr(config, 'disp', 10),
+    seed=getattr(config, 'seed', None)
 )
-# Load config to ensure all parameters are set correctly
-model.load_config(config)
 
-# Initialize networks before training (required for configure_optimizers)
-# Input dimension is determined from processed data
-input_dim = dataset.get_processed_data().shape[1]
-model.initialize_networks(input_dim)
-# Note: Device movement is handled automatically by Lightning
-# on_train_start() will move the model to the correct device
-
-# Note: For DDFM, max_epochs is set to model.max_epoch (number of MCMC iterations).
-# Each Lightning epoch = one MCMC iteration.
-# Training uses standard Lightning training loop with convergence callback.
-# Training stops early if convergence is achieved before max_epoch.
-# 
-# Noise injection is handled automatically by the Autoencoder class:
-# - Noise samples are pre-generated on GPU at the start of each epoch
-# - During training, noise is injected by subtracting epsilon: y_t^(mc) = ỹ_t - ε_t^(mc)
-# - This follows the original DDFM pattern for denoising autoencoder training
-# Note: trainer parameter removed - model.train() is called directly (plain PyTorch, no PyTorch Lightning)
-model.train(dataset=dataset)
-
+# Train model - fit() builds model, pre-trains, and trains in one method
+print(f"   Starting training (max {model.max_iter} iterations)...")
+model.fit()
 print("   Training completed!")
+
+# Build state-space model for prediction
+print("\n[Step 5.5] Building state-space model...")
+model.build_state_space()
+print("   State-space model built successfully")
 
 # ============================================================================
 # Step 6: Prediction

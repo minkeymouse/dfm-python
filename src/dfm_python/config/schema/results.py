@@ -113,7 +113,10 @@ class BaseResult(ABC):
             return self.num_state()
     
     def get_x_sm_original_scale(self, target_scaler: Optional[Any] = None) -> np.ndarray:
-        """Get unstandardized smoothed data using target scaler.
+        """Get smoothed data in original scale by inverse transforming target series.
+        
+        Note: DDFM trains and evaluates on scaled data. This method inverse transforms
+        the target series back to original scale for user convenience.
         
         Parameters
         ----------
@@ -124,12 +127,11 @@ class BaseResult(ABC):
         Returns
         -------
         np.ndarray
-            Unstandardized smoothed data (T x N)
+            Smoothed data with target series in original scale (T x N)
         """
         scaler = target_scaler if target_scaler is not None else self.target_scaler
         if scaler is not None and hasattr(scaler, 'inverse_transform'):
             return scaler.inverse_transform(self.x_sm)
-        # No scaler - assume already in original scale
         return self.x_sm
     
     def to_pandas_factors(self, time_index: Optional[object] = None, factor_names: Optional[List[str]] = None):

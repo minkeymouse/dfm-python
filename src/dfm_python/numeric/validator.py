@@ -26,8 +26,8 @@ from ..utils.errors import (
     PredictionError,
     ConfigurationError
 )
-from ..utils.common import ensure_numpy
-from ..config.types import ArrayLike
+import torch
+from ..config.types import ArrayLike, to_numpy
 from ..config.constants import DEFAULT_MIN_DELTA
 from ..logger import get_logger
 
@@ -130,7 +130,7 @@ def validate_companion_stability(
     display_name = name if name is not None else f"{model_name} companion matrix"
     
     # Convert to numpy if needed
-    matrix_np = ensure_numpy(companion_matrix)
+    matrix_np = to_numpy(companion_matrix)
     
     # Check for NaN/Inf
     if np.any(np.isnan(matrix_np)) or np.any(np.isinf(matrix_np)):
@@ -285,7 +285,7 @@ def validate_prediction_inputs(
     validated_last_obs = None
     if last_observation is not None:
         # Convert to numpy
-        last_obs_np = ensure_numpy(last_observation)
+        last_obs_np = to_numpy(last_observation)
         
         # Handle shape: (K,) or (1, K) -> (K,)
         if last_obs_np.ndim == 2:
@@ -346,7 +346,8 @@ def validate_forecast_inputs(
     
     if last_observation is not None and n_vars is not None:
         # Normalize to numpy for shape checking
-        last_obs_np = ensure_numpy(last_observation)
+        from ..config.types import to_numpy
+        last_obs_np = to_numpy(last_observation)
         
         # Check shape: should be (1, n_vars) or (n_vars,)
         if last_obs_np.ndim == 1:
@@ -657,7 +658,7 @@ def validate_matrix_condition(
     name: str = "matrix"
 ) -> None:
     """Validate matrix condition number."""
-    matrix_np = ensure_numpy(matrix)
+    matrix_np = to_numpy(matrix)
     
     if matrix_np.size == 0:
         return
@@ -835,7 +836,7 @@ def validate_and_convert_update_data(
         If data shape doesn't match training data (N must match)
     """
     # Convert to NumPy (handles pandas, polars, torch, numpy)
-    data_np = ensure_numpy(data, dtype=dtype)
+    data_np = to_numpy(data).astype(dtype)
     
     # Validate shape matches training data
     validate_update_data_shape(data_np, training_data, model_name=model_name)
@@ -904,7 +905,7 @@ def validate_factors(
     """
     from ..utils.errors import DataError
     
-    factors = ensure_numpy(factors)
+    factors = to_numpy(factors)
     
     if factors.ndim == 0 or factors.size == 0:
         raise DataError(

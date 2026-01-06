@@ -9,9 +9,10 @@ from typing import Tuple, Optional, Union, TYPE_CHECKING
 from .base import BaseEncoder
 from ..logger import get_logger
 from ..numeric.stability import create_scaled_identity
-from ..utils.common import ensure_numpy
+import torch
 from ..utils.errors import ModelNotTrainedError
 from ..config.constants import DEFAULT_IDENTITY_SCALE
+from ..config.types import to_numpy
 
 if TYPE_CHECKING:
     import torch
@@ -46,7 +47,7 @@ def compute_principal_components(
         Eigenvectors (N x n_components)
     """
     # Convert to NumPy if needed
-    cov_matrix = ensure_numpy(cov_matrix)
+    cov_matrix = to_numpy(cov_matrix)
     
     if cov_matrix.size == 1:
         eigenvector = np.array([[DEFAULT_IDENTITY_SCALE]])
@@ -141,10 +142,10 @@ class PCAEncoder(BaseEncoder):
                 cov_matrix, self.n_components, block_idx=self.block_idx
             )
             # Store as NumPy array
-            self.cov_matrix = ensure_numpy(cov_matrix)
+            self.cov_matrix = to_numpy(cov_matrix)
         else:
             # Convert to NumPy if needed
-            X = ensure_numpy(X)
+            X = to_numpy(X)
             
             # Center the data
             self.mean_ = np.mean(X, axis=0, keepdims=True)
@@ -203,7 +204,7 @@ class PCAEncoder(BaseEncoder):
             )
         
         # Convert to NumPy if needed
-        X = ensure_numpy(X)
+        X = to_numpy(X)
         
         # Center the data
         if self.mean_ is not None:

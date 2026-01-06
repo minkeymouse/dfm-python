@@ -10,9 +10,8 @@ class TestInferenceLogger:
         """Test InferenceLogger can be initialized."""
         from dfm_python.logger.inference_logger import InferenceLogger
         
-        logger = InferenceLogger(model_name="TestModel", model_type="dfm", verbose=True)
+        logger = InferenceLogger(model_name="TestModel", verbose=True)
         assert logger.model_name == "TestModel"
-        assert logger.model_type == "dfm"
         assert logger.verbose is True
         assert logger.num_predictions == 0
 
