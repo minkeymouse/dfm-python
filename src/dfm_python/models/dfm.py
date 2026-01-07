@@ -44,6 +44,7 @@ from ..config.constants import (
     DEFAULT_FACTOR_ORDER,
     DEFAULT_IDENTITY_SCALE,
     DEFAULT_ZERO_VALUE,
+    DEFAULT_BLOCK_NAME,
 )
 from ..logger import get_logger
 from .base import BaseFactorModel
@@ -145,8 +146,10 @@ class DFM(BaseFactorModel):
         """
         super().__init__()
         
-        # Initialize config using consolidated helper method
-        config = self._initialize_config(config)
+        # Initialize config - create temp config if None
+        if config is None:
+            config = self._create_temp_config()
+        self._config = config
         
         # Resolve parameters using consolidated helper
         # If parameters not explicitly passed, use config values if available, otherwise use defaults
@@ -208,6 +211,27 @@ class DFM(BaseFactorModel):
         # Note: Mx/Wx removed - target_scaler is used instead for inverse transformation
         self.data_processed: Optional[np.ndarray] = None
         self.target_scaler: Optional[Any] = None  # Fitted sklearn scaler for target series inverse transformation
+    
+    def _create_temp_config(self, block_name: Optional[str] = None) -> DFMConfig:
+        """Create a temporary configuration for model initialization.
+        
+        Parameters
+        ----------
+        block_name : str, optional
+            Name for the default block. If None, uses DEFAULT_BLOCK_NAME.
+            
+        Returns
+        -------
+        DFMConfig
+            Minimal default configuration with a single temporary series and block
+        """
+        if block_name is None:
+            block_name = DEFAULT_BLOCK_NAME
+        
+        return DFMConfig(
+            frequency={'temp': DEFAULT_CLOCK_FREQUENCY},
+            blocks={block_name: {'factors': 1, 'ar_lag': 1, 'clock': 'm'}}
+        )
     
     def _check_parameters_initialized(self) -> None:
         """Check if model parameters are initialized (required for prediction).
@@ -771,11 +795,8 @@ class DFM(BaseFactorModel):
                 self._mixed_freq = is_mixed_freq
         else:
             # Convert to NumPy
-            import torch
-            if torch.is_tensor(X):
-                X_np = X.cpu().numpy().astype(DEFAULT_DTYPE)
-            else:
-                X_np = np.asarray(X, dtype=DEFAULT_DTYPE)
+            from ..config.types import to_numpy
+            X_np = to_numpy(X, dtype=DEFAULT_DTYPE)
             
             # Setup mixed-frequency parameters (fallback if no datamodule)
             # Auto-detect from config if not explicitly set
@@ -1344,11 +1365,8 @@ class DFM(BaseFactorModel):
             X_forecast = X_forecast_std
         
         # Ensure X_forecast is numpy array and validate it's finite
-        import torch
-        if torch.is_tensor(X_forecast):
-            X_forecast = X_forecast.cpu().numpy().astype(DEFAULT_DTYPE)
-        else:
-            X_forecast = np.asarray(X_forecast, dtype=DEFAULT_DTYPE)
+        from ..config.types import to_numpy
+        X_forecast = to_numpy(X_forecast, dtype=DEFAULT_DTYPE)
         validate_no_nan_inf(X_forecast, name="forecast X_forecast")
         
         # Validate forecast values are within reasonable bounds (only if scaler available)

@@ -454,9 +454,14 @@ class DFMDataset:
                 details="get_initialization_params() requires data_processed attribute."
             )
         
+        # Get target_scaler from dataset attribute or config
+        target_scaler = getattr(self, 'target_scaler', None)
+        if target_scaler is None and self.config is not None:
+            target_scaler = getattr(self.config, 'target_scaler', None)
+        
         return {
             'X': self.data_processed,
-            'target_scaler': self.target_scaler,
+            'target_scaler': target_scaler,
             'R_mat': self._constraint_matrix,
             'q': self._constraint_vector,
             'n_slower_freq': self._n_slower_freq,

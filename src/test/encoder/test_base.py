@@ -4,11 +4,6 @@ import pytest
 import numpy as np
 from dfm_python.encoder.base import BaseEncoder
 from dfm_python.encoder.pca import PCAEncoder
-try:
-    from dfm_python.encoder.variational_autoencoder import AutoencoderEncoder
-except ImportError:
-    # AutoencoderEncoder may not be available if PyTorch is not installed
-    AutoencoderEncoder = None
 
 
 class TestBaseEncoder:

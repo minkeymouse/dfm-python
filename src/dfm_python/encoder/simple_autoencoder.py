@@ -170,6 +170,71 @@ class SimpleAutoencoder(nn.Module):
         with torch.no_grad():
             return self.forward(x)
     
+    def pretrain(
+        self,
+        full_input: torch.Tensor,
+        y: torch.Tensor,
+        epochs: int,
+        batch_size: int,
+        optimizer: torch.optim.Optimizer,
+        use_mse_loss: bool = True
+    ) -> List[float]:
+        """Pre-train autoencoder on clean data.
+        
+        Pre-training uses clean data (no corruption) to initialize the autoencoder
+        before MCMC training. This is separate from the MCMC fit() method which
+        uses corrupted inputs.
+        
+        Parameters
+        ----------
+        full_input : torch.Tensor
+            Full input data (X + y) for pre-training (T, input_dim)
+        y : torch.Tensor
+            Target data for pre-training (T, output_dim)
+        epochs : int
+            Number of pre-training epochs
+        batch_size : int
+            Batch size for pre-training
+        optimizer : torch.optim.Optimizer
+            Optimizer instance for pre-training
+        use_mse_loss : bool, default True
+            Whether to use standard MSE loss (True) or masked MSE loss (False)
+            
+        Returns
+        -------
+        List[float]
+            Final epoch losses for each epoch
+        """
+        self.train()
+        T = len(full_input)
+        final_epoch_losses = []
+        
+        for epoch in range(epochs):
+            epoch_losses = []
+            for i in range(0, T, batch_size):
+                batch_full_input = full_input[i:i+batch_size]
+                batch_y = y[i:i+batch_size]
+                
+                optimizer.zero_grad()
+                y_pred = self.forward(batch_full_input)
+                
+                if use_mse_loss:
+                    loss = torch.nn.functional.mse_loss(y_pred, batch_y, reduction='mean')
+                else:
+                    mask = ~torch.isnan(batch_y)
+                    y_actual = torch.where(torch.isnan(batch_y), torch.zeros_like(batch_y), batch_y)
+                    y_pred_masked = y_pred * mask.float()
+                    loss = torch.nn.functional.mse_loss(y_pred_masked, y_actual, reduction='mean')
+                
+                loss.backward()
+                optimizer.step()
+                epoch_losses.append(loss.item())
+            
+            if epoch_losses:
+                final_epoch_losses.append(np.mean(epoch_losses))
+        
+        return final_epoch_losses
+    
     def fit(
         self,
         dataset: 'AutoencoderDataset',

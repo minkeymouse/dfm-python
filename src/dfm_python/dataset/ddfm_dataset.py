@@ -223,7 +223,7 @@ class DDFMDataset(Dataset):
             Dataset with clean data (y_corrupted = y_clean for pre-training).
         """
         if device is None:
-            device = torch.device('cuda')
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
         # Split into X (features) and y (targets)
         if self.all_columns_are_targets:
@@ -282,7 +282,7 @@ class DDFMDataset(Dataset):
             One dataset per MC sample.
         """
         if device is None:
-            device = torch.device('cuda')
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
         X_array = X.values if isinstance(X, pd.DataFrame) else X
         y_tmp_array = y_tmp.values if isinstance(y_tmp, pd.DataFrame) else y_tmp
@@ -352,3 +352,20 @@ class AutoencoderDataset:
     def __len__(self) -> int:
         """Return number of time steps."""
         return self.y_corrupted.shape[0]
+    
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Get item at index idx.
+        
+        Parameters
+        ----------
+        idx : int
+            Index of time step
+            
+        Returns
+        -------
+        full_input : torch.Tensor
+            Full input at time step idx (shape: (N_input,))
+        y_clean : torch.Tensor
+            Clean target at time step idx (shape: (N,))
+        """
+        return self._full_input[idx], self.y_clean[idx]

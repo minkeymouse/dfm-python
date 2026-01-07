@@ -70,6 +70,23 @@ DEFAULT_SCALE_RATIO_MIN = 0.1  # Minimum acceptable scale ratio (prediction std 
 DEFAULT_STANDARDIZATION_MEAN_THRESHOLD = 0.1  # Maximum acceptable absolute mean for standardized data (mean should be ≈0)
 DEFAULT_STANDARDIZATION_STD_MIN = 0.1  # Minimum acceptable std for standardized data (std should be ≈1)
 DEFAULT_STANDARDIZATION_STD_MAX = 10.0  # Maximum acceptable std for standardized data (std should be ≈1)
+DEFAULT_STANDARDIZED_TARGET_STD = 1.0  # Target std for standardized data (std should be ≈1.0 for StandardScaler)
+
+# Variance collapse diagnostics thresholds (for DDFM variance collapse detection)
+DEFAULT_VARIANCE_COLLAPSE_THRESHOLD = 0.1  # Prediction std threshold for variance collapse detection (std < 0.1 indicates collapse)
+DEFAULT_FACTOR_COLLAPSE_THRESHOLD = 0.01  # Factor magnitude threshold for factor collapse detection (|mean| < 0.01 indicates collapse)
+DEFAULT_BATCHNORM_SUPPRESSION_THRESHOLD = 0.01  # BatchNorm running_var threshold for signal suppression detection (var < 0.01 indicates suppression)
+DEFAULT_TIMESTEP_COLLAPSE_THRESHOLD = 0.1  # Per-time-step std threshold for localized collapse detection (std < 0.1 indicates collapse)
+DEFAULT_TIMESTEP_COLLAPSE_RATIO_THRESHOLD = 0.5  # Ratio threshold for localized collapse (ratio > 0.5 indicates widespread collapse)
+DEFAULT_EXPECTED_FACTOR_MAGNITUDE_MIN = 0.1  # Expected minimum factor magnitude (for warning messages)
+DEFAULT_EXPECTED_FACTOR_MAGNITUDE_MAX = 1.0  # Expected maximum factor magnitude (for warning messages)
+
+# DDFM reproduction target values (for debugging and diagnostics)
+DEFAULT_TARGET_PREDICTION_STD = 1.0  # Target prediction std for standardized data (should be ~1.0 for StandardScaler)
+DEFAULT_VARIANCE_COLLAPSE_STD = 0.03  # Observed variance collapse std (std ~0.03 vs target ~1.0)
+DEFAULT_TARGET_CONVERGENCE_ITERATIONS = 10  # Target convergence iterations for exchange_rate dataset (TensorFlow reference)
+DEFAULT_TARGET_DDFM_LOSS = 0.56  # Target DDFM training loss for exchange_rate dataset (TensorFlow reference)
+DEFAULT_DDFM_LOSS_MULTIPLIER = 1.8  # Current loss multiplier vs target (1.00 vs 0.56 = 1.8x)
 
 # Logging precision constants
 DEFAULT_SCALE_LOG_PRECISION = 6  # Default precision for scale logging format strings (e.g., .6f)
@@ -423,6 +440,12 @@ __all__ = [
     'DEFAULT_STANDARDIZATION_MEAN_THRESHOLD',
     'DEFAULT_STANDARDIZATION_STD_MIN',
     'DEFAULT_STANDARDIZATION_STD_MAX',
+    'DEFAULT_STANDARDIZED_TARGET_STD',
+    'DEFAULT_TARGET_PREDICTION_STD',
+    'DEFAULT_VARIANCE_COLLAPSE_STD',
+    'DEFAULT_TARGET_CONVERGENCE_ITERATIONS',
+    'DEFAULT_TARGET_DDFM_LOSS',
+    'DEFAULT_DDFM_LOSS_MULTIPLIER',
     'DEFAULT_SCALE_LOG_PRECISION',
     'DEFAULT_TIME_LOG_PRECISION',
     'DEFAULT_LOSS_LOG_PRECISION',

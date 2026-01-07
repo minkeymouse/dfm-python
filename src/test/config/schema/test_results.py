@@ -6,7 +6,6 @@ from dfm_python.config.schema.results import (
     BaseResult,
     DFMResult,
     DDFMResult,
-    KDFMResult,
 )
 from dfm_python.config.schema.params import DFMFitParams
 from dfm_python.numeric.stability import create_scaled_identity
@@ -141,39 +140,6 @@ class TestDDFMResult:
         assert "Neural Network Training:" in summary
         assert "Final training loss: 0.0010" in summary
         assert "[64, 32]" in summary or "64, 32" in summary
-
-
-class TestKDFMResult:
-    """Test suite for KDFMResult."""
-    
-    def test_kdfm_result_summary(self):
-        """Test KDFMResult summary method includes KDFM-specific info."""
-        T, N, m = 10, 3, 2
-        result = KDFMResult(
-            x_sm=np.random.randn(T, N).astype(np.float32),
-            Z=np.random.randn(T, m).astype(np.float32),
-            C=np.random.randn(N, m).astype(np.float32),
-            R=create_scaled_identity(N, DEFAULT_IDENTITY_SCALE, dtype=np.float32),
-            A=create_scaled_identity(m, DEFAULT_IDENTITY_SCALE, dtype=np.float32),
-            Q=create_scaled_identity(m, DEFAULT_IDENTITY_SCALE, dtype=np.float32),
-            Z_0=np.zeros(m, dtype=np.float32),
-            V_0=create_scaled_identity(m, DEFAULT_IDENTITY_SCALE, dtype=np.float32),
-            r=np.array([m], dtype=np.int32),
-            p=1,
-            converged=True,
-            num_iter=15,
-            loglik=-150.0,
-            ar_coeffs=np.random.randn(1, m, m).astype(np.float32),
-            irf_reduced=np.random.randn(10, m, m).astype(np.float32),
-            irf_structural=np.random.randn(10, m, m).astype(np.float32)
-        )
-        summary = result.summary()
-        assert isinstance(summary, str)
-        assert "KDFM Model Summary" in summary
-        assert "KDFM-Specific:" in summary
-        assert "VAR order: 1" in summary
-        assert "IRFs computed: Reduced-form" in summary
-        assert "IRFs computed: Structural" in summary
 
 
 class TestDFMFitParams:

@@ -4,9 +4,8 @@ import pytest
 from dfm_python.config import (
     DFMConfig,
     DDFMConfig,
-    KDFMConfig,
 )
-from dfm_python.config.constants import DEFAULT_KDFM_AR_ORDER, DEFAULT_KDFM_MA_ORDER, DEFAULT_EM_THRESHOLD, DEFAULT_CLOCK_FREQUENCY, DEFAULT_MAX_ITER
+from dfm_python.config.constants import DEFAULT_EM_THRESHOLD, DEFAULT_CLOCK_FREQUENCY, DEFAULT_MAX_ITER
 
 
 class TestDFMConfig:
@@ -37,18 +36,4 @@ class TestDDFMConfig:
         config = DDFMConfig()
         assert config is not None
         assert config.clock == DEFAULT_CLOCK_FREQUENCY  # Default clock frequency
-
-
-class TestKDFMConfig:
-    """Test suite for KDFMConfig."""
-    
-    def test_kdfm_config_initialization(self):
-        """Test KDFMConfig can be initialized."""
-        config = KDFMConfig()
-        assert config is not None
-        assert config.clock == DEFAULT_CLOCK_FREQUENCY  # Default clock frequency
-        assert config.ar_order == DEFAULT_KDFM_AR_ORDER  # Default AR order from constants
-        assert config.ma_order == DEFAULT_KDFM_MA_ORDER  # Default MA order from constants
-
-
 

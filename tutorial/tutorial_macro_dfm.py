@@ -19,7 +19,7 @@ from datetime import datetime
 from dfm_python import DFM, DFMDataset
 from dfm_python.config import DFMConfig
 from dfm_python.config.constants import TUTORIAL_MAX_PERIODS
-from dfm_python.utils.misc import TimeIndex
+from dfm_python.dataset.time import TimeIndex
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sktime.transformations.series.impute import Imputer
@@ -252,7 +252,7 @@ dataset = DFMDataset(
 # Dataset initialization happens in __init__
 
 print(f"   Dataset created successfully")
-if hasattr(data_module, 'data_processed') and dataset.data_processed is not None:
+if hasattr(dataset, 'data_processed') and dataset.data_processed is not None:
     print(f"   Processed data shape: {dataset.data_processed.shape}")
 else:
     print(f"   Data shape: {df_processed.shape}")
@@ -275,8 +275,8 @@ X = init_params['X']
 
 
 # Fit model directly (DFM uses fit() method, not Lightning trainer)
-# Pass datamodule to extract all initialization parameters automatically
-model.fit(X=X, dataset =data_module)
+# Pass dataset to extract all initialization parameters automatically
+model.fit(X=X, dataset=dataset)
 
 # Access results via property
 result = model.result

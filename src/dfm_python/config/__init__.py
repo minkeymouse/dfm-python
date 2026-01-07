@@ -8,8 +8,8 @@ Note: Series are specified via frequency dict mapping column names to frequencie
 """
 
 from .schema import (
-    BaseModelConfig, DFMConfig, DDFMConfig, KDFMConfig,
-    BaseResult, DFMResult, DDFMResult, KDFMResult,
+    BaseModelConfig, DFMConfig, DDFMConfig,
+    BaseResult, DFMResult, DDFMResult,
     DFMFitParams, DDFMFitParams, FitParams,  # FitParams is backward compatibility alias
 )
 # DEFAULT_BLOCK_NAME is imported lazily where needed to avoid circular imports
@@ -106,12 +106,12 @@ __all__ = [
     'BaseModelConfig', 'BaseResult',
     # 'DEFAULT_BLOCK_NAME',  # Removed to avoid circular import - import directly from functional.dfm_block
     # Model-specific configs (from schema.py)
-    'DFMConfig', 'DDFMConfig', 'KDFMConfig',
+    'DFMConfig', 'DDFMConfig',
     # Parameter overrides
     'DFMFitParams', 'DDFMFitParams',
     'FitParams',  # Backward compatibility alias
     # Model-specific results (from results.py)
-    'DFMResult', 'DDFMResult', 'KDFMResult',
+    'DFMResult', 'DDFMResult',
     # Utilities
     'validate_frequency',
     # IO

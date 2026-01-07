@@ -23,8 +23,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 from dfm_python import DDFM, DDFMDataset
-from dfm_python.config import DDFMConfig, YamlSource, make_config_source
-from dfm_python.dataset.time import TimeIndex
+from dfm_python.config import DDFMConfig
 
 
 print("=" * 80)
@@ -64,7 +63,7 @@ print(f"   Missing values before preprocessing: {missing_before}")
 # Handle missing values with forward fill and backward fill
 if missing_before > 0:
     print("   Handling missing values with forward fill and backward fill...")
-    df_processed = df_processed.fillna(method='ffill').fillna(method='bfill')
+    df_processed = df_processed.ffill().bfill()
 
 missing_after = df_processed.isnull().sum().sum()
 print(f"   Missing values after imputation: {missing_after}")
@@ -202,15 +201,18 @@ print(f"   Scaled data shape: {df_scaled.shape}")
 print(f"   Mean (should be ~0): {df_scaled.mean().values[:3]}")
 print(f"   Std (should be ~1): {df_scaled.std().values[:3]}")
 
-# Pass None to scaler since we already scaled manually (matching original TensorFlow)
-target_scaler_class = None
+# Create scaler for target series (needed for prediction inverse transformation)
+# Even though data is already scaled, we need a scaler for prediction
+from sklearn.preprocessing import StandardScaler
+target_scaler = StandardScaler()
+target_scaler.fit(df_processed_final[target_series].values)
 
-# Create Dataset - data is already scaled, so pass None for scaler
+# Create Dataset - data is already scaled, but scaler needed for prediction
 dataset = DDFMDataset(
     data=df_scaled,  # Data already scaled using pandas (matching original)
     time_idx='index',  # Use DataFrame index as time identifier
     target_series=target_series,  # All series are targets
-    target_scaler=target_scaler_class  # None - data already scaled
+    target_scaler=target_scaler  # Scaler for prediction inverse transformation
 )
 
 print(f"   Dataset created successfully")
@@ -253,6 +255,23 @@ print("   Training completed!")
 print("\n[Step 5.5] Building state-space model...")
 model.build_state_space()
 print("   State-space model built successfully")
+
+# Check prediction variance (for debugging variance collapse issue)
+print("\n[Step 5.6] Checking prediction variance...")
+if hasattr(model, 'prediction_std') and model.prediction_std is not None:
+    prediction_std_mean = float(np.mean(model.prediction_std))
+    prediction_std_std = float(np.std(model.prediction_std))
+    print(f"   Prediction std (mean across all predictions): {prediction_std_mean:.6f}")
+    print(f"   Prediction std (std across all predictions): {prediction_std_std:.6f}")
+    print(f"   Target std: ~1.0 (TensorFlow reference)")
+    if prediction_std_mean < 0.1:
+        print(f"   ⚠️  WARNING: Variance collapse detected (std={prediction_std_mean:.6f} << target ~1.0)")
+    elif prediction_std_mean < 0.5:
+        print(f"   ⚠️  WARNING: Low variance (std={prediction_std_mean:.6f} < target ~1.0)")
+    else:
+        print(f"   ✓ Variance within acceptable range (std={prediction_std_mean:.6f} vs target ~1.0)")
+else:
+    print("   Prediction std not available (model may not have completed training)")
 
 # ============================================================================
 # Step 6: Extract Results

@@ -209,24 +209,42 @@ def get_array_shape(arr: ArrayLike) -> Shape:
         )
 
 
-def to_numpy(arr: ArrayLike) -> np.ndarray:
+def to_numpy(arr: ArrayLike, dtype: Optional[np.dtype] = None) -> np.ndarray:
     """Convert array-like to numpy array.
     
     Automatically detaches tensors that require grad to avoid RuntimeError.
+    
+    Parameters
+    ----------
+    arr : ArrayLike
+        Array-like object to convert (numpy array or torch tensor)
+    dtype : np.dtype, optional
+        Target dtype for output array. If None, preserves original dtype.
+        
+    Returns
+    -------
+    np.ndarray
+        Numpy array with specified dtype (or original dtype if dtype=None)
     """
     if is_numpy_array(arr):
-        return arr
+        result = arr
     elif is_torch_tensor(arr):
         import torch
         if torch.is_tensor(arr):
             # Detach if tensor requires grad to avoid RuntimeError
             if arr.requires_grad:
                 arr = arr.detach()
-            return arr.cpu().numpy()
+            result = arr.cpu().numpy()
         else:
-            return np.asarray(arr)
+            result = np.asarray(arr)
     else:
-        return np.asarray(arr)
+        result = np.asarray(arr)
+    
+    # Apply dtype conversion if specified
+    if dtype is not None:
+        result = result.astype(dtype)
+    
+    return result
 
 
 def to_tensor(arr: ArrayLike, device: Optional[Device] = None, dtype: Optional['torch.dtype'] = None) -> Tensor:

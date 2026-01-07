@@ -13,8 +13,6 @@ from dfm_python.config.constants import (
     DEFAULT_CLEAN_NAN,
     CHOLESKY_LOG_DET_FACTOR,
     SYMMETRY_AVERAGE_FACTOR,
-    DEFAULT_KDFM_AR_ORDER,
-    DEFAULT_KDFM_MA_ORDER,
     DEFAULT_MAX_EPOCHS,
     MIN_TIME_STEPS,
     MIN_VARIABLES,
@@ -103,17 +101,6 @@ class TestConstants:
         assert isinstance(SYMMETRY_AVERAGE_FACTOR, float)
         assert SYMMETRY_AVERAGE_FACTOR == 0.5
     
-    def test_default_kdfm_ar_order(self):
-        """Test DEFAULT_KDFM_AR_ORDER constant."""
-        assert DEFAULT_KDFM_AR_ORDER is not None
-        assert isinstance(DEFAULT_KDFM_AR_ORDER, int)
-        assert DEFAULT_KDFM_AR_ORDER == 1
-    
-    def test_default_kdfm_ma_order(self):
-        """Test DEFAULT_KDFM_MA_ORDER constant."""
-        assert DEFAULT_KDFM_MA_ORDER is not None
-        assert isinstance(DEFAULT_KDFM_MA_ORDER, int)
-        assert DEFAULT_KDFM_MA_ORDER == 0
     
     def test_default_max_epochs(self):
         """Test DEFAULT_MAX_EPOCHS constant."""
@@ -256,6 +243,5 @@ class TestConstants:
         # OSError is a built-in exception, check by name
         error_type_names = [et.__name__ for et in COMPUTATION_ERROR_TYPES]
         assert 'OSError' not in error_type_names
-        # Verify it's used in models/kdfm.py for consistent error handling
         # Used to consolidate duplicate exception handling patterns across models
 

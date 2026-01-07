@@ -6,6 +6,7 @@ consistency across the codebase.
 
 from typing import Any, Optional, Callable
 import numpy as np
+import pandas as pd
 
 from ..logger import get_logger
 
@@ -84,5 +85,26 @@ def interpolate_array(
             result = np.moveaxis(result_t, 0, axis)
         return result
 
+
+def interpolate_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """Interpolate DataFrame values using array interpolation.
+    
+    This function interpolates missing values in a DataFrame by converting
+    to numpy array, applying interpolate_array, and returning a new DataFrame
+    with the same index and columns.
+    
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Input DataFrame with potentially missing values
+        
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with interpolated values, same index and columns as input
+    """
+    df_interpolated = df.copy()
+    df_interpolated.values[:] = interpolate_array(df_interpolated.values)
+    return df_interpolated
 
 

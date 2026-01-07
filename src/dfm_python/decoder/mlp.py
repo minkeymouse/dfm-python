@@ -5,14 +5,15 @@ import torch
 import torch.nn as nn
 from typing import List, Optional, Tuple
 
+from .base import Decoder
 from ..utils.errors import ConfigurationError
-from ..config.constants import DEFAULT_XAVIER_GAIN, DEFAULT_OUTPUT_LAYER_GAIN, DEFAULT_ZERO_VALUE
+from ..config.constants import DEFAULT_XAVIER_GAIN, DEFAULT_OUTPUT_LAYER_GAIN, DEFAULT_ZERO_VALUE, DEFAULT_CLEAN_NAN
 from ..logger import get_logger
 
 _logger = get_logger(__name__)
 
 
-class MLPDecoder(nn.Module):
+class MLPDecoder(Decoder):
     """MLP decoder network for DDFM."""
     
     def __init__(
@@ -79,7 +80,49 @@ class MLPDecoder(nn.Module):
         
         if np.any(np.isnan(weight)):
             _logger.warning("MLPDecoder: C matrix contains NaN values. Replacing with zeros.")
-            weight = np.nan_to_num(weight, nan=0.0)
+            weight = np.nan_to_num(weight, nan=DEFAULT_CLEAN_NAN)
         
         return weight, bias
+    
+    def get_last_linear_layer(self) -> nn.Linear:
+        """Get decoder's last Linear layer (output layer).
+        
+        For MLPDecoder, this is the output_layer.
+        
+        Returns
+        -------
+        nn.Linear
+            Decoder's output Linear layer
+        """
+        return self.output_layer
+    
+    def get_intermediate(self) -> nn.Sequential:
+        """Get decoder intermediate layers (all except last layer).
+        
+        Used for last_neurons extraction (second-to-last layer output).
+        Returns a Sequential module containing all hidden layers with activations.
+        
+        Returns
+        -------
+        nn.Sequential
+            Decoder intermediate layers (all hidden layers with activations)
+            
+        Raises
+        ------
+        ConfigurationError
+            If decoder has no intermediate layers (only output layer)
+        """
+        if len(self.layers) == 0:
+            raise ConfigurationError(
+                "MLPDecoder has no intermediate layers for last_neurons extraction. "
+                "Decoder must have at least one hidden layer."
+            )
+        
+        # Build Sequential with layers and activations
+        intermediate_modules = []
+        for layer in self.layers:
+            intermediate_modules.append(layer)
+            intermediate_modules.append(self.activation)
+        
+        return nn.Sequential(*intermediate_modules)
 

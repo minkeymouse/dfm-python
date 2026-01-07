@@ -88,7 +88,7 @@ from .config import (
 from .config import DFMConfig
 
 # Results
-from .config import DFMResult, DDFMResult, KDFMResult, BaseResult
+from .config import DFMResult, DDFMResult, BaseResult
 
 # Utilities (from utils/ subpackage)
 from .utils.metric import calculate_rmse
@@ -97,7 +97,6 @@ from .utils.metric import calculate_rmse
 # Users can import these directly from dfm_python
 from .dataset.dfm_dataset import DFMDataset
 from .dataset.ddfm_dataset import DDFMDataset
-from .dataset.kdfm_dataset import KDFMDataset
 
 # Model implementations
 from .models.base import BaseFactorModel
@@ -105,9 +104,6 @@ from .models.dfm import DFM
 
 # DDFM high-level API (PyTorch is mandatory)
 from .models.ddfm import DDFM
-
-# KDFM high-level API
-from .models.kdfm import KDFM
 
 __all__ = [
     # Core classes
@@ -118,7 +114,7 @@ __all__ = [
     'ConfigSource', 'YamlSource',
     'make_config_source',
     # Low-level API (functional interface - advanced usage)
-    'BaseResult', 'DFMResult', 'DDFMResult', 'KDFMResult', 'calculate_rmse',
+    'BaseResult', 'DFMResult', 'DDFMResult', 'calculate_rmse',
 ]
 
 # DDFM high-level API (PyTorch is mandatory)
@@ -126,15 +122,9 @@ __all__.extend([
     'DDFM',  # High-level API class
 ])
 
-# KDFM high-level API
-__all__.extend([
-    'KDFM',  # High-level API class
-])
-
 # Dataset classes
 __all__.extend([
     'DFMDataset',  # DFM Dataset class
     'DDFMDataset',  # DDFM Dataset class
-    'KDFMDataset',  # KDFM Dataset class
 ])
 

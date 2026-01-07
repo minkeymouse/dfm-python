@@ -7,23 +7,17 @@ This package contains implementations of different factor models:
 
 from .base import BaseFactorModel
 from .dfm import DFM
-from ..config import BaseResult, DFMResult, DDFMResult, KDFMResult, FitParams
+from ..config import BaseResult, DFMResult, DDFMResult, FitParams
 
 __all__ = [
     'BaseFactorModel', 'DFM',
     # Results
-    'BaseResult', 'DFMResult', 'DDFMResult', 'KDFMResult', 'FitParams',
+    'BaseResult', 'DFMResult', 'DDFMResult', 'FitParams',
 ]
 
 # DDFM implementation
 from .ddfm import DDFM
 __all__.extend([
     'DDFM',  # High-level API
-])
-
-# KDFM implementation
-from .kdfm import KDFM
-__all__.extend([
-    'KDFM',  # High-level API
 ])
 

@@ -5,7 +5,6 @@ import numpy as np
 import pandas as pd
 import torch
 from dfm_python.dataset.ddfm_dataset import DDFMDataset, AutoencoderDataset
-from dfm_python.dataset.kdfm_dataset import KDFMDataset
 from dfm_python.config import DFMConfig
 
 
@@ -68,31 +67,3 @@ class TestAutoencoderDataset:
         full_input, y = dataset[0]
         assert full_input.shape == (N_input,)
         assert y.shape == (N,)
-
-
-class TestKDFMDataset:
-    """Test suite for KDFMDataset."""
-    
-    def test_kdfm_dataset_initialization_with_config(self, sample_data, sample_config):
-        """Test KDFMDataset can be initialized with config."""
-        target_series = list(sample_data.columns)
-        dataset = KDFMDataset(
-            config=sample_config,
-            data=sample_data,
-            target_series=target_series,
-            time_index=sample_data.index
-        )
-        assert dataset is not None
-        assert hasattr(dataset, 'data_processed')
-    
-    def test_kdfm_dataset_get_processed_data(self, sample_data, sample_config):
-        """Test KDFMDataset get_processed_data returns tensor."""
-        target_series = list(sample_data.columns)
-        dataset = KDFMDataset(
-            config=sample_config,
-            data=sample_data,
-            target_series=target_series,
-            time_index=sample_data.index
-        )
-        data = dataset.get_processed_data()
-        assert isinstance(data, torch.Tensor)

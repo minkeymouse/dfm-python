@@ -24,7 +24,6 @@ from datetime import datetime
 from dfm_python import DDFM, DDFMDataset
 from dfm_python.config import DDFMConfig
 from dfm_python.config.constants import TUTORIAL_MAX_PERIODS, DEFAULT_LEARNING_RATE, DEFAULT_DDFM_WINDOW_SIZE, DEFAULT_DDFM_LEARNING_RATE
-from dfm_python.dataset.time import TimeIndex
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sktime.transformations.series.impute import Imputer
@@ -225,22 +224,19 @@ print("\n[Step 4] Creating Dataset...")
 # Create DDFMDataset with preprocessed data
 # Data must be preprocessed before passing to Dataset
 # Target series are specified separately - they remain in raw form (not preprocessed)
-# time_index_column='date' will extract time index from DataFrame and remove the column
+# Remove date column from data before passing to Dataset
+df_for_dataset = df_processed.drop(columns=['date']) if 'date' in df_processed.columns else df_processed
+
 dataset = DDFMDataset(
-    config=config,
-    data=df_processed,  # Pass DataFrame directly (not .values) - already preprocessed
-    time_index_column='date',  # Extract time index from 'date' column and exclude it from data
-    target_series=[target_col]  # Specify target series
+    data=df_for_dataset,  # Pass DataFrame directly (not .values) - already preprocessed
+    time_idx='index',  # Use DataFrame index as time identifier
+    target_series=[target_col],  # Specify target series
+    target_scaler=y_scaler  # Fitted scaler for target series
 )
-# Dataset initialization happens in __init__
 
 print(f"   Dataset created successfully")
-if hasattr(data_module, 'data_processed') and dataset.data_processed is not None:
-    print(f"   Processed data shape: {dataset.data_processed.shape}")
-else:
-    print(f"   Data shape: {df_processed.shape}")
-if dataset.time_index is not None:
-    print(f"   Time range: {dataset.time_index[0]} to {dataset.time_index[-1]}")
+print(f"   Data shape: {dataset.data.shape}")
+print(f"   Target series: {dataset.target_series}")
 
 # ============================================================================
 # Step 5: Train Model
@@ -251,7 +247,6 @@ print("\n[Step 5] Training DDFM model...")
 # Map config parameters to model parameters
 encoder_layers = getattr(config, 'encoder_layers', [32, 1])
 encoder_size = tuple(encoder_layers) if encoder_layers else (32, 1)
-use_batch_norm = getattr(config, 'use_batch_norm', True)
 max_epoch = getattr(config, 'max_epoch', 3)  # Reduced for faster execution
 
 model = DDFM(
@@ -260,10 +255,9 @@ model = DDFM(
     encoder_size=encoder_size,  # Convert list to tuple
     decoder_type="linear",
     activation=getattr(config, 'activation', 'relu'),
-    batch_norm=use_batch_norm,  # Map use_batch_norm -> batch_norm
     learning_rate=getattr(config, 'learning_rate', DEFAULT_DDFM_LEARNING_RATE),
     optimizer='Adam',
-    n_mc_samples=getattr(config, 'n_mc_samples', 1),
+    n_mc_samples=getattr(config, 'n_mc_samples', 10),
     window_size=getattr(config, 'window_size', DEFAULT_DDFM_WINDOW_SIZE),
     max_iter=max_epoch,  # Map max_epoch -> max_iter
     tolerance=getattr(config, 'tolerance', 0.0005),
@@ -287,7 +281,8 @@ print("   State-space model built successfully")
 print("\n[Step 6] Making predictions...")
 
 # Predict with horizon=6 (uses target_series from Dataset)
-X_forecast, Z_forecast = model.predict(horizon=6)
+# Note: predict() requires build_state_space() to be called first
+X_forecast, Z_forecast = model.predict(horizon=6, return_series=True, return_factors=True)
 
 print(f"   Forecast shape: {X_forecast.shape}")
 print(f"   Factor forecast shape: {Z_forecast.shape}")

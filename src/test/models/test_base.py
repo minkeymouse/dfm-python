@@ -7,7 +7,6 @@ from unittest.mock import Mock, MagicMock
 from dfm_python.models.base import BaseFactorModel
 from dfm_python.models.dfm import DFM
 from dfm_python.models.ddfm import DDFM
-from dfm_python.models.kdfm import KDFM
 from dfm_python.dataset.ddfm_dataset import DDFMDataset
 from dfm_python.utils.errors import ConfigurationError, DataError, DataValidationError, ModelNotInitializedError, NumericalError
 from dfm_python.config import DFMConfig
@@ -35,30 +34,24 @@ class TestBaseFactorModel:
         dfm = DFM()
         # DDFM requires dataset - create minimal test dataset
         ddfm = self._create_test_ddfm()
-        kdfm = KDFM(ar_order=1, ma_order=0)
         
         # All should have get_result method (abstract, must be implemented)
         assert hasattr(dfm, 'get_result')
         assert hasattr(ddfm, 'get_result')
-        assert hasattr(kdfm, 'get_result')
         assert callable(dfm.get_result)
         assert callable(ddfm.get_result)
-        assert callable(kdfm.get_result)
         
-        # Some models (DFM, KDFM) also have result property for convenience
-        # Check result property exists for models that implement it (DFM, KDFM)
+        # DFM has result property for convenience
+        # Check result property exists for models that implement it (DFM)
         assert isinstance(getattr(type(dfm), 'result', None), property)
-        assert isinstance(getattr(type(kdfm), 'result', None), property)
         # DDFM only has get_result() method, not result property
         assert not isinstance(getattr(type(ddfm), 'result', None), property)
         
         # All should have reset method (concrete in base)
         assert hasattr(dfm, 'reset')
         assert hasattr(ddfm, 'reset')
-        assert hasattr(kdfm, 'reset')
         assert callable(dfm.reset)
         assert callable(ddfm.reset)
-        assert callable(kdfm.reset)
     
     def test_config_property_raises_when_not_set(self):
         """Test config property raises ConfigurationError when config not set."""
@@ -96,14 +89,11 @@ class TestBaseFactorModel:
         dfm = DFM()
         # DDFM requires dataset - create minimal test dataset
         ddfm = self._create_test_ddfm()
-        kdfm = KDFM(ar_order=1, ma_order=0)
         
         assert hasattr(dfm, 'predict')
         assert hasattr(ddfm, 'predict')
-        assert hasattr(kdfm, 'predict')
         assert callable(dfm.predict)
         assert callable(ddfm.predict)
-        assert callable(kdfm.predict)
     
     # Tests for removed legacy methods (_forecast_var_factors, _compute_default_horizon, _resolve_target_series)
     # These methods were removed during refactoring. Tests removed to reduce clutter.

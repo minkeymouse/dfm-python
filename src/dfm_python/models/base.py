@@ -79,7 +79,7 @@ from ..config import (
     DFMConfig, make_config_source, ConfigSource,
     BaseResult
 )
-from ..config.constants import DEFAULT_BLOCK_NAME, DEFAULT_DTYPE, DEFAULT_FORECAST_HORIZON, MAX_WARNING_ITEMS, MAX_ERROR_ITEMS, DEFAULT_CLOCK_FREQUENCY
+from ..config.constants import DEFAULT_DTYPE, DEFAULT_FORECAST_HORIZON, MAX_WARNING_ITEMS, MAX_ERROR_ITEMS
 from ..logger import get_logger
 from ..utils.errors import ConfigurationError, ModelNotTrainedError, ModelNotInitializedError
 from ..utils.validation import check_has_attr, check_condition
@@ -167,46 +167,6 @@ class BaseFactorModel(ABC):
                 self._result = self.get_result()
         return self._result
     
-    def _create_temp_config(self, block_name: Optional[str] = None) -> DFMConfig:
-        """Create a temporary configuration for model initialization.
-        
-        Parameters
-        ----------
-        block_name : str, optional
-            Name for the default block. If None, uses DEFAULT_BLOCK_NAME.
-            
-        Returns
-        -------
-        DFMConfig
-            Minimal default configuration with a single temporary series and block
-        """
-        if block_name is None:
-            block_name = DEFAULT_BLOCK_NAME
-        
-        return DFMConfig(
-            frequency={'temp': DEFAULT_CLOCK_FREQUENCY},
-            blocks={block_name: {'factors': 1, 'ar_lag': 1, 'clock': 'm'}}
-        )
-    
-    def _initialize_config(self, config: Optional[DFMConfig] = None) -> DFMConfig:
-        """Initialize configuration with common pattern.
-        
-        Parameters
-        ----------
-        config : DFMConfig, optional
-            Configuration to use. If None, creates temporary config.
-            
-        Returns
-        -------
-        DFMConfig
-            Initialized configuration
-        """
-        if config is None:
-            config = self._create_temp_config()
-        
-        self._config = config
-        return config
-    
     def _load_config_common(
         self,
         source: Optional[Union[str, Path, Dict[str, Any], DFMConfig, ConfigSource]] = None,
@@ -275,6 +235,23 @@ class BaseFactorModel(ABC):
                 )
             )
         return dataset
+    
+    def _get_target_scaler(self):
+        """Get target scaler from dataset.
+        
+        Consolidates duplicate pattern of extracting target_scaler from dataset.
+        This is a common helper used across all models (DFM, DDFM, KDFM) for
+        accessing the target scaler for inverse transformation during prediction.
+        
+        Returns
+        -------
+        target_scaler or None
+            Target scaler from dataset, or None if not available
+        """
+        dataset = getattr(self, '_dataset', None)
+        if dataset is None:
+            return None
+        return getattr(dataset, 'target_scaler', None)
     
     def reset(self) -> 'BaseFactorModel':
         """Reset model state."""
