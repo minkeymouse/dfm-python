@@ -61,7 +61,7 @@ Note: DFMConfig uses frequency dict to specify series (column names -> frequenci
 For detailed documentation, see the README.md file and the tutorial notebooks/scripts.
 """
 
-__version__ = "0.5.55"
+__version__ = "0.5.56"
 
 # ============================================================================
 # PUBLIC API DEFINITION
