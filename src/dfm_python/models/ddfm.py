@@ -661,14 +661,31 @@ class DDFM(BaseFactorModel, nn.Module):
         self.data_denoised_interpolated = self._interpolate_dataframe(self.data_denoised)
         self.data_imputed = self.data_denoised_interpolated.copy()
         
-        data_original = to_numpy(self.data)
+        # Match TensorFlow: build_inputs() then predict on data_tmp.values
+        # For lags_input=0, _build_inputs_for_pretrain returns self.data (no lags)
+        # Use interpolate=True to match TensorFlow's build_inputs() behavior
+        data_tmp = self._build_inputs_for_pretrain(interpolate=True)
+        data_original = to_numpy(data_tmp)
         data_original_tensor = to_tensor(data_original, dtype=DEFAULT_TORCH_DTYPE, device=self.device)
         prediction_iter_full_tensor = self.autoencoder.predict(data_original_tensor)
         prediction_iter_target_tensor = prediction_iter_full_tensor
         prediction_iter_full = to_numpy(prediction_iter_full_tensor)
         prediction_iter_target = to_numpy(prediction_iter_target_tensor)
         
-        self._update_imputed_and_eps(prediction_iter_full)
+        # Update imputed data with predictions (fill missing values)
+        if self.missing_mask.any():
+            self.data_imputed.values[self.missing_mask] = prediction_iter_full[self.missing_mask]
+        
+        # Compute eps: Match TensorFlow's self.eps = self.data_tmp[self.data.columns].values - prediction_iter
+        # For lags_input=0, data_tmp is self.data, so data_tmp[self.data.columns] is just self.data
+        # For all-targets case, prediction_iter_full is already full shape
+        if self.lags_input == 0:
+            data_for_eps = to_numpy(self.data)
+        else:
+            # If lags_input > 0, extract only original columns (matching TensorFlow's self.data.columns)
+            data_for_eps = data_tmp[self._dataset.data.columns].values
+        eps_full = data_for_eps - prediction_iter_full
+        self.eps = eps_full[:, self.target_indices]
         prediction_prev_iter, prediction_prev_iter_full = self._update_previous_predictions(
             prediction_iter_target, prediction_iter_full
         )
@@ -772,9 +789,13 @@ class DDFM(BaseFactorModel, nn.Module):
         self.factor_std = None
         while not converged and self._num_iter < self.max_iter:
             Phi, mu_eps, std_eps = get_idio(self.eps, self._dataset.observed_y)
-            eps_expanded = np.zeros((self.eps.shape[0], self.num_series))
-            eps_expanded[:, self.target_indices] = self.eps
-            self.data_denoised.values[self.lags_input+1:] = self.data_imputed.values[self.lags_input+1:] - eps_expanded[:-1, :] @ Phi
+            # For all-targets case (exchange rate), use eps directly like TensorFlow
+            # For covariates case, expand eps to full series shape
+            if self._dataset.all_columns_are_targets:
+                self.data_denoised.values[self.lags_input+1:] = self.data_imputed.values[self.lags_input+1:] - self.eps[:-1, :] @ Phi
+            else:
+                eps_expanded = self._expand_to_full_series_shape(self.eps)
+                self.data_denoised.values[self.lags_input+1:] = self.data_imputed.values[self.lags_input+1:] - eps_expanded[:-1, :] @ Phi
             self.data_denoised_interpolated = self._interpolate_dataframe(self.data_denoised)
             
             # Generate MC samples using denoised data
