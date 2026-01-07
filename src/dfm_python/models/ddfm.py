@@ -1,4 +1,8 @@
-"""Deep Dynamic Factor Model (DDFM) using PyTorch."""
+"""Deep Dynamic Factor Model (DDFM) using PyTorch.
+
+Implements the original DDFM algorithm with MCMC-based denoising training
+and sequential MC sample processing.
+"""
 
 import time
 import numpy as np
@@ -14,6 +18,7 @@ from ..numeric.estimator import get_idio, get_transition_params
 from ..encoder.simple_autoencoder import SimpleAutoencoder
 from ..config.schema.params import DDFMFitParams, DDFMTrainingState
 from ..config.schema.results import DDFMResult
+from sklearn.preprocessing import StandardScaler
 from ..config.constants import (
     DEFAULT_TORCH_DTYPE,
     DEFAULT_DDFM_OBSERVATION_NOISE,
@@ -38,6 +43,23 @@ from ..config.constants import (
     DEFAULT_PRETRAIN_EPOCHS,
     DEFAULT_LOSS_LOG_PRECISION,
     DEFAULT_MIN_TARGET_INTERPOLATE_RATIO,
+    DEFAULT_VARIANCE_COLLAPSE_THRESHOLD,
+    DEFAULT_FACTOR_COLLAPSE_THRESHOLD,
+    DEFAULT_BATCHNORM_SUPPRESSION_THRESHOLD,
+    DEFAULT_TIMESTEP_COLLAPSE_THRESHOLD,
+    DEFAULT_TIMESTEP_COLLAPSE_RATIO_THRESHOLD,
+    DEFAULT_EXPECTED_FACTOR_MAGNITUDE_MIN,
+    DEFAULT_EXPECTED_FACTOR_MAGNITUDE_MAX,
+    DEFAULT_SCALE_RATIO_MIN,
+    DEFAULT_STANDARDIZATION_MEAN_THRESHOLD,
+    DEFAULT_STANDARDIZATION_STD_MIN,
+    DEFAULT_STANDARDIZATION_STD_MAX,
+    DEFAULT_STANDARDIZED_TARGET_STD,
+    DEFAULT_TARGET_PREDICTION_STD,
+    DEFAULT_VARIANCE_COLLAPSE_STD,
+    DEFAULT_TARGET_CONVERGENCE_ITERATIONS,
+    DEFAULT_TARGET_DDFM_LOSS,
+    DEFAULT_DDFM_LOSS_MULTIPLIER,
 )
 from ..utils.errors import ModelNotTrainedError, ModelNotInitializedError, ConfigurationError
 from ..utils.validation import check_condition
@@ -46,22 +68,13 @@ from ..numeric.estimator import forecast_ar1_factors
 from ..utils.helper import interpolate_array
 from ..config.types import to_tensor, to_numpy
 
-# Import DDFMDataset for isinstance check
 from ..dataset.ddfm_dataset import DDFMDataset
 
 _logger = get_logger(__name__)
 
 
 class DDFM(BaseFactorModel, nn.Module):
-    """Deep Dynamic Factor Model (DDFM) using PyTorch.
-    
-    Implements the original DDFM algorithm with MCMC-based denoising training
-    and sequential MC sample processing. Uses plain PyTorch (nn.Module) for
-    better control over training loop compared to PyTorch Lightning.
-    
-    The model uses an autoencoder architecture to extract factors from
-    multivariate time series data, with Bayesian inference via MCMC sampling.
-    """
+    """Deep Dynamic Factor Model using PyTorch."""
     
     def __init__(
         self,
@@ -85,17 +98,14 @@ class DDFM(BaseFactorModel, nn.Module):
         BaseFactorModel.__init__(self)
         nn.Module.__init__(self)
         
-        # Validate dataset is DDFMDataset instance
         if not isinstance(dataset, DDFMDataset):
             raise ModelNotInitializedError(
                 f"dataset must be an instance of DDFMDataset, got {type(dataset).__name__}"
             )
         
-        # Store config and dataset
         self._config = config
         self._dataset = dataset
         
-        # Use DEFAULT_ENCODER_LAYERS if encoder_size not provided
         if encoder_size is None:
             encoder_size = tuple(DEFAULT_ENCODER_LAYERS)
         self.encoder_size = encoder_size
@@ -136,6 +146,9 @@ class DDFM(BaseFactorModel, nn.Module):
         
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.training_state = DDFMTrainingState()
+        self.state_space_params = None
+        
+        self.lags_input = 0
     
     def _get_averaged_factors(self) -> np.ndarray:
         """Get factors averaged across MC samples if 3D, otherwise return as-is."""
@@ -143,31 +156,336 @@ class DDFM(BaseFactorModel, nn.Module):
             return np.mean(self.factors, axis=0)  # Average across MC samples
         return self.factors
     
+    def _compute_variance_mean(self, variance_array: Optional[np.ndarray]) -> Optional[float]:
+        """Compute mean of variance array for logging.
+        
+        Consolidates duplicate pattern: float(np.mean(variance_array)) used for
+        prediction_std and factor_std logging.
+        
+        Parameters
+        ----------
+        variance_array : np.ndarray, optional
+            Variance array (prediction_std or factor_std)
+            
+        Returns
+        -------
+        float, optional
+            Mean of variance array, or None if array is None
+        """
+        if variance_array is None:
+            return None
+        return float(np.mean(variance_array))
+    
+    def _compute_array_stats(self, array: np.ndarray, use_nan: bool = False) -> Tuple[float, float, float, float]:
+        """Compute statistics (mean, std, min, max) for numpy array."""
+        if use_nan:
+            return (
+                float(np.nanmean(array)),
+                float(np.nanstd(array)),
+                float(np.nanmin(array)),
+                float(np.nanmax(array))
+            )
+        else:
+            return (
+                float(np.mean(array)),
+                float(np.std(array)),
+                float(np.min(array)),
+                float(np.max(array))
+            )
+    
+    def _compute_tensor_stats(self, tensor: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Compute mean and std of tensor along dimension 0 (MC samples dimension).
+        
+        Consolidates duplicate pattern: tensor.mean(dim=0) and tensor.std(dim=0) used
+        for predictions_full_tensor and factors_tensor statistics.
+        
+        **CRITICAL**: Uses `unbiased=False` to match TensorFlow's `tf.reduce_std` behavior.
+        TensorFlow's `tf.reduce_std` uses population std (unbiased=False) by default, while
+        PyTorch's `tensor.std()` defaults to sample std (unbiased=True, Bessel's correction).
+        This mismatch can cause systematic differences in prediction_std computation, especially
+        with small MC sample counts (n_mc_samples=10), potentially explaining variance collapse.
+        
+        Parameters
+        ----------
+        tensor : torch.Tensor
+            Tensor with shape (n_mc_samples, ...) where first dimension is MC samples
+            
+        Returns
+        -------
+        Tuple[torch.Tensor, torch.Tensor]
+            (mean, std) computed along dimension 0, where std uses population std (unbiased=False)
+            to match TensorFlow's tf.reduce_std behavior
+        """
+        return tensor.mean(dim=0), tensor.std(dim=0, unbiased=False)
+    
+    def _extract_batchnorm_statistics(self) -> list:
+        """Extract BatchNorm statistics (running_mean, running_var) from encoder/decoder.
+        
+        Consolidates BatchNorm statistics inspection pattern used in variance collapse diagnostics.
+        
+        Returns
+        -------
+        list[dict]
+            List of BatchNorm statistics dictionaries: {
+                'module': str ('encoder' or 'decoder'),
+                'layer': str (layer name),
+                'running_mean_abs': float,
+                'running_var_mean': float
+            }
+        """
+        batchnorm_stats = []
+        for module_name, module in [('encoder', self.encoder), ('decoder', self.decoder)]:
+            for name, submodule in module.named_modules():
+                if isinstance(submodule, (nn.BatchNorm1d, nn.BatchNorm2d)):
+                    running_mean = to_numpy(submodule.running_mean) if submodule.running_mean.numel() > 0 else None
+                    running_var = to_numpy(submodule.running_var) if submodule.running_var.numel() > 0 else None
+                    if running_mean is not None and running_var is not None:
+                        mean_abs = float(np.mean(np.abs(running_mean)))
+                        var_mean = self._compute_variance_mean(running_var)
+                        batchnorm_stats.append({
+                            'module': module_name,
+                            'layer': name,
+                            'running_mean_abs': mean_abs,
+                            'running_var_mean': var_mean
+                        })
+        return batchnorm_stats
+    
+    def _get_decoder_intermediate(self) -> nn.Sequential:
+        """Get decoder intermediate layers (all except last layer).
+        
+        Extracts decoder structure assuming decoder is nn.Sequential.
+        Used for last_neurons extraction (second-to-last layer output).
+        
+        Returns
+        -------
+        nn.Sequential
+            Decoder intermediate layers (all children except last)
+            
+        Raises
+        ------
+        ConfigurationError
+            If decoder is not Sequential or has no children
+        """
+        if not isinstance(self.decoder, nn.Sequential):
+            raise ConfigurationError(
+                f"Decoder must be nn.Sequential for last_neurons extraction, "
+                f"got {type(self.decoder).__name__}"
+            )
+        decoder_children = list(self.decoder.children())
+        if len(decoder_children) < 2:
+            raise ConfigurationError(
+                f"Decoder must have at least 2 layers for last_neurons extraction, "
+                f"got {len(decoder_children)} layers"
+            )
+        return nn.Sequential(*decoder_children[:-1])
+    
+    def _get_decoder_last_linear_layer(self) -> nn.Linear:
+        """Get decoder's last Linear layer.
+        
+        Searches decoder modules recursively to find Linear layers.
+        Returns the last Linear layer (assumed to be the output layer).
+        
+        Returns
+        -------
+        nn.Linear
+            Decoder's last Linear layer
+            
+        Raises
+        ------
+        ConfigurationError
+            If no Linear layer found in decoder
+        """
+        linear_layers = [m for m in self.decoder.modules() if isinstance(m, nn.Linear)]
+        if not linear_layers:
+            raise ConfigurationError("No Linear layer found in decoder")
+        # Return last Linear layer (assumed to be output layer)
+        return linear_layers[-1]
+    
+    def _diagnose_variance_collapse(
+        self,
+        prediction_std: np.ndarray,
+        prediction_mean: np.ndarray,
+        factors_mean: np.ndarray,
+        factors_std: Optional[np.ndarray] = None
+    ) -> dict:
+        """Diagnose root cause of variance collapse.
+        
+        Detects when prediction std is too low (std ~DEFAULT_VARIANCE_COLLAPSE_STD vs target ~DEFAULT_TARGET_PREDICTION_STD).
+        Uses constants DEFAULT_VARIANCE_COLLAPSE_STD and DEFAULT_TARGET_PREDICTION_STD for target values in diagnostics.
+        
+        Provides actionable diagnostics to identify why prediction variance is too low.
+        Checks: (1) decoder output scale vs data scale, (2) BatchNorm statistics,
+        (3) factor magnitudes, (4) per-time-step variance patterns.
+        
+        Parameters
+        ----------
+        prediction_std : np.ndarray
+            Prediction std across MC samples (shape: (T, N))
+        prediction_mean : np.ndarray
+            Prediction mean across MC samples (shape: (T, N))
+        factors_mean : np.ndarray
+            Factor mean across MC samples (shape: (T, m))
+        factors_std : np.ndarray, optional
+            Factor std across MC samples (shape: (T, m))
+            
+        Returns
+        -------
+        dict
+            Diagnostic information: {
+                'prediction_std_mean': float,
+                'data_std_mean': float,
+                'scale_ratio': float,
+                'factors_mean_abs': float,
+                'factors_std_mean': float (if factors_std provided),
+                'variance_collapse_detected': bool,
+                'warnings': list[str]
+            }
+        """
+        diagnostics = {
+            'prediction_std_mean': None,
+            'variance_collapse_detected': False,
+            'warnings': []
+        }
+        
+        # Validate prediction_std before computing mean to avoid numpy warnings
+        if not isinstance(prediction_std, np.ndarray):
+            diagnostics['warnings'].append(f"Invalid prediction_std type: {type(prediction_std).__name__}, expected np.ndarray")
+            return diagnostics
+        
+        if prediction_std.ndim == 0 or prediction_std.size == 0:
+            diagnostics['warnings'].append(f"Invalid prediction_std shape: {prediction_std.shape}, expected 2D array (T, N)")
+            return diagnostics
+        
+        # Handle 1D arrays (single time step or single series)
+        if prediction_std.ndim == 1:
+            diagnostics['warnings'].append(f"1D prediction_std array (shape: {prediction_std.shape}), per-time-step analysis skipped")
+            return diagnostics
+        
+        # Validate 2D array shape
+        if prediction_std.ndim != 2:
+            diagnostics['warnings'].append(f"Invalid prediction_std dimensions: {prediction_std.ndim}, expected 2D array (T, N)")
+            return diagnostics
+        
+        diagnostics['prediction_std_mean'] = self._compute_variance_mean(prediction_std)
+        
+        # Check 1: Decoder output scale vs data scale
+        data_mean, data_std, _, _ = self._compute_array_stats(self.y_actual)
+        diagnostics['data_std_mean'] = data_std
+        diagnostics['data_mean_abs'] = abs(data_mean)
+        
+        # Check if data is standardized (mean ≈ 0, std ≈ DEFAULT_TARGET_PREDICTION_STD)
+        target_scaler = self._get_target_scaler()
+        is_standardized = (
+            isinstance(target_scaler, StandardScaler) and
+            abs(data_mean) < DEFAULT_STANDARDIZATION_MEAN_THRESHOLD and
+            DEFAULT_STANDARDIZATION_STD_MIN <= data_std <= DEFAULT_STANDARDIZATION_STD_MAX
+        )
+        diagnostics['is_standardized'] = is_standardized
+        
+        if not is_standardized:
+            diagnostics['warnings'].append(
+                f"Data standardization assumption not verified: data_mean={data_mean:.6f}, data_std={data_std:.6f} "
+                f"(expected: mean≈0, std≈{DEFAULT_TARGET_PREDICTION_STD} for StandardScaler). Diagnostics may be inaccurate."
+            )
+            target_std = data_std
+        else:
+            target_std = DEFAULT_TARGET_PREDICTION_STD
+        
+        diagnostics['scale_ratio'] = diagnostics['prediction_std_mean'] / data_std if data_std > 0 else float('inf')
+        
+        if diagnostics['prediction_std_mean'] < DEFAULT_VARIANCE_COLLAPSE_THRESHOLD:
+            diagnostics['variance_collapse_detected'] = True
+            diagnostics['warnings'].append(
+                f"Variance collapse detected: prediction_std={diagnostics['prediction_std_mean']:.6f} << target ~{target_std:.6f}"
+            )
+        
+        if diagnostics['scale_ratio'] < DEFAULT_SCALE_RATIO_MIN:
+            diagnostics['warnings'].append(f"Scale mismatch: prediction_std/data_std={diagnostics['scale_ratio']:.6f} << target ~{target_std:.6f}")
+        
+        factors_mean_abs = float(np.mean(np.abs(factors_mean)))
+        diagnostics['factors_mean_abs'] = factors_mean_abs
+        if factors_mean_abs < DEFAULT_FACTOR_COLLAPSE_THRESHOLD:
+            diagnostics['warnings'].append(f"Factor collapse: |factors_mean|={factors_mean_abs:.6f} << expected ~{DEFAULT_EXPECTED_FACTOR_MAGNITUDE_MIN}-{DEFAULT_EXPECTED_FACTOR_MAGNITUDE_MAX}")
+        
+        if factors_std is not None:
+            factors_std_mean = self._compute_variance_mean(factors_std)
+            diagnostics['factors_std_mean'] = factors_std_mean
+            if factors_std_mean < DEFAULT_FACTOR_COLLAPSE_THRESHOLD:
+                diagnostics['warnings'].append(f"Factor variance collapse: factors_std={factors_std_mean:.6f} << expected ~{DEFAULT_EXPECTED_FACTOR_MAGNITUDE_MIN}-{DEFAULT_EXPECTED_FACTOR_MAGNITUDE_MAX}")
+        
+        batchnorm_stats = self._extract_batchnorm_statistics()
+        for stat in batchnorm_stats:
+            if stat['running_var_mean'] < DEFAULT_BATCHNORM_SUPPRESSION_THRESHOLD:
+                diagnostics['warnings'].append(
+                    f"BatchNorm signal suppression in {stat['module']}.{stat['layer']}: running_var={stat['running_var_mean']:.6f} << expected ~{DEFAULT_EXPECTED_FACTOR_MAGNITUDE_MIN}-{DEFAULT_EXPECTED_FACTOR_MAGNITUDE_MAX}"
+                )
+        diagnostics['batchnorm_stats'] = batchnorm_stats
+        
+        if len(prediction_std) > 1:
+            per_timestep_std = np.mean(prediction_std, axis=1)
+            timestep_collapse_count = int(np.sum(per_timestep_std < DEFAULT_TIMESTEP_COLLAPSE_THRESHOLD))
+            timestep_collapse_ratio = timestep_collapse_count / len(per_timestep_std)
+            diagnostics['timestep_collapse_count'] = timestep_collapse_count
+            diagnostics['timestep_collapse_ratio'] = timestep_collapse_ratio
+            if timestep_collapse_ratio > DEFAULT_TIMESTEP_COLLAPSE_RATIO_THRESHOLD:
+                diagnostics['warnings'].append(
+                    f"Localized variance collapse: {timestep_collapse_count}/{len(per_timestep_std)} time steps have std < {DEFAULT_TIMESTEP_COLLAPSE_THRESHOLD} "
+                    f"(ratio={timestep_collapse_ratio:.2%})"
+                )
+            elif timestep_collapse_count > 0:
+                diagnostics['warnings'].append(
+                    f"Partial variance collapse: {timestep_collapse_count}/{len(per_timestep_std)} time steps have std < {DEFAULT_TIMESTEP_COLLAPSE_THRESHOLD}"
+                )
+        
+        return diagnostics
+    
     
     @property
     def _has_factors(self) -> bool:
         """Check if factors attribute exists and is not None."""
         return getattr(self, 'factors', None) is not None
     
+    def _get_target_scaler(self):
+        """Get target scaler from dataset.
+        
+        Consolidates duplicate pattern of extracting target_scaler from dataset.
+        
+        Returns
+        -------
+        target_scaler or None
+            Target scaler from dataset, or None if not available
+        """
+        return getattr(self._dataset, 'target_scaler', None)
+    
+    def _expand_to_full_series_shape(self, target_array: np.ndarray) -> np.ndarray:
+        """Expand target array to full series shape by padding with zeros.
+        
+        Consolidates duplicate pattern of creating zero array and assigning to target_indices.
+        If all columns are targets, returns the input array as-is (no expansion needed).
+        
+        Parameters
+        ----------
+        target_array : np.ndarray
+            Array with shape (T, num_target_series)
+            
+        Returns
+        -------
+        np.ndarray
+            Array with shape (T, num_series) with target_array values in target_indices columns.
+            If all columns are targets, returns target_array unchanged.
+        """
+        if self._dataset.all_columns_are_targets:
+            # All columns are targets: no expansion needed, return as-is
+            return target_array
+        full_array = np.zeros((target_array.shape[0], self.num_series))
+        full_array[:, self.target_indices] = target_array
+        return full_array
     
     def _update_imputed_and_eps(self, prediction_iter_full: np.ndarray) -> None:
         """Update data_imputed with predictions and compute eps (idiosyncratic residuals)."""
-        # Step 1: Fill missing values with predictions (matching TensorFlow: data_mod_only_miss update)
-        # TensorFlow: data_mod_only_miss.values[lags_input:][bool_miss] = prediction_iter[bool_miss]
         if self.missing_mask.any():
             self.data_imputed.values[self.missing_mask] = prediction_iter_full[self.missing_mask]
-        
-        # Step 2: Compute eps (residuals) = data_imputed - prediction (matching TensorFlow)
-        # TensorFlow: eps = data_mod_only_miss.values[lags_input:] - prediction_iter
-        # For exchange rate data (no missing), data_mod_only_miss = original data
-        # But TensorFlow uses data_mod_only_miss (which may have predictions for missing values)
-        # We use data_imputed to match TensorFlow's data_mod_only_miss behavior
-        # Note: For data with no missing values, data_imputed = original data, so this is equivalent
-        # But for data with missing values, this ensures we use the imputed values (matching TensorFlow)
         eps_full = self.data_imputed.values - prediction_iter_full
-        
-        # Extract only target series residuals (eps is only defined for target series)
-        # TensorFlow indexes with [lags_input:], but for lags_input=0 this is the same
         self.eps = eps_full[:, self.target_indices]
     
     def _update_previous_predictions(
@@ -210,7 +528,21 @@ class DDFM(BaseFactorModel, nn.Module):
             self.register_buffer(name, to_tensor(arr, dtype=DEFAULT_TORCH_DTYPE))
     
     def _build_optimizer(self) -> None:
-        """Build optimizer and scheduler for training."""
+        """Build optimizer and scheduler for training.
+        
+        Creates optimizer (Adam/AdamW/SGD) and learning rate scheduler (LambdaLR).
+        
+        **Learning Rate Decay Implementation:**
+        TensorFlow's ExponentialDecay with decay_steps=n_mc_samples (DEFAULT_N_MC_SAMPLES) and staircase=True
+        decays every n_mc_samples optimizer steps (batches), not every n_mc_samples epochs.
+        
+        **Implementation (Fixed 2026-01-07):**
+        - Scheduler steps after each batch in autoencoder.fit() (simple_autoencoder.py:269)
+        - LambdaLR scheduler uses step count (number of batches) to compute decay
+        - Decays every n_mc_samples scheduler steps (batches) → matches TensorFlow behavior
+        - Learning rate multiplier: decay_rate ^ (step // n_mc_samples)
+        - Mathematical verification: Matches TensorFlow's ExponentialDecay(decay_steps=n_mc_samples, decay_rate=0.96, staircase=True)
+        """
         optimizers = {
             'Adam': lambda: torch.optim.Adam(
                 self.autoencoder.parameters(),
@@ -227,16 +559,68 @@ class DDFM(BaseFactorModel, nn.Module):
             'SGD': lambda: torch.optim.SGD(self.autoencoder.parameters(), lr=self.learning_rate)
         }
         self.optimizer = optimizers.get(self.optimizer_type, optimizers['SGD'])()
-        # CRITICAL: TensorFlow's ExponentialDecay with decay_steps=epochs (n_mc_samples=10) and staircase=True
-        # decays every 10 optimizer steps (batches), not every 10 epochs
-        # This is a significant difference from StepLR which decays every N epochs
-        # For now, disable scheduler to test if this is causing the prediction shrinking issue
-        # TODO: Implement proper per-step decay to match TensorFlow's behavior
-        self.scheduler = None
+        
+        def lr_lambda(step: int) -> float:
+            """Compute learning rate multiplier for per-batch decay (matches TensorFlow behavior).
+            
+            TensorFlow: ExponentialDecay(decay_steps=n_mc_samples, decay_rate=DEFAULT_LR_DECAY_RATE, staircase=True)
+            - Decays every n_mc_samples optimizer steps (batches)
+            
+            Our implementation (fixed 2026-01-07):
+            - Scheduler steps after each batch in autoencoder.fit() (simple_autoencoder.py:269)
+            - step parameter is scheduler step count (number of batches completed)
+            - Decays every n_mc_samples scheduler steps (batches) → matches TensorFlow behavior
+            - Mathematical equivalence: DEFAULT_LR_DECAY_RATE ^ (step // n_mc_samples) matches TensorFlow's staircase=True behavior
+            
+            Returns:
+                Learning rate multiplier: DEFAULT_LR_DECAY_RATE ^ (step // n_mc_samples)
+            """
+            # Decay every n_mc_samples scheduler steps (batches)
+            # Scheduler steps after each batch, so step count equals batch count
+            decay_steps = step // self.n_mc_samples
+            return DEFAULT_LR_DECAY_RATE ** decay_steps
+        
+        self.scheduler = torch.optim.lr_scheduler.LambdaLR(
+            self.optimizer,
+            lr_lambda=lr_lambda
+        )
+    
+    def _build_inputs_for_pretrain(self, interpolate: bool = True) -> pd.DataFrame:
+        """Build inputs for pre-training.
+        
+        For lags_input=0, returns the data (no lagged features).
+        For lags_input > 0, creates lagged features.
+        
+        Parameters
+        ----------
+        interpolate : bool
+            Whether to interpolate missing values using spline interpolation
+            
+        Returns
+        -------
+        pd.DataFrame
+            Input data with lagged features (if lags_input > 0) and optionally interpolated
+        """
+        if self.lags_input == 0:
+            data_tmp = self._dataset.data.copy()
+        else:
+            # Create lagged features
+            new_dict = {}
+            for col_name in self._dataset.data.columns:
+                new_dict[col_name] = self._dataset.data[col_name]
+                for lag in range(self.lags_input):
+                    new_dict[f'{col_name}_lag{lag + 1}'] = self._dataset.data[col_name].shift(lag + 1)
+            data_tmp = pd.DataFrame(new_dict, index=self._dataset.data.index)
+            # Drop initial nans from lagging
+            data_tmp = data_tmp[self.lags_input:]
+        
+        if interpolate and data_tmp.isna().sum().sum() > 0:
+            data_tmp = data_tmp.interpolate(method='spline', limit_direction='both', order=3)
+        
+        return data_tmp
     
     def _interpolate_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
         """Interpolate DataFrame values in-place and return."""
-        # Copy needed: interpolation modifies values in-place, preserve original
         df_interpolated = df.copy()
         df_interpolated.values[:] = interpolate_array(df_interpolated.values)
         return df_interpolated
@@ -248,57 +632,43 @@ class DDFM(BaseFactorModel, nn.Module):
         prediction_iter_full: np.ndarray,
         prediction_iter_target: np.ndarray
     ) -> Tuple[np.ndarray, np.ndarray]:
-        """Select appropriate predictions for convergence checking.
-        
-        When all columns are targets, uses full predictions (all columns).
-        When only some columns are targets, uses target predictions only.
-        This ensures consistency between training target and convergence checking target.
-        
-        Parameters
-        ----------
-        prediction_prev_full : Optional[np.ndarray]
-            Previous full prediction (all columns) or None if not all columns are targets
-        prediction_prev_target : np.ndarray
-            Previous target prediction (target columns only)
-        prediction_iter_full : np.ndarray
-            Current full prediction (all columns)
-        prediction_iter_target : np.ndarray
-            Current target prediction (target columns only)
-            
-        Returns
-        -------
-        Tuple[np.ndarray, np.ndarray]
-            (prediction_prev, prediction_iter) selected based on _all_columns_are_targets flag
-        """
+        """Select appropriate predictions for convergence checking."""
         if self._dataset.all_columns_are_targets:
             return prediction_prev_full, prediction_iter_full
         else:
             return prediction_prev_target, prediction_iter_target
+    
+    def _extract_target_predictions(self, prediction_full_tensor: torch.Tensor) -> torch.Tensor:
+        """Extract target predictions from full prediction tensor."""
+        if self._dataset.all_columns_are_targets:
+            return prediction_full_tensor
+        else:
+            # When covariates are present, autoencoder output_dim is num_target_series,
+            # so prediction_full_tensor already contains only target predictions
+            # Check if the prediction shape matches target shape
+            if prediction_full_tensor.shape[-1] == len(self._dataset.target_series):
+                return prediction_full_tensor
+            # Otherwise, extract target columns (legacy case)
+            if prediction_full_tensor.dim() == 1:
+                return prediction_full_tensor[self._target_col_tensor]
+            elif prediction_full_tensor.dim() == 2:
+                return prediction_full_tensor.index_select(1, self._target_col_tensor)
+            else:
+                return prediction_full_tensor.index_select(-1, self._target_col_tensor)
     
     def _initialize_mcmc_state(self) -> Tuple[np.ndarray, Optional[np.ndarray]]:
         """Initialize MCMC state: interpolate data, make initial prediction, compute initial eps."""
         self.data_denoised_interpolated = self._interpolate_dataframe(self.data_denoised)
         self.data_imputed = self.data_denoised_interpolated.copy()
         
-        # Initial prediction: use ORIGINAL data (matching TensorFlow: data_tmp from data_mod)
-        # TensorFlow: build_inputs() creates data_tmp from data_mod, then uses data_tmp.values
-        # For lags_input=0 and no missing values, data_tmp = data_mod = original scaled data
-        # We use self.data.values directly (matching TensorFlow's data_tmp.values)
-        # 
-        # CRITICAL: TensorFlow's autoencoder.predict() uses training mode for BatchNorm
-        # We must match this behavior to get identical initial predictions
-        data_original_tensor = to_tensor(self.data.values, dtype=DEFAULT_TORCH_DTYPE, device=self.device)
-        self.autoencoder.train()  # Set to training mode (matching TensorFlow's predict())
-        with torch.no_grad():
-            prediction_iter_full_tensor = self.autoencoder.forward(data_original_tensor)
-        prediction_iter_target_tensor = prediction_iter_full_tensor if self._dataset.all_columns_are_targets else prediction_iter_full_tensor[:, self._target_col_tensor]
+        data_original = to_numpy(self.data)
+        data_original_tensor = to_tensor(data_original, dtype=DEFAULT_TORCH_DTYPE, device=self.device)
+        prediction_iter_full_tensor = self.autoencoder.predict(data_original_tensor)
+        prediction_iter_target_tensor = prediction_iter_full_tensor
         prediction_iter_full = to_numpy(prediction_iter_full_tensor)
         prediction_iter_target = to_numpy(prediction_iter_target_tensor)
         
-        # Update imputed data/eps (eps computed as original_data - prediction, matching TensorFlow)
         self._update_imputed_and_eps(prediction_iter_full)
-        
-        # Initialize previous prediction for convergence checking
         prediction_prev_iter, prediction_prev_iter_full = self._update_previous_predictions(
             prediction_iter_target, prediction_iter_full
         )
@@ -307,10 +677,7 @@ class DDFM(BaseFactorModel, nn.Module):
                 
     def fit(self) -> None:
         """Fit DDFM: builds model, pre-trains, and trains in one method."""
-        # Track training time
         start_time = time.time()
-        
-        # Build autoencoder
         self.autoencoder = SimpleAutoencoder.build(
             input_dim=self.input_dim,
             encoder_size=self.encoder_size,
@@ -324,102 +691,95 @@ class DDFM(BaseFactorModel, nn.Module):
         self.decoder = self.autoencoder.decoder
         self.autoencoder.to(self.device)
         
-        # Compile autoencoder for faster execution (PyTorch 2.0+)
-        if hasattr(torch, 'compile'):
-            try:
-                self.autoencoder = torch.compile(self.autoencoder, mode='reduce-overhead')
-                _logger.debug("Autoencoder compiled with torch.compile for optimization")
-            except Exception as e:
-                _logger.warning(f"torch.compile failed, continuing without compilation: {e}")
         
         self._build_optimizer()
         
-        # Pre-train: interpolate if target_nan_ratio is high, otherwise keep NaN
-        if self._dataset.target_nan_ratio > self.min_target_interporate_ratio:
-            data_pre_train = self._interpolate_dataframe(self._dataset.data)
+        min_obs = 50
+        mult_epoch_pre = 1
+        pretrain_epochs = self.n_mc_samples * mult_epoch_pre
+        
+        data_pre_train = self._build_inputs_for_pretrain(interpolate=False)
+        data_pre_train_dropped = data_pre_train.dropna()
+        use_mse_loss = len(data_pre_train_dropped) >= min_obs
+        
+        if not use_mse_loss:
+            data_pre_train = self._build_inputs_for_pretrain(interpolate=True)
+            data_pre_train_dropped = data_pre_train.dropna()
+        
+        inpt_pre_train = data_pre_train_dropped.values
+        
+        if self._dataset.all_columns_are_targets:
+            oupt_pre_train = data_pre_train_dropped.values
         else:
-            data_pre_train = self._dataset.data
+            oupt_pre_train = data_pre_train_dropped[self._dataset.target_series].values
         
-        # Create pre-training dataset (handles X/y splitting and tensor conversion)
-        pre_train_dataset = self._dataset.create_pretrain_dataset(data_pre_train, device=self.device)
+        assert inpt_pre_train.shape[1] == self.input_dim, \
+            f"Input dimension mismatch: {inpt_pre_train.shape[1]} != {self.input_dim}"
+        assert oupt_pre_train.shape[1] == self.output_dim, \
+            f"Output dimension mismatch: {oupt_pre_train.shape[1]} != {self.output_dim}"
         
-        self.autoencoder.fit(
-            dataset=pre_train_dataset,
-            epochs=self.max_epoch_pre_train,
-            batch_size=self.window_size,
-            learning_rate=self.learning_rate,
-            optimizer_type=self.optimizer_type,
-            optimizer=self.optimizer,
-            scheduler=None,
-            target_indices=None
-        )
+        inpt_tensor = torch.from_numpy(inpt_pre_train).to(dtype=DEFAULT_TORCH_DTYPE, device=self.device)
+        oupt_tensor = torch.from_numpy(oupt_pre_train).to(dtype=DEFAULT_TORCH_DTYPE, device=self.device)
         
-        # CRITICAL: Do NOT rebuild optimizer after pre-training (matching TensorFlow)
-        # TensorFlow re-compiles with the SAME optimizer instance, preserving state
-        # (momentum, second-moment estimates, etc.)
-        # Rebuilding would reset optimizer state, causing different learning dynamics
-        # The optimizer state from pre-training should persist into MCMC training
+        self.autoencoder.train()
+        final_epoch_losses = []
+        for epoch in range(pretrain_epochs):
+            epoch_losses = []
+            for i in range(0, len(inpt_tensor), self.window_size):
+                batch_input = inpt_tensor[i:i+self.window_size]
+                batch_target = oupt_tensor[i:i+self.window_size]
+                
+                self.optimizer.zero_grad()
+                pred = self.autoencoder(batch_input)
+                
+                if use_mse_loss:
+                    loss = torch.nn.functional.mse_loss(pred, batch_target, reduction='mean')
+                else:
+                    mask = ~torch.isnan(batch_target)
+                    y_actual_ = torch.where(torch.isnan(batch_target), torch.zeros_like(batch_target), batch_target)
+                    y_predicted_ = pred * mask.float()
+                    loss = torch.nn.functional.mse_loss(y_predicted_, y_actual_, reduction='mean')
+                
+                loss.backward()
+                self.optimizer.step()
+                epoch_losses.append(loss.item())
+            
+            if epoch_losses:
+                final_epoch_losses.append(np.mean(epoch_losses))
         
-        # Initialize data structures needed for MCMC
-        # Copy needed: self.data is modified during MCMC (denoising, imputation), preserve original dataset
+        if final_epoch_losses:
+            _logger.info(f'Pre-training completed: final loss={final_epoch_losses[-1]:.{DEFAULT_LOSS_LOG_PRECISION}f}')
+        
         self.data = self._dataset.data.copy()
-        # Copy needed: self.data_denoised is modified during denoising iterations, preserve baseline
         self.data_denoised = self.data.copy()
         self.missing_mask = self.data.isna().values
         self.target_indices = self._dataset.target_indices
         if not self._dataset.all_columns_are_targets:
             self._target_col_tensor = torch.tensor(self.target_indices, device=self.device, dtype=torch.long)
         self.rng = np.random.RandomState(self.initializer_seed)
-        
-        # Initialize MCMC state (interpolation, initial prediction, eps computation)
         prediction_prev_iter, prediction_prev_iter_full = self._initialize_mcmc_state()
-        
-        # Set y_actual to ORIGINAL data (matching TensorFlow: z_actual = self.data[lags_input:].values)
-        # This is the ground truth target for reconstruction, NOT interpolated data
-        # TensorFlow uses original scaled data starting from lags_input
-        # We use self.data (which is a copy of _dataset.data) to match TensorFlow's self.data
-        # Note: self.data is set above as self._dataset.data.copy(), so it's the scaled original data
-        # For DDFM, lags_input is typically 0, so this is equivalent to using all data
-        lags_input = getattr(self, 'lags_input', 0)  # Default to 0 if not set (for backward compatibility)
         if self._dataset.all_columns_are_targets:
-            # All columns are targets: use original data starting from lags_input (matching TensorFlow)
-            self.y_actual = self.data.values[lags_input:]
+            # All columns are targets
+            self.y_actual = self.data.values[self.lags_input:]
         else:
             # Only some columns are targets: use target columns from original data starting from lags_input
             # For non-target case, we need to extract target columns from self.data
-            self.y_actual = self.data.values[lags_input:, self.target_indices]
+            self.y_actual = self.data.values[self.lags_input:, self.target_indices]
         
         converged = False
-        self._num_iter = 0  # Store actual iteration count for get_result()
-        
-        # MCMC loop
+        self._num_iter = 0
+        self.prediction_std = None
+        self.factor_std = None
         while not converged and self._num_iter < self.max_iter:
-            # Get idio distr (Phi is AR(1) coefficient matrix)
-            # Use dataset's observed_y directly (target columns only)
             Phi, mu_eps, std_eps = get_idio(self.eps, self._dataset.observed_y)
-            
-            # Apply denoising step: subtract conditional AR-idio mean from data_imputed
-            # TensorFlow: data_mod[lags_input + 1:] = data_mod_only_miss[lags_input + 1:] - eps[:-1, :] @ phi
-            # For lags_input=0, this becomes: data_mod[1:] = data_mod_only_miss[1:] - eps[:-1, :] @ phi
-            # We use data_imputed (which matches data_mod_only_miss) for denoising
             eps_expanded = np.zeros((self.eps.shape[0], self.num_series))
             eps_expanded[:, self.target_indices] = self.eps
-            self.data_denoised.values[1:] = self.data_imputed.values[1:] - eps_expanded[:-1, :] @ Phi
-            # TensorFlow also sets: data_mod[:lags_input + 1] = data_mod_only_miss[:lags_input + 1]
-            # For lags_input=0, this sets data_mod[0] = data_mod_only_miss[0]
-            # We initialize data_denoised as a copy of data, so first row is already correct
-            
-            # Update interpolated data (needed for creating datasets)
+            self.data_denoised.values[self.lags_input+1:] = self.data_imputed.values[self.lags_input+1:] - eps_expanded[:-1, :] @ Phi
             self.data_denoised_interpolated = self._interpolate_dataframe(self.data_denoised)
             
-            # Pre-generate MC samples
-            # Use denoised data (not interpolated) for corruption, matching TensorFlow's data_tmp
-            # TensorFlow: data_tmp is built from data_mod (denoised) via build_inputs()
-            # build_inputs() interpolates only if there are missing values
-            # For exchange rate data (no missing), data_tmp = denoised data
-            # So we use data_denoised (not interpolated) for corruption
+            # Generate MC samples using denoised data
             X_features_df, y_tmp = self._dataset.split_features_and_targets(self.data_denoised)
-            X_features = pd.DataFrame() if X_features_df is None else X_features_df
+            X_features = X_features_df if X_features_df is not None else pd.DataFrame()
             
             autoencoder_datasets = self._dataset.create_autoencoder_datasets_list(
                 n_mc_samples=self.n_mc_samples,
@@ -432,14 +792,6 @@ class DDFM(BaseFactorModel, nn.Module):
                 device=self.device
             )
             
-            # Train on each MC sample sequentially
-            # CRITICAL: TensorFlow uses ExponentialDecay with decay_steps=epochs (10) and staircase=True
-            # This means learning rate decays every 10 optimizer steps (batches), not every 10 epochs
-            # Our StepLR with step_size=n_mc_samples (10) decays every 10 epochs, which is different
-            # However, TensorFlow's decay_steps=epochs refers to the number of MC samples (epochs parameter)
-            # So we need to step the scheduler after each MC sample to match TensorFlow's behavior
-            # Actually, TensorFlow's ExponentialDecay is applied per optimizer step, so it decays
-            # every 10 batches across all MC samples. We need to match this behavior.
             self.autoencoder.train()
             target_indices = self._target_col_tensor if not self._dataset.all_columns_are_targets else None
             for ae_dataset in autoencoder_datasets:
@@ -450,74 +802,94 @@ class DDFM(BaseFactorModel, nn.Module):
                     learning_rate=self.learning_rate,
                     optimizer_type=self.optimizer_type,
                     optimizer=self.optimizer,
-                    scheduler=self.scheduler,  # Pass scheduler to use DDFM's learning rate decay
+                    scheduler=self.scheduler,
                     target_indices=target_indices
                 )
             
-            # Step scheduler after all MC samples (matching TensorFlow's decay_steps=epochs behavior)
-            # TensorFlow's ExponentialDecay with decay_steps=epochs (10) means it decays every 10 optimizer steps
-            # Since we have n_mc_samples (10) MC samples per iteration, we step after all MC samples
-            if self.scheduler is not None:
-                self.scheduler.step()
-            
-            # Extract factors and compute predictions
-            # CRITICAL: TensorFlow's encoder is a separate model that shares layers with autoencoder
-            # When autoencoder.fit() is called, all layers (including encoder's) are in training mode
-            # When encoder() is called directly, it uses the same layers, so still in training mode
-            # This means BatchNorm uses batch statistics, not running statistics
-            # 
-            # We must keep training mode to match TensorFlow, even though it's slower
-            # The slowness comes from BatchNorm computing batch mean/var on-the-fly
-            # This is necessary for correctness - running stats would give different results
-            # 
-            # Note: We use torch.no_grad() to prevent gradient computation, but keep training mode
-            # This ensures BatchNorm uses batch statistics (matching TensorFlow)
             with torch.no_grad():
                 factors_list = [self.encoder(ae_dataset.full_input) for ae_dataset in autoencoder_datasets]
                 factors_tensor = torch.stack(factors_list, dim=0)
                 
                 predictions_full_tensor = torch.stack([self.decoder(f) for f in factors_list], dim=0)
-                prediction_iter_full_tensor = predictions_full_tensor.mean(dim=0)
-                prediction_iter_target_tensor = prediction_iter_full_tensor if self._dataset.all_columns_are_targets else prediction_iter_full_tensor[:, self._target_col_tensor]
                 
+                # Validate MC sample dimension
+                if factors_tensor.shape[0] != self.n_mc_samples:
+                    raise ValueError(
+                        f"MC samples dimension mismatch: factors_tensor.shape[0]={factors_tensor.shape[0]} != n_mc_samples={self.n_mc_samples}"
+                    )
+                if predictions_full_tensor.shape[0] != self.n_mc_samples:
+                    raise ValueError(
+                        f"MC samples dimension mismatch: predictions_full_tensor.shape[0]={predictions_full_tensor.shape[0]} != n_mc_samples={self.n_mc_samples}"
+                    )
+                
+                prediction_iter_full_tensor, prediction_iter_std_tensor = self._compute_tensor_stats(predictions_full_tensor)
+                prediction_iter_target_tensor = self._extract_target_predictions(prediction_iter_full_tensor)
                 prediction_iter_full = to_numpy(prediction_iter_full_tensor)
                 prediction_iter_target = to_numpy(prediction_iter_target_tensor)
+                prediction_iter_std = to_numpy(prediction_iter_std_tensor)
                 self.factors = to_numpy(factors_tensor)
+                self.prediction_std = prediction_iter_std
+                
+                _, factors_std_tensor = self._compute_tensor_stats(factors_tensor)
+                self.factor_std = to_numpy(factors_std_tensor)
+                
+                prediction_std_mean_check = self._compute_variance_mean(prediction_iter_std)
+                should_check_variance = (
+                    (prediction_std_mean_check is not None and prediction_std_mean_check < DEFAULT_VARIANCE_COLLAPSE_THRESHOLD) or
+                    (self._num_iter % self.disp == 0)
+                )
+                if should_check_variance:
+                    factors_mean_tensor, _ = self._compute_tensor_stats(factors_tensor)
+                    factors_mean = to_numpy(factors_mean_tensor)
+                    variance_diagnostics = self._diagnose_variance_collapse(
+                        prediction_std=prediction_iter_std,
+                        prediction_mean=prediction_iter_full,
+                        factors_mean=factors_mean,
+                        factors_std=self.factor_std
+                    )
+                    if variance_diagnostics['variance_collapse_detected']:
+                        _logger.warning(f"Variance collapse detected at iteration {self._num_iter}: {', '.join(variance_diagnostics['warnings'])}")
             
-            # Update imputed data/eps
             self._update_imputed_and_eps(prediction_iter_full)
             
-            # Check convergence
-            prediction_prev, prediction_iter = self._select_convergence_predictions(
-                prediction_prev_iter_full, prediction_prev_iter,
-                prediction_iter_full, prediction_iter_target
-            )
-            delta, self.loss_now = convergence_checker(prediction_prev, prediction_iter, self.y_actual)
+            if self._num_iter > 1:
+                prediction_prev, prediction_iter = self._select_convergence_predictions(
+                    prediction_prev_iter_full, prediction_prev_iter,
+                    prediction_iter_full, prediction_iter_target
+                )
+                delta, self.loss_now = convergence_checker(prediction_prev, prediction_iter, self.y_actual)
+                
+                _logger.info(f'iteration: {self._num_iter} - delta: {delta:.{DEFAULT_LOSS_LOG_PRECISION}f} - loss: {self.loss_now:.{DEFAULT_LOSS_LOG_PRECISION}f}')
+                
+                if self._num_iter % self.disp == 0:
+                    prediction_std_mean = self._compute_variance_mean(self.prediction_std)
+                    factor_std_mean = self._compute_variance_mean(self.factor_std) if self.factor_std is not None else None
+                    log_parts = [f'iteration: {self._num_iter}', f'loss: {self.loss_now:.{DEFAULT_LOSS_LOG_PRECISION}f}', f'delta: {delta:.{DEFAULT_LOSS_LOG_PRECISION}f}']
+                    if prediction_std_mean is not None:
+                        log_parts.append(f'pred_std: {prediction_std_mean:.{DEFAULT_LOSS_LOG_PRECISION}f}')
+                    if factor_std_mean is not None:
+                        log_parts.append(f'factor_std: {factor_std_mean:.{DEFAULT_LOSS_LOG_PRECISION}f}')
+                    _logger.info(' - '.join(log_parts))
+                
+                if delta < self.tolerance:
+                    converged = True
+                    self._converged = True
+                    _logger.info(f'Convergence achieved in {self._num_iter + 1} iterations')
             
-            if self._num_iter % self.disp == 0:
-                _logger.info(f'iteration: {self._num_iter} - loss: {self.loss_now:.{DEFAULT_LOSS_LOG_PRECISION}f} - delta: {delta:.{DEFAULT_LOSS_LOG_PRECISION}f}')
-            
-            if delta < self.tolerance:
-                converged = True
-                self._converged = True
-                _logger.info(f'Convergence achieved in {self._num_iter} iterations')
-            
-            # Update previous prediction for next iteration
             prediction_prev_iter, prediction_prev_iter_full = self._update_previous_predictions(
                 prediction_iter_target, prediction_iter_full
             )
             
-            # Store last iteration's datasets for last_neurons extraction (if MLP decoder)
             if self.decoder_type == "mlp":
                 self._last_iter_datasets = autoencoder_datasets
             
-            self._num_iter += 1  # Increment iteration count (used for convergence check and get_result())
+            self._num_iter += 1
         
         # Extract last neurons (for MLP decoder: second-to-last layer output)
         if self.decoder_type == "linear":
             self.last_neurons = self.factors
         else:
-            decoder_intermediate = nn.Sequential(*list(self.decoder.children())[:-1])
+            decoder_intermediate = self._get_decoder_intermediate()
             self.autoencoder.eval()
             with torch.no_grad():
                 last_neurons_list = [
@@ -535,16 +907,9 @@ class DDFM(BaseFactorModel, nn.Module):
         eps_t = self.eps
         num_factors = f_t.shape[1]
         
-        # Extract decoder's last linear layer weights
-        linear_layers = [m for m in self.decoder.modules() if isinstance(m, nn.Linear)]
-        if not linear_layers:
-            raise ConfigurationError("No Linear layer found in decoder")
-        linear_layer = linear_layers[-1]
-        
-        # Get weight matrix: shape (N, m) where N=num_series, m=num_factors
+        linear_layer = self._get_decoder_last_linear_layer()
         weight = to_numpy(linear_layer.weight.data)
         
-        # Extract observation matrix H (first m columns of weight matrix)
         H = weight[:, :num_factors]
         
         # Get transition equation params (factor_order is fixed to 1)
@@ -552,7 +917,6 @@ class DDFM(BaseFactorModel, nn.Module):
         # Use dataset's observed_y directly (target columns only)
         F_full, Q_full, mu_0_full, Sigma_0_full, _ = get_transition_params(f_t, eps_t, bool_no_miss=self._dataset.observed_y)
         
-        # Extract factor-only transition matrix F (top-left block of F_full)
         # F_full structure: [[A_f, 0], [0, Phi]] where A_f is (m x m) factor transition
         F = F_full[:num_factors, :num_factors]  # Factor transition matrix (m x m)
         Q = Q_full[:num_factors, :num_factors]  # Factor process noise (m x m)
@@ -571,7 +935,6 @@ class DDFM(BaseFactorModel, nn.Module):
             '_state_space_R': R
         })
         
-        # Store in DDFMFitParams dataclass for convenient numpy access
         self.state_space_params = DDFMFitParams(
             F=F,
             Q=Q,
@@ -584,9 +947,7 @@ class DDFM(BaseFactorModel, nn.Module):
     def load_state_dict(self, state_dict: dict, strict: bool = True):
         """Load state dictionary and restore state_space_params dataclass."""
         result = super().load_state_dict(state_dict, strict=strict)
-        # Restore state_space_params from buffers if they exist
         if getattr(self, '_state_space_F', None) is not None:
-            # Convert state space buffers to numpy using to_numpy utility for consistency
             self.state_space_params = DDFMFitParams(
                 F=to_numpy(self._state_space_F),
                 Q=to_numpy(self._state_space_Q),
@@ -617,9 +978,8 @@ class DDFM(BaseFactorModel, nn.Module):
             details="Please call fit() or train() first"
         )
         
-        # Validate state-space model is built
         check_condition(
-            self.state_space_params is not None,
+            getattr(self, 'state_space_params', None) is not None,
             ModelNotInitializedError,
             f"{self.__class__.__name__} prediction failed: state-space model has not been built",
             details="Please call build_state_space() after training to enable prediction"
@@ -639,7 +999,8 @@ class DDFM(BaseFactorModel, nn.Module):
         factors_avg = self._get_averaged_factors()
         
         # Get last factor state: (num_factors,)
-        Z_last = factors_avg[-1, :] if factors_avg.shape[0] > 0 else params.mu_0
+        # Use last row if factors exist, otherwise use initial state
+        Z_last = factors_avg[-1, :] if len(factors_avg) > 0 else params.mu_0
         
         # Validate factor state
         validate_no_nan_inf(Z_last, name="last factor state Z_last")
@@ -653,12 +1014,10 @@ class DDFM(BaseFactorModel, nn.Module):
         # H shape: (num_target_series, num_factors)
         # Z_forecast shape: (horizon, num_factors)
         # y_forecast shape: (horizon, num_target_series)
-        # Note: y_forecast_std is in SCALED space (same scale as training data)
         y_forecast_std = Z_forecast @ H.T
         
         # Inverse transform target series to original scale (only during forecasting)
-        # Training and evaluation use scaled data; only forecasts are unscaled
-        target_scaler = getattr(self._dataset, 'target_scaler', None)
+        target_scaler = self._get_target_scaler()
         
         if target_scaler is None:
             raise ConfigurationError(
@@ -691,9 +1050,8 @@ class DDFM(BaseFactorModel, nn.Module):
             details="Please call fit() or train() first"
         )
         
-        # Validate state-space model is built
         check_condition(
-            self.state_space_params is not None,
+            getattr(self, 'state_space_params', None) is not None,
             ModelNotInitializedError,
             f"{self.__class__.__name__} get_result failed: state-space model has not been built",
             details="Please call build_state_space() after training"
@@ -712,21 +1070,19 @@ class DDFM(BaseFactorModel, nn.Module):
         Z = self._get_averaged_factors()
         
         # Compute smoothed data: x_sm = Z @ H.T
-        # Note: x_sm is in SCALED space (same scale as training data)
         # Use get_x_sm_original_scale() on result to get unscaled values if needed
         x_sm = Z @ H.T  # (T, num_target_series)
         
         # Expand to full data shape for compatibility
-        x_sm_full = np.zeros((x_sm.shape[0], self.num_series))
-        x_sm_full[:, self.target_indices] = x_sm
+        x_sm_full = self._expand_to_full_series_shape(x_sm)
         
         # Get target scaler from dataset
-        target_scaler = getattr(self._dataset, 'target_scaler', None)
+        target_scaler = self._get_target_scaler()
         
         # Create result
         # For DDFM: A = F (transition), C = H (observation), r = [num_factors], p = 1
-        f_avg = self._get_averaged_factors()
-        num_factors = f_avg.shape[1]
+        # Z already computed above, reuse it instead of calling _get_averaged_factors() again
+        num_factors = Z.shape[1]
         return DDFMResult(
             x_sm=x_sm_full,
             Z=Z,
@@ -792,13 +1148,10 @@ class DDFM(BaseFactorModel, nn.Module):
         # Convert to numpy
         new_factors_np = to_numpy(new_factors)
         
-        # Update factors: append new factors to existing ones
-        # self.factors shape: (n_mc_samples, T, num_factors) or (T, num_factors)
         if self.factors.ndim == 3:
-            # Expand new_factors to match MC dimension: (1, T_new, num_factors)
+            n_mc_samples = self.factors.shape[0]
             new_factors_expanded = np.expand_dims(new_factors_np, axis=0)
-            # Concatenate: (n_mc_samples, T + T_new, num_factors)
+            new_factors_expanded = np.repeat(new_factors_expanded, n_mc_samples, axis=0)
             self.factors = np.concatenate([self.factors, new_factors_expanded], axis=1)
         else:
-            # Concatenate: (T + T_new, num_factors)
             self.factors = np.vstack([self.factors, new_factors_np])

@@ -20,18 +20,17 @@ from ..config.constants import (
     DEFAULT_OUTPUT_LAYER_GAIN,
     DEFAULT_BATCH_NORM_MOMENTUM,
     DEFAULT_BATCH_NORM_EPS,
+    DEFAULT_AUTOENCODER_FIT_EPOCHS,
+    DEFAULT_DDFM_BATCH_SIZE,
+    DEFAULT_DDFM_LEARNING_RATE,
+    DEFAULT_CLEAN_NAN,
 )
 
 _logger = get_logger(__name__)
 
 
 class Encoder(nn.Module):
-    """Nonlinear encoder network for DDFM.
-    
-    Matches TensorFlow implementation:
-    - First layer: Dense → ReLU
-    - Subsequent layers: BatchNorm → Dense → ReLU
-    """
+    """Nonlinear encoder network for DDFM."""
     
     def __init__(
         self,
@@ -53,14 +52,12 @@ class Encoder(nn.Module):
             raise ConfigurationError(f"Unknown activation: {activation}")
         self.activation = activations[activation]
         
-        # First layer: Dense → ReLU (no BatchNorm before it, matching TensorFlow)
         prev_dim = input_dim
         first_layer = nn.Linear(prev_dim, encoder_dims[0])
         self._init_linear(first_layer)
         self.layers.append(first_layer)
         prev_dim = encoder_dims[0]
         
-        # Subsequent layers: BatchNorm → Dense → ReLU (matching TensorFlow loop)
         for dim in encoder_dims[1:]:
             self.batch_norms.append(nn.BatchNorm1d(prev_dim, momentum=DEFAULT_BATCH_NORM_MOMENTUM, eps=DEFAULT_BATCH_NORM_EPS))
             layer = nn.Linear(prev_dim, dim)
@@ -75,11 +72,7 @@ class Encoder(nn.Module):
         nn.init.constant_(layer.bias, DEFAULT_ZERO_VALUE)
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass: Dense → ReLU → BatchNorm → Dense → ReLU → ..."""
-        # First layer: Dense → ReLU
         x = self.activation(self.layers[0](x))
-        
-        # Subsequent layers: BatchNorm → Dense → ReLU
         for i in range(1, len(self.layers)):
             x = self.batch_norms[i - 1](x)
             x = self.activation(self.layers[i](x))
@@ -88,32 +81,16 @@ class Encoder(nn.Module):
 
 
 def extract_decoder_params(decoder) -> Tuple[np.ndarray, np.ndarray]:
-    """Extract observation matrix C and bias from decoder.
-    
-    This is a convenience function that delegates to the decoder's extract_params method.
-    For backward compatibility, it also handles nn.Linear directly.
-    
-    Parameters
-    ----------
-    decoder : LinearDecoder | MLPDecoder | nn.Linear
-        Decoder instance or Linear layer
-        
-    Returns
-    -------
-    Tuple[np.ndarray, np.ndarray]
-        (weight, bias) where weight is (output_dim, input_dim) and bias is (output_dim,)
-    """
-    # If decoder has extract_params method, use it (preferred)
+    """Extract observation matrix C and bias from decoder."""
     if hasattr(decoder, 'extract_params'):
         return decoder.extract_params()
     
-    # Backward compatibility: handle nn.Linear directly
     if isinstance(decoder, nn.Linear):
         weight = decoder.weight.data.cpu().numpy()
         bias = decoder.bias.data.cpu().numpy() if decoder.bias is not None else np.zeros(weight.shape[0])
         if np.any(np.isnan(weight)):
             _logger.warning("extract_decoder_params: C matrix contains NaN values. Replacing with zeros.")
-            weight = np.nan_to_num(weight, nan=0.0)
+            weight = np.nan_to_num(weight, nan=DEFAULT_CLEAN_NAN)
         return weight, bias
     
     raise DataValidationError(
@@ -148,7 +125,7 @@ class SimpleAutoencoder(nn.Module):
             torch.manual_seed(seed)
         
         if len(encoder_size) == 0:
-            raise ValueError("encoder_size must have at least one element (latent dimension)")
+            raise ValueError("encoder_size must have at least one element")
         
         encoder = Encoder(input_dim, list(encoder_size), activation)
         
@@ -160,7 +137,7 @@ class SimpleAutoencoder(nn.Module):
                 raise ValueError("decoder_size must be provided when decoder_type='mlp'")
             decoder = MLPDecoder(latent_dim, output_dim, list(decoder_size), activation, seed)
         else:
-            decoder = LinearDecoder(latent_dim, output_dim, seed)
+            decoder = LinearDecoder(latent_dim, output_dim, seed=seed)
         
         return cls(encoder=encoder, decoder=decoder)
     
@@ -174,7 +151,6 @@ class SimpleAutoencoder(nn.Module):
         activation: str = 'relu',
         seed: Optional[int] = None
     ) -> "SimpleAutoencoder":
-        """Build autoencoder from AutoencoderDataset dimensions."""
         return cls.build(
             input_dim=dataset.full_input.shape[1],
             encoder_size=encoder_size,
@@ -189,7 +165,7 @@ class SimpleAutoencoder(nn.Module):
         return self.decoder(self.encoder(x))
     
     def predict(self, x: torch.Tensor) -> torch.Tensor:
-        """Predict in inference mode."""
+        """Predict using inference mode (matches TensorFlow's autoencoder.predict() behavior)."""
         self.eval()
         with torch.no_grad():
             return self.forward(x)
@@ -197,16 +173,22 @@ class SimpleAutoencoder(nn.Module):
     def fit(
         self,
         dataset: 'AutoencoderDataset',
-        epochs: int = 1,
-        batch_size: int = 100,
-        learning_rate: float = 0.005,
+        epochs: Optional[int] = None,
+        batch_size: Optional[int] = None,
+        learning_rate: Optional[float] = None,
         optimizer_type: str = 'Adam',
         decay_learning_rate: bool = True,
         optimizer: Optional[torch.optim.Optimizer] = None,
         scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None,
         target_indices: Optional[torch.Tensor] = None
     ) -> None:
-        """Fit autoencoder on AutoencoderDataset."""
+        if epochs is None:
+            epochs = DEFAULT_AUTOENCODER_FIT_EPOCHS
+        if batch_size is None:
+            batch_size = DEFAULT_DDFM_BATCH_SIZE
+        if learning_rate is None:
+            learning_rate = DEFAULT_DDFM_LEARNING_RATE
+        
         if optimizer is None:
             optimizers = {
                 'Adam': lambda: torch.optim.Adam(self.parameters(), lr=learning_rate),
@@ -214,14 +196,9 @@ class SimpleAutoencoder(nn.Module):
             }
             optimizer = optimizers.get(optimizer_type, optimizers['Adam'])()
         
-        # Only create scheduler if none provided and decay is enabled
-        # If scheduler is provided (e.g., from DDFM), use it instead of creating a new one
         if scheduler is None and decay_learning_rate:
-            from ..config.constants import DEFAULT_LR_DECAY_RATE
-            # Note: TensorFlow uses ExponentialDecay with decay_steps=epochs (10) and staircase=True
-            # This decays every 10 optimizer steps. We use StepLR with step_size=10 to match this.
-            # However, if we're called from DDFM, the scheduler is already created and passed in.
-            scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=DEFAULT_LR_DECAY_RATE)
+            from ..config.constants import DEFAULT_LR_DECAY_RATE, DEFAULT_N_MC_SAMPLES
+            scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=DEFAULT_N_MC_SAMPLES, gamma=DEFAULT_LR_DECAY_RATE)
         
         self.train()
         full_input = dataset.full_input
@@ -235,19 +212,16 @@ class SimpleAutoencoder(nn.Module):
                 
                 optimizer.zero_grad()
                 pred = self.forward(batch_input)
-                if target_indices is not None:
-                    pred = pred[:, target_indices]
+                # Note: target_indices is not used here because the autoencoder
+                # output_dim is already set to num_target_series, so pred already
+                # contains only target series predictions
                 
-                # Match TensorFlow's mse_missing: set NaN to 0 in both y_actual and y_predicted
-                # TensorFlow: y_actual_ = tf.where(tf.math.is_nan(y_actual), tf.zeros_like(y_actual), y_actual)
-                #            y_predicted_ = tf.multiply(y_predicted, mask)
-                #            mse_loss(y_actual_, y_predicted_)
                 mask = ~torch.isnan(batch_target)
                 y_actual_ = torch.where(torch.isnan(batch_target), torch.zeros_like(batch_target), batch_target)
-                y_predicted_ = pred * mask.float()  # Convert mask to float for multiplication
+                y_predicted_ = pred * mask.float()
                 loss = torch.nn.functional.mse_loss(y_predicted_, y_actual_, reduction='mean')
                 loss.backward()
                 optimizer.step()
-            
-            if scheduler is not None:
-                scheduler.step()
+                
+                if scheduler is not None:
+                    scheduler.step()
