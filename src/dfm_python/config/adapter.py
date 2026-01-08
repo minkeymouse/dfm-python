@@ -118,7 +118,12 @@ def _extract_frequency_dict(
     data: Dict[str, Any],
     clock: str = DEFAULT_CLOCK_FREQUENCY
 ) -> Optional[Dict[str, str]]:
-    """Extract frequency dict from data, handling both new API and legacy formats.
+    """Extract frequency dict from data, handling multiple formats.
+    
+    Supports:
+    1. Grouped format: {'w': [series1, series2, ...], 'm': [series3, ...]}
+    2. Individual format: {'series1': 'w', 'series2': 'm', ...}
+    3. Legacy format: {'series': [{'series_id': ..., 'frequency': ...}, ...]}
     
     Parameters
     ----------
@@ -132,12 +137,63 @@ def _extract_frequency_dict(
     Optional[Dict[str, str]]
         Frequency dict mapping column names to frequencies, or None if not found
     """
-    if 'frequency' in data:
-        # New API: frequency dict directly
-        return data['frequency']
-    elif 'series' in data:
-        # Legacy: convert series list/dict to frequency dict
-        return _convert_series_to_frequency_dict(data['series'], clock)
+    if 'frequency' not in data:
+        # Legacy: check for 'series' key
+        if 'series' in data:
+            return _convert_series_to_frequency_dict(data['series'], clock)
+        return None
+    
+    freq_data = data['frequency']
+    
+    # Check if it's in grouped format: {'w': [...], 'm': [...]}
+    if _is_dict_like(freq_data):
+        from .constants import VALID_FREQUENCIES
+        
+        # Check if all keys are valid frequency codes (grouped format)
+        keys_are_frequencies = all(
+            isinstance(k, str) and k in VALID_FREQUENCIES 
+            for k in freq_data.keys()
+        )
+        
+        # Check if values are lists (grouped format)
+        values_are_lists = all(
+            isinstance(v, (list, tuple)) for v in freq_data.values()
+        )
+        
+        if keys_are_frequencies and values_are_lists:
+            # Grouped format: convert to individual format
+            result = {}
+            for freq, series_list in freq_data.items():
+                if not isinstance(series_list, (list, tuple)):
+                    _raise_config_error(
+                        f"Frequency '{freq}' must map to a list of series names, got {type(series_list)}"
+                    )
+                for series_name in series_list:
+                    if not isinstance(series_name, str):
+                        _raise_config_error(
+                            f"Series names must be strings, got {type(series_name)} in frequency '{freq}'"
+                        )
+                    if series_name in result:
+                        _raise_config_error(
+                            f"Series '{series_name}' appears in multiple frequency groups"
+                        )
+                    result[series_name] = freq
+            return result
+        else:
+            # Individual format: already in correct format, validate structure
+            result = {}
+            for series_name, freq in freq_data.items():
+                if not isinstance(series_name, str):
+                    _raise_config_error(
+                        f"Frequency dict keys must be strings (series names), got {type(series_name)}"
+                    )
+                if not isinstance(freq, str):
+                    _raise_config_error(
+                        f"Frequency dict values must be strings (frequency codes), got {type(freq)} for series '{series_name}'"
+                    )
+                result[series_name] = freq
+            return result
+    
     return None
 
 

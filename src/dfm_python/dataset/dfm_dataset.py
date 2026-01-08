@@ -285,7 +285,15 @@ class DFMDataset:
         
         # Separate target and feature columns
         all_columns = list(X_df.columns)
-        target_cols = [col for col in self.target_series if col in all_columns]
+        # If target_series is None or empty, use all columns as targets
+        if self.target_series is None:
+            target_cols = all_columns
+        elif isinstance(self.target_series, str):
+            target_cols = [self.target_series] if self.target_series in all_columns else []
+        elif len(self.target_series) == 0:
+            target_cols = all_columns
+        else:
+            target_cols = [col for col in self.target_series if col in all_columns]
         
         # Convert to numpy - filter numeric columns
         X_transformed = filter_numeric_columns(X_df)

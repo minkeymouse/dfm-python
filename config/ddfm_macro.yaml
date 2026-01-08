@@ -26,29 +26,30 @@ target_scaler: standard  # Scaler for target series: 'standard', 'robust', 'minm
 
 # Frequency mapping for mixed-frequency macro data
 # Clock is weekly (w), so monthly series are slower frequency
-# All frequencies must be explicitly specified
+# Grouped format: frequencies are specified as lists grouped by frequency code
 # Reduced set for faster testing (~50% reduction: 12 monthly series kept from original ~24)
 frequency:
   # Monthly series (slower than weekly clock) - typically end-of-month observations
   # Essential series for testing
-  KOEMPTOTO: m  # Total employment (monthly)
-  KOHWRWEMP: m  # Hours worked (monthly)
-  KOIMPCONA: m  # Investment, Construction (monthly)
-  KOWRCCNSE: m  # Consumption (monthly)
-  KOCONPRCF: m  # Production (monthly)
-  KOCPCOREF: m  # Consumer prices (monthly)
-  KOCPEXFEF: m  # Export prices (monthly)
-  KOCREU..A: m  # Credit (monthly)
-  KOLRLTHH: m  # Interest rates (monthly)
-  KOBSIHAPR: m  # Business survey (monthly)
-  KOCNFCONR: m  # Confidence (monthly)
-  # Target series
-  KOEQUIPTE: m  # Investment, Equipment (monthly, target series)
+  m:
+    - KOEMPTOTO  # Total employment (monthly)
+    - KOHWRWEMP  # Hours worked (monthly)
+    - KOIMPCONA  # Investment, Construction (monthly)
+    - KOWRCCNSE  # Consumption (monthly)
+    - KOCONPRCF  # Production (monthly)
+    - KOCPCOREF  # Consumer prices (monthly)
+    - KOCPEXFEF  # Export prices (monthly)
+    - KOCREU..A  # Credit (monthly)
+    - KOLRLTHH  # Interest rates (monthly)
+    - KOBSIHAPR  # Business survey (monthly)
+    - KOCNFCONR  # Confidence (monthly)
+    - KOEQUIPTE  # Investment, Equipment (monthly, target series)
   # Weekly series (same as clock frequency)
-  KORFBEV: w  # Retail, Food & Beverages (weekly)
-  KORWHLS: w  # Retail, Wholesale (weekly)
-  KORMCMP: w  # Retail, Miscellaneous & Comparison (weekly)
-  KORELEC: w  # Retail, Electronics (weekly)
-  KORCNST: w  # Retail, Construction (weekly)
-  KORMACH: w  # Retail, Machinery (weekly)
-  KOROCOINF: w  # Retail, Other Consumer & Information (weekly)
+  w:
+    - KORFBEV  # Retail, Food & Beverages (weekly)
+    - KORWHLS  # Retail, Wholesale (weekly)
+    - KORMCMP  # Retail, Miscellaneous & Comparison (weekly)
+    - KORELEC  # Retail, Electronics (weekly)
+    - KORCNST  # Retail, Construction (weekly)
+    - KORMACH  # Retail, Machinery (weekly)
+    - KOROCOINF  # Retail, Other Consumer & Information (weekly)

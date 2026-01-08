@@ -91,7 +91,9 @@ class BaseModelConfig:
     - Data preprocessing (missing data handling)
     
     Series Configuration:
-    - Provide `frequency` dict: {'column_name': 'frequency_code'} to specify per-series frequencies
+    - Provide `frequency` dict in one of two formats:
+      1. Grouped format: {'w': [series1, series2, ...], 'm': [series3, ...]} (recommended for large configs)
+      2. Individual format: {'series1': 'w', 'series2': 'm', ...} (backward compatible)
     - If `frequency` is None, all columns will use `clock` frequency
     - If a column is missing from `frequency` dict, it will use `clock` frequency
     - When data is loaded, missing columns in `frequency` dict are automatically added with `clock` frequency
@@ -103,7 +105,14 @@ class BaseModelConfig:
     
     Examples
     --------
-    >>> # With explicit frequency mapping
+    >>> # With grouped frequency mapping (recommended for large configs)
+    >>> config = DFMConfig(
+    ...     frequency={'q': ['gdp'], 'm': ['unemployment', 'interest_rate']},
+    ...     clock='m',
+    ...     blocks={...}
+    ... )
+    >>> 
+    >>> # With individual frequency mapping (backward compatible)
     >>> config = DFMConfig(
     ...     frequency={'gdp': 'q', 'unemployment': 'm', 'interest_rate': 'm'},
     ...     clock='m',

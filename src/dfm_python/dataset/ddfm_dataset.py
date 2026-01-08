@@ -29,8 +29,8 @@ class DDFMDataset(Dataset):
         Input data. Target series will be scaled if scaler provided.
     time_idx : str
         Time index column name.
-    target_series : List[str]
-        Target series column names to scale.
+    target_series : List[str], optional
+        Target series column names to scale. If None or empty, all columns will be used as targets.
     target_scaler : StandardScaler | RobustScaler | MinMaxScaler, optional
         Scaler instance to scale target series. If None, no scaling.
     """
@@ -39,7 +39,7 @@ class DDFMDataset(Dataset):
         self,
         data: Union[pd.DataFrame, PolarsDataFrame],
         time_idx: str,
-        target_series: List[str],
+        target_series: Optional[List[str]] = None,
         target_scaler: Optional[Union[StandardScaler, RobustScaler, MinMaxScaler]] = None,
     ):
         if _has_polars and isinstance(data, pl.DataFrame):
@@ -56,13 +56,17 @@ class DDFMDataset(Dataset):
         else:
             self.time_index = data.index
         
-        target_series_list = list(target_series)
-        missing_cols = [col for col in target_series_list if col not in data.columns]
-        if missing_cols:
-            raise ValueError(
-                f"target_series columns {missing_cols} not found in data. "
-                f"Available columns: {list(data.columns)}"
-            )
+        # If target_series is None or empty, use all columns as targets
+        if target_series is None or len(target_series) == 0:
+            target_series_list = list(data.columns)
+        else:
+            target_series_list = list(target_series)
+            missing_cols = [col for col in target_series_list if col not in data.columns]
+            if missing_cols:
+                raise ValueError(
+                    f"target_series columns {missing_cols} not found in data. "
+                    f"Available columns: {list(data.columns)}"
+                )
         self.target_series = target_series_list
         self.data_original = data.copy()
         self.target_scaler = target_scaler
