@@ -10,7 +10,7 @@ Note: Series are specified via frequency dict mapping column names to frequencie
 from .schema import (
     BaseModelConfig, DFMConfig, DDFMConfig,
     BaseResult, DFMResult, DDFMResult,
-    DFMFitParams, DDFMFitParams, FitParams,  # FitParams is backward compatibility alias
+    DFMStateSpaceParams, DDFMStateSpaceParams,
 )
 # DEFAULT_BLOCK_NAME is imported lazily where needed to avoid circular imports
 from .constants import (
@@ -107,9 +107,8 @@ __all__ = [
     # 'DEFAULT_BLOCK_NAME',  # Removed to avoid circular import - import directly from functional.dfm_block
     # Model-specific configs (from schema.py)
     'DFMConfig', 'DDFMConfig',
-    # Parameter overrides
-    'DFMFitParams', 'DDFMFitParams',
-    'FitParams',  # Backward compatibility alias
+    # State-space parameters
+    'DFMStateSpaceParams', 'DDFMStateSpaceParams',
     # Model-specific results (from results.py)
     'DFMResult', 'DDFMResult',
     # Utilities

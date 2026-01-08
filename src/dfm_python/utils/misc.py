@@ -14,7 +14,7 @@ import pandas as pd
 
 if TYPE_CHECKING:
     import torch
-    from ..config.schema import DFMConfig, DFMResult, FitParams
+    from ..config.schema import DFMConfig, DFMResult
 else:
     torch = None
 

@@ -5,8 +5,8 @@ DFM inherits from BaseFactorModel since all calculations are performed in NumPy 
 """
 
 # Standard library imports
-from dataclasses import dataclass
 from pathlib import Path
+import pickle
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 # Third-party imports
@@ -30,6 +30,7 @@ from ..config import (
     ConfigSource,
     DFMResult,
 )
+from ..config.schema.params import DFMStateSpaceParams, DFMModelState
 from ..numeric.tent import get_agg_structure, get_tent_weights, get_slower_freq_tent_weights
 from ..config.constants import (
     FREQUENCY_HIERARCHY,
@@ -84,20 +85,6 @@ _logger = get_logger(__name__)
 
 # sort_data moved to datamodule.base._sort_data_by_config
 # No longer needed in DFM model (handled by DataModule)
-
-
-@dataclass
-class DFMTrainingState:
-    """State tracking for DFM training."""
-    A: np.ndarray
-    C: np.ndarray
-    Q: np.ndarray
-    R: np.ndarray
-    Z_0: np.ndarray
-    V_0: np.ndarray
-    loglik: float
-    num_iter: int
-    converged: bool
 
 
 class DFM(BaseFactorModel):
@@ -259,8 +246,6 @@ class DFM(BaseFactorModel):
         A, C, Q, R, Z_0, V_0 : np.ndarray
             Parameter arrays
         """
-        import torch
-        # Convert to numpy and ensure dtype (only if necessary)
         self.A = np.asarray(A, dtype=DEFAULT_DTYPE) if A is not None else None
         self.C = np.asarray(C, dtype=DEFAULT_DTYPE) if C is not None else None
         self.Q = np.asarray(Q, dtype=DEFAULT_DTYPE) if Q is not None else None
@@ -753,7 +738,7 @@ class DFM(BaseFactorModel):
         self,
         X: Union[np.ndarray, Any],
         dataset: Optional[Any] = None
-    ) -> DFMTrainingState:
+    ) -> DFMStateSpaceParams:
         """Fit model using EM algorithm (wrapper around pykalman).
         
         Uses pykalman for E-step (Kalman filter/smoother) and custom M-step
@@ -770,8 +755,8 @@ class DFM(BaseFactorModel):
             
         Returns
         -------
-        DFMTrainingState
-            Final training state with parameters and convergence info
+        DFMStateSpaceParams
+            Fitted state-space parameters (A, C, Q, R, Z_0, V_0)
         """
         # Use dataset if provided
         if dataset is not None:
@@ -982,12 +967,16 @@ class DFM(BaseFactorModel):
             final_state['R'], final_state['Z_0'], final_state['V_0']
         )
         
-        self.training_state = DFMTrainingState(
+        # Store state-space parameters
+        self.training_state = DFMStateSpaceParams(
             A=final_state['A'], C=final_state['C'], Q=final_state['Q'],
-            R=final_state['R'], Z_0=final_state['Z_0'], V_0=final_state['V_0'],
-            loglik=final_state['loglik'], num_iter=final_state['num_iter'],
-            converged=final_state['converged']
+            R=final_state['R'], Z_0=final_state['Z_0'], V_0=final_state['V_0']
         )
+        
+        # Store training metadata separately (not in state-space params)
+        self._training_loglik = final_state['loglik']
+        self._training_num_iter = final_state['num_iter']
+        self._training_converged = final_state['converged']
         
         return self.training_state
     
@@ -1070,13 +1059,18 @@ class DFM(BaseFactorModel):
         from ..utils.misc import get_target_scaler
         target_scaler = get_target_scaler(model=self)
         
+        # Get training metadata from instance attributes
+        converged = getattr(self, '_training_converged', False)
+        num_iter = getattr(self, '_training_num_iter', 0)
+        loglik = getattr(self, '_training_loglik', 0.0)
+        
         return DFMResult(
             x_sm=x_sm, Z=Z, C=C, R=R, A=A, Q=Q,
             target_scaler=target_scaler,
             Z_0=Z_0, V_0=V_0, r=self.r, p=self.p,
-            converged=self.training_state.converged,
-            num_iter=self.training_state.num_iter,
-            loglik=self.training_state.loglik
+            converged=converged,
+            num_iter=num_iter,
+            loglik=loglik
         )
     
     
@@ -1421,7 +1415,181 @@ class DFM(BaseFactorModel):
         assert isinstance(result, DFMResult), f"Expected DFMResult but got {type(result)}"
         return result
     
+    def save(self, path: Union[str, Path]) -> None:
+        """Save DFM model to file.
+        
+        Saves the complete model state using the defined dataclasses:
+        - State-space parameters (DFMStateSpaceParams dataclass)
+        - Model state (DFMModelState dataclass)
+        - Training metadata (loglik, num_iter, converged as simple fields)
+        - Result (DFMResult dataclass, if model is trained)
+        - Configuration
+        
+        Parameters
+        ----------
+        path : str or Path
+            Path to save the model checkpoint file
+        """
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Get result dataclass if model is trained
+        result = None
+        if self.training_state is not None:
+            try:
+                result = self.get_result()
+            except (ModelNotTrainedError, ModelNotInitializedError):
+                pass
+        
+        # Collect checkpoint using dataclasses
+        checkpoint = {
+            'state_space_params': self.training_state,  # DFMStateSpaceParams
+            'model_state': DFMModelState.from_model(self),
+            'result': result,
+            'config': self._config,
+            'threshold': self.threshold,
+            'max_iter': self.max_iter,
+            'nan_method': self.nan_method,
+            'nan_k': self.nan_k,
+            'data_processed': self.data_processed,
+            'target_scaler': self.target_scaler,
+            # Training metadata stored as simple fields
+            'training_loglik': getattr(self, '_training_loglik', None),
+            'training_num_iter': getattr(self, '_training_num_iter', None),
+            'training_converged': getattr(self, '_training_converged', None),
+        }
+        
+        with open(path, 'wb') as f:
+            pickle.dump(checkpoint, f)
+        
+        _logger.info(f"DFM model saved to {path}")
     
+    @classmethod
+    def load(cls, path: Union[str, Path], config: Optional[DFMConfig] = None) -> 'DFM':
+        """Load DFM model from checkpoint file.
+        
+        Parameters
+        ----------
+        path : str or Path
+            Path to the checkpoint file
+        config : DFMConfig, optional
+            Configuration (if None, loaded from checkpoint)
+            
+        Returns
+        -------
+        DFM
+            Loaded DFM model instance
+        """
+        path = Path(path)
+        with open(path, 'rb') as f:
+            checkpoint = pickle.load(f)
+        
+        # Use checkpoint config if not provided
+        if config is None:
+            config = checkpoint.get('config')
+        
+        # Get model state (handle both old format and new format)
+        model_state = checkpoint.get('model_state')
+        if model_state is None:
+            # Old format: reconstruct from individual fields
+            model_state = DFMModelState(
+                num_factors=checkpoint.get('num_factors'),
+                r=checkpoint.get('r'),
+                p=checkpoint.get('p'),
+                blocks=checkpoint.get('blocks'),
+                mixed_freq=checkpoint.get('_mixed_freq'),
+                constraint_matrix=checkpoint.get('_constraint_matrix'),
+                constraint_vector=checkpoint.get('_constraint_vector'),
+                n_slower_freq=checkpoint.get('_n_slower_freq', 0),
+                n_clock_freq=checkpoint.get('_n_clock_freq'),
+                tent_weights_dict=checkpoint.get('_tent_weights_dict'),
+                frequencies=checkpoint.get('_frequencies'),
+                idio_indicator=checkpoint.get('_idio_indicator'),
+                max_lag_size=checkpoint.get('_max_lag_size'),
+            )
+        elif isinstance(model_state, dict):
+            # Handle dict format (shouldn't happen but be safe)
+            model_state = DFMModelState(**{k: v for k, v in model_state.items() if v is not None})
+        
+        # Create model instance
+        model = cls(
+            config=config,
+            num_factors=model_state.num_factors,
+            threshold=checkpoint.get('threshold'),
+            max_iter=checkpoint.get('max_iter'),
+            nan_method=checkpoint.get('nan_method'),
+            nan_k=checkpoint.get('nan_k')
+        )
+        
+        # Apply model state (structure and mixed-frequency params)
+        model_state.apply_to_model(model)
+        
+        # Restore state-space parameters (new format) or handle backward compatibility (old format)
+        state_space_params = checkpoint.get('state_space_params')
+        old_training_state = checkpoint.get('training_state')
+        
+        if state_space_params is not None:
+            # New format: state_space_params is DFMStateSpaceParams
+            if isinstance(state_space_params, dict):
+                # Handle dict format (shouldn't happen but be safe)
+                state_space_params = DFMStateSpaceParams(**{k: v for k, v in state_space_params.items() if v is not None})
+            model.training_state = state_space_params
+            state_space_params.apply_to_model(model)
+            
+            # Restore training metadata from checkpoint
+            model._training_loglik = checkpoint.get('training_loglik')
+            model._training_num_iter = checkpoint.get('training_num_iter')
+            model._training_converged = checkpoint.get('training_converged')
+            
+        elif old_training_state is not None:
+            # Backward compatibility: old format with DFMTrainingState
+            # Extract state-space params from old training_state
+            # Check if it's the old DFMTrainingState format (has A, C, Q, R, Z_0, V_0 attributes)
+            if hasattr(old_training_state, 'A'):
+                model.training_state = DFMStateSpaceParams(
+                    A=old_training_state.A,
+                    C=old_training_state.C,
+                    Q=old_training_state.Q,
+                    R=old_training_state.R,
+                    Z_0=old_training_state.Z_0,
+                    V_0=old_training_state.V_0
+                )
+                model.training_state.apply_to_model(model)
+                
+                # Extract training metadata from old training_state
+                model._training_loglik = getattr(old_training_state, 'loglik', None)
+                model._training_num_iter = getattr(old_training_state, 'num_iter', None)
+                model._training_converged = getattr(old_training_state, 'converged', None)
+            elif isinstance(old_training_state, dict):
+                # Handle dict format for old training_state
+                model.training_state = DFMStateSpaceParams(
+                    A=old_training_state.get('A'),
+                    C=old_training_state.get('C'),
+                    Q=old_training_state.get('Q'),
+                    R=old_training_state.get('R'),
+                    Z_0=old_training_state.get('Z_0'),
+                    V_0=old_training_state.get('V_0')
+                )
+                model.training_state.apply_to_model(model)
+                model._training_loglik = old_training_state.get('loglik')
+                model._training_num_iter = old_training_state.get('num_iter')
+                model._training_converged = old_training_state.get('converged')
+            else:
+                # Fallback: try to use as is (might be DFMStateSpaceParams already)
+                model.training_state = old_training_state
+                if hasattr(old_training_state, 'apply_to_model'):
+                    old_training_state.apply_to_model(model)
+        
+        # Restore data and preprocessing
+        model.data_processed = checkpoint.get('data_processed')
+        model.target_scaler = checkpoint.get('target_scaler')
+        
+        # Restore result
+        if checkpoint.get('result') is not None:
+            model._result = checkpoint['result']
+        
+        _logger.info(f"DFM model loaded from {path}")
+        return model
     
     def reset(self) -> 'DFM':
         """Reset model state."""

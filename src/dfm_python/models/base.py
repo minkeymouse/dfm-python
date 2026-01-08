@@ -101,7 +101,9 @@ class BaseFactorModel(ABC):
     _result : Optional[BaseResult]
         Last fit result
     training_state : Optional[Any]
-        Training state (model-specific, e.g., DFMTrainingState or DDFMTrainingState)
+        Training state (model-specific):
+        - DFM: DFMStateSpaceParams (state-space parameters A, C, Q, R, Z_0, V_0)
+        - DDFM: DDFMTrainingState (training intermediate state with factors, eps, etc.)
     """
     
     def __init__(self):

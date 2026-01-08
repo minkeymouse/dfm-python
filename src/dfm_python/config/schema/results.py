@@ -14,7 +14,7 @@ from typing import Optional, List, Dict, Any, Tuple
 from datetime import datetime
 
 from .model import DFMConfig
-from .params import DFMFitParams, DDFMFitParams
+from .params import DDFMStateSpaceParams
 
 
 
@@ -236,15 +236,12 @@ class DFMResult(BaseResult):
         Whether EM algorithm converged.
     num_iter : int
         Number of EM iterations performed.
-    fit_params : DFMFitParams, optional
-        Fit-time parameter overrides used during estimation.
-        Contains: max_iter, threshold, regularization_scale
     training_max_iter : int, optional
-        Maximum EM iterations used (from model.max_iter or fit_params.max_iter)
+        Maximum EM iterations used (from model.max_iter or config.max_iter)
     training_threshold : float, optional
-        Convergence threshold used (from model.threshold or fit_params.threshold)
+        Convergence threshold used (from model.threshold or config.threshold)
     training_regularization_scale : float, optional
-        Regularization scale used (from fit_params.regularization_scale if provided)
+        Regularization scale used (from config.regularization if provided)
     
     Examples
     --------
@@ -264,8 +261,7 @@ class DFMResult(BaseResult):
     # All fields inherited from BaseResult
     # converged and num_iter have specific meaning for EM algorithm
     
-    # Fit-time parameters
-    fit_params: Optional[DFMFitParams] = None
+    # Training hyperparameters (from config, no separate fit_params needed)
     training_max_iter: Optional[int] = None
     training_threshold: Optional[float] = None
     training_regularization_scale: Optional[float] = None
@@ -316,7 +312,7 @@ class DDFMResult(BaseResult):
         Architecture of the encoder network used.
     use_idiosyncratic : bool, optional
         Whether idiosyncratic components were modeled.
-    fit_params : DDFMFitParams, optional
+    fit_params : DDFMStateSpaceParams, optional
         State-space model parameters created during fit (F, Q, mu_0, sigma_0, H, R).
         These are computed during build_state_space() and represent the fitted
         state-space model structure.
@@ -369,8 +365,8 @@ class DDFMResult(BaseResult):
     encoder_layers: Optional[List[int]] = None  # Encoder architecture
     use_idiosyncratic: Optional[bool] = None  # Whether idio components were used
     
-    # Fit-time parameters (state-space model)
-    fit_params: Optional[DDFMFitParams] = None
+    # State-space parameters (fitted during training)
+    fit_params: Optional[DDFMStateSpaceParams] = None
     
     # Training hyperparameters
     training_max_iter: Optional[int] = None

@@ -7,9 +7,8 @@ from dfm_python.config.schema.results import (
     DFMResult,
     DDFMResult,
 )
-from dfm_python.config.schema.params import DFMFitParams
 from dfm_python.numeric.stability import create_scaled_identity
-from dfm_python.config.constants import DEFAULT_IDENTITY_SCALE, DEFAULT_MAX_ITER, DEFAULT_EM_THRESHOLD, DEFAULT_REGULARIZATION_SCALE
+from dfm_python.config.constants import DEFAULT_IDENTITY_SCALE
 
 
 class TestBaseResult:
@@ -140,20 +139,4 @@ class TestDDFMResult:
         assert "Neural Network Training:" in summary
         assert "Final training loss: 0.0010" in summary
         assert "[64, 32]" in summary or "64, 32" in summary
-
-
-class TestDFMFitParams:
-    """Test suite for DFMFitParams."""
-    
-    def test_dfm_fit_params_initialization(self):
-        """Test DFMFitParams can be initialized."""
-        params = DFMFitParams(
-            max_iter=DEFAULT_MAX_ITER,
-            threshold=DEFAULT_EM_THRESHOLD,
-            regularization_scale=DEFAULT_REGULARIZATION_SCALE
-        )
-        assert params is not None
-        assert params.max_iter == DEFAULT_MAX_ITER
-        assert params.threshold == DEFAULT_EM_THRESHOLD
-        assert params.regularization_scale == DEFAULT_REGULARIZATION_SCALE
 

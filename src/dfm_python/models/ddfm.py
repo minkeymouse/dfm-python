@@ -5,6 +5,7 @@ and sequential MC sample processing.
 """
 
 import time
+from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
@@ -20,7 +21,7 @@ from ..numeric.statistic import (
     average_3d_array, extract_batchnorm_statistics, diagnose_variance_collapse
 )
 from ..encoder.simple_autoencoder import SimpleAutoencoder
-from ..config.schema.params import DDFMFitParams, DDFMTrainingState
+from ..config.schema.params import DDFMStateSpaceParams, DDFMTrainingState
 from ..config.schema.results import DDFMResult
 from sklearn.preprocessing import StandardScaler
 from ..config.constants import (
@@ -662,7 +663,7 @@ class DDFM(BaseFactorModel, nn.Module):
             '_state_space_R': R
         })
         
-        self.state_space_params = DDFMFitParams(
+        self.state_space_params = DDFMStateSpaceParams(
             F=F,
             Q=Q,
             mu_0=mu_0,
@@ -671,11 +672,110 @@ class DDFM(BaseFactorModel, nn.Module):
             R=R
         )
     
+    def save(self, path: Union[str, Path]) -> None:
+        """Save DDFM model to file.
+        
+        Saves the complete model state using the defined dataclasses:
+        - PyTorch model state_dict (autoencoder weights and registered buffers)
+        - Configuration
+        - Training state (DDFMTrainingState dataclass)
+               - State-space parameters (DDFMStateSpaceParams dataclass)
+        - Result (DDFMResult dataclass, if model is trained)
+        
+        Parameters
+        ----------
+        path : str or Path
+            Path to save the model checkpoint file
+        """
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Sync training_state dataclass with current model state
+        self.training_state.sync_from_model(self)
+        
+        # Get result dataclass if model is trained
+        result = None
+        if self._has_factors and self.state_space_params is not None:
+            try:
+                result = self.get_result()
+            except (ModelNotTrainedError, ModelNotInitializedError):
+                pass
+        
+        # Collect checkpoint using dataclasses
+        checkpoint = {
+            'state_dict': self.state_dict(),
+            'config': self._config,
+            'training_state': self.training_state,
+            'state_space_params': self.state_space_params,
+            'result': result,
+            'encoder_size': self.encoder_size,
+            'decoder_type': self.decoder_type,
+            'decoder_size': self.decoder_size,
+        }
+        
+        torch.save(checkpoint, path)
+        _logger.info(f"DDFM model saved to {path}")
+    
+    @classmethod
+    def load(cls, path: Union[str, Path], dataset: DDFMDataset) -> 'DDFM':
+        """Load DDFM model from checkpoint file.
+        
+        Parameters
+        ----------
+        path : str or Path
+            Path to the checkpoint file
+        dataset : DDFMDataset
+            Dataset instance (required for model initialization)
+            
+        Returns
+        -------
+        DDFM
+            Loaded DDFM model instance
+        """
+        path = Path(path)
+        checkpoint = torch.load(path, map_location='cpu')
+        
+        # Extract architecture and config
+        encoder_size = checkpoint.get('encoder_size')
+        decoder_type = checkpoint.get('decoder_type', 'linear')
+        config = checkpoint.get('config')
+        
+        # Create model instance
+        model = cls(
+            dataset=dataset,
+            config=config,
+            encoder_size=encoder_size,
+            decoder_type=decoder_type
+        )
+        
+        # Load PyTorch state
+        model.load_state_dict(checkpoint['state_dict'], strict=False)
+        
+        # Restore dataclasses
+        model.training_state = checkpoint.get('training_state', DDFMTrainingState())
+        model.state_space_params = checkpoint.get('state_space_params')
+        
+        # Restore instance attributes from training_state if trained
+        if model.training_state.factors is not None:
+            model.factors = model.training_state.factors
+            model.eps = model.training_state.eps
+            model.last_neurons = model.training_state.last_neurons
+            model._num_iter = model.training_state.num_iter
+            model.loss_now = model.training_state.loss_now
+            model._converged = model.training_state.converged
+        
+        # Restore result
+        if checkpoint.get('result') is not None:
+            model._result = checkpoint['result']
+        
+        _logger.info(f"DDFM model loaded from {path}")
+        return model
+    
     def load_state_dict(self, state_dict: dict, strict: bool = True):
         """Load state dictionary and restore state_space_params dataclass."""
         result = super().load_state_dict(state_dict, strict=strict)
         if getattr(self, '_state_space_F', None) is not None:
-            self.state_space_params = DDFMFitParams(
+            self.state_space_params = DDFMStateSpaceParams(
                 F=to_numpy(self._state_space_F),
                 Q=to_numpy(self._state_space_Q),
                 mu_0=to_numpy(self._state_space_mu_0),

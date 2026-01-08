@@ -9,15 +9,11 @@ Note: Series are specified via frequency dict mapping column names to frequencie
 
 from .model import BaseModelConfig, DFMConfig, DDFMConfig
 from .results import BaseResult, DFMResult, DDFMResult
-from .params import DFMFitParams, DDFMFitParams
-
-# Backward compatibility alias
-FitParams = DFMFitParams
+from .params import DFMStateSpaceParams, DDFMStateSpaceParams
 
 __all__ = [
     'BaseModelConfig', 'DFMConfig', 'DDFMConfig',
     'BaseResult', 'DFMResult', 'DDFMResult',
-    'DFMFitParams', 'DDFMFitParams',
-    'FitParams',  # Backward compatibility alias
+    'DFMStateSpaceParams', 'DDFMStateSpaceParams',
 ]
 
