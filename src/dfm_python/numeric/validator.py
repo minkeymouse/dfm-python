@@ -26,7 +26,6 @@ from ..utils.errors import (
     PredictionError,
     ConfigurationError
 )
-import torch
 from ..config.types import ArrayLike, to_numpy
 from ..config.constants import DEFAULT_MIN_DELTA
 from ..logger import get_logger
@@ -459,7 +458,7 @@ def validate_parameter_shapes(
             )
 
 
-# Backward compatibility aliases
+# Alias for compatibility
 validate_companion_matrix = validate_companion_stability
 
 

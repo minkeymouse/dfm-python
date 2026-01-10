@@ -1,13 +1,11 @@
-"""Functional modules for KDFM.
+"""Functional modules for DFM and DDFM.
 
-This package provides functional utilities for KDFM:
-- Krylov FFT computation
-- Structural identification
-- IRF computation
+This package provides functional utilities for DFM:
+- EM algorithm implementation
+- Block initialization and management
 """
 
-from .krylov import krylov, krylov_sequential
-from .irf import compute_irf
+# This module currently only contains EM and block functionality
+# No public exports needed - all functionality is imported directly from submodules
 
-__all__ = ['krylov', 'krylov_sequential', 'compute_irf']
-
+__all__ = []

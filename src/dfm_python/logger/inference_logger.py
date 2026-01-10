@@ -1,7 +1,7 @@
 """Inference process logging utilities.
 
 This module provides specialized logging for inference/prediction processes,
-including prediction steps and forecast generation for DFM, DDFM, and KDFM.
+including prediction steps and forecast generation for DFM and DDFM.
 """
 
 import logging
@@ -32,7 +32,7 @@ class BaseInferenceLogger(ABC):
         Parameters
         ----------
         model_name : str
-            Name of the model (e.g., "DFM", "DDFM", "KDFM")
+            Name of the model (e.g., "DFM", "DDFM")
         verbose : bool, default True
             Whether to log detailed information
         """
@@ -216,18 +216,6 @@ class DDFMInferenceLogger(BaseInferenceLogger):
         super().__init__(model_name="DDFM", verbose=verbose)
 
 
-class KDFMInferenceLogger(BaseInferenceLogger):
-    """Inference logger for KDFM models."""
-    
-    def __init__(self, verbose: bool = True):
-        """Initialize KDFM inference logger."""
-        super().__init__(model_name="KDFM", verbose=verbose)
-
-
-# Backward compatibility alias
-InferenceLogger = BaseInferenceLogger
-
-
 # Convenience functions for simpler usage
 
 def log_inference_start(
@@ -240,7 +228,7 @@ def log_inference_start(
     Parameters
     ----------
     model_name : str, default "DFM"
-        Name of the model being used (e.g., "DFM", "DDFM", "KDFM")
+        Name of the model being used (e.g., "DFM", "DDFM")
     task : str, default "inference"
         Type of inference task
     **kwargs
@@ -255,8 +243,6 @@ def log_inference_start(
         logger = DFMInferenceLogger()
     elif model_name.upper() == "DDFM":
         logger = DDFMInferenceLogger()
-    elif model_name.upper() == "KDFM":
-        logger = KDFMInferenceLogger()
     else:
         logger = BaseInferenceLogger(model_name=model_name)
     

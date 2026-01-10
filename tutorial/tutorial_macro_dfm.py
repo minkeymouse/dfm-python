@@ -274,7 +274,7 @@ init_params = dataset.get_initialization_params()
 X = init_params['X']
 
 
-# Fit model directly (DFM uses fit() method, not Lightning trainer)
+# Fit model directly (DFM uses fit() method)
 # Pass dataset to extract all initialization parameters automatically
 model.fit(X=X, dataset=dataset)
 

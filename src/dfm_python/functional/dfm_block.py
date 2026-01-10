@@ -11,6 +11,7 @@ import numpy as np
 from typing import Optional, Tuple, Dict, Any, List
 from ..numeric.tent import get_tent_weights, generate_tent_weights
 from ..numeric.stability import create_scaled_identity
+from ..logger import get_logger
 from ..config.constants import (
     DEFAULT_REGULARIZATION,
     DEFAULT_CLOCK_FREQUENCY,
@@ -19,7 +20,7 @@ from ..config.constants import (
     MIN_EIGENVALUE,
     DEFAULT_IDENTITY_SCALE,
 )
-from ..numeric.stability import ensure_covariance_stable
+from ..numeric.stability import ensure_covariance_stable, ensure_process_noise_stable
 from ..numeric.estimator import (
     estimate_var_unified,
     estimate_constrained_ols_unified,
@@ -229,38 +230,82 @@ def initialize_block_loadings(
         factors = np.zeros((T, num_factors), dtype=dtype)
     else:
         clock_freq_data = data_for_extraction[:, clock_freq_indices]
-        clock_freq_data_centered = clock_freq_data - clock_freq_data.mean(axis=0, keepdims=True)
         
-        # Compute covariance matrix
-        if clock_freq_data_centered.shape[0] <= 1:
+        # Handle missing values for PCA: use nanmean/nanstd for centering
+        # NaN values will be handled by Kalman filter during EM, but PCA needs finite values
+        clock_freq_data_mean = np.nanmean(clock_freq_data, axis=0, keepdims=True)
+        clock_freq_data_centered = clock_freq_data - clock_freq_data_mean
+        
+        # Replace NaN with 0 after centering for covariance computation
+        # (This is only for initialization - EM will use proper masked arrays)
+        clock_freq_data_centered_clean = np.where(
+            np.isfinite(clock_freq_data_centered),
+            clock_freq_data_centered,
+            0.0
+        )
+        
+        # Compute covariance matrix (only over valid observations)
+        if clock_freq_data_centered_clean.shape[0] <= 1:
             cov_data = create_scaled_identity(len(clock_freq_indices), DEFAULT_IDENTITY_SCALE, dtype=dtype)
         elif len(clock_freq_indices) == 1:
-            cov_data = np.atleast_2d(np.var(clock_freq_data_centered, axis=0, ddof=0))
+            cov_data = np.atleast_2d(np.nanvar(clock_freq_data_centered, axis=0, ddof=0))
         else:
-            cov_data = np.cov(clock_freq_data_centered.T)
-            cov_data = (cov_data + cov_data.T) / 2  # Ensure symmetry
+            # Use nan-aware covariance for proper handling of missing values
+            # np.cov with NaN will produce NaN, so compute manually with nan-aware stats
+            valid_mask = np.all(np.isfinite(clock_freq_data_centered), axis=1)
+            if valid_mask.sum() > 1:
+                valid_data = clock_freq_data_centered[valid_mask, :]
+                cov_data = np.cov(valid_data.T)
+                cov_data = (cov_data + cov_data.T) / 2  # Ensure symmetry
+            else:
+                # Fallback: use identity if insufficient valid observations
+                cov_data = create_scaled_identity(len(clock_freq_indices), DEFAULT_IDENTITY_SCALE, dtype=dtype)
         
         try:
-            _, eigenvectors = compute_principal_components(cov_data, num_factors, block_idx=0)
+            # PCA can extract at most min(n_series, num_factors) components
+            max_extractable = min(len(clock_freq_indices), num_factors)
+            _, eigenvectors = compute_principal_components(cov_data, max_extractable, block_idx=0)
             loadings = eigenvectors
             # Ensure positive sign convention
             loadings = np.where(np.sum(loadings, axis=0) < 0, -loadings, loadings)
+            
+            # Pad loadings to expected shape if PCA returned fewer factors than requested
+            if loadings.shape[1] < num_factors:
+                padding = np.zeros((loadings.shape[0], num_factors - loadings.shape[1]), dtype=dtype)
+                loadings = np.hstack([loadings, padding])
         except (RuntimeError, ValueError):
             loadings = create_scaled_identity(len(clock_freq_indices), DEFAULT_IDENTITY_SCALE, dtype=dtype)[:, :num_factors]
         
         C_i[clock_freq_indices, :num_factors] = loadings
-        factors = data_for_extraction[:, clock_freq_indices] @ loadings
+        # Extract only the actual factors (non-zero columns) for computing factors matrix
+        # Handle NaN in data_for_extraction: NaN * loadings = NaN (preserved for Kalman filter)
+        n_actual_factors = min(len(clock_freq_indices), num_factors)
+        factors = data_for_extraction[:, clock_freq_indices] @ loadings[:, :n_actual_factors]
+        # NaN values are preserved - will be handled by Kalman filter via masked arrays during EM
+        
+        # Pad factors matrix to expected shape if needed
+        if factors.shape[1] < num_factors:
+            padding = np.zeros((factors.shape[0], num_factors - factors.shape[1]), dtype=dtype)
+            factors = np.hstack([factors, padding])
     
     # Slower frequency series: constrained least squares
     if R_mat is not None and q is not None and len(slower_freq_indices) > 0:
         constraint_matrix_block = np.kron(R_mat, create_scaled_identity(num_factors, DEFAULT_IDENTITY_SCALE, dtype=dtype))
         constraint_vector_block = np.kron(q, np.zeros(num_factors, dtype=dtype))
         
+        # Build lag matrix once (cached for all series in this block)
         lag_matrix = build_lag_matrix(factors, T, num_factors, tent_kernel_size, 1, dtype)
         n_cols = min(num_factors * tent_kernel_size, lag_matrix.shape[1])
         slower_freq_factors = lag_matrix[:, :n_cols]
         
-        for series_idx in slower_freq_indices:
+        # Log progress for slower frequency series initialization
+        total_slower = len(slower_freq_indices)
+        _logger.info(f"    Processing {total_slower} slower-frequency series with constrained OLS...")
+        
+        for idx, series_idx in enumerate(slower_freq_indices):
+            # Log progress every 10 series or at start/end
+            if idx == 0 or (idx + 1) % 10 == 0 or (idx + 1) == total_slower:
+                _logger.info(f"      Series {idx + 1}/{total_slower} (index {series_idx})")
             series_idx_int = int(series_idx)
             series_data = data_with_nans[tent_kernel_size:, series_idx_int]
             non_nan_mask = ~np.isnan(series_data)
@@ -280,7 +325,13 @@ def initialize_block_loadings(
             
             try:
                 # Use unified constrained OLS estimation
-                reg = matrix_regularization or DEFAULT_REGULARIZATION
+                # Increase regularization for slower-frequency series to handle ill-conditioning
+                # Tent kernel factors are highly correlated, requiring much higher regularization
+                from ..config.constants import DEFAULT_TENT_KERNEL_REGULARIZATION_MULTIPLIER
+                base_reg = matrix_regularization or DEFAULT_REGULARIZATION
+                # Use significantly higher regularization for slower-frequency (tent kernel) series
+                # Increased multiplier handles extreme ill-conditioning (rcond ~1e-11)
+                reg = base_reg * DEFAULT_TENT_KERNEL_REGULARIZATION_MULTIPLIER
                 loadings_constrained = estimate_constrained_ols_unified(
                     y=series_data_clean,
                     X=slower_freq_factors_clean,
@@ -402,9 +453,9 @@ def initialize_block_transition(
     if shift_size > 0:
         A_i[num_factors:, :shift_size] = default_shift
     
-    # Ensure Q_i is positive definite
-    Q_i[:num_factors, :num_factors] = ensure_covariance_stable(
-        Q_i[:num_factors, :num_factors], min_eigenval=eigenval_floor
+    # Ensure Q_i is positive definite and bounded (generic process noise stabilization)
+    Q_i[:num_factors, :num_factors] = ensure_process_noise_stable(
+        Q_i[:num_factors, :num_factors], min_eigenval=eigenval_floor, warn=True, dtype=dtype
     )
     
     # Initial covariance: solve (I - A ⊗ A) vec(V_0) = vec(Q)

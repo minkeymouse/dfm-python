@@ -4,13 +4,13 @@ import pytest
 
 
 class TestInferenceLogger:
-    """Test suite for InferenceLogger."""
+    """Test suite for BaseInferenceLogger."""
     
     def test_inference_logger_initialization(self):
-        """Test InferenceLogger can be initialized."""
-        from dfm_python.logger.inference_logger import InferenceLogger
+        """Test BaseInferenceLogger can be initialized."""
+        from dfm_python.logger.inference_logger import BaseInferenceLogger
         
-        logger = InferenceLogger(model_name="TestModel", verbose=True)
+        logger = BaseInferenceLogger(model_name="TestModel", verbose=True)
         assert logger.model_name == "TestModel"
         assert logger.verbose is True
         assert logger.num_predictions == 0

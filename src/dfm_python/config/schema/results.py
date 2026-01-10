@@ -3,7 +3,6 @@
 This module contains model-specific result dataclasses:
 - DFMResult(BaseResult): Results for linear DFM
 - DDFMResult(BaseResult): Results for Deep DFM
-- KDFMResult(BaseResult): Results for Kernelized DFM
 """
 
 import numpy as np
@@ -419,67 +418,6 @@ class DDFMResult(BaseResult):
             lines.insert(insert_idx, "")
             lines.insert(insert_idx, "Neural Network Training:")
             for info in ddfm_info:
-                lines.insert(insert_idx + 1, info)
-        
-        return "\n".join(lines)
-
-@dataclass
-class KDFMResult(BaseResult):
-    """KDFM estimation results structure.
-    
-    This dataclass contains all outputs from the KDFM estimation procedure,
-    including estimated parameters, smoothed data, and factors.
-    
-    Inherits all fields and methods from BaseResult. This class is specifically
-    for KDFM results estimated using gradient descent.
-    
-    Attributes
-    ----------
-    S : np.ndarray, optional
-        Structural identification matrix (K x K)
-    structural_shocks : np.ndarray, optional
-        Structural shocks ε_t (T x K)
-    irf_reduced : np.ndarray, optional
-        Reduced-form IRFs (horizon x K x K)
-    irf_structural : np.ndarray, optional
-        Structural IRFs (horizon x K x K)
-    ar_coeffs : np.ndarray, optional
-        Extracted VAR coefficients (p x K x K)
-    ma_coeffs : np.ndarray, optional
-        Extracted MA coefficients (q x K x K), only if q > 0
-    """
-    # KDFM-specific fields
-    S: Optional[np.ndarray] = None  # Structural identification matrix
-    structural_shocks: Optional[np.ndarray] = None  # ε_t (T x K)
-    irf_reduced: Optional[np.ndarray] = None  # Reduced-form IRFs
-    irf_structural: Optional[np.ndarray] = None  # Structural IRFs
-    ar_coeffs: Optional[np.ndarray] = None  # Extracted VAR coefficients
-    ma_coeffs: Optional[np.ndarray] = None  # Extracted MA coefficients (if q > 0)
-    
-    def summary(self) -> str:
-        """Return a formatted summary of the KDFM results."""
-        summary_text = super().summary()
-        lines = summary_text.split("\n")
-        
-        # Insert KDFM-specific information before the final separator
-        insert_idx = len(lines) - 1
-        kdfm_info = []
-        
-        if self.ar_coeffs is not None:
-            ar_order = self.ar_coeffs.shape[0] if self.ar_coeffs.ndim > 0 else 0
-            kdfm_info.append(f"  VAR order: {ar_order}")
-        if self.ma_coeffs is not None:
-            ma_order = self.ma_coeffs.shape[0] if self.ma_coeffs.ndim > 0 else 0
-            kdfm_info.append(f"  MA order: {ma_order}")
-        if self.irf_reduced is not None:
-            kdfm_info.append("  IRFs computed: Reduced-form")
-        if self.irf_structural is not None:
-            kdfm_info.append("  IRFs computed: Structural")
-        
-        if kdfm_info:
-            lines.insert(insert_idx, "")
-            lines.insert(insert_idx, "KDFM-Specific:")
-            for info in kdfm_info:
                 lines.insert(insert_idx + 1, info)
         
         return "\n".join(lines)

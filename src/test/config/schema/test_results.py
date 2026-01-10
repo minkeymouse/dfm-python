@@ -8,7 +8,7 @@ from dfm_python.config.schema.results import (
     DDFMResult,
 )
 from dfm_python.numeric.stability import create_scaled_identity
-from dfm_python.config.constants import DEFAULT_IDENTITY_SCALE
+from dfm_python.config.constants import DEFAULT_IDENTITY_SCALE, DEFAULT_DTYPE
 
 
 class TestBaseResult:
@@ -18,14 +18,14 @@ class TestBaseResult:
         """Test BaseResult can be initialized."""
         T, N, m = 10, 3, 2
         result = BaseResult(
-            x_sm=np.random.randn(T, N).astype(np.float32),
-            Z=np.random.randn(T, m).astype(np.float32),
-            C=np.random.randn(N, m).astype(np.float32),
-            R=create_scaled_identity(N, DEFAULT_IDENTITY_SCALE, dtype=np.float32),
-            A=create_scaled_identity(m, DEFAULT_IDENTITY_SCALE, dtype=np.float32),
-            Q=create_scaled_identity(m, DEFAULT_IDENTITY_SCALE, dtype=np.float32),
-            Z_0=np.zeros(m, dtype=np.float32),
-            V_0=create_scaled_identity(m, DEFAULT_IDENTITY_SCALE, dtype=np.float32),
+            x_sm=np.random.randn(T, N).astype(DEFAULT_DTYPE),
+            Z=np.random.randn(T, m).astype(DEFAULT_DTYPE),
+            C=np.random.randn(N, m).astype(DEFAULT_DTYPE),
+            R=create_scaled_identity(N, DEFAULT_IDENTITY_SCALE, dtype=DEFAULT_DTYPE),
+            A=create_scaled_identity(m, DEFAULT_IDENTITY_SCALE, dtype=DEFAULT_DTYPE),
+            Q=create_scaled_identity(m, DEFAULT_IDENTITY_SCALE, dtype=DEFAULT_DTYPE),
+            Z_0=np.zeros(m, dtype=DEFAULT_DTYPE),
+            V_0=create_scaled_identity(m, DEFAULT_IDENTITY_SCALE, dtype=DEFAULT_DTYPE),
             r=np.array([m], dtype=np.int32),
             p=1
         )
@@ -37,14 +37,14 @@ class TestBaseResult:
         """Test BaseResult summary method."""
         T, N, m = 10, 3, 2
         result = BaseResult(
-            x_sm=np.random.randn(T, N).astype(np.float32),
-            Z=np.random.randn(T, m).astype(np.float32),
-            C=np.random.randn(N, m).astype(np.float32),
-            R=create_scaled_identity(N, DEFAULT_IDENTITY_SCALE, dtype=np.float32),
-            A=create_scaled_identity(m, DEFAULT_IDENTITY_SCALE, dtype=np.float32),
-            Q=create_scaled_identity(m, DEFAULT_IDENTITY_SCALE, dtype=np.float32),
-            Z_0=np.zeros(m, dtype=np.float32),
-            V_0=create_scaled_identity(m, DEFAULT_IDENTITY_SCALE, dtype=np.float32),
+            x_sm=np.random.randn(T, N).astype(DEFAULT_DTYPE),
+            Z=np.random.randn(T, m).astype(DEFAULT_DTYPE),
+            C=np.random.randn(N, m).astype(DEFAULT_DTYPE),
+            R=create_scaled_identity(N, DEFAULT_IDENTITY_SCALE, dtype=DEFAULT_DTYPE),
+            A=create_scaled_identity(m, DEFAULT_IDENTITY_SCALE, dtype=DEFAULT_DTYPE),
+            Q=create_scaled_identity(m, DEFAULT_IDENTITY_SCALE, dtype=DEFAULT_DTYPE),
+            Z_0=np.zeros(m, dtype=DEFAULT_DTYPE),
+            V_0=create_scaled_identity(m, DEFAULT_IDENTITY_SCALE, dtype=DEFAULT_DTYPE),
             r=np.array([m], dtype=np.int32),
             p=1,
             converged=True,
@@ -66,14 +66,14 @@ class TestDFMResult:
         """Test DFMResult can be initialized."""
         T, N, m = 10, 3, 2
         result = DFMResult(
-            x_sm=np.random.randn(T, N).astype(np.float32),
-            Z=np.random.randn(T, m).astype(np.float32),
-            C=np.random.randn(N, m).astype(np.float32),
-            R=create_scaled_identity(N, DEFAULT_IDENTITY_SCALE, dtype=np.float32),
-            A=create_scaled_identity(m, DEFAULT_IDENTITY_SCALE, dtype=np.float32),
-            Q=create_scaled_identity(m, DEFAULT_IDENTITY_SCALE, dtype=np.float32),
-            Z_0=np.zeros(m, dtype=np.float32),
-            V_0=create_scaled_identity(m, DEFAULT_IDENTITY_SCALE, dtype=np.float32),
+            x_sm=np.random.randn(T, N).astype(DEFAULT_DTYPE),
+            Z=np.random.randn(T, m).astype(DEFAULT_DTYPE),
+            C=np.random.randn(N, m).astype(DEFAULT_DTYPE),
+            R=create_scaled_identity(N, DEFAULT_IDENTITY_SCALE, dtype=DEFAULT_DTYPE),
+            A=create_scaled_identity(m, DEFAULT_IDENTITY_SCALE, dtype=DEFAULT_DTYPE),
+            Q=create_scaled_identity(m, DEFAULT_IDENTITY_SCALE, dtype=DEFAULT_DTYPE),
+            Z_0=np.zeros(m, dtype=DEFAULT_DTYPE),
+            V_0=create_scaled_identity(m, DEFAULT_IDENTITY_SCALE, dtype=DEFAULT_DTYPE),
             r=np.array([m], dtype=np.int32),
             p=1
         )
@@ -85,14 +85,14 @@ class TestDFMResult:
         """Test DFMResult summary method."""
         T, N, m = 10, 3, 2
         result = DFMResult(
-            x_sm=np.random.randn(T, N).astype(np.float32),
-            Z=np.random.randn(T, m).astype(np.float32),
-            C=np.random.randn(N, m).astype(np.float32),
-            R=create_scaled_identity(N, DEFAULT_IDENTITY_SCALE, dtype=np.float32),
-            A=create_scaled_identity(m, DEFAULT_IDENTITY_SCALE, dtype=np.float32),
-            Q=create_scaled_identity(m, DEFAULT_IDENTITY_SCALE, dtype=np.float32),
-            Z_0=np.zeros(m, dtype=np.float32),
-            V_0=create_scaled_identity(m, DEFAULT_IDENTITY_SCALE, dtype=np.float32),
+            x_sm=np.random.randn(T, N).astype(DEFAULT_DTYPE),
+            Z=np.random.randn(T, m).astype(DEFAULT_DTYPE),
+            C=np.random.randn(N, m).astype(DEFAULT_DTYPE),
+            R=create_scaled_identity(N, DEFAULT_IDENTITY_SCALE, dtype=DEFAULT_DTYPE),
+            A=create_scaled_identity(m, DEFAULT_IDENTITY_SCALE, dtype=DEFAULT_DTYPE),
+            Q=create_scaled_identity(m, DEFAULT_IDENTITY_SCALE, dtype=DEFAULT_DTYPE),
+            Z_0=np.zeros(m, dtype=DEFAULT_DTYPE),
+            V_0=create_scaled_identity(m, DEFAULT_IDENTITY_SCALE, dtype=DEFAULT_DTYPE),
             r=np.array([m], dtype=np.int32),
             p=1,
             converged=True,
@@ -117,14 +117,14 @@ class TestDDFMResult:
         """Test DDFMResult summary method includes neural network info."""
         T, N, m = 10, 3, 2
         result = DDFMResult(
-            x_sm=np.random.randn(T, N).astype(np.float32),
-            Z=np.random.randn(T, m).astype(np.float32),
-            C=np.random.randn(N, m).astype(np.float32),
-            R=create_scaled_identity(N, DEFAULT_IDENTITY_SCALE, dtype=np.float32),
-            A=create_scaled_identity(m, DEFAULT_IDENTITY_SCALE, dtype=np.float32),
-            Q=create_scaled_identity(m, DEFAULT_IDENTITY_SCALE, dtype=np.float32),
-            Z_0=np.zeros(m, dtype=np.float32),
-            V_0=create_scaled_identity(m, DEFAULT_IDENTITY_SCALE, dtype=np.float32),
+            x_sm=np.random.randn(T, N).astype(DEFAULT_DTYPE),
+            Z=np.random.randn(T, m).astype(DEFAULT_DTYPE),
+            C=np.random.randn(N, m).astype(DEFAULT_DTYPE),
+            R=create_scaled_identity(N, DEFAULT_IDENTITY_SCALE, dtype=DEFAULT_DTYPE),
+            A=create_scaled_identity(m, DEFAULT_IDENTITY_SCALE, dtype=DEFAULT_DTYPE),
+            Q=create_scaled_identity(m, DEFAULT_IDENTITY_SCALE, dtype=DEFAULT_DTYPE),
+            Z_0=np.zeros(m, dtype=DEFAULT_DTYPE),
+            V_0=create_scaled_identity(m, DEFAULT_IDENTITY_SCALE, dtype=DEFAULT_DTYPE),
             r=np.array([m], dtype=np.int32),
             p=1,
             converged=True,

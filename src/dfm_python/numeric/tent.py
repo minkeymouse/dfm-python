@@ -74,6 +74,16 @@ def generate_tent_weights(n_periods: int, tent_type: str = 'symmetric') -> np.nd
 def generate_R_mat(tent_weights: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """Generate constraint matrix R_mat from tent weights.
     
+    This function generates constraint matrices matching the FRBNY MATLAB implementation.
+    The constraint enforces: tent_weights[i+1] * c0 - 1 * c(i+1) = 0, which means
+    c(i+1) = tent_weights[i+1] * c0, ensuring the tent kernel pattern in loadings.
+    
+    For tent weights [1, 2, 3, 2, 1], this produces:
+        R_mat = [[2, -1,  0,  0,  0],   # 2*c0 - 1*c1 = 0 → c1 = 2*c0
+                 [3,  0, -1,  0,  0],   # 3*c0 - 1*c2 = 0 → c2 = 3*c0
+                 [2,  0,  0, -1,  0],   # 2*c0 - 1*c3 = 0 → c3 = 2*c0
+                 [1,  0,  0,  0, -1]]   # 1*c0 - 1*c4 = 0 → c4 = 1*c0
+    
     Parameters
     ----------
     tent_weights : np.ndarray
@@ -82,22 +92,22 @@ def generate_R_mat(tent_weights: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     Returns
     -------
     R_mat : np.ndarray
-        Constraint matrix of shape (n-1) × n
+        Constraint matrix of shape (n-1) × n matching MATLAB pattern
     q : np.ndarray
         Constraint vector of zeros, shape (n-1,)
     """
     n = len(tent_weights)
-    w1 = tent_weights[0]  # First weight (reference)
     
     # Create constraint matrix: (n-1) rows × n columns
     R_mat = np.zeros((n - 1, n))
     q = np.zeros(n - 1)
     
-    # Row i: relates w1*c1 to w(i+1)*c(i+1)
-    # Constraint: w1*c1 - w(i+1)*c(i+1) = 0
+    # Row i: enforces tent_weights[i+1]*c0 - 1*c(i+1) = 0
+    # This ensures c(i+1) = tent_weights[i+1] * c0 (tent kernel pattern)
+    # Pattern matches FRBNY MATLAB dfm.m lines 85-88
     for i in range(n - 1):
-        R_mat[i, 0] = w1              # Coefficient for c1
-        R_mat[i, i + 1] = -tent_weights[i + 1]  # Coefficient for c(i+1)
+        R_mat[i, 0] = tent_weights[i + 1]  # Weight at index i+1
+        R_mat[i, i + 1] = -1  # Always -1 (not -tent_weights[i+1])
     
     return R_mat, q
 

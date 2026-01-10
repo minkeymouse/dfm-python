@@ -1,7 +1,13 @@
-"""Training process logging utilities.
+"""Custom training process logging utilities for dfm-python.
 
-This module provides specialized logging for training processes,
-including EM iterations (DFM), epochs (DDFM), convergence tracking, and training metrics.
+This module provides specialized logging for training processes built on Python's standard logging.
+The custom implementation includes:
+- EM iterations logging (DFM)
+- Epoch logging (DDFM)
+- Convergence tracking
+- Training metrics tracking
+
+All logging uses the custom logger system defined in the logger module.
 """
 
 import logging
@@ -32,7 +38,7 @@ class BaseTrainLogger(ABC):
         Parameters
         ----------
         model_name : str
-            Name of the model (e.g., "DFM", "DDFM", "KDFM")
+            Name of the model (e.g., "DFM", "DDFM")
         verbose : bool, default True
             Whether to log detailed information
         """
@@ -152,7 +158,7 @@ class BaseTrainLogger(ABC):
         learning_rate: Optional[float] = None,
         **kwargs
     ) -> None:
-        """Log training epoch information (for DDFM/KDFM).
+        """Log training epoch information (for DDFM).
         
         Parameters
         ----------
@@ -223,11 +229,11 @@ class BaseTrainLogger(ABC):
         num_iter : int, optional
             Number of EM iterations completed (for DFM)
         num_epochs : int, optional
-            Number of epochs completed (for DDFM/KDFM)
+            Number of epochs completed (for DDFM)
         final_loglik : float, optional
             Final log-likelihood value (for DFM)
         final_loss : float, optional
-            Final training loss (for DDFM/KDFM)
+            Final training loss (for DDFM)
         reason : str, optional
             Reason for stopping (e.g., "converged", "max_iterations", "max_epochs", "early_stopping")
         """
@@ -333,18 +339,6 @@ class DDFMTrainLogger(BaseTrainLogger):
         super().__init__(model_name="DDFM", verbose=verbose)
 
 
-class KDFMTrainLogger(BaseTrainLogger):
-    """Training logger for KDFM models (gradient descent)."""
-    
-    def __init__(self, verbose: bool = True):
-        """Initialize KDFM training logger."""
-        super().__init__(model_name="KDFM", verbose=verbose)
-
-
-# Backward compatibility alias
-TrainLogger = BaseTrainLogger
-
-
 # Convenience functions for simpler usage
 
 def log_training_start(
@@ -357,7 +351,7 @@ def log_training_start(
     Parameters
     ----------
     model_name : str, default "DFM"
-        Name of the model being trained (e.g., "DFM", "DDFM", "KDFM")
+        Name of the model being trained (e.g., "DFM", "DDFM")
     config : dict, optional
         Training configuration to log
     data_info : dict, optional
@@ -372,8 +366,6 @@ def log_training_start(
         logger = DFMTrainLogger()
     elif model_name.upper() == "DDFM":
         logger = DDFMTrainLogger()
-    elif model_name.upper() == "KDFM":
-        logger = KDFMTrainLogger()
     else:
         logger = BaseTrainLogger(model_name=model_name)
     
@@ -470,7 +462,7 @@ def log_training_epoch(
     learning_rate: Optional[float] = None,
     **kwargs
 ) -> None:
-    """Log training epoch (convenience function for DDFM/KDFM).
+    """Log training epoch (convenience function for DDFM).
     
     Parameters
     ----------
@@ -521,16 +513,16 @@ def log_convergence(
         Whether training converged
     num_iter : int, optional
         Number of EM iterations completed (for DFM)
-    num_epochs : int, optional
-        Number of epochs completed (for DDFM/KDFM)
-    final_loglik : float, optional
-        Final log-likelihood value (for DFM)
-    final_loss : float, optional
-        Final training loss (for DDFM/KDFM)
-    reason : str, optional
-        Reason for stopping
-    model_type : str, default "dfm"
-        Type of model: "dfm", "ddfm", or "kdfm"
+        num_epochs : int, optional
+            Number of epochs completed (for DDFM)
+        final_loglik : float, optional
+            Final log-likelihood value (for DFM)
+        final_loss : float, optional
+            Final training loss (for DDFM)
+        reason : str, optional
+            Reason for stopping
+        model_type : str, default "dfm"
+        Type of model: "dfm" or "ddfm"
     """
     model_type = model_type.lower()
     
@@ -539,7 +531,7 @@ def log_convergence(
             _logger.info(f"✓ EM algorithm converged after {num_iter} iterations")
         else:
             _logger.warning(f"⚠ EM algorithm did not converge after {num_iter} iterations")
-    else:  # ddfm or kdfm
+    else:  # ddfm
         if converged:
             _logger.info(f"✓ Training converged after {num_epochs} epochs")
         else:

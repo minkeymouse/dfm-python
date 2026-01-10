@@ -69,8 +69,7 @@ from ..functional.dfm_block import (
     build_slower_freq_observation_matrix,
     build_slower_freq_idiosyncratic_chain
 )
-from ..numeric.stability import rem_nans_spline
-from ..numeric.stability import ensure_covariance_stable
+from ..numeric.stability import ensure_covariance_stable, ensure_process_noise_stable
 from ..numeric.stability import create_scaled_identity
 from ..numeric.estimator import (
     estimate_ar1_unified,
@@ -81,10 +80,6 @@ if TYPE_CHECKING:
     from ..dataset.dfm_dataset import DFMDataset
 
 _logger = get_logger(__name__)
-
-
-# sort_data moved to datamodule.base._sort_data_by_config
-# No longer needed in DFM model (handled by DataModule)
 
 
 class DFM(BaseFactorModel):
@@ -117,7 +112,7 @@ class DFM(BaseFactorModel):
         nan_k : int, optional
             Spline interpolation order (internal, defaults to DEFAULT_NAN_K).
         **kwargs : Any
-            Additional arguments passed to BaseFactorModel (for API consistency with KDFM/DDFM).
+            Additional arguments passed to BaseFactorModel (for API consistency with DDFM).
             
         Returns
         -------
@@ -195,7 +190,6 @@ class DFM(BaseFactorModel):
         
         
         # Training state
-        # Note: Mx/Wx removed - target_scaler is used instead for inverse transformation
         self.data_processed: Optional[np.ndarray] = None
         self.target_scaler: Optional[Any] = None  # Fitted sklearn scaler for target series inverse transformation
     
@@ -236,6 +230,124 @@ class DFM(BaseFactorModel):
             },
             model_name=self.__class__.__name__
         )
+    
+    def _rebuild_blocks_array(self, columns: Optional[List[str]], N_actual: int) -> None:
+        """Rebuild blocks array to match data dimensions.
+        
+        Parameters
+        ----------
+        columns : Optional[List[str]]
+            Column names if available
+        N_actual : int
+            Expected number of series
+        """
+        if columns is not None:
+            # Clear cache and rebuild from config
+            if hasattr(self._config, '_cached_blocks'):
+                self._config._cached_blocks = None
+            blocks_array = self._config.get_blocks_array(columns=columns)
+            self.blocks = np.array(blocks_array, dtype=DEFAULT_DTYPE)
+            _logger.info(f"Rebuilt blocks array: shape={self.blocks.shape}")
+            self._log_blocks_diagnostics(columns, N_actual)
+        else:
+            # Fallback: pad or truncate to match dimensions
+            n_blocks = self.blocks.shape[1]
+            if self.blocks.shape[0] < N_actual:
+                padding = np.zeros((N_actual - self.blocks.shape[0], n_blocks), dtype=DEFAULT_DTYPE)
+                self.blocks = np.vstack([self.blocks, padding])
+                _logger.warning(f"Padded blocks array with zeros: {N_actual - self.blocks.shape[0]} rows")
+            elif self.blocks.shape[0] > N_actual:
+                self.blocks = self.blocks[:N_actual, :]
+                _logger.warning(f"Truncated blocks array: {self.blocks.shape[0]} -> {N_actual} rows")
+    
+    def _log_blocks_diagnostics(self, columns: Optional[List[str]], N_actual: int) -> None:
+        """Log diagnostics about blocks array.
+        
+        Parameters
+        ----------
+        columns : Optional[List[str]]
+            Column names if available
+        N_actual : int
+            Number of series
+        """
+        n_in_block = np.sum(self.blocks[:, 0] > 0) if self.blocks.shape[1] > 0 else 0
+        _logger.info(f"Blocks array: shape={self.blocks.shape}, series in Block_Global: {n_in_block}/{N_actual}")
+        
+        if n_in_block < N_actual:
+            missing_indices = np.where(self.blocks[:, 0] == 0)[0]
+            if columns and len(columns) > 0:
+                missing_series = [columns[i] for i in missing_indices[:10]]
+                _logger.warning(f"  Series NOT in Block_Global: {len(missing_indices)} ({missing_series[:5]}...)")
+            else:
+                _logger.warning(f"  Series NOT in Block_Global: {len(missing_indices)} (indices: {missing_indices[:10].tolist()}...)")
+    
+    
+    def _validate_initialization_numerics(
+        self,
+        A: np.ndarray,
+        C: np.ndarray,
+        Q: np.ndarray,
+        R: np.ndarray,
+        Z_0: np.ndarray,
+        V_0: np.ndarray
+    ) -> None:
+        """Validate numerical stability of initialized parameters."""
+        from ..numeric.validator import validate_no_nan_inf
+        
+        # Check for NaN/Inf using consolidated validation function
+        for name, param in [('A', A), ('C', C), ('Q', Q), ('R', R), ('Z_0', Z_0), ('V_0', V_0)]:
+            try:
+                validate_no_nan_inf(param, name=name)
+            except DataValidationError as e:
+                # Re-raise as NumericalError for consistency
+                raise NumericalError(
+                    f"Initialization contains non-finite values in {name}",
+                    details=str(e)
+                ) from e
+        
+        # Check for extreme values that could cause numerical issues
+        max_abs_values = {
+            'A': np.abs(A).max(),
+            'C': np.abs(C).max(),
+            'Q': np.abs(Q).max(),
+            'R': np.abs(R).max(),
+            'V_0': np.abs(V_0).max()
+        }
+        
+        from ..config.constants import MAX_EIGENVALUE
+        extreme_threshold = MAX_EIGENVALUE * 1e3  # Allow values up to 1e6 for validation warnings
+        for name, max_val in max_abs_values.items():
+            if max_val > extreme_threshold:
+                _logger.warning(
+                    f"Large values detected in {name}: max(abs)={max_val:.2e}. "
+                    f"This may indicate scaling issues or numerical instability."
+                )
+        
+        # Check covariance matrices are positive definite
+        for name, cov in [('Q', Q), ('R', R), ('V_0', V_0)]:
+            try:
+                eigenvals = np.linalg.eigvals(cov)
+                min_eigenval = np.min(eigenvals)
+                if min_eigenval < 0:
+                    _logger.warning(
+                        f"{name} has negative eigenvalues (min={min_eigenval:.2e}). "
+                        f"Matrix may not be positive definite."
+                    )
+                if min_eigenval < 1e-8:
+                    _logger.warning(
+                        f"{name} has very small eigenvalues (min={min_eigenval:.2e}). "
+                        f"This may cause numerical instability."
+                    )
+            except Exception as e:
+                _logger.warning(f"Could not check eigenvalues for {name}: {e}")
+        
+        # Check data scaling (via observation matrix)
+        C_scale = np.abs(C).mean()
+        if C_scale > 100 or C_scale < 0.01:
+            _logger.warning(
+                f"Observation matrix C has unusual scale (mean(abs)={C_scale:.2e}). "
+                f"This may indicate data scaling issues."
+            )
     
     def _update_parameters(self, A: np.ndarray, C: np.ndarray, Q: np.ndarray,
                           R: np.ndarray, Z_0: np.ndarray, V_0: np.ndarray) -> None:
@@ -412,6 +524,10 @@ class DFM(BaseFactorModel):
             block_series_indices = np.where(blocks[:, block_idx] > 0)[0]
             clock_freq_indices = block_series_indices[block_series_indices < n_clock_freq]
             slower_freq_indices = block_series_indices[block_series_indices >= n_clock_freq]
+            
+            _logger.info(f"  Initializing block {block_idx + 1}/{n_blocks}: "
+                        f"{num_factors_block} factors, {len(block_series_indices)} series "
+                        f"({len(clock_freq_indices)} clock, {len(slower_freq_indices)} slower)")
             
             # Extract factors and loadings for this block
             # Block 1: Uses original data (data_for_extraction = original data)
@@ -594,6 +710,9 @@ class DFM(BaseFactorModel):
     ) -> np.ndarray:
         """Initialize observation noise covariance R from residuals.
         
+        Missing values (NaN) are handled via nan-aware statistics - only valid observations
+        are used for variance estimation. NaN will be handled by Kalman filter during EM.
+        
         Returns
         -------
         R : np.ndarray
@@ -606,14 +725,15 @@ class DFM(BaseFactorModel):
         T_res, N_res = data_with_nans.shape
         default_obs_noise = _EM_CONFIG.default_observation_noise
         
-        # Use unified variance estimation with raw residuals
+        # Use unified variance estimation with raw residuals (handles NaN via nan-aware stats)
         if T_res <= 1:
             from ..numeric.stability import create_scaled_identity
             R = create_scaled_identity(N_res, default_obs_noise, dtype)
         else:
             # Compute residuals (data itself, since we're initializing from raw data)
+            # estimate_variance_unified uses nan-aware variance if residuals contain NaN
             R = estimate_variance_unified(
-                residuals=data_with_nans,  # Raw data as "residuals" for initialization
+                residuals=data_with_nans,  # Raw data as "residuals" for initialization (may contain NaN)
                 X=None,  # Not using smoothed expectations mode
                 EZ=None,
                 C=None,
@@ -651,18 +771,47 @@ class DFM(BaseFactorModel):
         n_blocks = blocks.shape[1]
         n_clock_freq = N - n_slower_freq  # Number of clock frequency series
         
-        # Handle missing data for initialization
-        x_clean, indNaN = rem_nans_spline(x, method=opt_nan.get('method', 2), k=opt_nan.get('k', 3))
+        # Kalman filter handles missing values natively via masked arrays - preserve NaN
+        x_clean = np.where(np.isinf(x), np.nan, x)  # Replace Inf with NaN, keep existing NaN
         
-        # Remove any remaining NaN/inf
-        x_clean = np.where(np.isfinite(x_clean), x_clean, DEFAULT_ZERO_VALUE)
+        # Check data scale for numerical stability
+        # Detect potential RobustScaler issues (IQR≈0) vs StandardScaler (std≈1, mean≈0)
+        valid_mask = np.isfinite(x_clean)
+        if valid_mask.any():
+            data_std = np.nanstd(x_clean)
+            data_mean = np.nanmean(x_clean)
+            data_median = np.nanmedian(x_clean)
+            data_iqr = np.nanpercentile(x_clean, 75) - np.nanpercentile(x_clean, 25)
+            
+            # Check for RobustScaler issues: IQR≈0 indicates potential scaling problems
+            # StandardScaler: mean≈0, std≈1, IQR≈1.35 (for normal distribution)
+            # RobustScaler with IQR≈0: can produce extreme values
+            has_zero_iqr = data_iqr < 1e-6
+            
+            # Check for scale mismatch
+            has_scale_mismatch = (
+                data_std > 10 or abs(data_mean) > 3 or abs(data_median) > 3 or
+                (data_std < 0.01 and not has_zero_iqr)  # Very small std (might indicate no scaling)
+            )
+            
+            if has_scale_mismatch or has_zero_iqr:
+                _logger.warning(f"  Data scale check: mean={data_mean:.2f}, median={data_median:.2f}, "
+                              f"std={data_std:.2f}, IQR={data_iqr:.2e}")
+                if has_zero_iqr:
+                    _logger.warning(f"  ⚠ CRITICAL: IQR≈0 detected (IQR={data_iqr:.2e}). "
+                                  f"This may indicate RobustScaler issues with near-constant series.")
+                    _logger.warning(f"  RobustScaler with IQR≈0 can produce extreme scaled values → large covariances → numerical instability.")
+                    _logger.warning(f"  Recommendation: Use StandardScaler or check for constant/zero-variance series before scaling.")
+                else:
+                    _logger.warning(f"  Data may not be properly standardized (expected: mean≈0, std≈1 for StandardScaler). "
+                                  f"This may cause numerical instability.")
+                    _logger.warning(f"  Check: Is data being scaled multiple times or not at all?")
         
         # Initialize data for factor extraction
-        # NOTE: For Block 1, this is the original data (after cleaning).
-        # For subsequent blocks, this becomes residuals after removing previous blocks' contributions.
-        data_for_extraction = x_clean.copy()  # T x N - starts as original data
-        data_with_nans = data_for_extraction.copy()
-        data_with_nans[indNaN] = np.nan
+        # Block 1: original data. Subsequent blocks: residuals. NaN preserved for Kalman filter
+        data_for_extraction = x_clean.copy()
+        data_with_nans = x_clean.copy()
+        indNaN = np.isnan(x_clean)  # Track NaN positions for initialization (only)
         
         # Determine tent kernel size
         if R_mat is not None:
@@ -728,16 +877,20 @@ class DFM(BaseFactorModel):
         m = int(A.shape[0]) if A.size > 0 and has_shape_with_min_dims(A, min_dims=1) else 0
         Z_0 = np.zeros(m, dtype=DEFAULT_DTYPE)
         
+        # Ensure Q is positive definite and bounded (SQ has sparse structure which can cause zero eigenvalues)
+        # This is critical for Kalman filter stability - prevents both singularity and explosion
+        Q = ensure_process_noise_stable(Q, min_eigenval=_EM_CONFIG.eigenval_floor, warn=True, dtype=DEFAULT_DTYPE)
+        
         # Ensure V_0 is positive definite
         V_0 = ensure_covariance_stable(V_0, min_eigenval=_EM_CONFIG.eigenval_floor)
         
-        # All arrays use DEFAULT_DTYPE, redundant conversions avoided in _update_parameters
         return A, C, Q, R, Z_0, V_0
     
     def fit(
         self,
         X: Union[np.ndarray, Any],
-        dataset: Optional[Any] = None
+        dataset: Optional[Any] = None,
+        checkpoint_callback: Optional[Any] = None
     ) -> DFMStateSpaceParams:
         """Fit model using EM algorithm (wrapper around pykalman).
         
@@ -758,13 +911,21 @@ class DFM(BaseFactorModel):
         DFMStateSpaceParams
             Fitted state-space parameters (A, C, Q, R, Z_0, V_0)
         """
-        # Use dataset if provided
+        # Clear all caches for fresh training run (ensures no stale data from previous runs)
+        if self._config is not None and hasattr(self._config, '_cached_blocks'):
+            self._config._cached_blocks = None
+        
+        # Extract initialization parameters (from dataset or X)
         if dataset is not None:
-            self._dataset = dataset  # Store for later use in predict()
-            # Store target_scaler for inverse transformation in predict()
+            # Use dataset's built-in method - it already handles all parameter extraction
+            self._dataset = dataset
             from ..utils.misc import get_target_scaler
             self.target_scaler = get_target_scaler(dataset=dataset)
+            
             init_params = dataset.get_initialization_params()
+            if self._mixed_freq is None:
+                self._mixed_freq = init_params.get('is_mixed_freq', False)
+            
             X_np = init_params['X']
             R_mat = init_params['R_mat']
             q = init_params['q']
@@ -774,131 +935,47 @@ class DFM(BaseFactorModel):
             idio_indicator = init_params['idio_indicator']
             opt_nan = init_params['opt_nan']
             clock = init_params['clock']
-            # Conditional logic: Auto-detect mixed_freq from Dataset if not set (not validation)
-            is_mixed_freq = init_params.get('is_mixed_freq', False)
-            if self._mixed_freq is None:
-                self._mixed_freq = is_mixed_freq
+            n_clock_freq = X_np.shape[1] - n_slower_freq
         else:
-            # Convert to NumPy
-            from ..config.types import to_numpy
-            X_np = to_numpy(X, dtype=DEFAULT_DTYPE)
+            # Create a temporary dataset to reuse its parameter extraction logic
+            # This avoids duplicating mixed-frequency setup code
+            from ..dataset.dfm_dataset import DFMDataset
+            temp_dataset = DFMDataset(config=self._config, data=X)
+            init_params = temp_dataset.get_initialization_params()
             
-            # Setup mixed-frequency parameters (fallback if no datamodule)
-            # Auto-detect from config if not explicitly set
-            from ..utils.misc import get_config_attr
-            clock = get_config_attr(self.config, 'clock', DEFAULT_CLOCK_FREQUENCY)
+            X_np = init_params['X']
+            R_mat = init_params['R_mat']
+            q = init_params['q']
+            n_slower_freq = init_params['n_slower_freq']
+            tent_weights_dict = init_params['tent_weights_dict']
+            frequencies_np = init_params['frequencies']
+            idio_indicator = init_params['idio_indicator']
+            opt_nan = init_params['opt_nan']
+            clock = init_params['clock']
+            n_clock_freq = X_np.shape[1] - n_slower_freq
             
-            # Conditional logic: Auto-detect mixed frequency from config if not set (not validation)
             if self._mixed_freq is None:
-                # Try to detect from config frequencies
-                frequencies = self.config.get_frequencies()
-                clock_hierarchy = FREQUENCY_HIERARCHY.get(clock, DEFAULT_HIERARCHY_VALUE)
-                self._mixed_freq = any(
-                    FREQUENCY_HIERARCHY.get(freq, DEFAULT_HIERARCHY_VALUE) > clock_hierarchy
-                    for freq in frequencies
-                )
-            
-            mixed_freq = self._mixed_freq
-            
-            if not mixed_freq:
-                R_mat = None
-                q = None
-                n_slower_freq = 0
-                n_clock_freq = X_np.shape[1]  # All series are at clock frequency
-                tent_weights_dict = None
-                frequencies_np = None
-                idio_indicator = np.ones(X_np.shape[1], dtype=DEFAULT_DTYPE)
-            else:
-                # Get frequencies using new API
-                frequencies_list = self.config.get_frequencies()
-                frequencies_set = set(frequencies_list) if frequencies_list else set()
-                # Compute clock_hierarchy once and reuse
-                clock_hierarchy = FREQUENCY_HIERARCHY.get(clock, DEFAULT_HIERARCHY_VALUE)
-                
-                # Validate frequency pairs
-                missing_pairs = [
-                    (freq, clock) for freq in frequencies_set
-                    if FREQUENCY_HIERARCHY.get(freq, DEFAULT_HIERARCHY_VALUE) > clock_hierarchy and get_tent_weights(freq, clock) is None
-                ]
-                if missing_pairs:
-                    raise ConfigurationError(
-                        f"Mixed-frequency data detected but the following frequency pairs are not in TENT_WEIGHTS_LOOKUP: {missing_pairs}",
-                        details=f"Available pairs: {list(TENT_WEIGHTS_LOOKUP.keys())}"
-                        f"Either add the missing pairs to TENT_WEIGHTS_LOOKUP or ensure all series use clock frequency."
-                    )
-                
-                # Get aggregation structure
-                agg_structure = get_agg_structure(self.config, clock=clock)
-                tent_weights_dict = {k: np.array(v, dtype=DEFAULT_DTYPE) for k, v in agg_structure['tent_weights'].items()}
-                
-                # Validate: DFM supports only clock + one slower frequency
-                if len(tent_weights_dict) > 1:
-                    slower_freqs = list(tent_weights_dict.keys())
-                    raise ConfigurationError(
-                        f"DFM supports only one slower frequency, but found {len(tent_weights_dict)} slower frequencies: {slower_freqs}. "
-                        f"Please ensure all slower-frequency series use the same frequency, or use a different clock frequency.",
-                        details=f"Slower frequencies detected: {slower_freqs}, clock: {clock}"
-                    )
-                
-                R_mat = None
-                q = None
-                if agg_structure['structures']:
-                    first_structure = list(agg_structure['structures'].values())[0]
-                    R_mat = np.array(first_structure[0], dtype=DEFAULT_DTYPE)
-                    q = np.array(first_structure[1], dtype=DEFAULT_DTYPE)
-                
-                # Compute frequency statistics (reuse clock_hierarchy computed above)
-                frequencies_np = np.array([
-                    FREQUENCY_HIERARCHY.get(f, FREQUENCY_HIERARCHY.get(DEFAULT_CLOCK_FREQUENCY, DEFAULT_HIERARCHY_VALUE))
-                    for f in frequencies_list
-                ], dtype=np.int32) if frequencies_list else None
-                
-                n_slower_freq = sum(1 for freq in frequencies_list if FREQUENCY_HIERARCHY.get(freq, DEFAULT_HIERARCHY_VALUE) > clock_hierarchy)
-                n_clock_freq = len(frequencies_list) - n_slower_freq if frequencies_list else 0
-                idio_indicator = np.array([1 if freq == clock else 0 for freq in frequencies_list], dtype=DEFAULT_DTYPE)
-            
-            opt_nan = {'method': self.nan_method, 'k': self.nan_k}
+                self._mixed_freq = init_params.get('is_mixed_freq', False)
         
-        # Note: Mx/Wx removed - target_scaler is used instead for inverse transformation
-        # Target scaler is stored in self.target_scaler (set above from dataset)
         self.data_processed = X_np
         
         # Rebuild blocks array to match actual data dimensions
-        # blocks must have shape (N, n_blocks) where N = X_np.shape[1]
         N_actual = X_np.shape[1]
+        # Get column names from dataset if available (it already stores _processed_columns)
+        columns = None
+        if dataset is not None and hasattr(dataset, '_processed_columns'):
+            columns = list(dataset._processed_columns) if len(dataset._processed_columns) == N_actual else None
+        
         if self.blocks.shape[0] != N_actual:
-            # Rebuild blocks from config using actual data columns
-            columns = None
-            if dataset is not None and hasattr(dataset, '_processed_columns'):
-                # Use column names from dataset
-                columns = list(dataset._processed_columns)
-            elif hasattr(self._config, 'frequency') and self._config.frequency is not None:
-                # Use series from frequency dict, but filter to match actual data
-                freq_keys = list(self._config.frequency.keys())
-                if len(freq_keys) == N_actual:
-                    columns = freq_keys
-            
-            # If we have column names, rebuild blocks properly
-            if columns is not None and len(columns) == N_actual:
-                # Clear cache to force rebuild
-                if hasattr(self._config, '_cached_blocks'):
-                    self._config._cached_blocks = None
-                self.blocks = np.array(self._config.get_blocks_array(columns=columns), dtype=DEFAULT_DTYPE)
-            else:
-                # Fallback: pad blocks with zeros (series not in any block)
-                n_blocks = self.blocks.shape[1]
-                if self.blocks.shape[0] < N_actual:
-                    padding = np.zeros((N_actual - self.blocks.shape[0], n_blocks), dtype=DEFAULT_DTYPE)
-                    self.blocks = np.vstack([self.blocks, padding])
-                elif self.blocks.shape[0] > N_actual:
-                    # Truncate to match data
-                    self.blocks = self.blocks[:N_actual, :]
+            self._rebuild_blocks_array(columns, N_actual)
+        else:
+            self._log_blocks_diagnostics(columns, N_actual)
         
         # Store for reuse in EM steps
         self._constraint_matrix = R_mat
         self._constraint_vector = q
         self._n_slower_freq = n_slower_freq
-        self._n_clock_freq = n_clock_freq if 'n_clock_freq' in locals() else (X_np.shape[1] - n_slower_freq if n_slower_freq is not None else None)
+        self._n_clock_freq = n_clock_freq if 'n_clock_freq' in locals() else (X_np.shape[1] - n_slower_freq)
         self._tent_weights_dict = tent_weights_dict
         self._frequencies = frequencies_np
         self._idio_indicator = idio_indicator
@@ -916,50 +993,76 @@ class DFM(BaseFactorModel):
         self._max_lag_size = max(self.p + 1, tent_kernel_size)
         
         # Initialize parameters (required for EM algorithm)
-        # Note: pykalman handles E-step, but we still need to initialize state-space structure
+        _logger.info("Initializing DFM parameters...")
+        _logger.info(f"  Data: {X_np.shape[0]} time steps × {X_np.shape[1]} series")
+        _logger.info(f"  Blocks: {self.blocks.shape[1]}, Factors: {self.num_factors}, "
+                    f"Mixed freq: {self._mixed_freq}")
         A_np, C_np, Q_np, R_np, Z_0_np, V_0_np = self._initialize_parameters(
             X_np, self.r, self.p, self.blocks, opt_nan, R_mat, q, n_slower_freq, idio_indicator,
             clock, tent_weights_dict
         )
-        self._update_parameters(A_np, C_np, Q_np, R_np, Z_0_np, V_0_np)
         
-        # Validate initialization succeeded
+        # Validate numerical stability before proceeding
+        self._validate_initialization_numerics(A_np, C_np, Q_np, R_np, Z_0_np, V_0_np)
+        
+        self._update_parameters(A_np, C_np, Q_np, R_np, Z_0_np, V_0_np)
         self._check_parameters_initialized()
+        
+        _logger.info(f"Initialization complete: state_dim={self.A.shape[0]}, obs_dim={self.C.shape[0]}, "
+                    f"factors={self.num_factors}, max_lag={self._max_lag_size}, mixed_freq={self._mixed_freq}")
         
         # Run EM algorithm using DFMKalmanFilter.em() method
         # Create Kalman filter and run EM algorithm
-        kalman_filter = DFMKalmanFilter(
-            transition_matrices=self.A,
-            observation_matrices=self.C,
-            transition_covariance=self.Q,
-            observation_covariance=self.R,
-            initial_state_mean=self.Z_0,
-            initial_state_covariance=self.V_0
-        )
+        try:
+            kalman_filter = DFMKalmanFilter(
+                transition_matrices=self.A,
+                observation_matrices=self.C,
+                transition_covariance=self.Q,
+                observation_covariance=self.R,
+                initial_state_mean=self.Z_0,
+                initial_state_covariance=self.V_0
+            )
+            _logger.debug("Kalman filter created successfully")
+        except Exception as e:
+            _logger.error(f"Failed to create Kalman filter: {e}", exc_info=True)
+            _logger.error(f"  Parameter shapes - A: {self.A.shape}, C: {self.C.shape}, Q: {self.Q.shape}, R: {self.R.shape}")
+            _logger.error(f"  Z_0: {self.Z_0.shape}, V_0: {self.V_0.shape}")
+            raise
         
         # Create EMConfig from DFMConfig (uses consolidated parameters)
         em_config = self._config.to_em_config() if self._config is not None else _EM_CONFIG
         
-        final_state = kalman_filter.em(
-            X=X_np,
-            initial_params={
-                'A': self.A, 'C': self.C, 'Q': self.Q,
-                'R': self.R, 'Z_0': self.Z_0, 'V_0': self.V_0
-            },
-            max_iter=self.max_iter,
-            threshold=self.threshold,
-            config=em_config,
-            blocks=self.blocks,
-            r=self.r,
-            p=self.p,
-            p_plus_one=self._max_lag_size,  # Use max_lag_size for state dimension (accounts for tent_kernel_size)
-            R_mat=self._constraint_matrix,
-            q=self._constraint_vector,
-            n_clock_freq=self._n_clock_freq,
-            n_slower_freq=n_slower_freq,
-            idio_indicator=self._idio_indicator,
-            tent_weights_dict=self._tent_weights_dict
-        )
+        try:
+            final_state = kalman_filter.em(
+                X=X_np,
+                initial_params={
+                    'A': self.A, 'C': self.C, 'Q': self.Q,
+                    'R': self.R, 'Z_0': self.Z_0, 'V_0': self.V_0
+                },
+                max_iter=self.max_iter,
+                threshold=self.threshold,
+                config=em_config,
+                blocks=self.blocks,
+                r=self.r,
+                p=self.p,
+                p_plus_one=self._max_lag_size,  # Use max_lag_size for state dimension (accounts for tent_kernel_size)
+                R_mat=self._constraint_matrix,
+                q=self._constraint_vector,
+                n_clock_freq=self._n_clock_freq,
+                n_slower_freq=n_slower_freq,
+                idio_indicator=self._idio_indicator,
+                tent_weights_dict=self._tent_weights_dict,
+                checkpoint_callback=checkpoint_callback
+            )
+        except Exception as e:
+            _logger.error(f"EM algorithm failed: {e}", exc_info=True)
+            _logger.error(f"  Initialization parameters:")
+            _logger.error(f"    A shape: {self.A.shape}, C shape: {self.C.shape}")
+            _logger.error(f"    Q shape: {self.Q.shape}, R shape: {self.R.shape}")
+            _logger.error(f"    Z_0 shape: {self.Z_0.shape}, V_0 shape: {self.V_0.shape}")
+            _logger.error(f"    Blocks shape: {self.blocks.shape}, r: {self.r}")
+            _logger.error(f"    p: {self.p}, max_lag_size: {self._max_lag_size}")
+            raise
         
         # Update model parameters from final state
         self._update_parameters(
@@ -1363,34 +1466,26 @@ class DFM(BaseFactorModel):
         X_forecast = to_numpy(X_forecast, dtype=DEFAULT_DTYPE)
         validate_no_nan_inf(X_forecast, name="forecast X_forecast")
         
-        # Validate forecast values are within reasonable bounds (only if scaler available)
-        # Note: Validation using std devs requires scaler attributes, skip if not available
-        if target_scaler is not None:
-            # Try to extract scale for validation (optional - don't fail if unavailable)
+        # Validate forecast values are within reasonable bounds (optional, if scaler available)
+        if target_scaler is not None and hasattr(target_scaler, 'scale_'):
             try:
-                # target_scaler is already an instance (fitted in dataset)
-                scaler = target_scaler
-                if scaler is not None and hasattr(scaler, 'scale_'):
-                    scale_vals = scaler.scale_
-                    if scale_vals is not None and len(scale_vals) > 0:
-                        extreme_threshold_std = _EM_CONFIG.extreme_forecast_threshold
-                        for i in range(X_forecast.shape[1] if X_forecast.ndim > 1 else 1):
-                            if i < len(scale_vals) and scale_vals[i] > 0:
-                                series_forecast = X_forecast[:, i] if X_forecast.ndim > 1 else X_forecast
-                                series_std = scale_vals[i]
-                                # Use std dev from scaler for validation (approximate)
-                                abs_deviations = np.abs(series_forecast) / series_std
-                                max_deviation = np.max(abs_deviations) if len(abs_deviations) > 0 else DEFAULT_ZERO_VALUE
-                                if max_deviation > extreme_threshold_std:
-                                    _logger.warning(
-                                        f"DFM prediction: Extreme forecast for target series {i} "
-                                        f"(max deviation: {max_deviation:.1f} std devs). "
-                                        f"Possible numerical instability."
-                                    )
+                scale_vals = target_scaler.scale_
+                if scale_vals is not None and len(scale_vals) > 0:
+                    extreme_threshold_std = _EM_CONFIG.extreme_forecast_threshold
+                    n_series = X_forecast.shape[1] if X_forecast.ndim > 1 else 1
+                    for i in range(min(n_series, len(scale_vals))):
+                        if scale_vals[i] > 0:
+                            series_forecast = X_forecast[:, i] if X_forecast.ndim > 1 else X_forecast
+                            abs_deviations = np.abs(series_forecast) / scale_vals[i]
+                            max_deviation = np.max(abs_deviations) if len(abs_deviations) > 0 else DEFAULT_ZERO_VALUE
+                            if max_deviation > extreme_threshold_std:
+                                _logger.warning(
+                                    f"DFM prediction: Extreme forecast for target series {i} "
+                                    f"(max deviation: {max_deviation:.1f} std devs). "
+                                    f"Possible numerical instability."
+                                )
             except (AttributeError, TypeError, ValueError):
-                # Skip validation if scaler attributes unavailable
-                # Uses specific exception types instead of bare Exception to avoid masking unexpected errors
-                pass
+                pass  # Skip validation if scaler attributes unavailable
         
         if return_factors:
             validate_no_nan_inf(Z_forecast, name="factor forecast Z_forecast")
@@ -1464,6 +1559,42 @@ class DFM(BaseFactorModel):
         
         _logger.info(f"DFM model saved to {path}")
     
+    @staticmethod
+    def _extract_state_space_from_old_format(old_training_state: Any) -> DFMStateSpaceParams:
+        """Extract state-space parameters from old checkpoint format.
+        
+        Parameters
+        ----------
+        old_training_state : Any
+            Old training state (object with A,C,Q,R,Z_0,V_0 or dict)
+            
+        Returns
+        -------
+        DFMStateSpaceParams
+            State-space parameters
+        """
+        if hasattr(old_training_state, 'A'):
+            return DFMStateSpaceParams(
+                A=old_training_state.A,
+                C=old_training_state.C,
+                Q=old_training_state.Q,
+                R=old_training_state.R,
+                Z_0=old_training_state.Z_0,
+                V_0=old_training_state.V_0
+            )
+        elif isinstance(old_training_state, dict):
+            return DFMStateSpaceParams(
+                A=old_training_state.get('A'),
+                C=old_training_state.get('C'),
+                Q=old_training_state.get('Q'),
+                R=old_training_state.get('R'),
+                Z_0=old_training_state.get('Z_0'),
+                V_0=old_training_state.get('V_0')
+            )
+        else:
+            # Assume it's already DFMStateSpaceParams
+            return old_training_state
+    
     @classmethod
     def load(cls, path: Union[str, Path], config: Optional[DFMConfig] = None) -> 'DFM':
         """Load DFM model from checkpoint file.
@@ -1488,7 +1619,7 @@ class DFM(BaseFactorModel):
         if config is None:
             config = checkpoint.get('config')
         
-        # Get model state (handle both old format and new format)
+        # Get model state (new format preferred, fallback to old format)
         model_state = checkpoint.get('model_state')
         if model_state is None:
             # Old format: reconstruct from individual fields
@@ -1508,7 +1639,6 @@ class DFM(BaseFactorModel):
                 max_lag_size=checkpoint.get('_max_lag_size'),
             )
         elif isinstance(model_state, dict):
-            # Handle dict format (shouldn't happen but be safe)
             model_state = DFMModelState(**{k: v for k, v in model_state.items() if v is not None})
         
         # Create model instance
@@ -1524,61 +1654,30 @@ class DFM(BaseFactorModel):
         # Apply model state (structure and mixed-frequency params)
         model_state.apply_to_model(model)
         
-        # Restore state-space parameters (new format) or handle backward compatibility (old format)
+        # Restore state-space parameters (new format preferred)
         state_space_params = checkpoint.get('state_space_params')
         old_training_state = checkpoint.get('training_state')
         
         if state_space_params is not None:
-            # New format: state_space_params is DFMStateSpaceParams
             if isinstance(state_space_params, dict):
-                # Handle dict format (shouldn't happen but be safe)
                 state_space_params = DFMStateSpaceParams(**{k: v for k, v in state_space_params.items() if v is not None})
             model.training_state = state_space_params
             state_space_params.apply_to_model(model)
-            
-            # Restore training metadata from checkpoint
-            model._training_loglik = checkpoint.get('training_loglik')
-            model._training_num_iter = checkpoint.get('training_num_iter')
-            model._training_converged = checkpoint.get('training_converged')
-            
         elif old_training_state is not None:
-            # Backward compatibility: old format with DFMTrainingState
-            # Extract state-space params from old training_state
-            # Check if it's the old DFMTrainingState format (has A, C, Q, R, Z_0, V_0 attributes)
-            if hasattr(old_training_state, 'A'):
-                model.training_state = DFMStateSpaceParams(
-                    A=old_training_state.A,
-                    C=old_training_state.C,
-                    Q=old_training_state.Q,
-                    R=old_training_state.R,
-                    Z_0=old_training_state.Z_0,
-                    V_0=old_training_state.V_0
-                )
-                model.training_state.apply_to_model(model)
-                
-                # Extract training metadata from old training_state
-                model._training_loglik = getattr(old_training_state, 'loglik', None)
-                model._training_num_iter = getattr(old_training_state, 'num_iter', None)
-                model._training_converged = getattr(old_training_state, 'converged', None)
-            elif isinstance(old_training_state, dict):
-                # Handle dict format for old training_state
-                model.training_state = DFMStateSpaceParams(
-                    A=old_training_state.get('A'),
-                    C=old_training_state.get('C'),
-                    Q=old_training_state.get('Q'),
-                    R=old_training_state.get('R'),
-                    Z_0=old_training_state.get('Z_0'),
-                    V_0=old_training_state.get('V_0')
-                )
-                model.training_state.apply_to_model(model)
-                model._training_loglik = old_training_state.get('loglik')
-                model._training_num_iter = old_training_state.get('num_iter')
-                model._training_converged = old_training_state.get('converged')
-            else:
-                # Fallback: try to use as is (might be DFMStateSpaceParams already)
-                model.training_state = old_training_state
-                if hasattr(old_training_state, 'apply_to_model'):
-                    old_training_state.apply_to_model(model)
+            # Backward compatibility: extract from old format
+            model.training_state = cls._extract_state_space_from_old_format(old_training_state)
+            model.training_state.apply_to_model(model)
+        
+        # Restore training metadata
+        model._training_loglik = checkpoint.get('training_loglik') or (
+            getattr(old_training_state, 'loglik', None) if old_training_state is not None else None
+        )
+        model._training_num_iter = checkpoint.get('training_num_iter') or (
+            getattr(old_training_state, 'num_iter', None) if old_training_state is not None else None
+        )
+        model._training_converged = checkpoint.get('training_converged') or (
+            getattr(old_training_state, 'converged', None) if old_training_state is not None else None
+        )
         
         # Restore data and preprocessing
         model.data_processed = checkpoint.get('data_processed')

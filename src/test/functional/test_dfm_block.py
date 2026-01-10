@@ -12,7 +12,7 @@ from dfm_python.numeric.tent import (
     generate_R_mat,
     get_slower_freq_tent_weights,
 )
-from dfm_python.config.constants import TENT_WEIGHTS_LOOKUP
+from dfm_python.config.constants import TENT_WEIGHTS_LOOKUP, DEFAULT_DTYPE
 
 
 class TestDFMBlockFunctions:
@@ -23,7 +23,7 @@ class TestDFMBlockFunctions:
         N = 5
         n_clock_freq = 2
         n_slower_freq = 3
-        tent_weights = np.array([1, 2, 3, 2, 1], dtype=np.float32)
+        tent_weights = np.array([1, 2, 3, 2, 1], dtype=DEFAULT_DTYPE)
         
         result = build_slower_freq_observation_matrix(N, n_clock_freq, n_slower_freq, tent_weights)
         tent_kernel_size = len(tent_weights)
@@ -38,7 +38,7 @@ class TestDFMBlockFunctions:
         num_factors = 2
         tent_kernel_size = 5
         p = 1
-        factors = np.random.randn(T, num_factors).astype(np.float32)
+        factors = np.random.randn(T, num_factors).astype(DEFAULT_DTYPE)
         
         result = build_lag_matrix(factors, T, num_factors, tent_kernel_size, p)
         # Should return array of shape (T, num_factors * max(p + 1, tent_kernel_size))
@@ -106,26 +106,23 @@ class TestFrequencyPairs:
         assert np.allclose(q, 0.0), \
             f"q should be all zeros for ({slower_freq}, {faster_freq})"
         
-        # R_mat enforces constraint: w1*c1 - w(i+1)*c(i+1) = 0
-        # This means c1/w1 = c(i+1)/w(i+1) (loadings divided by weights are equal)
-        # Test with loadings that satisfy this constraint: c = weights * scale / weights = scale
-        # Actually, if c = constant / weights, then w1*c1 = w1*(constant/w1) = constant
-        # and w(i+1)*c(i+1) = w(i+1)*(constant/w(i+1)) = constant, so constraint is satisfied
-        constant = 1.0
-        loadings_satisfying_constraint = constant / weights
+        # R_mat enforces constraint: tent_weights[i+1]*c0 - 1*c(i+1) = 0
+        # This means c(i+1) = tent_weights[i+1] * c0 (loadings are proportional to tent weights)
+        # Test with loadings that satisfy this constraint: c = weights * scale
+        scale = 1.0
+        loadings_satisfying_constraint = weights * scale  # c[i] = weights[i] * c0
         constraint_result = R_mat @ loadings_satisfying_constraint
         assert np.allclose(constraint_result, q, atol=1e-6), \
-            f"Constraint not satisfied for loadings = constant/weights for ({slower_freq}, {faster_freq}): {constraint_result}"
+            f"Constraint not satisfied for loadings = weights*scale for ({slower_freq}, {faster_freq}): {constraint_result}"
         
-        # Test that R_mat has correct structure: first column has w1, diagonal has -w(i+1)
-        w1 = weights[0]
-        assert np.allclose(R_mat[:, 0], w1), \
-            f"First column of R_mat should be all {w1} for ({slower_freq}, {faster_freq})"
-        
-        # Check diagonal structure (each row has -w(i+1) at position i+1)
+        # Test that R_mat matches MATLAB pattern:
+        # - First column has tent_weights[i+1] (not w1)
+        # - Diagonal has -1 (not -tent_weights[i+1])
         for i in range(tent_kernel_size - 1):
-            assert np.abs(R_mat[i, i + 1] + weights[i + 1]) < 1e-6, \
-                f"R_mat[{i}, {i+1}] should be -{weights[i+1]} for ({slower_freq}, {faster_freq})"
+            assert np.abs(R_mat[i, 0] - weights[i + 1]) < 1e-6, \
+                f"R_mat[{i}, 0] should be {weights[i+1]} (tent_weights[{i+1}]) for ({slower_freq}, {faster_freq}), got {R_mat[i, 0]}"
+            assert np.abs(R_mat[i, i + 1] + 1.0) < 1e-6, \
+                f"R_mat[{i}, {i+1}] should be -1 for ({slower_freq}, {faster_freq}), got {R_mat[i, i+1]}"
     
     @pytest.mark.parametrize("slower_freq,faster_freq", list(TENT_WEIGHTS_LOOKUP.keys()))
     def test_build_slower_freq_observation_matrix_for_all_pairs(self, slower_freq, faster_freq):
@@ -162,7 +159,7 @@ class TestFrequencyPairs:
         
         n_slower_freq = 3
         rho0 = 0.5
-        sig_e = np.array([0.1, 0.2, 0.3], dtype=np.float32)
+        sig_e = np.array([0.1, 0.2, 0.3], dtype=DEFAULT_DTYPE)
         
         BQ, SQ, initViQ = build_slower_freq_idiosyncratic_chain(
             n_slower_freq, tent_kernel_size, rho0, sig_e

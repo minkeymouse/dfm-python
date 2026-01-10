@@ -1,6 +1,6 @@
 """Checkpoint loading utilities for factor models.
 
-This module provides utilities for loading and parsing PyTorch Lightning checkpoints,
+This module provides utilities for loading and parsing PyTorch model checkpoints,
 inferring model parameters from state dictionaries, and extracting input dimensions.
 
 The utilities are designed to work with DDFM models but can be parameterized

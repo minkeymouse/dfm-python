@@ -229,7 +229,7 @@ X = init_params['X']
 # Note: Mx/Wx removed - target_scaler is used instead for inverse transformation
 # Target scaler is available via dataset.target_scaler
 
-# Fit model directly (DFM uses fit() method, not Lightning trainer)
+# Fit model directly (DFM uses fit() method)
 # Pass dataset to extract all initialization parameters automatically
 model.fit(X=X, dataset=dataset)
 

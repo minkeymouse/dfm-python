@@ -2,6 +2,7 @@
 
 import pytest
 import numpy as np
+from dfm_python.config.constants import DEFAULT_DTYPE
 
 
 class TestEstimator:
@@ -14,7 +15,7 @@ class TestEstimator:
         
         T = 100
         N = 2
-        y = np.random.randn(T, N).astype(np.float32)
+        y = np.random.randn(T, N).astype(DEFAULT_DTYPE)
         x = y[:-1]  # Lagged values (T-1 x N)
         y_current = y[1:]  # Current values (T-1 x N) to match x
         
@@ -33,7 +34,7 @@ class TestEstimator:
         
         T = 100
         N = 2
-        y = np.random.randn(T, N).astype(np.float32)
+        y = np.random.randn(T, N).astype(DEFAULT_DTYPE)
         x = y[:-1]  # Lagged values (T-1 x N)
         y_current = y[1:]  # Current values (T-1 x N) to match x
         
@@ -53,7 +54,7 @@ class TestEstimator:
         
         T = 100
         N = 3
-        residuals = np.random.randn(T, N).astype(np.float32)
+        residuals = np.random.randn(T, N).astype(DEFAULT_DTYPE)
         
         R = estimate_variance_unified(residuals=residuals)
         # Returns diagonal matrix (N x N), not vector

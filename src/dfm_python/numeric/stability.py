@@ -9,8 +9,6 @@ and analytical computations.
 import numpy as np
 import warnings
 from typing import Optional, Tuple, Dict, Any, Union
-from scipy.interpolate import CubicSpline
-from scipy.signal import lfilter
 import torch
 from torch import Tensor
 
@@ -289,10 +287,57 @@ def ensure_covariance_stable(
     return ensure_positive_definite(M, min_eigenval=min_eigenval, warn=False)
 
 
+def ensure_process_noise_stable(
+    Q: np.ndarray,
+    min_eigenval: float = MIN_EIGENVALUE,
+    max_eigenval: float = MAX_EIGENVALUE,
+    warn: bool = True,
+    dtype: type = np.float32
+) -> np.ndarray:
+    """Ensure process noise covariance Q is stable with both minimum and maximum eigenvalue bounds.
+    
+    This function ensures Q (process noise) is:
+    1. Positive definite (minimum eigenvalue >= min_eigenval)
+    2. Bounded above (maximum eigenvalue <= max_eigenval)
+    
+    This prevents both singularity (from zero eigenvalues) and numerical explosion
+    (from extremely large eigenvalues) in the Kalman filter.
+    
+    Parameters
+    ----------
+    Q : np.ndarray
+        Process noise covariance matrix (m x m)
+    min_eigenval : float, default MIN_EIGENVALUE
+        Minimum eigenvalue to enforce (prevents singularity)
+    max_eigenval : float, default MAX_EIGENVALUE
+        Maximum eigenvalue to enforce (prevents explosion)
+    warn : bool, default True
+        Whether to log warnings when capping occurs
+    dtype : type, default np.float32
+        Data type
+        
+    Returns
+    -------
+    np.ndarray
+        Stable process noise covariance matrix
+    """
+    if Q.size == 0 or Q.shape[0] == 0:
+        return Q
+    
+    # Ensure minimum eigenvalue (positive definiteness)
+    Q = ensure_covariance_stable(Q, min_eigenval=min_eigenval)
+    
+    # Cap maximum eigenvalue (prevent explosion)
+    Q = cap_max_eigenval(Q, max_eigenval=max_eigenval, symmetric=True, warn=warn)
+    
+    return Q.astype(dtype)
+
+
 def stabilize_innovation_covariance(
     Q: np.ndarray,
     min_eigenval: float = MIN_EIGENVALUE,
     min_floor: Optional[float] = None,
+    max_eigenval: float = MAX_EIGENVALUE,
     dtype: type = np.float32
 ) -> np.ndarray:
     """Stabilize innovation covariance matrix Q with symmetrization, eigenvalue regularization, and floor.
@@ -300,7 +345,8 @@ def stabilize_innovation_covariance(
     This is a common pattern used in VAR estimation to ensure Q is:
     1. Symmetric
     2. Positive semi-definite (with minimum eigenvalue)
-    3. Floored to minimum values (typically MIN_Q_FLOOR)
+    3. Bounded above (with maximum eigenvalue cap to prevent explosion)
+    4. Floored to minimum values (typically MIN_Q_FLOOR)
     
     Parameters
     ----------
@@ -311,6 +357,8 @@ def stabilize_innovation_covariance(
     min_floor : float, optional
         Minimum floor value for all elements. If None, no floor is applied.
         Typically MIN_Q_FLOOR from constants.
+    max_eigenval : float, default MAX_EIGENVALUE
+        Maximum eigenvalue to enforce (prevents numerical explosion)
     dtype : type, default np.float32
         Data type
         
@@ -322,8 +370,8 @@ def stabilize_innovation_covariance(
     if Q.size == 0 or Q.shape[0] == 0:
         return Q
     
-    # Ensure symmetric and positive semi-definite
-    Q = ensure_covariance_stable(Q, min_eigenval=min_eigenval)
+    # Ensure minimum and maximum eigenvalue bounds (generic process noise stabilization)
+    Q = ensure_process_noise_stable(Q, min_eigenval=min_eigenval, max_eigenval=max_eigenval, warn=False, dtype=dtype)
     
     # Apply floor if specified
     if min_floor is not None:
@@ -573,147 +621,6 @@ def safe_determinant(M: np.ndarray, use_logdet: bool = True) -> float:
     
     _logger.debug("safe_determinant: all methods failed, returning 0.0")
     return DEFAULT_ZERO_VALUE
-
-
-# ============================================================================
-# Missing Data Handling
-# ============================================================================
-
-def rem_nans_spline(X: np.ndarray, method: int = 2, k: int = 3) -> Tuple[np.ndarray, np.ndarray]:
-    """Treat NaNs in dataset for DFM estimation using standard interpolation methods.
-    
-    This function implements standard econometric practice for handling missing data
-    in time series, following the approach used in FRBNY Nowcasting Model and similar
-    DFM implementations. The Kalman Filter in the DFM will handle remaining missing
-    values during estimation.
-    
-    Parameters
-    ----------
-    X : np.ndarray
-        Input data matrix (T x N)
-    method : int
-        Missing data handling method:
-        - 1: Replace all missing values using spline interpolation
-        - 2: Remove >80% NaN rows, then fill (default, recommended)
-        - 3: Only remove all-NaN rows
-        - 4: Remove all-NaN rows, then fill
-        - 5: Fill missing values
-    k : int
-        Spline interpolation order (default: 3 for cubic spline)
-        
-    Returns
-    -------
-    X : np.ndarray
-        Data with NaNs treated
-    indNaN : np.ndarray
-        Boolean mask indicating original NaN positions
-        
-    Notes
-    -----
-    This preprocessing step is followed by Kalman Filter-based missing data handling
-    during DFM estimation, which is the standard approach in state-space models.
-    See Mariano & Murasawa (2003) and Harvey (1989) for theoretical background.
-    """
-    # Ensure X is a numeric numpy array
-    X = np.asarray(X)
-    if not np.issubdtype(X.dtype, np.number):
-        # Convert non-numeric types to numeric, handling errors
-        try:
-            X = X.astype(np.float64)
-        except (ValueError, TypeError):
-            # If conversion fails, try using pandas for better type handling
-            try:
-                import pandas as pd
-                X_df = pd.DataFrame(X)
-                X = X_df.select_dtypes(include=[np.number]).to_numpy()
-                if X.size == 0:
-                    raise DataValidationError(
-                        "Input data contains no numeric columns",
-                        details="All columns were removed during numeric type conversion. Ensure input data contains at least one numeric column."
-                    )
-                # If shape changed, we need to handle it
-                if X.shape != X_df.shape:
-                    _logger.warning(f"Non-numeric columns removed. Shape changed from {X_df.shape} to {X.shape}")
-            except ImportError:
-                raise DataValidationError(
-                    f"Cannot convert input data to numeric. dtype: {X.dtype}",
-                    details="Data type conversion failed. Ensure input data contains numeric types or install pandas for better type handling."
-                )
-    
-    T, N = X.shape
-    indNaN = np.isnan(X)
-    
-    def _remove_leading_trailing(threshold: float):
-        """Remove rows with NaN count above threshold."""
-        rem = np.sum(indNaN, axis=1) > (N * threshold if threshold < 1 else threshold)
-        nan_lead = np.cumsum(rem) == np.arange(1, T + 1)
-        nan_end = np.cumsum(rem[::-1]) == np.arange(1, T + 1)[::-1]
-        return ~(nan_lead | nan_end)
-    
-    def _fill_missing(x: np.ndarray, mask: np.ndarray):
-        """Fill missing values using spline interpolation and moving average."""
-        if len(mask) != len(x):
-            mask = mask[:len(x)]
-        
-        non_nan = np.where(~mask)[0]
-        if len(non_nan) < 2:
-            return x
-        
-        x_filled = x.copy()
-        if non_nan[-1] >= len(x):
-            non_nan = non_nan[non_nan < len(x)]
-        if len(non_nan) < 2:
-            return x
-        
-        x_filled[non_nan[0]:non_nan[-1]+1] = CubicSpline(non_nan, x[non_nan])(np.arange(non_nan[0], min(non_nan[-1]+1, len(x))))
-        x_filled[mask[:len(x_filled)]] = np.nanmedian(x_filled)
-        
-        # Moving average filter
-        pad = np.concatenate([np.full(k, x_filled[0]), x_filled, np.full(k, x_filled[-1])])
-        ma = lfilter(np.ones(2*k+1)/(2*k+1), 1, pad)[2*k+1:]
-        if len(ma) == len(x_filled):
-            x_filled[mask[:len(x_filled)]] = ma[mask[:len(x_filled)]]
-        return x_filled
-    
-    if method == 1:
-        # Replace all missing values
-        for i in range(N):
-            mask = indNaN[:, i]
-            x = X[:, i].copy()
-            x[mask] = np.nanmedian(x)
-            pad = np.concatenate([np.full(k, x[0]), x, np.full(k, x[-1])])
-            ma = lfilter(np.ones(2*k+1)/(2*k+1), 1, pad)[2*k+1:]
-            x[mask] = ma[mask]
-            X[:, i] = x
-    
-    elif method == 2:
-        # Remove >80% NaN rows, then fill
-        mask = _remove_leading_trailing(0.8)
-        X = X[mask]
-        indNaN = np.isnan(X)
-        for i in range(N):
-            X[:, i] = _fill_missing(X[:, i], indNaN[:, i])
-    
-    elif method == 3:
-        # Only remove all-NaN rows
-        mask = _remove_leading_trailing(N)
-        X = X[mask]
-        indNaN = np.isnan(X)
-    
-    elif method == 4:
-        # Remove all-NaN rows, then fill
-        mask = _remove_leading_trailing(N)
-        X = X[mask]
-        indNaN = np.isnan(X)
-        for i in range(N):
-            X[:, i] = _fill_missing(X[:, i], indNaN[:, i])
-    
-    elif method == 5:
-        # Fill missing values
-        for i in range(N):
-            X[:, i] = _fill_missing(X[:, i], indNaN[:, i])
-    
-    return X, indNaN
 
 
 # ============================================================================
@@ -1105,9 +1012,8 @@ def safe_matrix_power(
 ) -> Union[np.ndarray, Tensor]:
     """Safely compute matrix power with stability checks.
     
-    This function computes matrix powers with numerical stability checks,
-    useful for IRF computation where matrix powers are computed for large
-    horizons. Supports both NumPy arrays and PyTorch tensors.
+    This function computes matrix powers with numerical stability checks.
+    Supports both NumPy arrays and PyTorch tensors.
     
     Parameters
     ----------
@@ -1285,8 +1191,6 @@ __all__ = [
     'ensure_covariance_stable',
     'compute_reg_param',
     'safe_determinant',
-    # Missing data handling
-    'rem_nans_spline',
     # Analytical computations
     'safe_divide',
     'compute_var_safe',

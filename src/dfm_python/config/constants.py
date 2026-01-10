@@ -23,7 +23,7 @@ DEFAULT_MIN_DELTA = 1e-6  # Minimum change for improvement
 # ============================================================================
 
 # Minimum eigenvalues and variances
-MIN_EIGENVALUE = 1e-8  # Minimum eigenvalue for positive definite matrices
+MIN_EIGENVALUE = 1e-6  # Minimum eigenvalue for positive definite matrices (increased from 1e-8 for better conditioning)
 MIN_DIAGONAL_VARIANCE = 1e-8  # Minimum variance for diagonal elements
 MIN_OBSERVATION_NOISE = 1e-4  # Minimum observation noise for measurement error (used in EM updates)
 DEFAULT_DDFM_OBSERVATION_NOISE = 1e-15  # Default observation noise for DDFM state-space (matches original TensorFlow)
@@ -33,7 +33,7 @@ MIN_STD_FOR_SCALE_CHECK = 1e-10  # Minimum standard deviation for scale ratio co
 DEFAULT_VARIANCE_FALLBACK = 1.0  # Default variance fallback value for numerical stability
 
 # Maximum eigenvalues
-MAX_EIGENVALUE = 1e6  # Maximum eigenvalue cap
+MAX_EIGENVALUE = 1e3  # Maximum eigenvalue cap (reduced to 1e3 to improve condition number: 1e3/1e-6 = 1e9)
 
 # Eigenvalue stability thresholds
 DEFAULT_EIGENVALUE_MAX_MAGNITUDE = 1.0  # Default maximum eigenvalue magnitude for stability checks
@@ -217,6 +217,7 @@ DEFAULT_START_DATE = datetime(2000, 1, 1)
 # Default window size for DDFM
 DEFAULT_WINDOW_SIZE = 100
 DEFAULT_TENT_KERNEL_SIZE = 5  # Default tent kernel size for slower-frequency series aggregation
+DEFAULT_TENT_KERNEL_REGULARIZATION_MULTIPLIER = 100.0  # Regularization multiplier for tent kernel series (handles ill-conditioning)
 # Note: DEFAULT_BATCH_SIZE is defined above (line 88) as 32 for general neural networks
 # Use DEFAULT_DDFM_WINDOW_SIZE (100) for DDFM-specific window size (time-step batch size)
 
@@ -284,7 +285,7 @@ DEFAULT_PROGRESS_LOG_INTERVAL = 5  # Default progress logging interval for EM al
 # Precision Defaults
 # ============================================================================
 
-DEFAULT_DTYPE = np.float32  # Default numpy dtype for arrays
+DEFAULT_DTYPE = np.float64  # Default numpy dtype for arrays (float64 for better numerical stability)
 
 # PyTorch dtype (matches DEFAULT_DTYPE)
 try:
@@ -518,7 +519,6 @@ __all__ = [
     'MIN_VARIABLES',
     'MIN_SHAPE_FOR_AR2',
     'MIN_DDFM_TIME_STEPS',
-    'MIN_SHAPE_FOR_AR2',
     'MIN_DDFM_DATASET_SIZE_WARNING',
     'MIN_ITER_FOR_DELTA_COMPUTATION',
     'DEFAULT_MIN_ITER_FOR_CONVERGENCE_CHECK',
@@ -546,6 +546,7 @@ __all__ = [
     'DEFAULT_LOG_INTERVAL',
     'DEFAULT_PROGRESS_LOG_INTERVAL',
     'DEFAULT_TENT_KERNEL_SIZE',
+    'DEFAULT_TENT_KERNEL_REGULARIZATION_MULTIPLIER',
     'MAX_ERROR_ITEMS',
     # IRF
     'DEFAULT_IRF_HORIZON',

@@ -5,16 +5,9 @@ must implement, ensuring consistent API across different model types.
 
 API Differences Between Models
 ------------------------------
-The models in this package (KDFM, DFM, DDFM) have intentionally different APIs
+The models in this package (DFM, DDFM) have intentionally different APIs
 to reflect their different architectures and use cases. They are NOT polymorphic
 and cannot be used interchangeably.
-
-**KDFM (Kernelized Dynamic Factor Model)**:
-- Training: Uses `train(dataset)` method
-- Prediction: `predict(horizon, last_observation)` - REQUIRES `last_observation` parameter
-- Result extraction: `get_result()` returns KDFMResult with IRF data
-- Architecture: Companion matrix parameterization, structural identification layer
-- Use case: Direct IRF estimation, explicit structural shock analysis
 
 **DFM (Dynamic Factor Model)**:
 - Training: Uses `fit(data)` method (statsmodels-style)
@@ -30,20 +23,7 @@ and cannot be used interchangeably.
 - Architecture: Deep learning + Bayesian inference
 - Use case: Probabilistic forecasting with uncertainty quantification
 
-**Why Different APIs?**
-These models serve different purposes and have fundamentally different architectures.
-KDFM's requirement for `last_observation` reflects its need to compute initial factor
-state from the last observed data point, while DFM/DDFM use their internal state.
-This design choice enables KDFM's direct IRF estimation capability but requires
-explicit state management.
-
 **Usage Examples**:
-    # KDFM
-    model = KDFM(config=config)
-    dataset = KDFMDataset(config=config, data=data)
-    model.train(dataset=dataset)
-    forecasts = model.predict(horizon=8, last_observation=last_obs)
-    
     # DFM
     model = DFM(config=config)
     dataset = DFMDataset(config=config, data=data)
@@ -71,7 +51,6 @@ else:
         Tensor = Any
 
 if TYPE_CHECKING:
-    from ..dataset.kdfm_dataset import KDFMDataset
     from ..dataset.dfm_dataset import DFMDataset
     from ..dataset.ddfm_dataset import DDFMDataset
 
@@ -189,7 +168,7 @@ class BaseFactorModel(ABC):
         self._config = new_config
         return new_config
     
-    def _get_dataset(self) -> Union['KDFMDataset', 'DFMDataset', 'DDFMDataset']:
+    def _get_dataset(self) -> Union['DFMDataset', 'DDFMDataset']:
         """Get Dataset from model.
         
         This method retrieves the Dataset from the model's _dataset attribute.
@@ -199,14 +178,13 @@ class BaseFactorModel(ABC):
         parameters and target series configuration.
         
         **Type Note**: Uses TYPE_CHECKING to avoid circular imports. The return type
-        is `Union[KDFMDataset, DFMDataset, DDFMDataset]` depending on model type.
+        is `Union[DFMDataset, DDFMDataset]` depending on model type.
         TYPE_CHECKING allows proper type hints without runtime circular dependencies.
         
         Returns
         -------
         Any
-            Dataset instance (KDFMDataset, DFMDataset, or DDFMDataset)
-            - KDFMDataset: For KDFM models
+            Dataset instance (DFMDataset or DDFMDataset)
             - DFMDataset: For DFM models
             - DDFMDataset: For DDFM models
             
@@ -242,7 +220,7 @@ class BaseFactorModel(ABC):
         """Get target scaler from dataset.
         
         Consolidates duplicate pattern of extracting target_scaler from dataset.
-        This is a common helper used across all models (DFM, DDFM, KDFM) for
+        This is a common helper used across all models (DFM, DDFM) for
         accessing the target scaler for inverse transformation during prediction.
         
         Returns
@@ -272,7 +250,6 @@ class BaseFactorModel(ABC):
         but keeps model parameters fixed. The implementation differs by model type:
         - DFM: Uses Kalman filtering/smoothing
         - DDFM: Uses neural network forward pass
-        - KDFM: Uses companion matrix forward pass
         
         **Data Shape**: The input data must be 2D with shape (T_new x N) where:
         - T_new: Number of new time steps (can be any positive integer)

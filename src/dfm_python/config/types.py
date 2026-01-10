@@ -59,11 +59,7 @@ CoefficientMatrix = np.ndarray
 CovarianceMatrix = np.ndarray
 """Covariance matrix (e.g., Q, R). Shape: (K, K) or (m, m)."""
 
-IRFArray = np.ndarray
-"""Impulse response function array. Shape: (horizon, n_vars, n_vars)."""
-
-CompanionMatrix = np.ndarray
-"""Companion matrix. Shape: (p*K, p*K) or (q*K, q*K)."""
+# IRFArray and CompanionMatrix removed - these were KDFM-specific types
 
 # ============================================================================
 # Configuration Types
@@ -79,7 +75,7 @@ Frequency = Literal['d', 'w', 'm', 'q', 'sa', 'a']
 DatasetName = str
 """Dataset name identifier."""
 
-ModelName = Literal['var', 'vecm', 'dfm', 'kdfm', 'ddfm']
+ModelName = Literal['var', 'vecm', 'dfm', 'ddfm']
 """Model name identifier."""
 
 # ============================================================================
@@ -108,8 +104,7 @@ ForecastDict = Dict[str, Union[float, np.ndarray, Dict[str, Any]]]
 MetricsDict = Dict[str, float]
 """Metrics dictionary (RMSE, MAE, R², etc.)."""
 
-IRFResultDict = Dict[str, Union[List, np.ndarray, int, str, None]]
-"""IRF result dictionary."""
+# IRFResultDict removed - this was KDFM-specific type
 
 CheckpointDict = Dict[str, Any]
 """Model checkpoint dictionary."""
@@ -302,8 +297,6 @@ __all__ = [
     'ForecastResult',
     'CoefficientMatrix',
     'CovarianceMatrix',
-    'IRFArray',
-    'CompanionMatrix',
     # Configuration Types
     'SeriesID',
     'Frequency',
@@ -317,7 +310,6 @@ __all__ = [
     'ResultDict',
     'ForecastDict',
     'MetricsDict',
-    'IRFResultDict',
     'CheckpointDict',
     'ConfigDict',
     # Device Types

@@ -74,10 +74,28 @@ class DDFMDataset(Dataset):
         y = data[target_series_list]
         X = data.drop(columns=target_series_list)
         
+        # Check if data is already standardized (mean≈0, std≈1) to avoid double scaling
+        # If data is already scaled, we still need target_scaler for inverse transformation
+        # but we should NOT scale again
         if target_scaler is not None:
-            self.target_scaler.fit(y.values)
-            y_scaled = self.target_scaler.transform(y.values)
-            y = pd.DataFrame(y_scaled, index=y.index, columns=y.columns)
+            # Check if target data appears already standardized
+            y_mean = y.mean().abs().max()
+            y_std = (y.std() - 1.0).abs().max()
+            is_already_scaled = y_mean < 0.1 and y_std < 0.1
+            
+            if is_already_scaled:
+                # Data is already standardized - don't scale again
+                # But still fit the scaler if not already fitted (for inverse transformation)
+                # The scaler should have been fitted on original unscaled data by the caller
+                if not hasattr(target_scaler, 'mean_') or target_scaler.mean_ is None:
+                    # If scaler not fitted, fit it on current data (assumes caller passed unscaled data)
+                    self.target_scaler.fit(y.values)
+                # Don't transform - data is already scaled
+            else:
+                # Data is not standardized - apply scaling
+                self.target_scaler.fit(y.values)
+                y_scaled = self.target_scaler.transform(y.values)
+                y = pd.DataFrame(y_scaled, index=y.index, columns=y.columns)
         
         self.data = pd.concat([X, y], axis=1)
         self.X = X.values

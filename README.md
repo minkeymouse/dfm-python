@@ -118,7 +118,7 @@ dfm-python/
 │   └── dfm_python/
 │       ├── models/          # Model implementations (DFM, DDFM, KDFM)
 │       ├── config/           # Configuration schemas
-│       ├── datamodule/       # PyTorch Lightning DataModules
+│       ├── datamodule/       # Data loading and preprocessing modules
 │       ├── trainer/          # Training procedures
 │       ├── ssm/              # State-space model components
 │       ├── dataset/          # Data loading and preprocessing
@@ -136,7 +136,7 @@ dfm-python/
 - **Structural identification**: Learnable structural shock identification (Cholesky, full, low-rank)
 - **Efficient computation**: Krylov FFT for O(T log T) forward pass
 - **Direct IRF computation**: Avoids numerical error accumulation
-- **Gradient descent training**: Uses PyTorch Lightning for training
+- **Gradient descent training**: Uses PyTorch for training with custom logging
 
 ### DFM (Dynamic Factor Model)
 
@@ -149,7 +149,7 @@ dfm-python/
 
 - **Nonlinear encoder**: Neural network encoder for nonlinear factor extraction
 - **MCMC training**: Denoising training procedure
-- **PyTorch-based**: Full PyTorch implementation with Lightning support
+- **PyTorch-based**: Full PyTorch implementation with custom logging system
 
 ## IRF Analysis: KDFM's PRIMARY CONTRIBUTION
 

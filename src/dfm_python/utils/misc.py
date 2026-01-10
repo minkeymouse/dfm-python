@@ -202,13 +202,7 @@ def resolve_target_series(
     return target_series, target_indices
 
 
-# ============================================================================
-# Re-exports for backward compatibility
-# ============================================================================
-# These functions have been moved to other modules but are re-exported here
-# to maintain backward compatibility with existing code.
-
-# Scaling utilities (moved from dataset.process)
+# Scaling utilities
 from sklearn.preprocessing import StandardScaler, RobustScaler
 from typing import TYPE_CHECKING
 
@@ -238,9 +232,9 @@ def get_target_scaler(dataset: Optional[Any] = None, model: Optional[Any] = None
     Parameters
     ----------
     dataset : Any, optional
-        Dataset instance (DFMDataset, DDFMDataset, KDFMDataset)
+        Dataset instance (DFMDataset, DDFMDataset)
     model : Any, optional
-        Model instance (DFM, DDFM, KDFM)
+        Model instance (DFM, DDFM)
         
     Returns
     -------

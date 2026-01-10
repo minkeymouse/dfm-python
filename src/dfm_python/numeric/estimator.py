@@ -7,6 +7,7 @@ clipping utilities for numerical stability.
 
 import numpy as np
 from typing import Optional, Tuple, Dict, Any, TYPE_CHECKING
+from scipy.linalg import solve
 
 if TYPE_CHECKING:
     from ..functional.em import EMConfig
@@ -18,6 +19,7 @@ from ..config.constants import (
     MIN_FACTOR_VARIANCE,
     DEFAULT_REGULARIZATION,
     MIN_EIGENVALUE,
+    MAX_EIGENVALUE,
     MIN_STD,
     VAR_STABILITY_THRESHOLD,
     AR_CLIP_MIN,
@@ -33,6 +35,7 @@ from ..config.constants import (
     DEFAULT_MIN_OBS,
 )
 from .stability import (
+    ensure_process_noise_stable,
     clean_matrix,
     cap_max_eigenval,
     compute_var_safe,
@@ -297,7 +300,7 @@ def forecast_ar1_factors(
     
     **AR(1) Dynamics**: f_t = A @ f_{t-1}
     
-    This function is used by DFM, DDFM, and KDFM for factor forecasting, ensuring
+    This function is used by DFM and DDFM for factor forecasting, ensuring
     consistent AR dynamics computation across models.
     
     Parameters
@@ -609,31 +612,98 @@ def estimate_var_unified(
         # E[z_{t-1} z_{t-1}'] = EZ_lag @ EZ_lag' + V_smooth_lag
         # E[z_t z_{t-1}'] = EZ @ EZ_lag' + VVsmooth
         
-        T = y.shape[0]
+        T = y.shape[0] if y is not None and len(y.shape) > 0 else 1
         m = y.shape[1]
         p = x.shape[1]
         
+        # CRITICAL FIX: Cap V_smooth eigenvalues before computing EZZ to prevent explosion
+        # This addresses root cause of Q explosions: V_smooth explosion → EZZ explosion → Q explosion
+        # 
+        # IMPORTANT: Cap per-time-step value to account for T summation
+        # If we cap each V_smooth[t] at 1e4, and T=2135, sum can be up to 2.1e7
+        # So we cap each at MAX_EIGENVALUE / max(T, 100) to ensure sum is bounded
+        # cap_max_eigenval is already imported at top of file
+        max_per_timestep = MAX_EIGENVALUE / max(T, 100)  # Cap per timestep so sum is bounded
+        
+        if V_smooth.ndim == 3:
+            # Cap each V_smooth[t] before summing to prevent explosion
+            V_smooth_capped = np.zeros_like(V_smooth, dtype=dtype)
+            for t in range(V_smooth.shape[0]):
+                V_smooth_capped[t] = cap_max_eigenval(
+                    V_smooth[t], 
+                    max_eigenval=max_per_timestep, 
+                    symmetric=True, 
+                    warn=False
+                ).astype(dtype)
+            V_smooth_sum = np.sum(V_smooth_capped, axis=0)
+            # CRITICAL: Also cap the sum after accumulation to prevent any explosion
+            V_smooth_sum = cap_max_eigenval(
+                V_smooth_sum,
+                max_eigenval=MAX_EIGENVALUE,
+                symmetric=True,
+                warn=False
+            ).astype(dtype)
+        elif V_smooth.ndim == 2:
+            V_smooth_sum = cap_max_eigenval(
+                V_smooth, 
+                max_eigenval=MAX_EIGENVALUE, 
+                symmetric=True, 
+                warn=False
+            ).astype(dtype)
+        else:
+            V_smooth_sum = V_smooth.astype(dtype) if V_smooth is not None else None
+        
         # Compute expectations
         EZZ = y.T @ y
-        if V_smooth.ndim == 3:
-            EZZ = EZZ + np.sum(V_smooth, axis=0)
-        elif V_smooth.ndim == 2:
-            EZZ = EZZ + V_smooth
+        if V_smooth_sum is not None:
+            EZZ = EZZ + V_smooth_sum
         
         EZZ_BB = x.T @ x
         if V_smooth.ndim == 3:
-            V_smooth_lag = V_smooth[:-1] if V_smooth.shape[0] == T + 1 else V_smooth
-            EZZ_BB = EZZ_BB + np.sum(V_smooth_lag, axis=0)
+            V_smooth_lag = V_smooth_capped[:-1] if V_smooth_capped.shape[0] == T + 1 else V_smooth_capped
+            V_smooth_lag_sum = np.sum(V_smooth_lag, axis=0)
+            # Cap the lag sum as well
+            V_smooth_lag_sum = cap_max_eigenval(
+                V_smooth_lag_sum,
+                max_eigenval=MAX_EIGENVALUE,
+                symmetric=True,
+                warn=False
+            ).astype(dtype)
+            EZZ_BB = EZZ_BB + V_smooth_lag_sum
         elif V_smooth.ndim == 2:
-            EZZ_BB = EZZ_BB + V_smooth
+            EZZ_BB = EZZ_BB + V_smooth_sum
         
         EZZ_FB = y[1:].T @ x if y.shape[0] > x.shape[0] else y.T @ x
+        # CRITICAL FIX: Cap VVsmooth eigenvalues as well to prevent explosion
+        # Use same per-timestep cap as V_smooth (defined above: MAX_EIGENVALUE / max(T, 100))
         if VVsmooth is not None:
             if VVsmooth.ndim == 3:
-                VVsmooth_sum = np.sum(VVsmooth[1:], axis=0) if VVsmooth.shape[0] == T + 1 else np.sum(VVsmooth, axis=0)
+                # Cap each VVsmooth[t] before summing
+                VVsmooth_capped = np.zeros_like(VVsmooth, dtype=dtype)
+                for t in range(VVsmooth.shape[0]):
+                    VVsmooth_capped[t] = cap_max_eigenval(
+                        VVsmooth[t], 
+                        max_eigenval=max_per_timestep, 
+                        symmetric=True, 
+                        warn=False
+                    ).astype(dtype)
+                VVsmooth_sum = np.sum(VVsmooth_capped[1:], axis=0) if VVsmooth_capped.shape[0] == T + 1 else np.sum(VVsmooth_capped, axis=0)
+                # CRITICAL: Also cap the sum after accumulation
+                VVsmooth_sum = cap_max_eigenval(
+                    VVsmooth_sum,
+                    max_eigenval=MAX_EIGENVALUE,
+                    symmetric=True,
+                    warn=False
+                ).astype(dtype)
                 EZZ_FB = EZZ_FB + VVsmooth_sum
             elif VVsmooth.ndim == 2:
-                EZZ_FB = EZZ_FB + VVsmooth
+                VVsmooth_capped = cap_max_eigenval(
+                    VVsmooth, 
+                    max_eigenval=MAX_EIGENVALUE, 
+                    symmetric=True, 
+                    warn=False
+                ).astype(dtype)
+                EZZ_FB = EZZ_FB + VVsmooth_capped
         
         # Regularize
         EZZ_BB_reg = EZZ_BB + create_scaled_identity(p, regularization, dtype=dtype)
@@ -645,7 +715,7 @@ def estimate_var_unified(
             
             # Q = (EZZ - A @ EZZ_FB') / T
             Q = (EZZ - A @ EZZ_FB.T) / T
-            Q = ensure_covariance_stable(Q, min_eigenval=min_variance)
+            Q = ensure_process_noise_stable(Q, min_eigenval=min_variance, warn=True, dtype=dtype)
             return A, Q
         
         def _fallback_A_Q():
@@ -683,7 +753,9 @@ def estimate_var_unified(
             var_val = compute_var_safe(residuals.flatten(), ddof=0, min_variance=min_variance)
             Q = np.atleast_2d(var_val)
         else:
-            Q = compute_cov_safe(residuals.T, rowvar=True, pairwise_complete=False, min_eigenval=min_variance)
+            # Use pairwise_complete=True during initialization to handle NaNs better
+            # This allows covariance computation even when there aren't enough complete rows
+            Q = compute_cov_safe(residuals.T, rowvar=True, pairwise_complete=True, min_eigenval=min_variance)
         
         Q = stabilize_innovation_covariance(Q, min_eigenval=min_variance, min_floor=MIN_Q_FLOOR, dtype=dtype)
     
@@ -801,7 +873,7 @@ def estimate_ar1_unified(
                 # OLS: A = (x'x + reg)^(-1) x'y
                 XTX = x_i_clean.T @ x_i_clean
                 XTX_reg = XTX + create_scaled_identity(1, regularization, dtype=dtype)
-                A_i = np.linalg.solve(XTX_reg, x_i_clean.T @ y_i_clean).item()
+                A_i = solve(XTX_reg, x_i_clean.T @ y_i_clean, overwrite_a=False, overwrite_b=False, check_finite=False).item()
                 
                 # Estimate Q from residuals
                 residuals = y_i_clean - x_i_clean.squeeze() * A_i
@@ -861,13 +933,22 @@ def estimate_constrained_ols_unified(
         beta_unconstrained = solve_regularized_ols(X, y, regularization=regularization, use_XTX=False, dtype=dtype)
         
         # Apply constraints: beta_constrained = beta_unconstrained - X^(-1) @ R' @ (R @ X^(-1) @ R')^(-1) @ (R @ beta_unconstrained - q)
+        # Optimized: avoid computing X^(-1) explicitly, solve linear systems instead
         try:
             X_reg = X + create_scaled_identity(X.shape[0], regularization, dtype=dtype)
-            X_inv = np.linalg.inv(X_reg)
-            R_X_inv_RT = R @ X_inv @ R.T
-            R_X_inv_RT_reg = R_X_inv_RT + create_scaled_identity(R_X_inv_RT.shape[0], regularization, dtype=dtype)
             constraint_term = R @ beta_unconstrained - q
-            beta_constrained = beta_unconstrained - X_inv @ R.T @ np.linalg.solve(R_X_inv_RT_reg, constraint_term)
+            
+            # Solve: X_reg @ temp1 = R.T  (instead of computing X_inv @ R.T)
+            # Then: (R @ X_inv @ R.T) = R @ temp1 = R @ solve(X_reg, R.T)
+            R_X_reg_inv = solve(X_reg, R.T, overwrite_a=False, overwrite_b=False, check_finite=False)
+            R_X_inv_RT = R @ R_X_reg_inv
+            R_X_inv_RT_reg = R_X_inv_RT + create_scaled_identity(R_X_inv_RT.shape[0], regularization, dtype=dtype)
+            
+            # Solve: (R_X_inv_RT_reg) @ temp2 = constraint_term
+            temp2 = solve(R_X_inv_RT_reg, constraint_term, overwrite_a=False, overwrite_b=False, check_finite=False)
+            
+            # beta_constrained = beta_unconstrained - R_X_reg_inv @ temp2
+            beta_constrained = beta_unconstrained - R_X_reg_inv @ temp2
         except (np.linalg.LinAlgError, ValueError):
             beta_constrained = beta_unconstrained
     else:
@@ -876,15 +957,51 @@ def estimate_constrained_ols_unified(
         beta_unconstrained = solve_regularized_ols(X, y, regularization=regularization, dtype=dtype)
         
         # Apply constraints
+        # Optimized: avoid computing (X'X)^(-1) explicitly, solve linear systems instead
         try:
             XTX = X.T @ X
-            XTX_reg = XTX + create_scaled_identity(XTX.shape[0], regularization, dtype=dtype)
-            XTX_inv = np.linalg.inv(XTX_reg)
-            R_XTX_inv_RT = R @ XTX_inv @ R.T
-            R_XTX_inv_RT_reg = R_XTX_inv_RT + create_scaled_identity(R_XTX_inv_RT.shape[0], regularization, dtype=dtype)
+            # Check condition number and increase regularization if ill-conditioned
+            try:
+                eigenvals_XTX = np.linalg.eigvalsh(XTX)
+                max_eig = np.max(np.abs(eigenvals_XTX))
+                min_eig = np.max(np.abs(eigenvals_XTX[eigenvals_XTX != 0]))
+                cond_num = max_eig / max(min_eig, 1e-12)
+                # Increase regularization for ill-conditioned matrices
+                if cond_num > 1e10:
+                    adaptive_reg = regularization * (cond_num / 1e10)
+                    XTX_reg = XTX + create_scaled_identity(XTX.shape[0], adaptive_reg, dtype=dtype)
+                else:
+                    XTX_reg = XTX + create_scaled_identity(XTX.shape[0], regularization, dtype=dtype)
+            except:
+                # Fallback to default regularization if eigendecomposition fails
+                XTX_reg = XTX + create_scaled_identity(XTX.shape[0], regularization, dtype=dtype)
+            
             constraint_term = R @ beta_unconstrained - q
-            beta_constrained = beta_unconstrained - XTX_inv @ R.T @ np.linalg.solve(R_XTX_inv_RT_reg, constraint_term)
-        except (np.linalg.LinAlgError, ValueError):
+            
+            # Solve: XTX_reg @ temp1 = R.T  (instead of computing XTX_inv @ R.T)
+            # Use lstsq for better handling of ill-conditioned matrices
+            try:
+                R_XTX_inv = solve(XTX_reg, R.T, overwrite_a=False, overwrite_b=False, check_finite=False)
+            except np.linalg.LinAlgError:
+                # Fallback to least squares for very ill-conditioned matrices
+                from scipy.linalg import lstsq
+                R_XTX_inv, _, _, _ = lstsq(XTX_reg, R.T, lapack_driver='gelsy', cond=1e-10)
+            
+            R_XTX_inv_RT = R @ R_XTX_inv
+            R_XTX_inv_RT_reg = R_XTX_inv_RT + create_scaled_identity(R_XTX_inv_RT.shape[0], regularization, dtype=dtype)
+            
+            # Solve: (R_XTX_inv_RT_reg) @ temp2 = constraint_term
+            try:
+                temp2 = solve(R_XTX_inv_RT_reg, constraint_term, overwrite_a=False, overwrite_b=False, check_finite=False)
+            except np.linalg.LinAlgError:
+                # Fallback to least squares if still ill-conditioned
+                from scipy.linalg import lstsq
+                temp2, _, _, _ = lstsq(R_XTX_inv_RT_reg, constraint_term, lapack_driver='gelsy', cond=1e-10)
+            
+            # beta_constrained = beta_unconstrained - R_XTX_inv @ temp2
+            beta_constrained = beta_unconstrained - R_XTX_inv @ temp2
+        except (np.linalg.LinAlgError, ValueError) as e:
+            _logger.debug(f"Constrained OLS failed, using unconstrained solution: {e}")
             beta_constrained = beta_unconstrained
     
     return beta_constrained.astype(dtype)
@@ -1019,9 +1136,12 @@ def compute_initial_covariance_from_transition(
     try:
         kron_AA = np.kron(A, A)
         eye_kron = create_scaled_identity(n ** 2, DEFAULT_IDENTITY_SCALE, dtype=dtype)
-        V_0_flat = np.linalg.solve(
+        V_0_flat = solve(
             eye_kron - kron_AA + create_scaled_identity(n ** 2, regularization, dtype=dtype),
-            Q.flatten()
+            Q.flatten(),
+            overwrite_a=False,
+            overwrite_b=False,
+            check_finite=False
         )
         V_0 = V_0_flat.reshape(n, n).astype(dtype)
         return V_0
