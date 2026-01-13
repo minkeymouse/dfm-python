@@ -552,6 +552,11 @@ def detect_config_type(data: Dict[str, Any]) -> str:
     if model_type == MODEL_TYPE_DFM:
         return MODEL_TYPE_DFM
     
+    # Priority check: blocks parameter indicates DFM (highest priority)
+    # DFM is the only model type that uses blocks structure
+    if 'blocks' in data and data.get('blocks'):
+        return MODEL_TYPE_DFM
+    
     # Check for model-specific parameters
     keys = set(data.keys())
     if keys & _KDFM_PARAMS:

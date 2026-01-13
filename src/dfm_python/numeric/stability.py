@@ -4,6 +4,28 @@ This module provides functions to ensure numerical stability of matrices,
 including symmetry enforcement, positive definiteness, eigenvalue capping,
 matrix cleaning, safe determinant computation, missing data handling,
 and analytical computations.
+
+**Function Selection Guide:**
+
+- `ensure_positive_definite()`: O(m³) eigendecomposition approach. Use for critical 
+  matrices that need exact positive semi-definite guarantee (e.g., initial covariance 
+  matrices, critical model parameters). Expensive but guarantees exact PSD property.
+
+- `ensure_covariance_stable()`: Wrapper around `ensure_positive_definite()`. Use for 
+  general covariance matrices (observation noise R, state covariance V). Same O(m³) cost.
+
+- `ensure_process_noise_stable()`: For process noise Q matrices requiring both min and 
+  max eigenvalue bounds. Uses eigendecomposition when needed. Use for Q matrices that 
+  must be bounded to prevent numerical explosion.
+
+- Direct diagonal loading (in kalman.py): O(m²) approach used for high-frequency 
+  operations (E-step in EM algorithm). Fast but less precise. Used in `update_parameters()` 
+  and smoothing loops where speed is critical and matrices are already well-conditioned.
+
+**Performance Considerations:**
+- Eigendecomposition (O(m³)): Accurate but expensive, use sparingly
+- Diagonal loading (O(m²)): Fast, suitable for high-frequency operations
+- Choose based on frequency of operation and required precision
 """
 
 import numpy as np
@@ -209,6 +231,14 @@ def ensure_positive_definite(
 ) -> np.ndarray:
     """Ensure matrix is positive semi-definite by adding regularization if needed.
     
+    Uses O(m³) eigendecomposition to compute exact eigenvalues and apply precise 
+    regularization. This is expensive but guarantees exact positive semi-definite 
+    property. Use for critical matrices (initial covariances, model parameters) 
+    where exact PSD property is required.
+    
+    For high-frequency operations (e.g., Kalman filter E-step), consider using 
+    faster O(m²) diagonal loading instead (see kalman.py).
+    
     Parameters
     ----------
     M : np.ndarray
@@ -222,6 +252,11 @@ def ensure_positive_definite(
     -------
     np.ndarray
         Positive semi-definite matrix
+        
+    Note
+    ----
+    Computational complexity: O(m³) due to eigendecomposition. For matrices that
+    are already well-conditioned, consider faster diagonal loading approaches.
     """
     M = ensure_symmetric(M)
     
@@ -268,6 +303,10 @@ def ensure_covariance_stable(
 ) -> np.ndarray:
     """Ensure covariance matrix is symmetric and positive semi-definite.
     
+    Wrapper around `ensure_positive_definite()` for general covariance matrices.
+    Uses O(m³) eigendecomposition. Use for observation noise R or state covariance V
+    matrices where exact PSD property is important.
+    
     Parameters
     ----------
     M : np.ndarray
@@ -279,6 +318,11 @@ def ensure_covariance_stable(
     -------
     np.ndarray
         Stable covariance matrix
+        
+    Note
+    ----
+    Computational complexity: O(m³). For high-frequency operations, consider
+    faster diagonal loading approaches used in kalman.py.
     """
     if M.size == 0 or M.shape[0] == 0:
         return M

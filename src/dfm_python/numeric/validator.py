@@ -873,6 +873,8 @@ __all__ = [
     # DDFM-specific validators
     'validate_factors',
     'validate_ddfm_training_data',
+    # Block index validation
+    'validate_block_index_dimensions',
 ]
 
 
@@ -1022,4 +1024,87 @@ def validate_ddfm_training_data(
             )
     
     return T, N
+
+
+def validate_block_index_dimensions(
+    bl_idxQ_i: np.ndarray,
+    expected_rps: int,
+    block_pattern_idx: int,
+    block_pattern: np.ndarray,
+    n_blocks: int,
+    r: np.ndarray,
+    p_plus_one: int,
+    operation: str = "slower-frequency series update"
+) -> None:
+    """Validate that block index array has correct dimensions for slower-frequency series update.
+    
+    This validator checks that `bl_idxQ_i` (indices for slower-frequency factor states)
+    has the expected length `rps = rs * p_plus_one` where `rs` is the sum of factors
+    in active blocks for the given block pattern.
+    
+    **Purpose**: Catches dimension mismatches that cause broadcasting errors when
+    updating slower-frequency series loadings in the EM algorithm M-step.
+    
+    Parameters
+    ----------
+    bl_idxQ_i : np.ndarray
+        Boolean mask indices for slower-frequency factor states (from np.where(bl_idxQ[i])[0])
+    expected_rps : int
+        Expected number of slower-frequency factor states: `rs * p_plus_one`
+        where `rs = sum(r[bl_pattern > 0])`
+    block_pattern_idx : int
+        Index of the block pattern being processed (for error messages)
+    block_pattern : np.ndarray
+        Block pattern array indicating which blocks are active (for error messages)
+    n_blocks : int
+        Total number of blocks (for error messages)
+    r : np.ndarray
+        Number of factors per block (for computing expected rs)
+    p_plus_one : int
+        State dimension per factor (for computing expected rps)
+    operation : str, default "slower-frequency series update"
+        Operation name for error messages
+        
+    Raises
+    ------
+    DataValidationError
+        If `len(bl_idxQ_i) != expected_rps`, indicating a bug in block index construction
+        or block pattern matching.
+        
+    Examples
+    --------
+    >>> # Valid case: bl_idxQ_i has 9 indices, expected_rps=9
+    >>> validate_block_index_dimensions(bl_idxQ_i, 9, 0, bl_pattern, 7, r, 3)
+    >>> # No error raised
+    >>> 
+    >>> # Invalid case: bl_idxQ_i has 18 indices, expected_rps=9
+    >>> validate_block_index_dimensions(bl_idxQ_i, 9, 0, bl_pattern, 7, r, 3)
+    >>> # Raises DataValidationError with diagnostic information
+    """
+    actual_rps = len(bl_idxQ_i)
+    
+    if actual_rps != expected_rps:
+        # Compute diagnostic information
+        rs_expected = expected_rps // p_plus_one
+        active_blocks = [j for j in range(n_blocks) if block_pattern[j] > 0]
+        r_active = r[active_blocks] if len(active_blocks) > 0 else np.array([])
+        rs_computed = int(np.sum(r_active))
+        
+        raise DataValidationError(
+            f"{operation} failed: Block index dimension mismatch for pattern {block_pattern_idx}. "
+            f"Expected {expected_rps} indices (rps = {rs_expected} factors × {p_plus_one}), "
+            f"but got {actual_rps} indices from bl_idxQ[{block_pattern_idx}]. "
+            f"This indicates a bug in block index construction: "
+            f"bl_idxQ[{block_pattern_idx}] has {actual_rps // p_plus_one} factor states selected, "
+            f"but block pattern indicates only {rs_computed} factors should be active.",
+            details=(
+                f"Pattern {block_pattern_idx}: active blocks {active_blocks}, "
+                f"r[active] = {r_active.tolist() if len(r_active) > 0 else '[]'}, "
+                f"rs_expected = {rs_expected}, rps_expected = {expected_rps}, "
+                f"actual_rps = {actual_rps}, p_plus_one = {p_plus_one}, "
+                f"block_pattern = {block_pattern.tolist()}, "
+                f"bl_idxQ_i length = {actual_rps}, "
+                f"bl_idxQ_i indices (first 10): {bl_idxQ_i[:10].tolist() if len(bl_idxQ_i) > 0 else '[]'}"
+            )
+        )
 

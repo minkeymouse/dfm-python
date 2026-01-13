@@ -26,7 +26,7 @@ from dfm_python.config.constants import (
     DEFAULT_DTYPE,
 )
 from dfm_python.config.schema.block import BlockStructure
-from dfm_python.numeric.tent import get_tent_weights, generate_R_mat
+from dfm_python.numeric.tent import generate_R_mat, generate_tent_weights
 
 
 class TestEMFunctions:
@@ -546,8 +546,8 @@ class TestEMEinsumFix:
         Z_0 = np.zeros(m, dtype=DEFAULT_DTYPE)
         V_0 = create_scaled_identity(m, DEFAULT_PROCESS_NOISE, dtype=DEFAULT_DTYPE)
         
-        # Create tent weights and constraint matrix
-        tent_weights = get_tent_weights('q', 'm')  # Quarterly to monthly
+        # Create tent weights and constraint matrix (5-period tent for quarterly to monthly)
+        tent_weights = generate_tent_weights(5, tent_type='symmetric')  # Quarterly to monthly
         R_mat, q = generate_R_mat(tent_weights)
         tent_weights_dict = {('q', 'm'): tent_weights}
         
@@ -618,7 +618,7 @@ class TestEMEinsumFix:
         Z_0 = np.zeros(m, dtype=DEFAULT_DTYPE)
         V_0 = create_scaled_identity(m, DEFAULT_PROCESS_NOISE, dtype=DEFAULT_DTYPE)
         
-        tent_weights = get_tent_weights('q', 'm')
+        tent_weights = generate_tent_weights(5, tent_type='symmetric')  # Quarterly to monthly
         R_mat, q = generate_R_mat(tent_weights)
         tent_weights_dict = {('q', 'm'): tent_weights}
         idio_indicator = np.ones(N, dtype=DEFAULT_DTYPE)
@@ -676,8 +676,8 @@ class TestEMProfiling:
         Z_0 = np.zeros(m, dtype=DEFAULT_DTYPE)
         V_0 = create_scaled_identity(m, DEFAULT_PROCESS_NOISE, dtype=DEFAULT_DTYPE)
         
-        # Create tent weights and constraint matrix
-        tent_weights = get_tent_weights('q', 'm')  # Quarterly to monthly
+        # Create tent weights and constraint matrix (5-period tent for quarterly to monthly)
+        tent_weights = generate_tent_weights(5, tent_type='symmetric')  # Quarterly to monthly
         R_mat, q = generate_R_mat(tent_weights)
         tent_weights_dict = {('q', 'm'): tent_weights}
         

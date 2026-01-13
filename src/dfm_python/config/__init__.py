@@ -86,9 +86,8 @@ except ImportError:
     compute_idio_lengths = None
 
 try:
-    from ..numeric.tent import get_tent_weights, get_agg_structure, group_by_freq
+    from ..numeric.tent import get_agg_structure, group_by_freq
 except ImportError:
-    get_tent_weights = None
     get_agg_structure = None
     group_by_freq = None
 from .constants import FREQUENCY_HIERARCHY, PERIODS_PER_YEAR
@@ -119,7 +118,6 @@ __all__ = [
     'PERIODS_PER_YEAR',
     'get_periods_per_year',
     'compute_idio_lengths',
-    'get_tent_weights',
     'get_agg_structure',
     'group_by_freq',
     # Type definitions (from types.py)

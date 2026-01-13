@@ -8,8 +8,8 @@ This module provides functions for initializing DFM blocks, including:
 """
 
 import numpy as np
-from typing import Optional, Tuple, Dict, Any, List
-from ..numeric.tent import get_tent_weights, generate_tent_weights
+from typing import Optional, Tuple, Dict, Any, List, Callable
+from ..numeric.tent import generate_tent_weights
 from ..numeric.stability import create_scaled_identity
 from ..logger import get_logger
 from ..config.constants import (
@@ -176,7 +176,8 @@ def initialize_block_loadings(
     N: int,
     max_lag_size: int,
     matrix_regularization: Optional[float] = None,
-    dtype: type = np.float32
+    dtype: type = np.float32,
+    impute_func: Optional[callable] = None
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Initialize loadings for a block (clock frequency PCA + slower frequency constrained OLS).
     
@@ -210,6 +211,9 @@ def initialize_block_loadings(
         Regularization for matrix operations
     dtype : type, default np.float32
         Data type
+    impute_func : Optional[Callable[[np.ndarray], np.ndarray]], optional
+        Function to impute NaN values for initialization fallback.
+        Only used when insufficient non-NaN observations for regression.
         
     Returns
     -------
@@ -310,10 +314,17 @@ def initialize_block_loadings(
             series_data = data_with_nans[tent_kernel_size:, series_idx_int]
             non_nan_mask = ~np.isnan(series_data)
             
-            # Use clean data if insufficient non-NaN values
+            # Use imputed data if insufficient non-NaN values (following FRBNY pattern)
             min_required = slower_freq_factors.shape[1] + 2
             if np.sum(non_nan_mask) < min_required:
-                series_data = data_for_extraction[tent_kernel_size:, series_idx_int]
+                # Try data_for_extraction first (may already be imputed)
+                series_data_attempt = data_for_extraction[tent_kernel_size:, series_idx_int]
+                if np.sum(~np.isnan(series_data_attempt)) < min_required and impute_func is not None:
+                    # Fallback: use imputation function (only for initialization)
+                    series_data = impute_func(series_data)
+                    _logger.debug(f"      Using imputed data for series {series_idx_int} (insufficient observations)")
+                else:
+                    series_data = series_data_attempt
                 non_nan_mask = np.ones(len(series_data), dtype=bool)
             
             slower_freq_factors_clean = slower_freq_factors[tent_kernel_size:][non_nan_mask, :]
@@ -341,6 +352,10 @@ def initialize_block_loadings(
                     regularization=reg,
                     dtype=dtype
                 )
+                # Validate loadings are finite
+                if np.any(~np.isfinite(loadings_constrained)):
+                    _logger.warning(f"Computed loadings contain non-finite values for series {series_idx_int}. Skipping.")
+                    continue
                 C_i[series_idx_int, :num_factors * tent_kernel_size] = loadings_constrained
             except (np.linalg.LinAlgError, ValueError) as e:
                 _logger.warning(f"Failed to compute constrained loadings for series {series_idx_int}: {e}. Skipping.")

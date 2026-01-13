@@ -35,7 +35,6 @@ from .metric import (
 from ..config import (
     get_periods_per_year,
     validate_frequency,
-    get_tent_weights,
     get_agg_structure,
     group_by_freq,
     compute_idio_lengths,
@@ -45,7 +44,6 @@ from ..config import (
 # Import constants from config.constants
 from ..config.constants import (
     FREQUENCY_HIERARCHY,
-    TENT_WEIGHTS_LOOKUP,
     MAX_TENT_SIZE,
     PERIODS_PER_YEAR,
     DEFAULT_BLOCK_NAME,
@@ -116,6 +114,7 @@ from ..numeric.validator import (
 # Helper utilities (from misc)
 from .misc import (
     resolve_param,
+    resolve_named_param,
     get_config_attr,
     get_clock_frequency,
 )
@@ -135,24 +134,22 @@ __all__ = [
     'calculate_mape',
     'calculate_r2',
     'TimeIndex',
-    'parse_timestamp',
     # Config utilities (frequency and parsing)
     'get_periods_per_year',
     'FREQUENCY_HIERARCHY',
     'PERIODS_PER_YEAR',
-    'TENT_WEIGHTS_LOOKUP',
     'MAX_TENT_SIZE',
     'DEFAULT_BLOCK_NAME',
     'validate_frequency',
     'generate_tent_weights',
     'generate_R_mat',
-    'get_tent_weights',
     'get_agg_structure',
     'group_by_freq',
     'compute_idio_lengths',
     'detect_config_type',
     # Helper utilities
     'resolve_param',
+    'resolve_named_param',
     'get_config_attr',
     'get_clock_frequency',
     # Scaling utilities

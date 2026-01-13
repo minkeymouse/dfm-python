@@ -18,7 +18,7 @@ from .stability import ensure_positive_definite, compute_cov_safe, create_scaled
 _logger = get_logger(__name__)
 
 
-def build_observation_matrix(C: np.ndarray, factor_order: int = 1, N: int = 0) -> np.ndarray:
+def build_observation_matrix(C: np.ndarray) -> np.ndarray:
     """Build observation matrix H including idiosyncratic components.
     
     Constructs the observation matrix H = [C, I] for AR(1), where C loads on factors and I on idio.
@@ -27,10 +27,6 @@ def build_observation_matrix(C: np.ndarray, factor_order: int = 1, N: int = 0) -
     ----------
     C : np.ndarray
         Loading matrix (N x m) from decoder
-    factor_order : int, default 1
-        AR lag order (always 1)
-    N : int, default 0
-        Number of series (unused parameter)
         
     Returns
     -------

@@ -31,10 +31,9 @@ from ..config import (
     DFMResult,
 )
 from ..config.schema.params import DFMStateSpaceParams, DFMModelState
-from ..numeric.tent import get_agg_structure, get_tent_weights, get_slower_freq_tent_weights
+from ..numeric.tent import get_agg_structure, get_slower_freq_tent_weights
 from ..config.constants import (
     FREQUENCY_HIERARCHY,
-    TENT_WEIGHTS_LOOKUP,
     DEFAULT_CONVERGENCE_THRESHOLD,
     DEFAULT_MAX_ITER,
     DEFAULT_NAN_METHOD,
@@ -54,6 +53,7 @@ from ..utils.errors import (
     ModelNotInitializedError,
     ConfigurationError,
     DataError,
+    DataValidationError,
     PredictionError,
     NumericalError
 )
@@ -124,7 +124,7 @@ class DFM(BaseFactorModel):
         ConfigurationError
             If config validation fails or required parameters are missing.
         ValueError
-            If mixed_freq=True and frequency pairs are not in TENT_WEIGHTS_LOOKUP.
+            If mixed_freq=True and tent_weights are not specified in config.
         """
         super().__init__()
         
@@ -535,7 +535,8 @@ class DFM(BaseFactorModel):
             C_i, factors = initialize_block_loadings(
                 data_for_extraction, data_with_nans, clock_freq_indices, slower_freq_indices,
                 num_factors_block, tent_kernel_size, R_mat, q,
-                N, max_lag_size, _EM_CONFIG.matrix_regularization, dtype
+                N, max_lag_size, _EM_CONFIG.matrix_regularization, dtype,
+                impute_func=self._impute_for_init
             )
             
             # Build lag matrix for transition equation
@@ -638,19 +639,17 @@ class DFM(BaseFactorModel):
                 return slower_freq
         
         # Try slower frequencies from hierarchy (sorted by hierarchy, ascending)
+        # Note: Without lookup table, we rely on tent_weights_dict which must be provided
+        # from config. This function now requires tent_weights_dict to be populated.
         clock_hierarchy = FREQUENCY_HIERARCHY.get(clock, DEFAULT_HIERARCHY_VALUE)
         slower_freqs = sorted(
             [freq for freq in FREQUENCY_HIERARCHY if FREQUENCY_HIERARCHY[freq] > clock_hierarchy],
             key=lambda f: FREQUENCY_HIERARCHY[f]
         )
-        for freq in slower_freqs:
-            if get_tent_weights(freq, clock) is not None:
-                return freq
-        
-        # Fallback: first available slower frequency
-        for freq in FREQUENCY_HIERARCHY:
-            if FREQUENCY_HIERARCHY[freq] > clock_hierarchy and get_tent_weights(freq, clock) is not None:
-                return freq
+        # Return first slower frequency if tent_weights_dict is empty (fallback)
+        # This is a best-effort guess; proper tent weights should be in tent_weights_dict
+        if slower_freqs:
+            return slower_freqs[0]
         
         return None
     
@@ -749,6 +748,59 @@ class DFM(BaseFactorModel):
         R[np.ix_(all_indices, all_indices)] = np.diag(np.full(len(all_indices), default_obs_noise, dtype=dtype))
         
         return R
+    
+    @staticmethod
+    def _impute_for_init(data: np.ndarray) -> np.ndarray:
+        """Simple imputation for initialization: forward fill → backward fill → mean.
+        
+        Following FRBNY pattern: used only when insufficient non-NaN observations
+        for regression during initialization. The EM algorithm uses NaN-preserved data.
+        
+        Parameters
+        ----------
+        data : np.ndarray
+            1D array (T,) with potential NaN values
+        
+        Returns
+        -------
+        np.ndarray
+            Imputed 1D array with no NaN values
+        """
+        data_imputed = data.copy()
+        mask = np.isnan(data_imputed)
+        
+        if not mask.any():
+            return data_imputed
+        
+        # Vectorized forward fill using pandas (fast)
+        try:
+            import pandas as pd
+            s = pd.Series(data_imputed)
+            data_imputed = s.ffill().bfill().values
+        except ImportError:
+            # Fallback: numpy-based forward/backward fill (slower but no pandas dependency)
+            # Forward fill
+            idx = np.where(~mask)[0]
+            if len(idx) > 0:
+                # Use np.interp to forward fill
+                indices = np.arange(len(data_imputed))
+                valid_values = data_imputed[~mask]
+                valid_indices = indices[~mask]
+                if len(valid_values) > 0:
+                    # Forward fill: use previous valid value
+                    data_imputed = np.interp(indices, valid_indices, valid_values, 
+                                           left=valid_values[0] if len(valid_values) > 0 else 0,
+                                           right=valid_values[-1] if len(valid_values) > 0 else 0)
+        
+        # Fill remaining with mean
+        mask = np.isnan(data_imputed)
+        if mask.any():
+            mean_val = np.nanmean(data_imputed)
+            if np.isnan(mean_val):
+                mean_val = 0.0  # Fallback if all NaN
+            data_imputed[mask] = mean_val
+        
+        return data_imputed
     
     def _initialize_parameters(
         self,
@@ -1013,6 +1065,9 @@ class DFM(BaseFactorModel):
         
         # Run EM algorithm using DFMKalmanFilter.em() method
         # Create Kalman filter and run EM algorithm
+        use_cholesky = getattr(self._config, 'use_cholesky_filter', False) if self._config is not None else False
+        if use_cholesky:
+            _logger.info("Using CholeskyKalmanFilter for improved numerical stability")
         try:
             kalman_filter = DFMKalmanFilter(
                 transition_matrices=self.A,
@@ -1020,7 +1075,8 @@ class DFM(BaseFactorModel):
                 transition_covariance=self.Q,
                 observation_covariance=self.R,
                 initial_state_mean=self.Z_0,
-                initial_state_covariance=self.V_0
+                initial_state_covariance=self.V_0,
+                use_cholesky=use_cholesky
             )
             _logger.debug("Kalman filter created successfully")
         except Exception as e:
@@ -1107,13 +1163,15 @@ class DFM(BaseFactorModel):
         if initial_state_covariance is None:
             initial_state_covariance = self.training_state.V_0
         
+        use_cholesky = getattr(self._config, 'use_cholesky_filter', False) if self._config is not None else False
         return DFMKalmanFilter(
             transition_matrices=self.training_state.A,
             observation_matrices=self.training_state.C,
             transition_covariance=self.training_state.Q,
             observation_covariance=self.training_state.R,
             initial_state_mean=initial_state_mean,
-            initial_state_covariance=initial_state_covariance
+            initial_state_covariance=initial_state_covariance,
+            use_cholesky=use_cholesky
         )
     
     def _compute_smoothed_factors(self) -> np.ndarray:
@@ -1554,10 +1612,47 @@ class DFM(BaseFactorModel):
             'training_converged': getattr(self, '_training_converged', None),
         }
         
-        with open(path, 'wb') as f:
-            pickle.dump(checkpoint, f)
+        # Use atomic write: write to temp file first, then rename
+        # This prevents corruption if process is interrupted during write
+        temp_path = path.with_suffix('.pkl.tmp')
         
-        _logger.info(f"DFM model saved to {path}")
+        try:
+            with open(temp_path, 'wb') as f:
+                # Use HIGHEST_PROTOCOL for better compatibility and smaller file size
+                pickle.dump(checkpoint, f, protocol=pickle.HIGHEST_PROTOCOL)
+                # Explicit flush to ensure all data is written to disk
+                f.flush()
+                # Force OS to write buffers to disk
+                import os
+                os.fsync(f.fileno())
+            
+            # Atomic rename: if this fails, original file is preserved
+            temp_path.replace(path)
+            
+            # Verify the saved file can be loaded
+            try:
+                with open(path, 'rb') as f:
+                    pickle.load(f)
+            except Exception as verify_error:
+                _logger.error(f"Failed to verify saved checkpoint: {verify_error}. File may be corrupted.")
+                # Try to remove corrupted file
+                try:
+                    path.unlink()
+                except Exception:
+                    pass
+                raise RuntimeError(f"Checkpoint verification failed: {verify_error}") from verify_error
+            
+            _logger.info(f"DFM model saved to {path}")
+            
+        except Exception as e:
+            # Clean up temp file on error
+            if temp_path.exists():
+                try:
+                    temp_path.unlink()
+                except Exception:
+                    pass
+            _logger.error(f"Failed to save DFM model to {path}: {e}")
+            raise
     
     @staticmethod
     def _extract_state_space_from_old_format(old_training_state: Any) -> DFMStateSpaceParams:
@@ -1612,8 +1707,21 @@ class DFM(BaseFactorModel):
             Loaded DFM model instance
         """
         path = Path(path)
-        with open(path, 'rb') as f:
-            checkpoint = pickle.load(f)
+        
+        # Check if file exists
+        if not path.exists():
+            raise FileNotFoundError(f"Checkpoint file not found: {path}")
+        
+        # Try loading with error handling for corrupted files
+        try:
+            with open(path, 'rb') as f:
+                checkpoint = pickle.load(f)
+        except (pickle.UnpicklingError, EOFError, ValueError) as e:
+            raise RuntimeError(
+                f"Failed to load checkpoint from {path}. "
+                f"The file may be corrupted. Error: {e}. "
+                f"Try re-training the model to generate a new checkpoint."
+            ) from e
         
         # Use checkpoint config if not provided
         if config is None:
@@ -1675,9 +1783,11 @@ class DFM(BaseFactorModel):
         model._training_num_iter = checkpoint.get('training_num_iter') or (
             getattr(old_training_state, 'num_iter', None) if old_training_state is not None else None
         )
-        model._training_converged = checkpoint.get('training_converged') or (
-            getattr(old_training_state, 'converged', None) if old_training_state is not None else None
-        )
+        # Handle training_converged: can be False (bool) or None
+        training_converged = checkpoint.get('training_converged')
+        if training_converged is None and old_training_state is not None:
+            training_converged = getattr(old_training_state, 'converged', None)
+        model._training_converged = training_converged  # Can be bool or None
         
         # Restore data and preprocessing
         model.data_processed = checkpoint.get('data_processed')

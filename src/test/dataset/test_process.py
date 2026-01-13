@@ -32,8 +32,8 @@ class TestTimeIndex:
         assert len(sliced) == 3
 
 
-class TestParseTimestamp:
-    """Test suite for parse_timestamp function."""
+class TestTimeIndexStringParsing:
+    """Test suite for TimeIndex string and datetime parsing."""
     
     def test_time_index_from_string(self):
         """Test TimeIndex can be created from string dates."""

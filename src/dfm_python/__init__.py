@@ -80,7 +80,6 @@ __version__ = "0.5.56"
 
 # Configuration (from config/ subpackage)
 from .config import (
-    # DEFAULT_BLOCK_NAME,  # Removed to avoid circular import - import directly from functional.dfm_block
     ConfigSource, YamlSource,
     make_config_source,
 )

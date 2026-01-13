@@ -83,6 +83,7 @@ packages = [
 exclude = [
     "test_venv",
     "test_venv/**",
+    "LICENSE",
 ]
 
 [dependency-groups]

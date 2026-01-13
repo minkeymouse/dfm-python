@@ -104,11 +104,10 @@ class TestDFM:
     def test_find_slower_frequency_from_hierarchy(self):
         """Test _find_slower_frequency returns frequency from hierarchy when tent_weights_dict not provided."""
         from dfm_python.config.constants import FREQUENCY_HIERARCHY
-        from dfm_python.numeric.tent import get_tent_weights
         model = DFM()
         
         # Test with clock='d' (daily), should find slower frequency from hierarchy
-        # Note: This depends on FREQUENCY_HIERARCHY and get_tent_weights implementation
+        # Note: Without lookup table, this relies on hierarchy only
         slower_freq = model._find_slower_frequency('d', None)
         # Result may be None if no valid slower frequency found, or a valid frequency string
         assert slower_freq is None or isinstance(slower_freq, str)
@@ -145,7 +144,7 @@ class TestDFM:
         3. Training converges successfully
         """
         from dfm_python.dataset import DFMDataset
-        from dfm_python.numeric.tent import generate_R_mat, get_tent_weights
+        from dfm_python.numeric.tent import generate_R_mat
         
         # Create synthetic mixed-frequency data
         # 5 weekly series + 3 quarterly series, 120 time periods
@@ -169,7 +168,7 @@ class TestDFM:
         # For this test, let's use monthly clock with quarterly slower frequency
         frequency = {'m': list(range(n_weekly)), 'q': list(range(n_weekly, n_weekly + n_quarterly))}
         
-        # Create config with blocks
+        # Create config with blocks and tent weights (required for mixed-frequency)
         series_names = [f'series_{i}' for i in range(n_weekly + n_quarterly)]
         config = DFMConfig(
             blocks={
@@ -183,6 +182,7 @@ class TestDFM:
                 for i in range(n_weekly + n_quarterly)
             },
             clock='m',
+            tent_weights={'q:m': [1, 2, 3, 2, 1]},  # Required: specify tent weights in config
             max_iter=10  # Reduced for faster test
         )
         
@@ -212,8 +212,8 @@ class TestDFM:
             
             # Verify tent kernel constraints are satisfied if applicable
             if hasattr(dataset, '_agg_structure') and dataset._agg_structure is not None:
-                tent_weights = get_tent_weights('q', 'm')
-                if tent_weights is not None:
+                # Tent weights should come from config
+                tent_weights = np.array([1, 2, 3, 2, 1])  # From config
                     R_mat, q = generate_R_mat(tent_weights)
                     # Check that constraint matrix matches MATLAB pattern
                     # For tent_weights [1, 2, 3, 2, 1], first row should be [2, -1, 0, 0, 0]

@@ -8,15 +8,15 @@ from dfm_python.config.constants import DEFAULT_DTYPE
 class TestBuilder:
     """Test suite for numeric builder utilities."""
     
-    def test_build_observation_matrix_factor_order_one(self):
-        """Test build_observation_matrix with factor_order=1."""
+    def test_build_observation_matrix(self):
+        """Test build_observation_matrix."""
         import numpy as np
         from dfm_python.numeric.builder import build_observation_matrix
         
         N = 3
         m = 2
         C = np.eye(N, m, dtype=DEFAULT_DTYPE)
-        H = build_observation_matrix(C, factor_order=1, N=N)
+        H = build_observation_matrix(C)
         # Should be [C, I] where I is N x N identity
         assert H.shape == (N, m + N)
         assert np.allclose(H[:, :m], C)

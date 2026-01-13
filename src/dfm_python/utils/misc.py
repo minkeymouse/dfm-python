@@ -32,6 +32,41 @@ from .errors import NumericalError, ConfigValidationError
 _logger = get_logger(__name__)
 
 
+def resolve_named_param(
+    name: str,
+    kwargs: Optional[Dict[str, Any]] = None,
+    config: Optional[Any] = None,
+    defaults: Optional[Dict[str, Any]] = None
+) -> Any:
+    """Resolve parameter value by name from multiple sources with priority.
+    
+    Checks sources in order: kwargs > config > defaults.
+    
+    Parameters
+    ----------
+    name : str
+        Parameter name to extract
+    kwargs : dict, optional
+        Keyword arguments dictionary (highest priority)
+    config : object, optional
+        Configuration object with attributes
+    defaults : dict, optional
+        Default values dictionary (lowest priority)
+        
+    Returns
+    -------
+    Any
+        Parameter value from first available source, or None if not found
+    """
+    if kwargs is not None and name in kwargs:
+        return kwargs.pop(name) if isinstance(kwargs, dict) else kwargs.get(name)
+    if config is not None and hasattr(config, name):
+        return getattr(config, name)
+    if defaults is not None and name in defaults:
+        return defaults[name]
+    return None
+
+
 def resolve_param(
     override: Optional[Any] = None,
     default: Any = None,
@@ -41,16 +76,34 @@ def resolve_param(
     config: Optional[Any] = None,
     defaults: Optional[Dict[str, Any]] = None
 ) -> Any:
-    """Resolve parameter value from multiple sources with priority."""
-    # Named pattern: extract by name from multiple sources
+    """Resolve parameter value from override or default, with optional named lookup.
+    
+    Simple pattern: override > default
+    If name is provided, uses resolve_named_param() to check multiple sources.
+    
+    Parameters
+    ----------
+    override : Any, optional
+        Override value (highest priority if provided)
+    default : Any, optional
+        Default value (lowest priority)
+    name : str, optional
+        If provided, resolves using resolve_named_param() instead
+    kwargs : dict, optional
+        For named resolution (passed to resolve_named_param)
+    config : object, optional
+        For named resolution (passed to resolve_named_param)
+    defaults : dict, optional
+        For named resolution (passed to resolve_named_param)
+        
+    Returns
+    -------
+    Any
+        Resolved parameter value
+    """
+    # Named pattern: use resolve_named_param
     if name is not None:
-        if kwargs is not None and name in kwargs:
-            return kwargs.pop(name) if isinstance(kwargs, dict) else kwargs.get(name)
-        if config is not None and hasattr(config, name):
-            return getattr(config, name)
-        if defaults is not None and name in defaults:
-            return defaults[name]
-        return None
+        return resolve_named_param(name, kwargs=kwargs, config=config, defaults=defaults)
     
     # Simple pattern: override > default
     if override is not None:

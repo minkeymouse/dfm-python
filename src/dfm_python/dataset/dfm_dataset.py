@@ -14,10 +14,9 @@ if TYPE_CHECKING:
 
 from ..logger import get_logger
 from ..config import DFMConfig
-from ..numeric.tent import get_tent_weights, generate_R_mat
+from ..numeric.tent import generate_R_mat
 from ..config.constants import (
     FREQUENCY_HIERARCHY,
-    TENT_WEIGHTS_LOOKUP,
     DEFAULT_HIERARCHY_VALUE,
     DEFAULT_CLOCK_FREQUENCY,
     DEFAULT_NAN_METHOD,
@@ -368,26 +367,72 @@ class DFMDataset:
             self.config._update_idio_flags_from_frequencies(frequencies_list)
         clock_hierarchy = FREQUENCY_HIERARCHY.get(clock, DEFAULT_HIERARCHY_VALUE)
         
-        # Validate frequency pairs
-        missing_pairs = [
-            (freq, clock) for freq in frequencies_set
-                    if FREQUENCY_HIERARCHY.get(freq, DEFAULT_HIERARCHY_VALUE) > clock_hierarchy and get_tent_weights(freq, clock) is None
-        ]
+        # Validate frequency pairs (tent weights must be in config)
+        config_tent_weights = getattr(self.config, 'tent_weights', None)
+        missing_pairs = []
+        for freq in frequencies_set:
+            if FREQUENCY_HIERARCHY.get(freq, DEFAULT_HIERARCHY_VALUE) > clock_hierarchy:
+                # Check if tent weights available in config
+                has_config_weights = False
+                if config_tent_weights is not None:
+                    pair_key = f"{freq}:{clock}"
+                    has_config_weights = (pair_key in config_tent_weights) or (freq in config_tent_weights)
+                
+                if not has_config_weights:
+                    missing_pairs.append((freq, clock))
+        
         if missing_pairs:
             raise DataValidationError(
-                f"Mixed-frequency data detected but the following frequency pairs are not in TENT_WEIGHTS_LOOKUP: {missing_pairs}. "
-                f"Available pairs: {list(TENT_WEIGHTS_LOOKUP.keys())}. "
-                f"Either add the missing pairs to TENT_WEIGHTS_LOOKUP or ensure all series use clock frequency.",
+                f"Mixed-frequency data detected but no tent weights found in config for frequency pairs: {missing_pairs}. "
+                f"Please specify tent_weights in config (e.g., tent_weights: {{'m:w': [1, 2, 1]}}). "
+                f"Alternatively, ensure all series use clock frequency.",
                 details=f"Frequency pairs without tent weights: {missing_pairs}"
             )
         
-        # Get aggregation structure
+        # Get aggregation structure (tent weights must be in config)
         tent_weights_dict = {}
+        config_tent_weights = getattr(self.config, 'tent_weights', None)
+        
+        if config_tent_weights is None:
+            slower_freqs = [freq for freq in frequencies_set 
+                           if FREQUENCY_HIERARCHY.get(freq, DEFAULT_HIERARCHY_VALUE) > clock_hierarchy]
+            if slower_freqs:
+                raise DataValidationError(
+                    f"Mixed-frequency data detected (slower frequencies: {slower_freqs}) but no tent_weights "
+                    f"specified in config. Please specify tent_weights in config for all frequency pairs.",
+                    details=f"Slower frequencies: {slower_freqs}, clock: {clock}"
+                )
+        
         for freq in frequencies_set:
             if FREQUENCY_HIERARCHY.get(freq, DEFAULT_HIERARCHY_VALUE) > clock_hierarchy:
-                tent_w = get_tent_weights(freq, clock)
+                tent_w = None
+                
+                # Get tent weights from config (required)
+                if config_tent_weights is not None:
+                    # Try both formats: 'freq:clock' (e.g., 'm:w') or just 'freq' (e.g., 'm')
+                    pair_key = f"{freq}:{clock}"
+                    if pair_key in config_tent_weights:
+                        tent_w = config_tent_weights[pair_key]
+                    elif freq in config_tent_weights:
+                        tent_w = config_tent_weights[freq]
+                
+                # Tent weights must be in config
+                if tent_w is None:
+                    pair_key = f"{freq}:{clock}"
+                    raise DataValidationError(
+                        f"Tent weights not found in config for frequency pair ({freq}, {clock}). "
+                        f"Please specify tent_weights in config, e.g., tent_weights: {{'{pair_key}': [1, 2, 1]}}",
+                        details=f"Frequency pair: ({freq}, {clock})"
+                    )
+                
+                # Convert to numpy array if found
                 if tent_w is not None:
-                    tent_weights_dict[freq] = np.array(tent_w, dtype=np.float32)
+                    if isinstance(tent_w, list):
+                        tent_weights_dict[freq] = np.array(tent_w, dtype=np.float32)
+                    elif isinstance(tent_w, np.ndarray):
+                        tent_weights_dict[freq] = tent_w.astype(np.float32)
+                    else:
+                        tent_weights_dict[freq] = np.array(tent_w, dtype=np.float32)
         
         # Validate: DFM supports only clock + one slower frequency
         if len(tent_weights_dict) > 1:
@@ -396,6 +441,19 @@ class DFMDataset:
                 f"DFM supports only one slower frequency, but found {len(tent_weights_dict)} slower frequencies: {slower_freqs}. "
                 f"Please ensure all slower-frequency series use the same frequency, or use a different clock frequency.",
                 details=f"Slower frequencies detected: {slower_freqs}, clock: {clock}"
+            )
+        
+        # Warn if slower frequency detected but no tent weights found
+        slower_freqs_detected = [freq for freq in frequencies_set 
+                                  if FREQUENCY_HIERARCHY.get(freq, DEFAULT_HIERARCHY_VALUE) > clock_hierarchy]
+        if slower_freqs_detected and not tent_weights_dict:
+            missing_pairs = [(freq, clock) for freq in slower_freqs_detected]
+            from ..logger import get_logger
+            _logger = get_logger(__name__)
+            _logger.warning(
+                f"Mixed-frequency data detected but no tent weights found in config for pairs: {missing_pairs}. "
+                f"Tent weights must be specified in config. "
+                f"This may cause errors in model initialization."
             )
         
         # Generate constraint matrices if needed

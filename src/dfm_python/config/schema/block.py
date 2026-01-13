@@ -90,6 +90,7 @@ class BlockStructure:
     _cached_n_idio_M: Optional[int] = field(default=None, init=False, repr=False)
     _cached_c_idio_indicator: Optional[np.ndarray] = field(default=None, init=False, repr=False)
     _cached_rp1: Optional[int] = field(default=None, init=False, repr=False)
+    _cached_N: Optional[int] = field(default=None, init=False, repr=False)  # N value used for caching
     
     def is_valid(self) -> bool:
         """Check if block structure is valid (all required fields are not None)."""
@@ -119,4 +120,5 @@ class BlockStructure:
         self._cached_n_idio_M = None
         self._cached_c_idio_indicator = None
         self._cached_rp1 = None
+        self._cached_N = None
 

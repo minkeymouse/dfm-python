@@ -114,3 +114,43 @@ class TestDFMKalmanFilter:
         assert filtered_means.shape == (T, m)
         assert filtered_covs.shape == (T, m, m)
 
+    def test_progress_bar_no_spam(self):
+        """Test that progress bar doesn't spam repeated prints when stuck at 100%."""
+        import time
+        
+        # Setup filter with parameters
+        m, n = 2, 3
+        A = np.eye(m, dtype=np.float64)
+        C = np.random.randn(n, m)
+        Q = np.eye(m, dtype=np.float64) * 0.1
+        R = np.eye(n, dtype=np.float64) * 0.1
+        Z0 = np.zeros(m)
+        V0 = np.eye(m, dtype=np.float64)
+        
+        kf = DFMKalmanFilter(
+            transition_matrices=A,
+            observation_matrices=C,
+            transition_covariance=Q,
+            observation_covariance=R,
+            initial_state_mean=Z0,
+            initial_state_covariance=V0,
+            use_cholesky=False
+        )
+        
+        # Create observations
+        T = 100
+        observations = np.random.randn(T, n)
+        
+        # Run filter_and_smooth which triggers progress bar
+        # The key test: it should complete quickly without hanging
+        start_time = time.time()
+        result = kf.filter_and_smooth(observations)
+        elapsed = time.time() - start_time
+        
+        # Verify it completes (no infinite loop)
+        assert elapsed < 5.0, f"Filter took {elapsed:.2f}s, possible infinite loop in progress bar"
+        
+        # Verify we got results
+        assert result is not None
+        assert len(result) == 4  # Should return (smoothed_means, smoothed_covs, cross_covs, loglik)
+

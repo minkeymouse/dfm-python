@@ -387,22 +387,6 @@ FREQUENCY_HIERARCHY: Dict[str, int] = {
 # For frequency gaps larger than this, the missing data approach is used instead
 MAX_TENT_SIZE: int = 12
 
-# Deterministic tent weights lookup for supported frequency pairs
-# Format: (slower_freq, faster_freq) -> tent_weights_array
-# These weights define how slower-frequency series aggregate clock-frequency factors
-TENT_WEIGHTS_LOOKUP: Dict[Tuple[str, str], np.ndarray] = {
-    ('q', 'm'): np.array([1, 2, 3, 2, 1]),                    # 5 periods: quarterly -> monthly
-    ('sa', 'm'): np.array([1, 2, 3, 4, 3, 2, 1]),             # 7 periods: semi-annual -> monthly
-    ('a', 'm'): np.array([1, 2, 3, 4, 5, 4, 3, 2, 1]),       # 9 periods: annual -> monthly
-    ('m', 'w'): np.array([1, 2, 3, 2, 1]),                    # 5 periods: monthly -> weekly
-    ('q', 'w'): np.array([1, 2, 3, 4, 5, 4, 3, 2, 1]),       # 9 periods: quarterly -> weekly
-    ('sa', 'w'): np.array([1, 2, 3, 4, 3, 2, 1]),             # 7 periods: semi-annual -> weekly
-    ('a', 'w'): np.array([1, 2, 3, 4, 5, 4, 3, 2, 1]),       # 9 periods: annual -> weekly
-    ('sa', 'q'): np.array([1, 2, 1]),                         # 3 periods: semi-annual -> quarterly
-    ('a', 'q'): np.array([1, 2, 3, 2, 1]),                    # 5 periods: annual -> quarterly
-    ('a', 'sa'): np.array([1, 2, 1]),                         # 3 periods: annual -> semi-annual
-}
-
 # ============================================================================
 # Export all constants
 # ============================================================================
@@ -582,6 +566,5 @@ __all__ = [
     # Frequency hierarchy and tent kernels
     'FREQUENCY_HIERARCHY',
     'MAX_TENT_SIZE',
-    'TENT_WEIGHTS_LOOKUP',
 ]
 

@@ -2,10 +2,9 @@
 
 from typing import Tuple, Optional, Dict, Any, Callable
 import time as time_module
-import threading
-import sys
 import numpy as np
 from pykalman import KalmanFilter as PyKalmanFilter
+from pykalman.sqrt import CholeskyKalmanFilter as PyCholeskyKalmanFilter
 from pykalman.standard import _filter, _smooth, _smooth_pair
 
 from ..logger import get_logger, log_em_iteration, log_convergence
@@ -13,6 +12,7 @@ from ..utils.errors import ModelNotInitializedError
 from ..utils.misc import get_config_attr
 from ..config.types import FloatArray
 from ..config.constants import DEFAULT_MIN_DELTA, DEFAULT_ZERO_VALUE
+from ..numeric.stability import ensure_symmetric
 
 _logger = get_logger(__name__)
 
@@ -27,15 +27,18 @@ class DFMKalmanFilter:
         transition_covariance: Optional[FloatArray] = None,
         observation_covariance: Optional[FloatArray] = None,
         initial_state_mean: Optional[FloatArray] = None,
-        initial_state_covariance: Optional[FloatArray] = None
+        initial_state_covariance: Optional[FloatArray] = None,
+        use_cholesky: bool = False
     ) -> None:
+        self._use_cholesky = use_cholesky
         self._pykalman = None
         if all(p is not None for p in [
             transition_matrices, observation_matrices,
             transition_covariance, observation_covariance,
             initial_state_mean, initial_state_covariance
         ]):
-            self._pykalman = PyKalmanFilter(
+            filter_class = PyCholeskyKalmanFilter if use_cholesky else PyKalmanFilter
+            self._pykalman = filter_class(
                 transition_matrices=transition_matrices,
                 observation_matrices=observation_matrices,
                 transition_covariance=transition_covariance,
@@ -70,8 +73,32 @@ class DFMKalmanFilter:
         initial_state_covariance : np.ndarray
             Initial state covariance V_0 (m x m)
         """
+        # Lightweight stabilization: add small diagonal regularization (O(m²) operation)
+        # This is used for high-frequency operations (E-step) where speed is critical.
+        # For critical matrices requiring exact PSD guarantee, use ensure_positive_definite()
+        # from numeric.stability (O(m³) eigendecomposition) instead.
+        from ..config.constants import MIN_EIGENVALUE
+        reg = MIN_EIGENVALUE * 10  # 1e-5
+        
+        # Fast diagonal loading: O(m²) instead of O(m³) eigendecomposition
+        transition_covariance = ensure_symmetric(transition_covariance)
+        transition_covariance = transition_covariance + np.eye(
+            transition_covariance.shape[0], dtype=transition_covariance.dtype
+        ) * reg
+        
+        observation_covariance = ensure_symmetric(observation_covariance)
+        observation_covariance = observation_covariance + np.eye(
+            observation_covariance.shape[0], dtype=observation_covariance.dtype
+        ) * reg
+        
+        initial_state_covariance = ensure_symmetric(initial_state_covariance)
+        initial_state_covariance = initial_state_covariance + np.eye(
+            initial_state_covariance.shape[0], dtype=initial_state_covariance.dtype
+        ) * reg
+        
         if self._pykalman is None:
-            self._pykalman = PyKalmanFilter(
+            filter_class = PyCholeskyKalmanFilter if self._use_cholesky else PyKalmanFilter
+            self._pykalman = filter_class(
                 transition_matrices=transition_matrices,
                 observation_matrices=observation_matrices,
                 transition_covariance=transition_covariance,
@@ -153,36 +180,17 @@ class DFMKalmanFilter:
         
         _logger.info(f"    Filter: Processing {T} timesteps (state_dim={m}, obs_dim={N})...")
         
-        # Progress bar that overwrites the same line
-        # Use time-based progress: assume filter takes ~0.5-2s based on typical performance
-        completed = False
-        start_time = time_module.time()
-        estimated_total_time = 2.0  # Conservative estimate for filter (typically 1-2s)
-        bar_width = 50
-        
-        def show_progress():
-            nonlocal completed
-            while not completed:
-                elapsed = time_module.time() - start_time
-                progress = min(elapsed / estimated_total_time, 1.0) if estimated_total_time > 0 else 0.0
-                filled = int(bar_width * progress)
-                bar = "=" * filled + "-" * (bar_width - filled)
-                estimated_step = min(int(progress * T), T)
-                sys.stdout.write(f"\r[{bar}] {estimated_step}/{T}")
-                sys.stdout.flush()
-                time_module.sleep(0.2)  # Update every 200ms
-        
-        progress_thread = threading.Thread(target=show_progress, daemon=True)
-        progress_thread.start()
-        
-        try:
-            (
-                predicted_state_means,
-                predicted_state_covariances,
-                _,
-                filtered_state_means,
-                filtered_state_covariances,
-            ) = _filter(
+        def run_filter():
+            if self._use_cholesky:
+                # Use public API for CholeskyKalmanFilter
+                filtered_state_means, filtered_state_covariances = self._pykalman.filter(observations)
+                # Approximate predicted states (needed for smooth_pair calculation)
+                predicted_state_means = filtered_state_means.copy()
+                predicted_state_covariances = filtered_state_covariances.copy()
+                return predicted_state_means, predicted_state_covariances, None, filtered_state_means, filtered_state_covariances
+            else:
+                # Use internal functions for standard KalmanFilter (more efficient, gets predicted states)
+                return _filter(
                 self._pykalman.transition_matrices,
                 self._pykalman.observation_matrices,
                 self._pykalman.transition_covariance,
@@ -193,67 +201,88 @@ class DFMKalmanFilter:
                 self._pykalman.initial_state_covariance,
                 observations
             )
-        finally:
-            completed = True
-            time_module.sleep(0.25)  # Give progress thread one more update cycle
-            # Final progress bar
-            bar = "=" * bar_width
-            sys.stdout.write(f"\r[{bar}] {T}/{T}\n")
-            sys.stdout.flush()
-            # Don't join thread - daemon thread will terminate naturally
+        
+        # Run filter
+        predicted_state_means, predicted_state_covariances, _, filtered_state_means, filtered_state_covariances = run_filter()
         
         filter_time = time_module.time() - filter_start
         _logger.info(f"    Filter: Completed in {filter_time:.2f}s ({filter_time/T*1000:.2f}ms/timestep)")
+        
+        # Log filter results summary
+        _logger.info(f"    Filter: Results - predicted_state_means shape: {predicted_state_means.shape}, "
+                    f"predicted_state_covariances shape: {predicted_state_covariances.shape}")
         
         # Smooth to get smoothed states (also O(T × m³) - can be slow)
         _logger.info(f"    Smooth: Processing {T} timesteps (state_dim={m})...")
         smooth_start = time_module.time()
         
-        # Progress bar that overwrites the same line
-        # Smooth typically takes 4-7 minutes (250-400s) for T=2135, m=183
-        smooth_completed = False
-        smooth_start_time = time_module.time()
-        smooth_estimated_total_time = 300.0  # Conservative estimate: 5 minutes
-        bar_width = 50
-        
-        def show_smooth_progress():
-            nonlocal smooth_completed
-            while not smooth_completed:
-                elapsed = time_module.time() - smooth_start_time
-                progress = min(elapsed / smooth_estimated_total_time, 1.0) if smooth_estimated_total_time > 0 else 0.0
-                filled = int(bar_width * progress)
-                bar = "=" * filled + "-" * (bar_width - filled)
-                estimated_step = min(int(progress * T), T)
-                sys.stdout.write(f"\r[{bar}] {estimated_step}/{T}")
-                sys.stdout.flush()
-                time_module.sleep(0.2)
-        
-        smooth_progress_thread = threading.Thread(target=show_smooth_progress, daemon=True)
-        smooth_progress_thread.start()
-        
-        try:
-            smoothed_state_means, smoothed_state_covariances, kalman_smoothing_gains = _smooth(
+        def run_smooth():
+            if self._use_cholesky:
+                _logger.info("    Smooth: Using CholeskyKalmanFilter smooth() method")
+                # Use public API for CholeskyKalmanFilter
+                smoothed_state_means, smoothed_state_covariances = self._pykalman.smooth(observations)
+                # Approximate kalman_smoothing_gains (needed for smooth_pair)
+                kalman_smoothing_gains = np.array([np.eye(m) for _ in range(T)])
+                return smoothed_state_means, smoothed_state_covariances, kalman_smoothing_gains
+            else:
+                # Lightweight stabilization: add small diagonal regularization to prevent SVD failures
+                # This is much cheaper than full eigendecomposition (O(m²) vs O(m³))
+                from ..config.constants import MIN_EIGENVALUE
+                regularization = max(1e-6, MIN_EIGENVALUE * 100)  # 1e-4 for stability
+                
+                _logger.info(f"    Smooth: Stabilizing {len(predicted_state_covariances)} covariance matrices "
+                            f"(regularization={regularization:.2e})")
+                
+                # Fast diagonal loading: just add regularization to diagonal (O(m²) per matrix)
+                # Symmetrize and add diagonal regularization without expensive eigendecomposition
+                # Use in-place diagonal modification for efficiency (avoids creating identity matrix in loop)
+                for t in range(len(predicted_state_covariances)):
+                    cov = predicted_state_covariances[t]
+                    # Symmetrize and add regularization to diagonal (cheap: O(m²))
+                    cov = ensure_symmetric(cov)
+                    np.fill_diagonal(cov, np.diagonal(cov) + regularization)
+                    predicted_state_covariances[t] = cov
+                
+                # Same for filtered_state_covariances
+                for t in range(len(filtered_state_covariances)):
+                    cov = filtered_state_covariances[t]
+                    cov = ensure_symmetric(cov)
+                    np.fill_diagonal(cov, np.diagonal(cov) + regularization)
+                    filtered_state_covariances[t] = cov
+                
+                _logger.info("    Smooth: Covariance matrices stabilized, starting smoother")
+                
+                # Use internal functions for standard KalmanFilter
+                return _smooth(
                 self._pykalman.transition_matrices,
                 filtered_state_means,
                 filtered_state_covariances,
                 predicted_state_means,
                 predicted_state_covariances,
             )
-        finally:
-            smooth_completed = True
-            time_module.sleep(0.25)  # Give progress thread one more update cycle
-            # Final progress bar
-            bar = "=" * bar_width
-            sys.stdout.write(f"\r[{bar}] {T}/{T}\n")
-            sys.stdout.flush()
+        
+        # Run smooth
+        _logger.info("    Smooth: Starting smoother execution...")
+        smoothed_state_means, smoothed_state_covariances, kalman_smoothing_gains = run_smooth()
         
         smooth_time = time_module.time() - smooth_start
         _logger.info(f"    Smooth: Completed in {smooth_time:.2f}s ({smooth_time/T*1000:.2f}ms/timestep)")
+        _logger.debug(f"    Smooth: Results - smoothed_state_means shape: {smoothed_state_means.shape}, "
+                     f"smoothed_state_covariances shape: {smoothed_state_covariances.shape}")
         
         # Compute lag-1 cross-covariances (needed for M-step)
         _logger.info(f"    Smooth-pair: Computing cross-covariances...")
         smooth_pair_start = time_module.time()
-        sigma_pair_smooth = _smooth_pair(smoothed_state_covariances, kalman_smoothing_gains)
+        if self._use_cholesky:
+            # For CholeskyKalmanFilter, compute cross-covariances directly from smoothed results
+            # Simplified computation: V_{t,t-1} ≈ A @ V_{t-1,t-1} (approximation)
+            A = self._pykalman.transition_matrices
+            sigma_pair_smooth = np.zeros((T-1, m, m), dtype=smoothed_state_covariances.dtype)
+            for t in range(T-1):
+                sigma_pair_smooth[t] = A @ smoothed_state_covariances[t]
+        else:
+            # Use internal function for standard KalmanFilter
+            sigma_pair_smooth = _smooth_pair(smoothed_state_covariances, kalman_smoothing_gains)
         smooth_pair_time = time_module.time() - smooth_pair_start
         _logger.info(f"    Smooth-pair: Completed in {smooth_pair_time:.2f}s")
         
@@ -262,12 +291,10 @@ class DFMKalmanFilter:
         loglik_start = time_module.time()
         try:
             loglik = self._pykalman.loglikelihood(observations)
-            # Validate: log-likelihood should be finite and typically negative (log of probabilities)
+            # Validate: log-likelihood should be finite
             if not np.isfinite(loglik):
                 _logger.error(f"DFMKalmanFilter: Log-likelihood is not finite: {loglik}. This indicates numerical instability.")
                 loglik = float('-inf')
-            elif loglik > 0:
-                _logger.warning(f"DFMKalmanFilter: Log-likelihood is positive ({loglik:.2e}), which is unusual (expected negative).")
         except (ValueError, RuntimeError, AttributeError) as e:
             _logger.error(f"DFMKalmanFilter: Failed to compute log-likelihood: {e}. Using -inf (will break convergence checks).")
             _logger.debug(f"DFMKalmanFilter: Full exception traceback for loglikelihood computation failure:", exc_info=True)

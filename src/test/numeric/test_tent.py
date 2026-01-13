@@ -5,10 +5,9 @@ import numpy as np
 from dfm_python.numeric.tent import (
     generate_tent_weights,
     generate_R_mat,
-    get_tent_weights,
     get_agg_structure,
+    get_slower_freq_tent_weights,
 )
-from dfm_python.config.constants import TENT_WEIGHTS_LOOKUP
 
 
 class TestTentKernel:
@@ -36,27 +35,17 @@ class TestTentKernel:
         assert len(weights_linear) == 5
         assert weights_linear[0] == 1  # Should start at 1
     
-    def test_get_tent_weights(self):
-        """Test getting tent weights for frequency pairs."""
-        # Test known frequency pair from TENT_WEIGHTS_LOOKUP
-        weights = get_tent_weights('q', 'm')  # Quarterly to monthly
+    def test_get_slower_freq_tent_weights(self):
+        """Test getting tent weights for slower frequency with fallback generation."""
+        # Test with known tent kernel size - function should generate symmetric weights
+        weights = get_slower_freq_tent_weights('q', 'm', tent_kernel_size=5)
         assert weights is not None
         assert isinstance(weights, np.ndarray)
-        assert len(weights) == 5  # Should match TENT_WEIGHTS_LOOKUP[('q', 'm')]
-        expected = TENT_WEIGHTS_LOOKUP[('q', 'm')]
-        assert np.array_equal(weights, expected)
-        
-        # Test another known pair
-        weights2 = get_tent_weights('a', 'm')  # Annual to monthly
-        assert weights2 is not None
-        assert isinstance(weights2, np.ndarray)
-        expected2 = TENT_WEIGHTS_LOOKUP[('a', 'm')]
-        assert np.array_equal(weights2, expected2)
-        
-        # Test invalid frequency pair (should return None or raise)
-        weights_invalid = get_tent_weights('invalid', 'm')
-        # Function may return None for invalid pairs - check implementation behavior
-        # This test verifies the function exists and can be called
+        assert len(weights) == 5
+        # Should generate symmetric tent weights
+        assert weights[0] == 1
+        assert weights[-1] == 1
+        assert weights[2] == 3  # Middle should be peak
     
     def test_get_agg_structure(self):
         """Test aggregation structure computation."""
@@ -99,37 +88,26 @@ class TestTentKernel:
         assert np.allclose(constraint_result, q, atol=1e-6), \
             f"Constraint not satisfied for loadings = weights*scale: {constraint_result}"
     
-    @pytest.mark.parametrize("slower_freq,faster_freq", list(TENT_WEIGHTS_LOOKUP.keys()))
-    def test_generate_R_mat_for_all_tent_weights(self, slower_freq, faster_freq):
-        """Test generate_R_mat for all tent weights in TENT_WEIGHTS_LOOKUP."""
-        weights = get_tent_weights(slower_freq, faster_freq)
-        if weights is None:
-            pytest.skip(f"No tent weights for ({slower_freq}, {faster_freq})")
+    def test_generate_R_mat_various_sizes(self):
+        """Test generate_R_mat for various tent weight sizes."""
+        # Test with 3-period tent (production)
+        weights_3 = np.array([1, 2, 1])
+        R_mat_3, q_3 = generate_R_mat(weights_3)
+        assert R_mat_3.shape == (2, 3)
+        assert np.allclose(q_3, 0.0)
         
-        R_mat, q = generate_R_mat(weights)
-        tent_kernel_size = len(weights)
+        # Test with 5-period tent (investment)
+        weights_5 = np.array([1, 2, 3, 2, 1])
+        R_mat_5, q_5 = generate_R_mat(weights_5)
+        assert R_mat_5.shape == (4, 5)
+        assert np.allclose(q_5, 0.0)
         
-        # Verify shape
-        assert R_mat.shape == (tent_kernel_size - 1, tent_kernel_size), \
-            f"R_mat shape incorrect for ({slower_freq}, {faster_freq})"
-        assert q.shape == (tent_kernel_size - 1,), \
-            f"q shape incorrect for ({slower_freq}, {faster_freq})"
-        
-        # Verify q is all zeros
-        assert np.allclose(q, 0.0), \
-            f"q should be all zeros for ({slower_freq}, {faster_freq})"
-        
-        # Verify MATLAB pattern: R_mat[i, 0] = tent_weights[i+1], R_mat[i, i+1] = -1
-        for i in range(tent_kernel_size - 1):
-            assert np.abs(R_mat[i, 0] - weights[i + 1]) < 1e-6, \
-                f"R_mat[{i}, 0] should be {weights[i+1]} for ({slower_freq}, {faster_freq})"
-            assert np.abs(R_mat[i, i + 1] + 1.0) < 1e-6, \
-                f"R_mat[{i}, {i+1}] should be -1 for ({slower_freq}, {faster_freq})"
+        # Verify MATLAB pattern for 5-period
+        assert np.abs(R_mat_5[0, 0] - weights_5[1]) < 1e-6  # Should be 2
+        assert np.abs(R_mat_5[0, 1] + 1.0) < 1e-6  # Should be -1
         
         # Verify constraint satisfaction
-        scale = 1.0
-        loadings = weights * scale
-        constraint_result = R_mat @ loadings
-        assert np.allclose(constraint_result, q, atol=1e-6), \
-            f"Constraint not satisfied for ({slower_freq}, {faster_freq}): {constraint_result}"
+        loadings = weights_5 * 1.0
+        constraint_result = R_mat_5 @ loadings
+        assert np.allclose(constraint_result, q_5, atol=1e-6)
 

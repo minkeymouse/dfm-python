@@ -58,6 +58,8 @@ from ..numeric.estimator import (
     estimate_variance_unified,
 )
 from ..utils.helper import handle_linear_algebra_error
+from ..numeric.validator import validate_block_index_dimensions
+from ..utils.errors import DataValidationError
 
 _logger = get_logger(__name__)
 
@@ -240,6 +242,7 @@ def _compute_and_cache_block_indices(block_structure: BlockStructure, N: int) ->
     block_structure._cached_n_idio_M = n_idio_M
     block_structure._cached_c_idio_indicator = c_idio_indicator
     block_structure._cached_rp1 = rp1
+    block_structure._cached_N = N  # Store N value used for caching
 
 
 def _update_transition_matrix(EZ: np.ndarray, A: np.ndarray, config: EMConfig) -> np.ndarray:
@@ -512,29 +515,15 @@ def _update_observation_matrix_blocked(
     T, N = X.shape
     n_blocks = len(r)
     
-    # Align blocks shape to match X (make a copy to avoid modifying original)
-    blocks = _align_blocks_to_data(blocks, N)
-    
-    # Force blocks to have exactly N rows (defensive check)
-    # This should already be done by _align_blocks_to_data, but ensure it
-    if blocks.shape[0] != N:
-        if blocks.shape[0] > N:
-            blocks = blocks[:N, :].copy()
-        else:
-            # Pad if needed
-            n_blocks_cols = blocks.shape[1]
-            padding = np.zeros((N - blocks.shape[0], n_blocks_cols), dtype=blocks.dtype)
-            blocks = np.vstack([blocks, padding])
-    
-    # Final assertion: blocks must have exactly N rows
-    assert blocks.shape[0] == N, f"blocks must have {N} rows, got {blocks.shape[0]}"
-    
     # Initialize output
     C_new = C.copy()
     
-    # Use cached indices if available (computed once, reused across EM iterations)
-    if block_structure is not None and block_structure.has_cached_indices():
-        # Use cached indices (fast path - no recomputation)
+    # Use cached indices if available and N matches (computed once, reused across EM iterations)
+    # CRITICAL: Must verify N matches to ensure cached unique_blocks align with current blocks array
+    if (block_structure is not None 
+        and block_structure.has_cached_indices() 
+        and block_structure._cached_N == N):
+        # Use cached indices (fast path - N matches, so alignment is consistent)
         unique_blocks = block_structure._cached_unique_blocks
         unique_indices = block_structure._cached_unique_indices
         bl_idxM = block_structure._cached_bl_idxM
@@ -546,7 +535,27 @@ def _update_observation_matrix_blocked(
         n_idio_M = block_structure._cached_n_idio_M
         c_idio_indicator = block_structure._cached_c_idio_indicator
         rp1 = block_structure._cached_rp1
+        
+        # Align blocks to match cached alignment (must match N used for caching)
+        blocks = _align_blocks_to_data(blocks, N)
     else:
+        # N mismatch or no cache - recompute indices from current blocks alignment
+        # Align blocks shape to match X (make a copy to avoid modifying original)
+        blocks = _align_blocks_to_data(blocks, N)
+        
+        # Force blocks to have exactly N rows (defensive check)
+        if blocks.shape[0] != N:
+            if blocks.shape[0] > N:
+                blocks = blocks[:N, :].copy()
+            else:
+                # Pad if needed
+                n_blocks_cols = blocks.shape[1]
+                padding = np.zeros((N - blocks.shape[0], n_blocks_cols), dtype=blocks.dtype)
+                blocks = np.vstack([blocks, padding])
+        
+        # Final assertion: blocks must have exactly N rows
+        assert blocks.shape[0] == N, f"blocks must have {N} rows, got {blocks.shape[0]}"
+        
         # Compute indices inline (fallback if not cached)
         # Find unique block patterns
         block_tuples = [tuple(row) for row in blocks]
@@ -673,7 +682,7 @@ def _update_observation_matrix_blocked(
         # Count factors in this block pattern
         rs = int(np.sum(r[bl_i > 0]))
         
-        # Get factor indices for this block pattern
+        # Get factor indices for clock-frequency: use cached if available, otherwise compute
         if i < len(bl_idxM) and len(bl_idxM[i]) > 0:
             bl_idxM_i = np.where(bl_idxM[i])[0]
         else:
@@ -784,9 +793,7 @@ def _update_observation_matrix_blocked(
             C_new[idx_iM[:, None], bl_idxM_i] = loadings
         
         # Update slower-frequency variables
-        # Filter to slower-frequency series and validate indices
-        # idx_i is already validated above to be < X.shape[1]
-        # Filter to slower-frequency series and validate indices
+        # Filter to slower-frequency series and validate indices (idx_i already validated above)
         idx_iQ = idx_i[(idx_i >= n_clock_freq) & (idx_i < X.shape[1])]
         # Additional validation: ensure all indices are valid for nanY
         idx_iQ = idx_iQ[(idx_iQ >= 0) & (idx_iQ < nanY.shape[1])]
@@ -794,24 +801,36 @@ def _update_observation_matrix_blocked(
         if len(idx_iQ) > 0 and R_mat is not None and q is not None:
             rps = rs * p_plus_one
             
-            # Get constraint matrix for this block
+            # Get factor indices for slower-frequency: use cached if available, otherwise compute
             if i < len(bl_idxQ) and len(bl_idxQ[i]) > 0:
                 bl_idxQ_i = np.where(bl_idxQ[i])[0]
-                if R_con is not None and q_con is not None:
-                    R_con_i = R_con[:, bl_idxQ_i]
-                    q_con_i = q_con.copy()
-                    
-                    # Remove zero rows
-                    no_c = ~np.any(R_con_i, axis=1)
-                    R_con_i = R_con_i[~no_c, :]
-                    q_con_i = q_con_i[~no_c]
-                else:
-                    R_con_i = None
-                    q_con_i = None
             else:
+                # Fallback: compute from block pattern
                 bl_idxQ_i = []
+                offset = 0
+                for block_idx in range(n_blocks):
+                    if bl_i[block_idx] > 0:
+                        bl_idxQ_i.extend(range(offset, offset + int(r[block_idx]) * p_plus_one))
+                    offset += int(r[block_idx]) * p_plus_one
+                bl_idxQ_i = np.array(bl_idxQ_i)
+            
+            # Get constraint matrix for this block (after bl_idxQ_i is computed)
+            if R_con is not None and q_con is not None and len(bl_idxQ_i) > 0:
+                R_con_i = R_con[:, bl_idxQ_i]
+                q_con_i = q_con.copy()
+                
+                # Remove zero rows
+                no_c = ~np.any(R_con_i, axis=1)
+                R_con_i = R_con_i[~no_c, :]
+                q_con_i = q_con_i[~no_c]
+            else:
                 R_con_i = None
                 q_con_i = None
+            
+            # Skip if bl_idxQ_i is empty
+            if len(bl_idxQ_i) == 0:
+                # No block indices for slower-frequency factors in this block, skip all slower-frequency series
+                continue
             
             # Get tent kernel size from R_mat or tent_weights_dict (generalized)
             tent_kernel_size = None
@@ -836,14 +855,7 @@ def _update_observation_matrix_blocked(
                 # Update tent_kernel_size from actual weights
                 tent_kernel_size = len(tent_weights)
             
-            # Skip if bl_idxQ_i is empty - no factor states to update for this block
-            # When bl_idxQ_i is empty, Z_all would have shape (T_valid, 0), leading to denom with shape (0, 0)
-            # which causes broadcast error when adding create_scaled_identity(rps, ...)
-            if len(bl_idxQ_i) == 0:
-                # No block indices for slower-frequency factors in this block, skip all slower-frequency series
-                # Continue to next block iteration
-                pass
-            else:
+            # Loop through slower-frequency series (generic, works for any slower frequency)
                 # Loop through slower-frequency series (generic, works for any slower frequency)
                 # idx_iQ is already filtered above
                 for j in idx_iQ:

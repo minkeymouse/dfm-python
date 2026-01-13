@@ -1,7 +1,7 @@
 """Tests for utils.misc module."""
 
 import pytest
-from dfm_python.utils.misc import resolve_param, get_clock_frequency
+from dfm_python.utils.misc import resolve_param, resolve_named_param, get_clock_frequency
 from dfm_python.config.constants import DEFAULT_CLOCK_FREQUENCY
 
 
@@ -27,6 +27,56 @@ class TestResolveParam:
         """Test resolve_param with default value (simple pattern)."""
         value = resolve_param(None, default=10)
         assert value == 10
+    
+    def test_resolve_named_param_from_kwargs(self):
+        """Test resolve_named_param extracts from kwargs."""
+        kwargs = {'num_factors': 5, 'learning_rate': 0.01}
+        value = resolve_named_param('num_factors', kwargs=kwargs)
+        assert value == 5
+    
+    def test_resolve_named_param_from_config(self):
+        """Test resolve_named_param extracts from config."""
+        class Config:
+            def __init__(self):
+                self.num_factors = 7
+                self.learning_rate = 0.001
+        
+        config = Config()
+        value = resolve_named_param('num_factors', config=config)
+        assert value == 7
+    
+    def test_resolve_named_param_from_defaults(self):
+        """Test resolve_named_param uses defaults when not in kwargs or config."""
+        defaults = {'num_factors': 10, 'learning_rate': 0.01}
+        value = resolve_named_param('num_factors', defaults=defaults)
+        assert value == 10
+    
+    def test_resolve_named_param_priority(self):
+        """Test resolve_named_param priority: kwargs > config > defaults."""
+        class Config:
+            def __init__(self):
+                self.num_factors = 7
+        
+        config = Config()
+        kwargs = {'num_factors': 5}
+        defaults = {'num_factors': 10}
+        
+        # kwargs should take priority
+        value = resolve_named_param('num_factors', kwargs=kwargs, config=config, defaults=defaults)
+        assert value == 5
+        
+        # config should take priority over defaults
+        value2 = resolve_named_param('num_factors', config=config, defaults=defaults)
+        assert value2 == 7
+        
+        # defaults should be used if nothing else available
+        value3 = resolve_named_param('num_factors', defaults=defaults)
+        assert value3 == 10
+    
+    def test_resolve_named_param_returns_none_if_not_found(self):
+        """Test resolve_named_param returns None if parameter not found in any source."""
+        value = resolve_named_param('nonexistent_param')
+        assert value is None
 
 
 class TestGetClockFrequency:

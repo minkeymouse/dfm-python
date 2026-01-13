@@ -19,7 +19,6 @@ _logger = get_logger(__name__)
 from ..config.constants import (
     FREQUENCY_HIERARCHY,
     MAX_TENT_SIZE,
-    TENT_WEIGHTS_LOOKUP,
     DEFAULT_HIERARCHY_VALUE,
 )
 
@@ -112,24 +111,6 @@ def generate_R_mat(tent_weights: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     return R_mat, q
 
 
-def get_tent_weights(slower_freq: str, faster_freq: str) -> Optional[np.ndarray]:
-    """Get deterministic tent weights for a frequency pair.
-    
-    Parameters
-    ----------
-    slower_freq : str
-        Slower frequency (e.g., 'q' for quarterly)
-    faster_freq : str
-        Faster frequency (e.g., 'm' for monthly) - this is the clock
-    
-    Returns
-    -------
-    tent_weights : np.ndarray or None
-        Tent weights array if pair is supported, None otherwise
-    """
-    return TENT_WEIGHTS_LOOKUP.get((slower_freq, faster_freq))
-
-
 def get_slower_freq_tent_weights(
     slower_freq: str, 
     clock: str, 
@@ -138,8 +119,9 @@ def get_slower_freq_tent_weights(
 ) -> np.ndarray:
     """Get tent weights for slower-frequency idiosyncratic chain structure.
     
-    This function attempts to get tent weights from the lookup table, and if not
-    available, falls back to generating symmetric tent weights.
+    Generates symmetric tent weights of the specified size. Tent weights must be
+    explicitly specified in config for production use; this function provides
+    a fallback for generating symmetric weights when needed.
     
     Parameters
     ----------
@@ -148,7 +130,7 @@ def get_slower_freq_tent_weights(
     clock : str
         Clock frequency ('m', 'q', etc.)
     tent_kernel_size : int
-        Expected tent kernel size (used for fallback generation)
+        Expected tent kernel size (used for generating weights)
     dtype : type, default np.float32
         Data type for output array
         
@@ -157,12 +139,8 @@ def get_slower_freq_tent_weights(
     np.ndarray
         Tent weights array (e.g., [1, 2, 3, 2, 1] for quarterly-monthly)
     """
-    tent_weights = get_tent_weights(slower_freq, clock)
-    if tent_weights is None:
-        # Fallback: generate symmetric tent weights
-        tent_weights = generate_tent_weights(tent_kernel_size, 'symmetric').astype(dtype)
-    else:
-        tent_weights = tent_weights.astype(dtype)
+    # Generate symmetric tent weights as fallback
+    tent_weights = generate_tent_weights(tent_kernel_size, 'symmetric').astype(dtype)
     return tent_weights
 
 
@@ -205,17 +183,61 @@ def get_agg_structure(
     n_periods_map = {}
     
     # Find series with frequencies slower than clock (need tent kernels)
+    # Tent weights must be specified in config.tent_weights
+    config_tent_weights = getattr(config, 'tent_weights', None)
+    
+    if config_tent_weights is None:
+        # No tent weights in config - check if any slower frequencies exist
+        slower_freqs = [freq for freq in frequencies 
+                       if FREQUENCY_HIERARCHY.get(freq, 999) > FREQUENCY_HIERARCHY.get(clock, 0)]
+        if slower_freqs:
+            raise DataValidationError(
+                f"Mixed-frequency data detected (slower frequencies: {slower_freqs}) but no tent_weights "
+                f"specified in config. Please specify tent_weights in config for all frequency pairs, "
+                f"e.g., tent_weights: {{'m:w': [1, 2, 1]}}",
+                details=f"Slower frequencies detected: {slower_freqs}, clock: {clock}"
+            )
+    
     for freq in frequencies:
         if FREQUENCY_HIERARCHY.get(freq, 999) > FREQUENCY_HIERARCHY.get(clock, 0):
-            # This frequency is slower than clock, check if tent kernel is available
-            tent_w = get_tent_weights(freq, clock)
-            if tent_w is not None and len(tent_w) <= MAX_TENT_SIZE:
-                # Tent kernel available and within size limit
-                tent_weights[freq] = tent_w
-                n_periods_map[freq] = len(tent_w)
-                # Generate R_mat from tent weights
-                R_mat, q = generate_R_mat(tent_w)
-                structures[(freq, clock)] = (R_mat, q)
+            # This frequency is slower than clock, get tent weights from config
+            tent_w = None
+            
+            # Get tent weights from config (required)
+            if config_tent_weights is not None:
+                # Try both formats: 'freq:clock' (e.g., 'm:w') or just 'freq' (e.g., 'm')
+                pair_key = f"{freq}:{clock}"
+                if pair_key in config_tent_weights:
+                    tent_w = config_tent_weights[pair_key]
+                elif freq in config_tent_weights:
+                    tent_w = config_tent_weights[freq]
+                
+                # Convert list to numpy array if needed
+                if tent_w is not None and isinstance(tent_w, list):
+                    tent_w = np.array(tent_w)
+            
+            # Tent weights must be provided in config
+            if tent_w is None:
+                raise DataValidationError(
+                    f"Tent weights not found in config for frequency pair ({freq}, {clock}). "
+                    f"Please specify tent_weights in config, e.g., tent_weights: {{'{pair_key}': [1, 2, 1]}}",
+                    details=f"Frequency pair: ({freq}, {clock})"
+                )
+            
+            # Process tent weights
+            if tent_w is not None:
+                # Convert to numpy array if not already
+                if not isinstance(tent_w, np.ndarray):
+                    tent_w = np.array(tent_w)
+                
+                # Check size limit
+                if len(tent_w) <= MAX_TENT_SIZE:
+                    # Tent kernel available and within size limit
+                    tent_weights[freq] = tent_w
+                    n_periods_map[freq] = len(tent_w)
+                    # Generate R_mat from tent weights
+                    R_mat, q = generate_R_mat(tent_w)
+                    structures[(freq, clock)] = (R_mat, q)
             # If tent kernel not available or too large, use missing data approach (no structure needed)
     
     return {
@@ -298,7 +320,6 @@ def group_by_freq(
 __all__ = [
     'generate_tent_weights',
     'generate_R_mat',
-    'get_tent_weights',
     'get_slower_freq_tent_weights',
     'get_agg_structure',
     'group_by_freq',

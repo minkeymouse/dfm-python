@@ -286,12 +286,19 @@ class DFMConfig(BaseModelConfig):
     # Damped Updates: If provided (not None), automatically enables damping and always warns
     damping_factor: Optional[float] = None  # Damping factor (0.8 = 80% new, 20% old). If None, no damping. If provided, damping enabled and warnings always shown.
     
-    # Idiosyncratic Component Parameters (auto-detected from frequencies)
+    # Idiosyncratic Component Parameters
     idio_rho0: float = DEFAULT_IDIO_RHO0  # Initial AR coefficient for idiosyncratic components (default: 0.1)
     idio_min_var: float = MIN_DIAGONAL_VARIANCE  # Minimum variance for idiosyncratic innovation covariance (defaults to MIN_DIAGONAL_VARIANCE)
-    # Note: augment_idio and augment_idio_slow are auto-detected from frequency configuration
+    # Note: augment_idio and augment_idio_slow are INTERNALLY auto-detected (not configurable)
     # - If all series use clock frequency: augment_idio=False, augment_idio_slow=False
-    # - If mixed frequencies detected: augment_idio=True, augment_idio_slow=True (auto-enabled)
+    # - If mixed frequencies detected: augment_idio=True, augment_idio_slow=True (required for tent kernel)
+    # These are properties, not config fields - automatically determined from frequency configuration
+    
+    # Kalman Filter Type
+    use_cholesky_filter: bool = False  # Use CholeskyKalmanFilter for better numerical stability (default: False)
+    
+    # Tent Kernel Weights (for mixed-frequency aggregation)
+    tent_weights: Optional[Union[Dict[str, List[float]], Dict[str, np.ndarray]]] = None  # Required for mixed-frequency data: tent weights for frequency pairs. Format: {'freq_pair': [weights]} or {'freq': [weights]}. Example: {'m:w': [1, 2, 1]} or {'m': [1, 2, 1]}. Must be specified in config for all slower-frequency pairs.
     
     def __post_init__(self):
         """Validate blocks structure and derive block properties."""
@@ -446,6 +453,8 @@ class DFMConfig(BaseModelConfig):
             'data_clip': data.get('data_clip', None),
             'regularization': data.get('regularization', None),
             'damping_factor': data.get('damping_factor', None),
+            'use_cholesky_filter': data.get('use_cholesky_filter', False),
+            'tent_weights': data.get('tent_weights', None),
         }
         
         result = base_params.copy()
