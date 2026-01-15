@@ -533,6 +533,11 @@ class DDFMConfig(BaseModelConfig):
     seed: Optional[int] = None  # Random seed for reproducibility
     lags_input: int = 0  # Number of lags of inputs on encoder (default 0, matching original TensorFlow DDFM)
     
+    # Interpolation parameters (for handling missing values)
+    interpolation_method: str = 'linear'  # Interpolation method: 'linear', 'spline', 'cubic', etc. (default: 'linear' for stability)
+    interpolation_limit: Optional[int] = 10  # Maximum consecutive NaNs to interpolate (default: 10, prevents extreme extrapolation)
+    interpolation_limit_direction: str = 'both'  # Direction to fill: 'forward', 'backward', or 'both' (default: 'both')
+    
     
     # ========================================================================
     # Factory Methods
@@ -559,6 +564,9 @@ class DDFMConfig(BaseModelConfig):
             'disp': DEFAULT_DISP,
             'seed': None,
             'lags_input': 0,  # Number of lags (default 0, matching original TensorFlow)
+            'interpolation_method': 'linear',  # Interpolation method (default: 'linear' for stability)
+            'interpolation_limit': 10,  # Maximum consecutive NaNs to interpolate (default: 10)
+            'interpolation_limit_direction': 'both',  # Direction to fill (default: 'both')
         })
         # Map 'epochs' from config to 'n_mc_samples' for clarity (backward compatibility)
         # Always remove 'epochs' if present (even if n_mc_samples is also present)

@@ -21,7 +21,7 @@ from ..config.constants import DEFAULT_TORCH_DTYPE
 class DDFMDataset(Dataset):
     """Dataset for DDFM training.
     
-    Scales target series if scaler provided. Feature series are used as-is.
+    Scales target series if scaler provided. Feature series can also be scaled if provided.
     
     Parameters
     ----------
@@ -33,6 +33,8 @@ class DDFMDataset(Dataset):
         Target series column names to scale. If None or empty, all columns will be used as targets.
     target_scaler : StandardScaler | RobustScaler | MinMaxScaler, optional
         Scaler instance to scale target series. If None, no scaling.
+    feature_scaler : StandardScaler | RobustScaler | MinMaxScaler, optional
+        Scaler instance to scale feature series. If None, no scaling.
     """
     
     def __init__(
@@ -41,6 +43,7 @@ class DDFMDataset(Dataset):
         time_idx: str,
         target_series: Optional[List[str]] = None,
         target_scaler: Optional[Union[StandardScaler, RobustScaler, MinMaxScaler]] = None,
+        feature_scaler: Optional[Union[StandardScaler, RobustScaler, MinMaxScaler]] = None,
     ):
         if _has_polars and isinstance(data, pl.DataFrame):
             data = data.to_pandas()
@@ -70,9 +73,30 @@ class DDFMDataset(Dataset):
         self.target_series = target_series_list
         self.data_original = data.copy()
         self.target_scaler = target_scaler
+        self.feature_scaler = feature_scaler
         
         y = data[target_series_list]
         X = data.drop(columns=target_series_list)
+        
+        # Optionally scale feature series to avoid scale dominance in encoder input
+        if feature_scaler is not None and not X.empty:
+            x_mean = X.mean().abs().max()
+            x_std = (X.std() - 1.0).abs().max()
+            x_is_already_scaled = x_mean < 0.1 and x_std < 0.1
+            x_scaler_is_fitted = (
+                hasattr(feature_scaler, 'mean_') and
+                feature_scaler.mean_ is not None and
+                hasattr(feature_scaler, 'scale_') and
+                feature_scaler.scale_ is not None
+            )
+            if not x_is_already_scaled:
+                if not x_scaler_is_fitted:
+                    self.feature_scaler.fit(X.values)
+                X_scaled = self.feature_scaler.transform(X.values)
+                X = pd.DataFrame(X_scaled, index=X.index, columns=X.columns)
+            else:
+                if not x_scaler_is_fitted:
+                    self.feature_scaler.fit(X.values)
         
         # Check if data is already standardized (mean≈0, std≈1) to avoid double scaling
         # If data is already scaled, we still need target_scaler for inverse transformation
@@ -83,17 +107,58 @@ class DDFMDataset(Dataset):
             y_std = (y.std() - 1.0).abs().max()
             is_already_scaled = y_mean < 0.1 and y_std < 0.1
             
+            # Check if scaler is already fitted
+            scaler_is_fitted = (
+                hasattr(target_scaler, 'mean_') and 
+                target_scaler.mean_ is not None and
+                hasattr(target_scaler, 'scale_') and
+                target_scaler.scale_ is not None
+            )
+            
             if is_already_scaled:
                 # Data is already standardized - don't scale again
-                # But still fit the scaler if not already fitted (for inverse transformation)
+                # IMPORTANT: If scaler is already fitted, do NOT refit it on already-scaled data
                 # The scaler should have been fitted on original unscaled data by the caller
-                if not hasattr(target_scaler, 'mean_') or target_scaler.mean_ is None:
-                    # If scaler not fitted, fit it on current data (assumes caller passed unscaled data)
+                # Refitting on already-scaled data would break inverse transformation
+                if not scaler_is_fitted:
+                    # Only fit if scaler is not already fitted
+                    # This assumes caller passed unscaled data (edge case)
+                    import warnings
+                    warnings.warn(
+                        "DDFMDataset: Data appears already scaled but scaler is not fitted. "
+                        "Fitting scaler on already-scaled data may break inverse transformation. "
+                        "Ensure scaler is fitted on original unscaled data before passing to DDFMDataset.",
+                        UserWarning
+                    )
                     self.target_scaler.fit(y.values)
                 # Don't transform - data is already scaled
             else:
                 # Data is not standardized - apply scaling
-                self.target_scaler.fit(y.values)
+                # If scaler is already fitted, DO NOT refit (preserve training scaler).
+                if scaler_is_fitted:
+                    # Check if scaler was fitted on data with similar scale
+                    # If mean/scale are very different, warn user but keep scaler.
+                    scaler_mean = np.abs(target_scaler.mean_)
+                    scaler_scale = target_scaler.scale_
+                    data_mean = np.abs(y.mean().values)
+                    data_std = y.std().values
+                    
+                    # Check for significant mismatch (more than 2x difference)
+                    mean_mismatch = np.any((data_mean > 2 * scaler_mean) | (scaler_mean > 2 * data_mean))
+                    scale_mismatch = np.any((data_std > 2 * scaler_scale) | (scaler_scale > 2 * data_std))
+                    
+                    if mean_mismatch or scale_mismatch:
+                        import warnings
+                        warnings.warn(
+                            "DDFMDataset: Scaler appears to be fitted on data with different scale. "
+                            "Using existing scaler to preserve inverse transformation. "
+                            "Ensure scaler consistency across train/test.",
+                            UserWarning
+                        )
+                else:
+                    # Scaler not fitted - fit on current data
+                    self.target_scaler.fit(y.values)
+                
                 y_scaled = self.target_scaler.transform(y.values)
                 y = pd.DataFrame(y_scaled, index=y.index, columns=y.columns)
         
@@ -184,13 +249,14 @@ class DDFMDataset(Dataset):
         Returns
         -------
         DDFMDataset
-            New dataset with same time_idx, target_series, target_scaler.
+            New dataset with same time_idx, target_series, target_scaler, feature_scaler.
         """
         return cls(
             data=new_data,
             time_idx=dataset.time_idx,
             target_series=dataset.target_series,
-            target_scaler=dataset.target_scaler
+            target_scaler=dataset.target_scaler,
+            feature_scaler=getattr(dataset, 'feature_scaler', None)
         )
     
     def create_autoencoder_dataset(

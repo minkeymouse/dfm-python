@@ -30,7 +30,10 @@ class TestModelSchema:
             },
             'clock': 'w',
             'num_factors': 2,
-            'encoder_layers': [64, 32]
+            'encoder_layers': [64, 32],
+            'interpolation_method': 'linear',
+            'interpolation_limit': 10,
+            'interpolation_limit_direction': 'both',
         }
         config = DDFMConfig.from_dict(config_dict)
         assert config is not None
@@ -39,6 +42,9 @@ class TestModelSchema:
         assert config.frequency['series3'] == 'm'
         assert config.frequency['series4'] == 'm'
         assert config.clock == 'w'
+        assert config.interpolation_method == 'linear'
+        assert config.interpolation_limit == 10
+        assert config.interpolation_limit_direction == 'both'
     
     def test_dfm_config_from_dict_grouped_frequency(self):
         """Test DFMConfig.from_dict with grouped frequency format."""

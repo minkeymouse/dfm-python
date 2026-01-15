@@ -86,25 +86,81 @@ def interpolate_array(
         return result
 
 
-def interpolate_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-    """Interpolate DataFrame values using array interpolation.
+def interpolate_dataframe(
+    df: pd.DataFrame,
+    method: str = 'linear',
+    limit: Optional[int] = 10,
+    limit_direction: str = 'both'
+) -> pd.DataFrame:
+    """Interpolate missing values in DataFrame with configurable method.
     
-    This function interpolates missing values in a DataFrame by converting
-    to numpy array, applying interpolate_array, and returning a new DataFrame
-    with the same index and columns.
+    This function interpolates missing values in a DataFrame using pandas
+    interpolation, which is more stable than scipy interpolation for data
+    with high missingness.
     
     Parameters
     ----------
     df : pd.DataFrame
-        Input DataFrame with potentially missing values
+        DataFrame with potentially missing values
+    method : str, default 'linear'
+        Interpolation method: 'linear', 'spline', 'cubic', 'polynomial', etc.
+        'linear' is recommended for stability with high missingness.
+        'spline' and 'cubic' may cause extreme values with large gaps.
+    limit : int, optional, default 10
+        Maximum number of consecutive NaNs to fill. Prevents extreme extrapolation.
+        Set to None for unlimited (may cause instability with large gaps).
+    limit_direction : str, default 'both'
+        Direction to fill: 'forward', 'backward', or 'both'
         
     Returns
     -------
     pd.DataFrame
-        DataFrame with interpolated values, same index and columns as input
+        DataFrame with interpolated values (guaranteed no NaNs), same index and columns as input
     """
     df_interpolated = df.copy()
-    df_interpolated.values[:] = interpolate_array(df_interpolated.values)
+    
+    if df_interpolated.isna().sum().sum() == 0:
+        return df_interpolated
+    
+    # Use pandas interpolation (handles DataFrames well and is more stable)
+    if method in ['spline', 'cubic']:
+        # Cubic spline - add limit for stability
+        # Check if we have enough points for spline (needs at least 4 points for order=3)
+        # If not enough points, fall back to linear
+        try:
+            order = 3 if method == 'spline' else None
+            df_interpolated = df_interpolated.interpolate(
+                method='spline' if method == 'spline' else 'cubic',
+                limit_direction=limit_direction,
+                order=order,
+                limit=limit  # Critical: prevents extreme extrapolation
+            )
+        except (ValueError, Exception):
+            # Fall back to linear if spline fails (e.g., not enough points)
+            _logger.warning(
+                f"Spline interpolation failed (possibly not enough points), falling back to linear"
+            )
+            df_interpolated = df_interpolated.interpolate(
+                method='linear',
+                limit_direction=limit_direction,
+                limit=limit
+            )
+    else:
+        # Linear or other methods - more stable
+        df_interpolated = df_interpolated.interpolate(
+            method=method,
+            limit_direction=limit_direction,
+            limit=limit
+        )
+    
+    # Fill any remaining NaNs with forward/backward fill
+    if df_interpolated.isna().sum().sum() > 0:
+        df_interpolated = df_interpolated.ffill().bfill()
+    
+    # Final fallback: fill with column mean (or 0 if all NaN)
+    if df_interpolated.isna().sum().sum() > 0:
+        df_interpolated = df_interpolated.fillna(df_interpolated.mean().fillna(0))
+    
     return df_interpolated
 
 

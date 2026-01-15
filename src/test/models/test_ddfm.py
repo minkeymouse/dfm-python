@@ -13,6 +13,7 @@ from dfm_python.utils.errors import DataError, DataValidationError, ModelNotTrai
 from dfm_python.config.constants import MIN_VARIABLES, MIN_DDFM_TIME_STEPS, DEFAULT_ENCODER_LAYERS
 from dfm_python.utils.checkpoint import infer_ddfm_input_dim, infer_input_dim_from_data
 from dfm_python.numeric.statistic import diagnose_variance_collapse
+from dfm_python.config.schema.model import DDFMConfig
 
 
 class TestDDFM:
@@ -117,6 +118,62 @@ class TestDDFM:
         # Verify window_size is set correctly
         assert model.window_size == 100
         assert model.n_mc_samples == 10
+
+    def test_ddfm_interpolation_params_from_config_are_applied(self):
+        """DDFM should prefer config interpolation settings over constructor defaults."""
+        dataset = self._create_test_dataset(num_series=5, time_steps=10)
+        cfg = DDFMConfig(
+            encoder_layers=[16, 4],
+            num_factors=2,
+            interpolation_method="linear",
+            interpolation_limit=7,
+            interpolation_limit_direction="both",
+        )
+        model = DDFM(
+            dataset=dataset,
+            config=cfg,
+            encoder_size=(16, 4),
+            interpolation_method="spline",  # should be ignored due to config
+            interpolation_limit=1,
+            interpolation_limit_direction="forward",
+        )
+        assert model.interpolation_method == "linear"
+        assert model.interpolation_limit == 7
+        assert model.interpolation_limit_direction == "both"
+
+    def test_ddfm_build_inputs_for_pretrain_is_trivial_and_interpolates(self):
+        """_build_inputs_for_pretrain should return dataset.data and optionally interpolate, without feature engineering."""
+        # Construct data with missing values to force interpolation path
+        np.random.seed(0)
+        data = pd.DataFrame(
+            np.random.randn(10, 5),
+            columns=[f"series_{i}" for i in range(5)]
+        )
+        data.iloc[1, 0] = np.nan
+        data.iloc[3, 2] = np.nan
+        dataset = DDFMDataset(
+            data=data,
+            time_idx='index',
+            target_series=list(data.columns),
+            target_scaler=None
+        )
+        model = DDFM(
+            dataset=dataset,
+            encoder_size=tuple(DEFAULT_ENCODER_LAYERS),
+            interpolation_method="linear",
+            interpolation_limit=10,
+            interpolation_limit_direction="both",
+            max_iter=1
+        )
+        out_no_interp = model._build_inputs_for_pretrain(interpolate=False)
+        assert out_no_interp.shape == dataset.data.shape
+        assert list(out_no_interp.columns) == list(dataset.data.columns)
+        assert out_no_interp.isna().sum().sum() > 0
+
+        out_interp = model._build_inputs_for_pretrain(interpolate=True)
+        assert out_interp.shape == dataset.data.shape
+        assert list(out_interp.columns) == list(dataset.data.columns)
+        assert out_interp.isna().sum().sum() == 0
     
     def test_ddfm_result_not_trained(self):
         """Test DDFM result access raises error when model not trained."""
@@ -269,7 +326,10 @@ class TestDDFM:
             prediction_std=prediction_std,
             prediction_mean=prediction_mean,
             factors_mean=factors_mean,
-            target_scaler=dataset_std.target_scaler
+            y_actual=model_std.y_actual,
+            target_scaler=dataset_std.target_scaler,
+            encoder=model_std.encoder,
+            decoder=model_std.decoder,
         )
         assert 'is_standardized' in diagnostics_std
         
@@ -277,7 +337,10 @@ class TestDDFM:
             prediction_std=prediction_std,
             prediction_mean=prediction_mean,
             factors_mean=factors_mean,
-            target_scaler=dataset_robust.target_scaler
+            y_actual=model_robust.y_actual,
+            target_scaler=dataset_robust.target_scaler,
+            encoder=model_robust.encoder,
+            decoder=model_robust.decoder,
         )
         assert 'is_standardized' in diagnostics_robust
     
@@ -298,7 +361,10 @@ class TestDDFM:
             prediction_std=[[0.1] * 5] * 50,
             prediction_mean=prediction_mean,
             factors_mean=factors_mean,
-            target_scaler=dataset.target_scaler
+            y_actual=model.y_actual,
+            target_scaler=dataset.target_scaler,
+            encoder=model.encoder,
+            decoder=model.decoder,
         )
         assert 'warnings' in diagnostics_invalid
         assert any('Invalid prediction_std type' in w for w in diagnostics_invalid['warnings'])
@@ -309,7 +375,10 @@ class TestDDFM:
             prediction_std=prediction_std_1d,
             prediction_mean=prediction_mean,
             factors_mean=factors_mean,
-            target_scaler=dataset.target_scaler
+            y_actual=model.y_actual,
+            target_scaler=dataset.target_scaler,
+            encoder=model.encoder,
+            decoder=model.decoder,
         )
         assert 'warnings' in diagnostics_1d
         assert any('1D prediction_std array' in w for w in diagnostics_1d['warnings'])
@@ -321,7 +390,10 @@ class TestDDFM:
                 prediction_std=prediction_std_empty,
                 prediction_mean=prediction_mean,
                 factors_mean=factors_mean,
-                target_scaler=dataset.target_scaler
+                y_actual=model.y_actual,
+                target_scaler=dataset.target_scaler,
+                encoder=model.encoder,
+                decoder=model.decoder,
             )
         assert 'warnings' in diagnostics_empty
         assert any('Invalid prediction_std shape' in w for w in diagnostics_empty['warnings'])
@@ -332,7 +404,10 @@ class TestDDFM:
             prediction_std=prediction_std_valid,
             prediction_mean=prediction_mean,
             factors_mean=factors_mean,
-            target_scaler=dataset.target_scaler
+            y_actual=model.y_actual,
+            target_scaler=dataset.target_scaler,
+            encoder=model.encoder,
+            decoder=model.decoder,
         )
         assert 'prediction_std_mean' in diagnostics_valid
         assert 'variance_collapse_detected' in diagnostics_valid

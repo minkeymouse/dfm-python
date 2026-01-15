@@ -12,7 +12,7 @@ from ..utils.errors import ModelNotInitializedError
 from ..utils.misc import get_config_attr
 from ..config.types import FloatArray
 from ..config.constants import DEFAULT_MIN_DELTA, DEFAULT_ZERO_VALUE
-from ..numeric.stability import ensure_symmetric
+from ..numeric.stability import ensure_symmetric, ensure_covariance_stable, ensure_process_noise_stable
 
 _logger = get_logger(__name__)
 
@@ -32,19 +32,25 @@ class DFMKalmanFilter:
     ) -> None:
         self._use_cholesky = use_cholesky
         self._pykalman = None
+        # IMPORTANT:
+        # Always go through update_parameters() so covariance stabilization is applied consistently.
+        # Previously, the constructor path would pass raw covariances to pykalman (bypassing
+        # symmetrization/regularization), which can later crash Cholesky-based smooth().
         if all(p is not None for p in [
             transition_matrices, observation_matrices,
             transition_covariance, observation_covariance,
             initial_state_mean, initial_state_covariance
         ]):
-            filter_class = PyCholeskyKalmanFilter if use_cholesky else PyKalmanFilter
-            self._pykalman = filter_class(
+            self.update_parameters(
                 transition_matrices=transition_matrices,
                 observation_matrices=observation_matrices,
                 transition_covariance=transition_covariance,
                 observation_covariance=observation_covariance,
                 initial_state_mean=initial_state_mean,
-                initial_state_covariance=initial_state_covariance
+                initial_state_covariance=initial_state_covariance,
+                # Strict PD is only needed when using Cholesky-based routines; doing this once
+                # on initialization is cheap relative to EM and prevents save-time crashes.
+                strict_pd=use_cholesky,
             )
     
     def update_parameters(
@@ -54,7 +60,8 @@ class DFMKalmanFilter:
         transition_covariance: FloatArray,
         observation_covariance: FloatArray,
         initial_state_mean: FloatArray,
-        initial_state_covariance: FloatArray
+        initial_state_covariance: FloatArray,
+        strict_pd: bool = False,
     ) -> None:
         """Update filter parameters.
         
@@ -72,11 +79,21 @@ class DFMKalmanFilter:
             Initial state mean Z_0 (m,)
         initial_state_covariance : np.ndarray
             Initial state covariance V_0 (m x m)
+        strict_pd : bool, default False
+            If True, apply O(m^3) stabilization to guarantee (near) positive definiteness.
+            This is mainly required for Cholesky-based filtering/smoothing.
         """
-        # Lightweight stabilization: add small diagonal regularization (O(m²) operation)
-        # This is used for high-frequency operations (E-step) where speed is critical.
-        # For critical matrices requiring exact PSD guarantee, use ensure_positive_definite()
-        # from numeric.stability (O(m³) eigendecomposition) instead.
+        # Keep everything in float64 for numerical stability in large state spaces.
+        # (Downstream pykalman / SciPy Cholesky is sensitive to tiny negative eigenvalues.)
+        transition_matrices = np.asarray(transition_matrices, dtype=np.float64)
+        observation_matrices = np.asarray(observation_matrices, dtype=np.float64)
+        transition_covariance = np.asarray(transition_covariance, dtype=np.float64)
+        observation_covariance = np.asarray(observation_covariance, dtype=np.float64)
+        initial_state_mean = np.asarray(initial_state_mean, dtype=np.float64)
+        initial_state_covariance = np.asarray(initial_state_covariance, dtype=np.float64)
+
+        # Lightweight stabilization: add small diagonal regularization (O(m²) operation).
+        # Used for high-frequency operations (EM iterations) where speed is critical.
         from ..config.constants import MIN_EIGENVALUE
         reg = MIN_EIGENVALUE * 10  # 1e-5
         
@@ -95,6 +112,26 @@ class DFMKalmanFilter:
         initial_state_covariance = initial_state_covariance + np.eye(
             initial_state_covariance.shape[0], dtype=initial_state_covariance.dtype
         ) * reg
+
+        # Strict stabilization: guarantee (near) PD when needed.
+        # We do this only when explicitly requested (e.g., Cholesky-based filter/smoother).
+        if strict_pd:
+            # Ensure Q (process noise) is bounded and PD; keep float64.
+            transition_covariance = ensure_process_noise_stable(
+                transition_covariance,
+                min_eigenval=max(1e-10, float(MIN_EIGENVALUE)),
+                warn=True,
+                dtype=np.float64,
+            )
+            # Ensure R and V0 are PD; keep float64.
+            observation_covariance = ensure_covariance_stable(
+                observation_covariance,
+                min_eigenval=max(1e-10, float(MIN_EIGENVALUE)),
+            ).astype(np.float64)
+            initial_state_covariance = ensure_covariance_stable(
+                initial_state_covariance,
+                min_eigenval=max(1e-10, float(MIN_EIGENVALUE)),
+            ).astype(np.float64)
         
         if self._pykalman is None:
             filter_class = PyCholeskyKalmanFilter if self._use_cholesky else PyKalmanFilter

@@ -66,7 +66,7 @@ from ..config.constants import (
     DEFAULT_TARGET_DDFM_LOSS,
     DEFAULT_DDFM_LOSS_MULTIPLIER,
 )
-from ..utils.errors import ModelNotTrainedError, ModelNotInitializedError, ConfigurationError
+from ..utils.errors import ModelNotTrainedError, ModelNotInitializedError, ConfigurationError, NumericalError
 from ..utils.validation import check_condition
 from ..numeric.validator import validate_horizon, validate_no_nan_inf, validate_update_data_shape
 from ..numeric.estimator import forecast_ar1_factors
@@ -98,6 +98,9 @@ class DDFM(BaseFactorModel, nn.Module):
         tolerance: float = DEFAULT_TOLERANCE,
         disp: int = DEFAULT_DISP,
         min_target_interporate_ratio: Optional[float] = DEFAULT_MIN_TARGET_INTERPOLATE_RATIO,
+        interpolation_method: str = 'linear',
+        interpolation_limit: Optional[int] = 10,
+        interpolation_limit_direction: str = 'both',
     ):
         """Initialize DDFM model."""
         BaseFactorModel.__init__(self)
@@ -133,6 +136,16 @@ class DDFM(BaseFactorModel, nn.Module):
         
         self.target_scaler = dataset.target_scaler
         self.min_target_interporate_ratio = min_target_interporate_ratio
+        
+        # Interpolation parameters (extract from config if available, otherwise use defaults)
+        if config is not None and hasattr(config, 'interpolation_method'):
+            self.interpolation_method = config.interpolation_method
+            self.interpolation_limit = config.interpolation_limit
+            self.interpolation_limit_direction = config.interpolation_limit_direction
+        else:
+            self.interpolation_method = interpolation_method
+            self.interpolation_limit = interpolation_limit
+            self.interpolation_limit_direction = interpolation_limit_direction
         
         # Calculate dimensions using dataset shape properties
         # input_dim = X features + y targets (full_input concatenates them)
@@ -297,34 +310,28 @@ class DDFM(BaseFactorModel, nn.Module):
     def _build_inputs_for_pretrain(self, interpolate: bool = True) -> pd.DataFrame:
         """Build inputs for pre-training.
         
-        For lags_input=0, returns the data (no lagged features).
-        For lags_input > 0, creates lagged features.
+        Returns the data as-is (user provides data with lagged features if needed).
+        Optionally interpolates missing values.
         
         Parameters
         ----------
         interpolate : bool
-            Whether to interpolate missing values using spline interpolation
+            Whether to interpolate missing values using configured interpolation method
             
         Returns
         -------
         pd.DataFrame
-            Full input data (X + y) with lagged features (if lags_input > 0) and optionally interpolated
+            Input data, optionally interpolated
         """
-        if self.lags_input == 0:
-            full_input_data = self._dataset.data.copy()
-        else:
-            # Create lagged features
-            new_dict = {}
-            for col_name in self._dataset.data.columns:
-                new_dict[col_name] = self._dataset.data[col_name]
-                for lag in range(self.lags_input):
-                    new_dict[f'{col_name}_lag{lag + 1}'] = self._dataset.data[col_name].shift(lag + 1)
-            full_input_data = pd.DataFrame(new_dict, index=self._dataset.data.index)
-            # Drop initial nans from lagging
-            full_input_data = full_input_data[self.lags_input:]
+        full_input_data = self._dataset.data.copy()
         
         if interpolate and full_input_data.isna().sum().sum() > 0:
-            full_input_data = full_input_data.interpolate(method='spline', limit_direction='both', order=3)
+            full_input_data = interpolate_dataframe(
+                full_input_data,
+                method=self.interpolation_method,
+                limit=self.interpolation_limit,
+                limit_direction=self.interpolation_limit_direction
+            )
         
         return full_input_data
     
@@ -362,7 +369,12 @@ class DDFM(BaseFactorModel, nn.Module):
     
     def _initialize_mcmc_state(self) -> Tuple[np.ndarray, Optional[np.ndarray]]:
         """Initialize MCMC state: interpolate data, make initial prediction, compute initial eps."""
-        self.data_denoised_interpolated = interpolate_dataframe(self.data_denoised)
+        self.data_denoised_interpolated = interpolate_dataframe(
+            self.data_denoised,
+            method=self.interpolation_method,
+            limit=self.interpolation_limit,
+            limit_direction=self.interpolation_limit_direction
+        )
         self.data_imputed = self.data_denoised_interpolated.copy()
         
         # Match TensorFlow: build_inputs() then predict on full input data
@@ -395,7 +407,10 @@ class DDFM(BaseFactorModel, nn.Module):
         # For all-targets case, y_pred_full is already full shape
         # eps = y_actual_full - y_pred_full (idiosyncratic residuals)
         if self.lags_input == 0:
-            y_actual_full = to_numpy(self.data)
+            # IMPORTANT: use interpolated data for residuals so eps does not contain NaNs
+            # Mixed-frequency data can have large missing blocks; eps NaNs propagate into AR-idio
+            # estimation and can cause SVD failures when building the state space.
+            y_actual_full = to_numpy(self.data_denoised_interpolated)
         else:
             # If lags_input > 0, extract only original columns (matching TensorFlow's self.data.columns)
             y_actual_full = full_input_data[self._dataset.data.columns].values
@@ -477,28 +492,34 @@ class DDFM(BaseFactorModel, nn.Module):
         y_pred_prev, y_pred_prev_full = self._initialize_mcmc_state()
         if self._dataset.all_columns_are_targets:
             # All columns are targets
-            self.y_actual = self.data.values[self.lags_input:]
+            # Use interpolated data to avoid NaNs in convergence and diagnostics
+            self.y_actual = self.data_denoised_interpolated.values[self.lags_input:]
         else:
             # Only some columns are targets: use target columns from original data starting from lags_input
             # For non-target case, we need to extract target columns from self.data
-            self.y_actual = self.data.values[self.lags_input:, self.target_indices]
+            self.y_actual = self.data_denoised_interpolated.values[self.lags_input:, self.target_indices]
         
         converged = False
         self._num_iter = 0
         self.prediction_std = None
         self.factor_std = None
         while not converged and self._num_iter < self.max_iter:
-            Phi, mu_eps, std_eps = get_idio(self.eps, self._dataset.observed_y)
+            Phi, mu_eps, std_eps = get_idio(self.eps, self._dataset.observed_y, min_obs=1)
             # Denoise: subtract conditional AR-idio mean from target series only
             # Features (X) are only used for encoder input, not for denoising
             # eps @ Phi gives (T-1, num_target_series), update only target columns
             eps_denoise = self.eps[:-1, :] @ Phi  # (T-1, num_target_series)
             self.data_denoised.values[self.lags_input+1:, self.target_indices] = \
                 self.data_imputed.values[self.lags_input+1:, self.target_indices] - eps_denoise
-            self.data_denoised_interpolated = interpolate_dataframe(self.data_denoised)
+            self.data_denoised_interpolated = interpolate_dataframe(
+                self.data_denoised,
+                method=self.interpolation_method,
+                limit=self.interpolation_limit,
+                limit_direction=self.interpolation_limit_direction
+            )
             
             # Generate MC samples using denoised data
-            X_features_df, y_tmp = self._dataset.split_features_and_targets(self.data_denoised)
+            X_features_df, y_tmp = self._dataset.split_features_and_targets(self.data_denoised_interpolated)
             X_features = X_features_df if X_features_df is not None else pd.DataFrame()
             
             autoencoder_datasets = self._dataset.create_autoencoder_datasets_list(
@@ -633,17 +654,62 @@ class DDFM(BaseFactorModel, nn.Module):
         """Build state-space model from trained autoencoder."""
         f_t = self._get_averaged_factors()
         eps_t = self.eps
+        
+        # Validate factors and residuals
+        if f_t is None or len(f_t) == 0:
+            raise ModelNotTrainedError(
+                f"{self.__class__.__name__}: Cannot build state space - factors are empty. "
+                "Model must be trained before building state space."
+            )
+        if eps_t is None or len(eps_t) == 0:
+            raise ModelNotTrainedError(
+                f"{self.__class__.__name__}: Cannot build state space - residuals are empty. "
+                "Model must be trained before building state space."
+            )
+        
+        # Check for non-finite values
+        if not np.all(np.isfinite(f_t)):
+            _logger.warning(
+                f"build_state_space: Factors contain non-finite values. "
+                "Replacing with zeros to allow state space construction."
+            )
+            f_t = np.nan_to_num(f_t, nan=0.0, posinf=0.0, neginf=0.0)
+        
+        if not np.all(np.isfinite(eps_t)):
+            _logger.warning(
+                f"build_state_space: Residuals contain non-finite values. "
+                "Replacing with zeros to allow state space construction."
+            )
+            eps_t = np.nan_to_num(eps_t, nan=0.0, posinf=0.0, neginf=0.0)
+        
         num_factors = f_t.shape[1]
         
         linear_layer = self.decoder.get_last_linear_layer()
         weight = to_numpy(linear_layer.weight.data)
+        
+        if weight.shape[1] < num_factors:
+            raise ValueError(
+                f"build_state_space: Decoder weight shape {weight.shape} incompatible with "
+                f"{num_factors} factors. Expected at least {num_factors} columns."
+            )
         
         H = weight[:, :num_factors]
         
         # Get transition equation params (factor_order is fixed to 1)
         # F_full includes both factors and idiosyncratic components: shape (m + N, m + N)
         # Use dataset's observed_y directly (target columns only)
-        F_full, Q_full, mu_0_full, Sigma_0_full, _ = get_transition_params(f_t, eps_t, bool_no_miss=self._dataset.observed_y)
+        try:
+            F_full, Q_full, mu_0_full, Sigma_0_full, _ = get_transition_params(
+                f_t, eps_t, bool_no_miss=self._dataset.observed_y
+            )
+        except (np.linalg.LinAlgError, ValueError) as e:
+            raise NumericalError(
+                f"{self.__class__.__name__}: Failed to estimate transition parameters. "
+                f"Error: {type(e).__name__}: {str(e)}. "
+                "This may indicate numerical instability in factor estimation. "
+                "Consider: (1) Checking data quality, (2) Reducing number of factors, "
+                "(3) Increasing training iterations."
+            ) from e
         
         # F_full structure: [[A_f, 0], [0, Phi]] where A_f is (m x m) factor transition
         F = F_full[:num_factors, :num_factors]  # Factor transition matrix (m x m)
@@ -733,7 +799,14 @@ class DDFM(BaseFactorModel, nn.Module):
             Loaded DDFM model instance
         """
         path = Path(path)
-        checkpoint = torch.load(path, map_location='cpu')
+        # PyTorch 2.6+ defaults torch.load(..., weights_only=True), which blocks
+        # unpickling non-tensor objects (e.g., our config dataclass) unless allowlisted.
+        # These checkpoints are produced locally by this project, so load them fully.
+        try:
+            checkpoint = torch.load(path, map_location='cpu', weights_only=False)
+        except TypeError:
+            # Older PyTorch versions don't support weights_only
+            checkpoint = torch.load(path, map_location='cpu')
         
         # Extract architecture and config
         encoder_size = checkpoint.get('encoder_size')
@@ -748,8 +821,24 @@ class DDFM(BaseFactorModel, nn.Module):
             decoder_type=decoder_type
         )
         
+        # Build autoencoder modules before loading state_dict so attributes exist
+        # (needed for update()/predict() paths that use encoder/decoder).
+        model.autoencoder = SimpleAutoencoder.build(
+            input_dim=model.input_dim,
+            encoder_size=model.encoder_size,
+            decoder_size=model.decoder_size,
+            decoder_type=model.decoder_type,
+            output_dim=model.output_dim,
+            activation=model.activation,
+            seed=model.initializer_seed
+        )
+        model.encoder = model.autoencoder.encoder
+        model.decoder = model.autoencoder.decoder
+        
         # Load PyTorch state
         model.load_state_dict(checkpoint['state_dict'], strict=False)
+        # Ensure modules are on the same device expected by update()/predict()
+        model.autoencoder.to(model.device)
         
         # Restore dataclasses
         model.training_state = checkpoint.get('training_state', DDFMTrainingState())
@@ -763,6 +852,13 @@ class DDFM(BaseFactorModel, nn.Module):
             model._num_iter = model.training_state.num_iter
             model.loss_now = model.training_state.loss_now
             model._converged = model.training_state.converged
+        
+        # Reconstruct runtime attributes needed for update()/forecast paths
+        # (these are not part of state_dict/training_state but are expected by methods).
+        model.data = model._dataset.data.copy()
+        model.target_indices = model._dataset.target_indices
+        if not model._dataset.all_columns_are_targets:
+            model._target_col_tensor = torch.tensor(model.target_indices, device=model.device, dtype=torch.long)
         
         # Restore result
         if checkpoint.get('result') is not None:
@@ -821,6 +917,9 @@ class DDFM(BaseFactorModel, nn.Module):
         params = self.state_space_params
         F = params.F  # Transition matrix (m x m)
         H = params.H  # Observation matrix (N x m) where N is num_target_series
+        # Defensive: training instability can introduce NaNs/Infs in state-space params
+        F = np.nan_to_num(F, nan=0.0, posinf=0.0, neginf=0.0)
+        H = np.nan_to_num(H, nan=0.0, posinf=0.0, neginf=0.0)
         
         # Get last factor state from training (average across MC samples)
         factors_avg = self._get_averaged_factors()
@@ -828,6 +927,9 @@ class DDFM(BaseFactorModel, nn.Module):
         # Get last factor state: (num_factors,)
         # Use last row if factors exist, otherwise use initial state
         Z_last = factors_avg[-1, :] if len(factors_avg) > 0 else params.mu_0
+        # Defensive: factors can contain NaNs if upstream training/update was numerically unstable.
+        # Replace with 0s so forecasting can still proceed (reporting/evaluation use-case).
+        Z_last = np.nan_to_num(Z_last, nan=0.0, posinf=0.0, neginf=0.0)
         
         # Validate factor state
         validate_no_nan_inf(Z_last, name="last factor state Z_last")
@@ -854,6 +956,7 @@ class DDFM(BaseFactorModel, nn.Module):
         
         # Scaler is already fitted in dataset.__init__, just apply inverse transform
         y_forecast = target_scaler.inverse_transform(y_forecast_std)
+        y_forecast = np.nan_to_num(y_forecast, nan=0.0, posinf=0.0, neginf=0.0)
         
         # Ensure numpy array and validate
         y_forecast = np.asarray(y_forecast, dtype=DEFAULT_DTYPE)
@@ -947,7 +1050,33 @@ class DDFM(BaseFactorModel, nn.Module):
         
         # Validate dataset has same number of features
         # DDFMDataset has self.data (DataFrame), not data_processed attribute
-        new_data = np.asarray(dataset.data.values)
+        # Ensure no NaNs/Infs are fed into the encoder during update.
+        # Mixed-frequency data updates often include missing values; without interpolation,
+        # encoder outputs NaNs and forecasting fails.
+        new_data_df = dataset.data.copy()
+        if new_data_df.isna().sum().sum() > 0:
+            new_data_df = interpolate_dataframe(
+                new_data_df,
+                method=self.interpolation_method,
+                limit=self.interpolation_limit,
+                limit_direction=self.interpolation_limit_direction
+            )
+        
+        # Ensure update data is scaled with training scalers
+        try:
+            target_scaler = self._get_target_scaler()
+            feature_scaler = getattr(self._dataset, "feature_scaler", None)
+            target_cols = list(self._dataset.target_series)
+            feature_cols = [c for c in new_data_df.columns if c not in target_cols]
+            if target_scaler is not None and target_cols:
+                target_vals = target_scaler.transform(new_data_df[target_cols].values)
+                new_data_df[target_cols] = target_vals
+            if feature_scaler is not None and feature_cols:
+                feature_vals = feature_scaler.transform(new_data_df[feature_cols].values)
+                new_data_df[feature_cols] = feature_vals
+        except Exception:
+            pass
+        new_data = np.asarray(new_data_df.values)
         training_data = np.asarray(self.data.values)
         validate_update_data_shape(
             data=new_data,

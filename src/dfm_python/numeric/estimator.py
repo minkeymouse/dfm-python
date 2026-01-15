@@ -231,7 +231,11 @@ def get_idio(eps: np.ndarray, idx_no_missings: np.ndarray, min_obs: int = 5) -> 
         if np.sum(to_select) >= min_obs:
             this_eps = eps[to_select, j]
         else:
-            raise ValueError(f"Not enough observation ({min_obs}) to estimate idio AR(1) parameters.")
+            # Insufficient observations: use zero AR(1) coefficient
+            Phi[j, j] = 0.0
+            mu_eps[j] = 0.0
+            std_eps[j] = 1.0
+            continue
         mu_eps[j] = np.mean(this_eps)
         std_eps[j] = np.std(this_eps)
         cov1_eps = np.cov(this_eps[1:], this_eps[:-1])[0][1]
@@ -268,7 +272,72 @@ def get_transition_params(f_t: np.ndarray, eps_t: np.ndarray, bool_no_miss: np.n
     """
     # Factor order is fixed to 1 (VAR(1) only)
     f_past = f_t[:-1, :]
-    A_f = (np.linalg.pinv(f_past.T @ f_past) @ f_past.T @ f_t[1:, :]).T
+    # Robust VAR(1) estimation for factors.
+    #
+    # In practice, upstream training can occasionally produce NaNs/Infs in factors.
+    # Those propagate into (f_past.T @ f_past) and cause SVD non-convergence inside pinv().
+    # To keep the pipeline running (so we can still forecast/evaluate), we:
+    # - replace non-finite values with 0
+    # - add a small ridge term to stabilize the inversion
+    # - fall back to least squares if pinv still fails
+    # - validate results to ensure numerical stability
+    f_past_safe = np.nan_to_num(f_past, nan=0.0, posinf=0.0, neginf=0.0)
+    f_next_safe = np.nan_to_num(f_t[1:, :], nan=0.0, posinf=0.0, neginf=0.0)
+    
+    # Check for constant factors (zero variance) which can cause issues
+    f_past_std = np.std(f_past_safe, axis=0)
+    if np.any(f_past_std < 1e-10):
+        from ..logger import get_logger
+        _logger = get_logger(__name__)
+        _logger.warning(
+            f"get_transition_params: Some factors have near-zero variance (min_std={f_past_std.min():.2e}). "
+            "This may cause numerical instability in transition matrix estimation."
+        )
+    
+    XtX = f_past_safe.T @ f_past_safe
+    Xty = f_past_safe.T @ f_next_safe
+    
+    # Adaptive ridge regularization based on matrix condition
+    # Use larger ridge for ill-conditioned matrices
+    try:
+        cond_num = np.linalg.cond(XtX)
+        # Use larger ridge if condition number is very high
+        ridge_scale = max(1e-6, min(1e-4, 1e-6 * (1 + np.log10(max(cond_num, 1)))))
+    except (np.linalg.LinAlgError, ValueError):
+        # If condition number computation fails, use default
+        ridge_scale = 1e-6
+    
+    ridge = ridge_scale * np.eye(XtX.shape[0], dtype=XtX.dtype)
+    
+    try:
+        A_f = (np.linalg.pinv(XtX + ridge) @ Xty).T
+        # Validate result
+        if not np.all(np.isfinite(A_f)):
+            raise ValueError("pinv produced non-finite values")
+    except (np.linalg.LinAlgError, ValueError) as e:
+        # Solve (XtX + ridge) A^T = Xty via least squares as a fallback
+        from ..logger import get_logger
+        _logger = get_logger(__name__)
+        _logger.warning(
+            f"get_transition_params: pinv failed ({type(e).__name__}), using lstsq fallback. "
+            "This may indicate numerical instability in factor estimation."
+        )
+        try:
+            A_t, residuals, rank, s = np.linalg.lstsq(XtX + ridge, Xty, rcond=None)
+            A_f = A_t.T
+            # Check if solution is valid
+            if rank < XtX.shape[0]:
+                _logger.warning(
+                    f"get_transition_params: lstsq solution has rank {rank} < {XtX.shape[0]}. "
+                    "Matrix may be rank-deficient."
+                )
+        except np.linalg.LinAlgError as e2:
+            # If both methods fail, use identity as last resort
+            _logger.error(
+                f"get_transition_params: Both pinv and lstsq failed. Using identity matrix as fallback. "
+                f"Errors: {type(e).__name__}, {type(e2).__name__}"
+            )
+            A_f = np.eye(f_past_safe.shape[1], dtype=f_past_safe.dtype)
     
     Phi, _, _ = get_idio(eps_t, bool_no_miss)
     

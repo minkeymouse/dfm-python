@@ -192,6 +192,7 @@ class DFM(BaseFactorModel):
         # Training state
         self.data_processed: Optional[np.ndarray] = None
         self.target_scaler: Optional[Any] = None  # Fitted sklearn scaler for target series inverse transformation
+        self._target_series: Optional[List[str]] = None  # Saved target series list for prediction (Fix 3)
     
     def _create_temp_config(self, block_name: Optional[str] = None) -> DFMConfig:
         """Create a temporary configuration for model initialization.
@@ -973,6 +974,11 @@ class DFM(BaseFactorModel):
             self._dataset = dataset
             from ..utils.misc import get_target_scaler
             self.target_scaler = get_target_scaler(dataset=dataset)
+            # Save target_series for checkpoint
+            if hasattr(dataset, 'target_series') and dataset.target_series:
+                self._target_series = [dataset.target_series] if isinstance(dataset.target_series, str) else list(dataset.target_series)
+            else:
+                self._target_series = None
             
             init_params = dataset.get_initialization_params()
             if self._mixed_freq is None:
@@ -1202,6 +1208,10 @@ class DFM(BaseFactorModel):
         DFMResult
             Estimation results with parameters, factors, and diagnostics
         """
+        # Return cached result if available (avoids expensive recomputation)
+        if self._result is not None:
+            return self._result
+        
         # Compute smoothed factors (validates training_state and data_processed internally)
         Z = self._compute_smoothed_factors()
         
@@ -1225,7 +1235,7 @@ class DFM(BaseFactorModel):
         num_iter = getattr(self, '_training_num_iter', 0)
         loglik = getattr(self, '_training_loglik', 0.0)
         
-        return DFMResult(
+        result = DFMResult(
             x_sm=x_sm, Z=Z, C=C, R=R, A=A, Q=Q,
             target_scaler=target_scaler,
             Z_0=Z_0, V_0=V_0, r=self.r, p=self.p,
@@ -1233,6 +1243,10 @@ class DFM(BaseFactorModel):
             num_iter=num_iter,
             loglik=loglik
         )
+        
+        # Cache result to avoid recomputation
+        self._result = result
+        return result
     
     
     def update(self, data: Union[np.ndarray, Any]) -> None:
@@ -1488,7 +1502,7 @@ class DFM(BaseFactorModel):
         validate_no_nan_inf(C, name="observation matrix C")
         
         from ..utils.misc import resolve_target_series
-        series_ids = self._config.get_series_ids() if self._config is not None else result.series_ids
+        series_ids = self._config.get_series_ids() if self._config is not None else None
         dataset = None
         try:
             dataset = self._get_dataset()
@@ -1496,11 +1510,16 @@ class DFM(BaseFactorModel):
             pass
         target_series, target_indices = resolve_target_series(dataset, series_ids, result, self.__class__.__name__)
         
-        # Additional validation: ensure target_series was set in Dataset
         if target_series is None or len(target_series) == 0:
             raise ValueError(
                 "DFM prediction failed: no target_series found in Dataset. "
-                "Please set target_series when creating the Dataset (e.g., DFMDataset(..., target_series=['series_id']))."
+                "Please set target_series when creating the Dataset."
+            )
+        
+        if target_indices is None:
+            raise ValueError(
+                "DFM prediction failed: could not resolve target_indices. "
+                "Ensure model config has series_ids."
             )
         
         from ..numeric.estimator import forecast_ar1_factors
@@ -1515,6 +1534,14 @@ class DFM(BaseFactorModel):
         
         # Unscale target series using fitted scaler if available
         if target_scaler is not None and hasattr(target_scaler, 'inverse_transform'):
+            if hasattr(target_scaler, 'n_features_in_'):
+                expected_features = target_scaler.n_features_in_
+                actual_features = X_forecast_std.shape[1] if X_forecast_std.ndim > 1 else 1
+                if expected_features != actual_features:
+                    raise ValueError(
+                        f"target_scaler expects {expected_features} features, but forecast has {actual_features}. "
+                        "Ensure target_series matches training target_series."
+                    )
             X_forecast = target_scaler.inverse_transform(X_forecast_std)
         else:
             X_forecast = X_forecast_std
@@ -1587,12 +1614,18 @@ class DFM(BaseFactorModel):
         path.parent.mkdir(parents=True, exist_ok=True)
         
         # Get result dataclass if model is trained
+        # Always try to save result to checkpoint to avoid expensive recomputation on load
         result = None
         if self.training_state is not None:
-            try:
-                result = self.get_result()
-            except (ModelNotTrainedError, ModelNotInitializedError):
-                pass
+            # Use cached _result if available (avoids expensive recomputation)
+            if self._result is not None:
+                result = self._result
+            else:
+                # Only compute if _result is not cached
+                try:
+                    result = self.get_result()
+                except (ModelNotTrainedError, ModelNotInitializedError):
+                    pass
         
         # Collect checkpoint using dataclasses
         checkpoint = {
@@ -1606,6 +1639,7 @@ class DFM(BaseFactorModel):
             'nan_k': self.nan_k,
             'data_processed': self.data_processed,
             'target_scaler': self.target_scaler,
+            'target_series': getattr(self, '_target_series', None),
             # Training metadata stored as simple fields
             'training_loglik': getattr(self, '_training_loglik', None),
             'training_num_iter': getattr(self, '_training_num_iter', None),
@@ -1792,6 +1826,7 @@ class DFM(BaseFactorModel):
         # Restore data and preprocessing
         model.data_processed = checkpoint.get('data_processed')
         model.target_scaler = checkpoint.get('target_scaler')
+        model._target_series = checkpoint.get('target_series')
         
         # Restore result
         if checkpoint.get('result') is not None:

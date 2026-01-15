@@ -153,26 +153,76 @@ class PCAEncoder(BaseEncoder):
             
             # Use SVD for efficient low-rank PCA (NumPy equivalent of torch.pca_lowrank)
             try:
+                # Check for NaN/Inf values before SVD
+                if np.any(~np.isfinite(X_centered)):
+                    raise ValueError("Input contains non-finite values")
+                
+                # Check for zero variance columns (can cause SVD issues)
+                col_stds = np.std(X_centered, axis=0)
+                if np.any(col_stds < 1e-10):
+                    _logger.warning(
+                        f"PCA: Some columns have near-zero variance (min_std={col_stds.min():.2e}). "
+                        "This may cause SVD convergence issues. Consider removing constant columns."
+                    )
+                
                 # Use truncated SVD for efficiency
-                U, S, Vt = np.linalg.svd(X_centered, full_matrices=False)
+                # Use hermitian=False explicitly for clarity
+                U, S, Vt = np.linalg.svd(X_centered, full_matrices=False, hermitian=False)
+                
+                # Validate SVD results
+                if not np.all(np.isfinite(S)):
+                    raise ValueError("SVD produced non-finite singular values")
+                
                 # Take top n_components
-                U = U[:, :self.n_components]
-                S = S[:self.n_components]
-                Vt = Vt[:self.n_components, :]
+                n_components_actual = min(self.n_components, len(S))
+                if n_components_actual < self.n_components:
+                    _logger.warning(
+                        f"PCA: Requested {self.n_components} components but only {len(S)} available. "
+                        f"Using {n_components_actual} components."
+                    )
+                
+                U = U[:, :n_components_actual]
+                S = S[:n_components_actual]
+                Vt = Vt[:n_components_actual, :]
                 
                 # Vt contains the principal components (eigenvectors) as rows
                 # Transpose to get (N x n_components)
                 self.eigenvectors = Vt.T
                 # Convert singular values to eigenvalues
                 self.eigenvalues = S ** 2
+                
             except (ValueError, np.linalg.LinAlgError) as e:
                 # Fallback: compute covariance and use eigendecomposition
-                _logger.warning(f"PCA SVD failed, falling back to eigendecomposition. Error: {type(e).__name__}")
-                T = X_centered.shape[0]
-                self.cov_matrix = (X_centered.T @ X_centered) / (T - 1)
-                self.eigenvalues, self.eigenvectors = compute_principal_components(
-                    self.cov_matrix, self.n_components, block_idx=self.block_idx
+                error_msg = str(e) if str(e) else type(e).__name__
+                _logger.warning(
+                    f"PCA SVD failed ({error_msg}), falling back to eigendecomposition. "
+                    "This may be due to numerical instability or ill-conditioned data."
                 )
+                
+                # Clean data for covariance computation
+                X_centered_clean = np.nan_to_num(X_centered, nan=0.0, posinf=0.0, neginf=0.0)
+                T = X_centered_clean.shape[0]
+                
+                # Compute covariance with regularization for stability
+                cov_raw = (X_centered_clean.T @ X_centered_clean) / max(T - 1, 1)
+                
+                # Add small regularization to diagonal for numerical stability
+                reg = 1e-8 * np.eye(cov_raw.shape[0], dtype=cov_raw.dtype)
+                self.cov_matrix = cov_raw + reg
+                
+                try:
+                    self.eigenvalues, self.eigenvectors = compute_principal_components(
+                        self.cov_matrix, self.n_components, block_idx=self.block_idx
+                    )
+                except (ValueError, np.linalg.LinAlgError) as e2:
+                    # If eigendecomposition also fails, raise with helpful message
+                    raise RuntimeError(
+                        f"PCA failed: Both SVD and eigendecomposition failed. "
+                        f"Original error: {error_msg}, Eigendecomposition error: {str(e2)}. "
+                        "This may indicate severely ill-conditioned data. "
+                        "Consider: (1) Removing constant/near-constant columns, "
+                        "(2) Checking for outliers, (3) Using fewer components."
+                    ) from e2
         
         return self
     

@@ -1011,8 +1011,17 @@ def _update_process_noise(EZ: np.ndarray, A_new: np.ndarray, Q: np.ndarray, conf
         Q_new = np.array([[np.var(residuals, axis=0)]])
     else:
         Q_new = np.cov(residuals.T)
-    Q_new = ensure_process_noise_stable(Q_new, min_eigenval=config.min_variance, warn=True, dtype=np.float32)
-    return np.maximum(Q_new, create_scaled_identity(m, config.min_variance))
+    # Keep float64 to avoid reintroducing tiny negative eigenvalues after stabilization.
+    Q_new = ensure_process_noise_stable(Q_new, min_eigenval=config.min_variance, warn=True, dtype=np.float64)
+    # IMPORTANT: Do NOT use elementwise max with an identity matrix; that can break PSD/PD.
+    # If we need a floor, add a diagonal bump (PSD-preserving).
+    if Q_new.size > 0:
+        Q_new = ensure_symmetric(Q_new)
+        diag = np.diag(Q_new)
+        bump = np.maximum(0.0, config.min_variance - diag)
+        if np.any(bump > 0):
+            Q_new = Q_new + np.diag(bump)
+    return Q_new
 
 
 def _update_observation_noise(X: np.ndarray, EZ: np.ndarray, C_new: np.ndarray, config: EMConfig) -> np.ndarray:
@@ -1271,7 +1280,8 @@ def em_step(
         # CRITICAL: Cap Q_new after assembly to ensure full matrix stability
         # Individual blocks are capped, but assembled Q_new may still exceed limits
         # due to idiosyncratic components or numerical issues during assembly
-        Q_new = ensure_process_noise_stable(Q_new, min_eigenval=config.min_variance, warn=True, dtype=np.float32)
+        # Keep float64 for stability (avoid float32 reintroducing tiny negative eigenvalues).
+        Q_new = ensure_process_noise_stable(Q_new, min_eigenval=config.min_variance, warn=True, dtype=np.float64)
         
         # Blocked observation matrix update
         if verbose_iterations:

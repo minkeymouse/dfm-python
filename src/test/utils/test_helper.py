@@ -2,7 +2,9 @@
 
 import pytest
 import numpy as np
+import pandas as pd
 from dfm_python.utils.helper import handle_linear_algebra_error
+from dfm_python.utils.helper import interpolate_dataframe
 from dfm_python.utils.misc import get_config_attr
 from dfm_python.utils.errors import ConfigValidationError
 
@@ -161,6 +163,25 @@ class TestGetConfigAttr:
         """Test getting required attribute from None config raises ConfigValidationError."""
         with pytest.raises(ConfigValidationError, match="Config is None"):
             get_config_attr(None, 'required_attr', required=True)
+
+class TestInterpolateDataFrame:
+    """Test suite for interpolate_dataframe."""
+
+    def test_interpolate_dataframe_linear_fills_missing(self):
+        df = pd.DataFrame(
+            {
+                "a": [1.0, np.nan, 3.0, np.nan, 5.0],
+                "b": [2.0, np.nan, np.nan, 8.0, 10.0],
+            }
+        )
+        out = interpolate_dataframe(df, method="linear", limit=10, limit_direction="both")
+        assert out.isna().sum().sum() == 0
+
+    def test_interpolate_dataframe_spline_fallback_does_not_error(self):
+        # Spline with order=3 needs enough points; this should trigger fallback-to-linear path
+        df = pd.DataFrame({"a": [1.0, np.nan, 3.0, np.nan, 5.0]})
+        out = interpolate_dataframe(df, method="spline", limit=10, limit_direction="both")
+        assert out.isna().sum().sum() == 0
 
 
 
