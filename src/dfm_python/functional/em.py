@@ -1233,7 +1233,7 @@ def em_step(
         _logger.info(f"    E-step: Running Kalman filter + smoother (T={T}, N={N}, m={m}, ~{ops_estimate:.1f}B ops)...")
         _logger.info(f"    E-step: Filter is fast (~1s), but smooth may take 5-7 minutes (bottleneck)")
     EZ, V_smooth, VVsmooth, loglik = kalman_filter.filter_and_smooth(X_masked)
-    
+
     # Keep float64 for numerical stability (prevents V_smooth accumulation overflow)
     # Do NOT convert to float32 - maintain float64 precision throughout M-step
     # Float64 is critical for large state spaces (m=183) and long time series (T=2135)

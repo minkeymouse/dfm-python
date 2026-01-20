@@ -1319,7 +1319,33 @@ class DFM(BaseFactorModel):
         
         # Run filter and smooth on new data
         y_masked = np.ma.masked_invalid(data_new)
-        Z_new, V_smooth_new, _, _ = kalman_new.filter_and_smooth(y_masked)
+
+        # ------------------------------------------------------------------
+        # IMPORTANT (pykalman quirk):
+        # pykalman.KalmanFilter._parse_observations() transposes when input has
+        # shape (1, n_dim_obs), interpreting it as (n_dim_obs, 1). For our
+        # update() case, (1, N) means 1 timestep with N series. This transpose
+        # causes n_dim_obs=1 and breaks CholeskyKalmanFilter internals.
+        #
+        # Workaround: for a single new timestep, use filter_update() directly
+        # with a 1D observation vector (n_dim_obs,), avoiding _parse_observations.
+        # ------------------------------------------------------------------
+        if hasattr(data_new, "shape") and len(data_new.shape) == 2 and int(data_new.shape[0]) == 1:
+            pk = getattr(kalman_new, "_pykalman", None)
+            if pk is None:
+                raise ModelNotTrainedError("Kalman filter not initialized for update()")
+
+            # 1D observation vector for this timestep
+            obs = np.ma.masked_invalid(data_new[0])
+            next_mean, _next_cov = pk.filter_update(
+                filtered_state_mean=Z_last,
+                filtered_state_covariance=V_last,
+                observation=obs,
+            )
+            Z_new = np.asarray(next_mean, dtype=DEFAULT_DTYPE)[np.newaxis, :]
+            V_smooth_new = None
+        else:
+            Z_new, V_smooth_new, _, _ = kalman_new.filter_and_smooth(y_masked)
         
         # Update model state: append new factors and data
         # Concatenate new factors to existing result.Z
@@ -1509,6 +1535,18 @@ class DFM(BaseFactorModel):
         except (ModelNotInitializedError, AttributeError):
             pass
         target_series, target_indices = resolve_target_series(dataset, series_ids, result, self.__class__.__name__)
+
+        # Fallback: If no Dataset is attached, use config.target_series.
+        # This is needed for checkpoints used in external pipelines where dataset.pkl
+        # is missing or not attached to the model instance.
+        if (target_series is None or len(target_series) == 0 or target_indices is None) and getattr(self, "_config", None) is not None:
+            cfg_ts = getattr(self._config, "target_series", None)
+            if cfg_ts is not None:
+                cfg_ts_list = cfg_ts if isinstance(cfg_ts, list) else [cfg_ts]
+                cfg_indices = [series_ids.index(t) for t in cfg_ts_list if series_ids is not None and t in series_ids]
+
+                if cfg_indices:
+                    target_series, target_indices = cfg_ts_list, cfg_indices
         
         if target_series is None or len(target_series) == 0:
             raise ValueError(
@@ -1747,19 +1785,36 @@ class DFM(BaseFactorModel):
             raise FileNotFoundError(f"Checkpoint file not found: {path}")
         
         # Try loading with error handling for corrupted files
+        # NOTE: Our training pipeline typically saves with joblib (for speed/compression),
+        # but older checkpoints may be plain pickle. Support both.
+        checkpoint = None
         try:
-            with open(path, 'rb') as f:
-                checkpoint = pickle.load(f)
-        except (pickle.UnpicklingError, EOFError, ValueError) as e:
-            raise RuntimeError(
-                f"Failed to load checkpoint from {path}. "
-                f"The file may be corrupted. Error: {e}. "
-                f"Try re-training the model to generate a new checkpoint."
-            ) from e
+            import joblib  # local import to avoid hard dependency at import-time
+            checkpoint = joblib.load(path)
+        except Exception:
+            # Fallback to plain pickle
+            try:
+                with open(path, 'rb') as f:
+                    checkpoint = pickle.load(f)
+            except (pickle.UnpicklingError, EOFError, ValueError) as e:
+                raise RuntimeError(
+                    f"Failed to load checkpoint from {path}. "
+                    f"The file may be corrupted or saved in an unsupported format. Error: {e}. "
+                    f"Try re-training the model to generate a new checkpoint."
+                ) from e
         
         # Use checkpoint config if not provided
         if config is None:
             config = checkpoint.get('config')
+
+        # If target_series was stored separately in the checkpoint (common in our pipeline),
+        # inject it into config so predict() can resolve targets without a Dataset attached.
+        try:
+            ckpt_target_series = checkpoint.get('target_series')
+            if config is not None and getattr(config, 'target_series', None) is None and ckpt_target_series is not None:
+                config.target_series = ckpt_target_series if isinstance(ckpt_target_series, list) else [ckpt_target_series]
+        except Exception:
+            pass
         
         # Get model state (new format preferred, fallback to old format)
         model_state = checkpoint.get('model_state')

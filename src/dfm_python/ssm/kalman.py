@@ -204,7 +204,7 @@ class DFMKalmanFilter:
                 "DFMKalmanFilter parameters not initialized. "
                 "Call update_parameters() first."
             )
-        
+
         # Get filtered states first (needed for smoother)
         transition_offsets = getattr(self._pykalman, 'transition_offsets', None)
         observation_offsets = getattr(self._pykalman, 'observation_offsets', None)
@@ -241,7 +241,7 @@ class DFMKalmanFilter:
         
         # Run filter
         predicted_state_means, predicted_state_covariances, _, filtered_state_means, filtered_state_covariances = run_filter()
-        
+
         filter_time = time_module.time() - filter_start
         _logger.info(f"    Filter: Completed in {filter_time:.2f}s ({filter_time/T*1000:.2f}ms/timestep)")
         
@@ -266,7 +266,7 @@ class DFMKalmanFilter:
                 # This is much cheaper than full eigendecomposition (O(m²) vs O(m³))
                 from ..config.constants import MIN_EIGENVALUE
                 regularization = max(1e-6, MIN_EIGENVALUE * 100)  # 1e-4 for stability
-                
+
                 _logger.info(f"    Smooth: Stabilizing {len(predicted_state_covariances)} covariance matrices "
                             f"(regularization={regularization:.2e})")
                 
