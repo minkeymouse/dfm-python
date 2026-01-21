@@ -56,14 +56,16 @@ class TestAutoencoderDataset:
         dataset = AutoencoderDataset(X=None, y_corrupted=x_corrupted, y_clean=y_clean)
         assert len(dataset) == T
     
-    def test_autoencoder_dataset_getitem(self):
-        """Test AutoencoderDataset indexing."""
+    def test_autoencoder_dataset_direct_slicing(self):
+        """Test AutoencoderDataset direct tensor slicing."""
         T, N_input, N = 10, 8, 5
         x_corrupted = torch.randn(T, N_input)
         y_clean = torch.randn(T, N)
         
         # AutoencoderDataset takes (X, y_corrupted, y_clean) - no mask parameter
         dataset = AutoencoderDataset(X=None, y_corrupted=x_corrupted, y_clean=y_clean)
-        full_input, y = dataset[0]
+        # Use direct slicing (as done in training)
+        full_input = dataset.full_input[0]
+        y = dataset.y_clean[0]
         assert full_input.shape == (N_input,)
         assert y.shape == (N,)

@@ -404,8 +404,9 @@ class DDFMDataset(Dataset):
 class AutoencoderDataset:
     """Container for autoencoder training data with corrupted inputs and clean targets.
     
-    Stores pre-loaded tensors for efficient direct slicing (no DataLoader needed).
-    All tensors are expected to be on the correct device.
+    Stores pre-loaded tensors for efficient direct slicing. All tensors are expected 
+    to be on the correct device. Use direct tensor slicing (e.g., `dataset.full_input[i:j]`)
+    rather than indexing.
     
     Parameters
     ----------
@@ -440,20 +441,3 @@ class AutoencoderDataset:
     def __len__(self) -> int:
         """Return number of time steps."""
         return self.y_corrupted.shape[0]
-    
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Get item at index idx.
-        
-        Parameters
-        ----------
-        idx : int
-            Index of time step
-            
-        Returns
-        -------
-        full_input : torch.Tensor
-            Full input at time step idx (shape: (N_input,))
-        y_clean : torch.Tensor
-            Clean target at time step idx (shape: (N,))
-        """
-        return self._full_input[idx], self.y_clean[idx]
