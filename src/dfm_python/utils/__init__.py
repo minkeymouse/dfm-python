@@ -11,10 +11,7 @@ Helper functions are inlined into models or moved to numeric/functional.
 """
 
 # State-space utilities (imported from numeric.builder)
-from ..numeric.builder import (
-    build_observation_matrix,
-    build_state_space,
-)
+# Note: build_observation_matrix and build_state_space are DDFM methods, not standalone functions
 from ..numeric.estimator import (
     estimate_var,
     estimate_idio_dynamics,
@@ -49,8 +46,8 @@ from ..config.constants import (
     DEFAULT_BLOCK_NAME,
 )
 
-# Tent kernel matrix functions (from numeric module)
-from ..numeric.tent import generate_tent_weights, generate_R_mat
+# Tent kernel matrix functions (from models/dfm module)
+from ..models.dfm.tent import generate_tent_weights, generate_R_mat
 
 # Scaling utilities (from misc)
 from .misc import (
@@ -61,16 +58,13 @@ from .misc import (
 
 # Validation utilities (from numeric.validator)
 from ..numeric.validator import (
-    validate_ar_order,
-    validate_ma_order,
-    validate_learning_rate,
-    validate_batch_size,
     validate_data_shape,
     validate_no_nan_inf,
-    validate_eigenvalue_bounds,
-    validate_matrix_condition,
     validate_horizon,
-    validate_irf_horizon,
+    validate_update_data_shape,
+    validate_ndarray_ndim,
+    validate_parameters_initialized,
+    validate_dfm_initialization,
 )
 
 # Exception classes (from errors.py)
@@ -94,22 +88,19 @@ from .errors import (
 
 # Analytics utilities (from numeric.stability)
 from ..numeric.stability import (
-    safe_matrix_power,
-    extract_matrix_block,
-    compute_forecast_metrics,
+    create_scaled_identity,
+    ensure_symmetric,
+    cap_max_eigenval,
+    ensure_positive_definite,
+    ensure_covariance_stable,
+    compute_var_safe,
+    compute_cov_safe,
+    convergence_checker,
+    solve_regularized_ols,
 )
 
 # Model validation utilities (from numeric.validator)
-from ..numeric.validator import (
-    validate_companion_stability,
-    validate_companion_matrix,
-    validate_model_initialized,
-    validate_prediction_inputs,
-    validate_model_components,
-    validate_forecast_inputs,
-    validate_result_structure,
-    validate_parameter_shapes,
-)
+# Note: Most model validation functions were removed - only basic validators remain
 
 # Helper utilities (from misc)
 from .misc import (
@@ -126,8 +117,6 @@ __all__ = [
     # State-space utilities
     'estimate_var',
     'estimate_idio_dynamics',
-    'build_observation_matrix',
-    'build_state_space',
     # Time utilities (includes metrics)
     'calculate_rmse',
     'calculate_mae',
@@ -156,16 +145,13 @@ __all__ = [
     '_check_sklearn',
     'get_target_scaler',
     # Validation utilities (from numeric.validator)
-    'validate_ar_order',
-    'validate_ma_order',
-    'validate_learning_rate',
-    'validate_batch_size',
     'validate_data_shape',
     'validate_no_nan_inf',
-    'validate_eigenvalue_bounds',
-    'validate_matrix_condition',
     'validate_horizon',
-    'validate_irf_horizon',
+    'validate_update_data_shape',
+    'validate_ndarray_ndim',
+    'validate_parameters_initialized',
+    'validate_dfm_initialization',
     # Exception classes (from errors.py)
     'DFMError',  # Base exception class
     'ModelNotInitializedError',
@@ -177,24 +163,16 @@ __all__ = [
     'DataValidationError',
     'NumericalStabilityError',
     'ConfigValidationError',
-    # Common utilities (simplified - removed ensure_numpy, use np.asarray() or .cpu().numpy() directly)
-    'safe_matrix_power',
-    'extract_matrix_block',
-    'validate_matrix_shape',
-    'compute_scale_stats',
-    'check_and_standardize_data',
-    'normalize_to_match_scale',
-    'log_tensor_stats',
+    # Stability utilities (from numeric.stability)
+    'create_scaled_identity',
+    'ensure_symmetric',
+    'cap_max_eigenval',
+    'ensure_positive_definite',
+    'ensure_covariance_stable',
+    'compute_var_safe',
+    'compute_cov_safe',
+    'convergence_checker',
+    'solve_regularized_ols',
+    # Misc utilities
     'select_columns_by_prefix',  # From misc
-    'extract_tensor_value',
-    # Preprocessing utilities
-    # Model validation utilities (from numeric.validator)
-    'validate_companion_stability',
-    'validate_companion_matrix',
-    'validate_model_initialized',
-    'validate_prediction_inputs',
-    'validate_model_components',
-    'validate_forecast_inputs',
-    'validate_result_structure',
-    'validate_parameter_shapes',
 ]

@@ -9,96 +9,11 @@ from typing import Optional, Any
 
 
 @dataclass
-class DFMStateSpaceParams:
-    """State-space model parameters for DFM (fitted during model training).
-    
-    These parameters are computed during DFM.fit() and represent the fitted
-    state-space model structure. Contains only the state-space parameters,
-    not training metadata (loglik, num_iter, converged) which are stored
-    separately in checkpoint dicts.
-    
-    Parameters
-    ----------
-    A : np.ndarray
-        Transition matrix (m x m) - VAR dynamics for factors
-    C : np.ndarray
-        Observation matrix (N x m) - factor loadings
-    Q : np.ndarray
-        Process noise covariance (m x m) - innovation covariance
-    R : np.ndarray
-        Observation noise covariance (N x N) - typically diagonal
-    Z_0 : np.ndarray
-        Initial state mean (m,) - initial factor values
-    V_0 : np.ndarray
-        Initial state covariance (m x m) - initial uncertainty
-    """
-    A: np.ndarray  # Transition matrix (m x m)
-    C: np.ndarray  # Observation matrix (N x m)
-    Q: np.ndarray  # Process noise covariance (m x m)
-    R: np.ndarray  # Observation noise covariance (N x N)
-    Z_0: np.ndarray  # Initial state mean (m,)
-    V_0: np.ndarray  # Initial state covariance (m x m)
-    
-    @classmethod
-    def from_model(cls, model: Any) -> 'DFMStateSpaceParams':
-        """Create DFMStateSpaceParams from DFM model instance.
-        
-        Parameters
-        ----------
-        model : DFM
-            DFM model instance with fitted parameters
-            
-        Returns
-        -------
-        DFMStateSpaceParams
-            State-space parameters dataclass
-        """
-        # Get parameters from model (stored after fit)
-        # First check if training_state is already DFMStateSpaceParams (new format)
-        if hasattr(model, 'training_state') and model.training_state is not None:
-            if isinstance(model.training_state, cls):
-                # Already a DFMStateSpaceParams instance
-                return model.training_state
-            # Backward compatibility: If old format training_state (has A, C, Q, R, Z_0, V_0 attributes)
-            if hasattr(model.training_state, 'A'):
-                return cls(
-                    A=model.training_state.A,
-                    C=model.training_state.C,
-                    Q=model.training_state.Q,
-                    R=model.training_state.R,
-                    Z_0=model.training_state.Z_0,
-                    V_0=model.training_state.V_0
-                )
-        
-        # Get from model attributes (after _update_parameters is called)
-        return cls(
-            A=getattr(model, 'A', None),
-            C=getattr(model, 'C', None),
-            Q=getattr(model, 'Q', None),
-            R=getattr(model, 'R', None),
-            Z_0=getattr(model, 'Z_0', None),
-            V_0=getattr(model, 'V_0', None)
-        )
-    
-    def apply_to_model(self, model: Any) -> None:
-        """Apply state-space parameters to DFM model instance.
-        
-        Parameters
-        ----------
-        model : DFM
-            DFM model instance to update
-        """
-        model._update_parameters(
-            self.A, self.C, self.Q, self.R, self.Z_0, self.V_0
-        )
-
-
-@dataclass
 class DFMModelState:
-    """DFM model structure and mixed-frequency parameters.
+    """DFM model state including structure, mixed-frequency parameters, and state-space parameters.
     
-    Consolidates model structure and mixed-frequency state for checkpointing.
-    This allows save/load methods to be simplified by using a single dataclass.
+    Consolidates all DFM model state for checkpointing: model structure, mixed-frequency
+    configuration, and fitted state-space parameters.
     
     Attributes
     ----------
@@ -128,6 +43,18 @@ class DFMModelState:
         Indicator for idiosyncratic components
     max_lag_size : int, optional
         Maximum lag size for state dimension
+    A : np.ndarray, optional
+        Transition matrix (m x m) - VAR dynamics for factors
+    C : np.ndarray, optional
+        Observation matrix (N x m) - factor loadings
+    Q : np.ndarray, optional
+        Process noise covariance (m x m) - innovation covariance
+    R : np.ndarray, optional
+        Observation noise covariance (N x N) - typically diagonal
+    Z_0 : np.ndarray, optional
+        Initial state mean (m,) - initial factor values
+    V_0 : np.ndarray, optional
+        Initial state covariance (m x m) - initial uncertainty
     """
     num_factors: int
     r: np.ndarray
@@ -142,6 +69,13 @@ class DFMModelState:
     frequencies: Optional[np.ndarray] = None
     idio_indicator: Optional[np.ndarray] = None
     max_lag_size: Optional[int] = None
+    # State-space parameters (fitted during training)
+    A: Optional[np.ndarray] = None
+    C: Optional[np.ndarray] = None
+    Q: Optional[np.ndarray] = None
+    R: Optional[np.ndarray] = None
+    Z_0: Optional[np.ndarray] = None
+    V_0: Optional[np.ndarray] = None
     
     @classmethod
     def from_model(cls, model: Any) -> 'DFMModelState':
@@ -157,6 +91,27 @@ class DFMModelState:
         DFMModelState
             Model state dataclass
         """
+        # Get state-space parameters from training_state if available
+        A = C = Q = R = Z_0 = V_0 = None
+        if hasattr(model, 'training_state') and model.training_state is not None:
+            # Handle both old DFMStateSpaceParams format and new DFMModelState format
+            ts = model.training_state
+            if hasattr(ts, 'A'):
+                A = ts.A
+                C = ts.C
+                Q = ts.Q
+                R = ts.R
+                Z_0 = ts.Z_0
+                V_0 = ts.V_0
+        else:
+            # Fallback: get from model attributes directly
+            A = getattr(model, 'A', None)
+            C = getattr(model, 'C', None)
+            Q = getattr(model, 'Q', None)
+            R = getattr(model, 'R', None)
+            Z_0 = getattr(model, 'Z_0', None)
+            V_0 = getattr(model, 'V_0', None)
+        
         return cls(
             num_factors=model.num_factors,
             r=model.r,
@@ -170,7 +125,13 @@ class DFMModelState:
             tent_weights_dict=getattr(model, '_tent_weights_dict', None),
             frequencies=getattr(model, '_frequencies', None),
             idio_indicator=getattr(model, '_idio_indicator', None),
-            max_lag_size=getattr(model, '_max_lag_size', None)
+            max_lag_size=getattr(model, '_max_lag_size', None),
+            A=A,
+            C=C,
+            Q=Q,
+            R=R,
+            Z_0=Z_0,
+            V_0=V_0
         )
     
     def apply_to_model(self, model: Any) -> None:
@@ -194,6 +155,12 @@ class DFMModelState:
         model._frequencies = self.frequencies
         model._idio_indicator = self.idio_indicator
         model._max_lag_size = self.max_lag_size
+        
+        # Apply state-space parameters if available
+        if self.A is not None and self.C is not None and self.Q is not None:
+            model._update_parameters(
+                self.A, self.C, self.Q, self.R, self.Z_0, self.V_0
+            )
 
 @dataclass
 class DDFMTrainingState:
@@ -276,4 +243,7 @@ class DDFMStateSpaceParams:
     Sigma_0: np.ndarray  # Initial state covariance (m x m)
     H: np.ndarray  # Observation matrix (N x m) - theta in paper
     R: np.ndarray  # Observation noise covariance (N x N)
+
+# Backward compatibility alias
+DFMStateSpaceParams = DFMModelState
 

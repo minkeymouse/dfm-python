@@ -7,16 +7,16 @@ matrices used in mixed-frequency Dynamic Factor Models.
 import numpy as np
 from typing import Tuple, Optional, Dict, Any, TYPE_CHECKING
 
-from ..logger import get_logger
-from ..utils.errors import DataValidationError
+from ...logger import get_logger
+from ...utils.errors import DataValidationError
 
 if TYPE_CHECKING:
-    from ..config.schema import DFMConfig
+    from ...config.schema import DFMConfig
 
 _logger = get_logger(__name__)
 
 # Import constants
-from ..config.constants import (
+from ...config.constants import (
     FREQUENCY_HIERARCHY,
     MAX_TENT_SIZE,
     DEFAULT_HIERARCHY_VALUE,
@@ -324,4 +324,3 @@ __all__ = [
     'get_agg_structure',
     'group_by_freq',
 ]
-

@@ -29,21 +29,29 @@ class DDFMDataset(Dataset):
         Input data. Target series will be scaled if scaler provided.
     time_idx : str
         Time index column name.
+    covariates : List[str], optional
+        Series to exclude from targets (used for factor extraction but not forecasted).
+        If None, all series are targets (default).
     target_series : List[str], optional
-        Target series column names to scale. If None or empty, all columns will be used as targets.
-    target_scaler : StandardScaler | RobustScaler | MinMaxScaler, optional
+        Target series column names (deprecated, use covariates instead).
+        If None or empty, all columns will be used as targets.
+    scaler : StandardScaler | RobustScaler | MinMaxScaler, optional
         Scaler instance to scale target series. If None, no scaling.
     feature_scaler : StandardScaler | RobustScaler | MinMaxScaler, optional
         Scaler instance to scale feature series. If None, no scaling.
+    target_scaler : StandardScaler | RobustScaler | MinMaxScaler, optional
+        Deprecated: use scaler instead.
     """
     
     def __init__(
         self,
         data: Union[pd.DataFrame, PolarsDataFrame],
         time_idx: str,
-        target_series: Optional[List[str]] = None,
-        target_scaler: Optional[Union[StandardScaler, RobustScaler, MinMaxScaler]] = None,
+        covariates: Optional[List[str]] = None,
+        target_series: Optional[List[str]] = None,  # Deprecated: use covariates instead
+        scaler: Optional[Union[StandardScaler, RobustScaler, MinMaxScaler]] = None,
         feature_scaler: Optional[Union[StandardScaler, RobustScaler, MinMaxScaler]] = None,
+        target_scaler: Optional[Union[StandardScaler, RobustScaler, MinMaxScaler]] = None,  # Deprecated: use scaler instead
     ):
         if _has_polars and isinstance(data, pl.DataFrame):
             data = data.to_pandas()
@@ -59,24 +67,65 @@ class DDFMDataset(Dataset):
         else:
             self.time_index = data.index
         
-        # If target_series is None or empty, use all columns as targets
-        if target_series is None or len(target_series) == 0:
-            target_series_list = list(data.columns)
-        else:
-            target_series_list = list(target_series)
-            missing_cols = [col for col in target_series_list if col not in data.columns]
+        # Get all available columns (excluding time_idx if it's a column)
+        all_columns = [col for col in data.columns if col != time_idx] if time_idx in data.columns else list(data.columns)
+        
+        # Handle backward compatibility: if target_series is provided, compute covariates from it
+        if target_series is not None and len(target_series) > 0:
+            import warnings
+            warnings.warn(
+                "target_series parameter is deprecated. Use covariates instead. "
+                "If you specify target_series, it will be converted to covariates automatically.",
+                DeprecationWarning,
+                stacklevel=2
+            )
+            # Compute covariates = all_columns - target_series
+            valid_targets = [t for t in target_series if t in all_columns]
+            missing_cols = [col for col in target_series if col not in all_columns]
             if missing_cols:
                 raise ValueError(
                     f"target_series columns {missing_cols} not found in data. "
-                    f"Available columns: {list(data.columns)}"
+                    f"Available columns: {all_columns}"
                 )
+            # Compute covariates from target_series
+            covariates = [col for col in all_columns if col not in valid_targets]
+        else:
+            covariates = covariates if covariates is not None else []
+        
+        # Compute target_series from covariates
+        # If covariates is empty, all series are targets
+        if covariates:
+            # Filter covariates to only those that exist in data
+            valid_covariates = [c for c in covariates if c in all_columns]
+            missing_covariates = [c for c in covariates if c not in all_columns]
+            if missing_covariates:
+                import warnings
+                warnings.warn(
+                    f"Some covariates not found in data: {missing_covariates}. "
+                    f"Available columns: {all_columns}",
+                    UserWarning
+                )
+            # target_series = all_columns - covariates
+            target_series_list = [col for col in all_columns if col not in valid_covariates]
+            self.covariates = valid_covariates
+        else:
+            # No covariates: all series are targets
+            target_series_list = all_columns
+            self.covariates = []
+        
+        # Store computed target_series for backward compatibility
         self.target_series = target_series_list
         self.data_original = data.copy()
-        self.target_scaler = target_scaler
+        # Use scaler parameter, fallback to target_scaler for backward compatibility
+        self.scaler = scaler if scaler is not None else target_scaler
         self.feature_scaler = feature_scaler
         
-        y = data[target_series_list]
-        X = data.drop(columns=target_series_list)
+        # Exclude time_idx from data when splitting X and y
+        # time_idx is metadata, not a data column
+        data_for_split = data.drop(columns=[time_idx]) if time_idx in data.columns else data
+        
+        y = data_for_split[target_series_list]
+        X = data_for_split.drop(columns=target_series_list)
         
         # Optionally scale feature series to avoid scale dominance in encoder input
         if feature_scaler is not None and not X.empty:
@@ -99,9 +148,9 @@ class DDFMDataset(Dataset):
                     self.feature_scaler.fit(X.values)
         
         # Check if data is already standardized (mean≈0, std≈1) to avoid double scaling
-        # If data is already scaled, we still need target_scaler for inverse transformation
+        # If data is already scaled, we still need scaler for inverse transformation
         # but we should NOT scale again
-        if target_scaler is not None:
+        if self.scaler is not None:
             # Check if target data appears already standardized
             y_mean = y.mean().abs().max()
             y_std = (y.std() - 1.0).abs().max()
@@ -109,10 +158,10 @@ class DDFMDataset(Dataset):
             
             # Check if scaler is already fitted
             scaler_is_fitted = (
-                hasattr(target_scaler, 'mean_') and 
-                target_scaler.mean_ is not None and
-                hasattr(target_scaler, 'scale_') and
-                target_scaler.scale_ is not None
+                hasattr(self.scaler, 'mean_') and 
+                self.scaler.mean_ is not None and
+                hasattr(self.scaler, 'scale_') and
+                self.scaler.scale_ is not None
             )
             
             if is_already_scaled:
@@ -130,7 +179,7 @@ class DDFMDataset(Dataset):
                         "Ensure scaler is fitted on original unscaled data before passing to DDFMDataset.",
                         UserWarning
                     )
-                    self.target_scaler.fit(y.values)
+                    self.scaler.fit(y.values)
                 # Don't transform - data is already scaled
             else:
                 # Data is not standardized - apply scaling
@@ -138,8 +187,8 @@ class DDFMDataset(Dataset):
                 if scaler_is_fitted:
                     # Check if scaler was fitted on data with similar scale
                     # If mean/scale are very different, warn user but keep scaler.
-                    scaler_mean = np.abs(target_scaler.mean_)
-                    scaler_scale = target_scaler.scale_
+                    scaler_mean = np.abs(self.scaler.mean_)
+                    scaler_scale = self.scaler.scale_
                     data_mean = np.abs(y.mean().values)
                     data_std = y.std().values
                     
@@ -157,9 +206,9 @@ class DDFMDataset(Dataset):
                         )
                 else:
                     # Scaler not fitted - fit on current data
-                    self.target_scaler.fit(y.values)
+                    self.scaler.fit(y.values)
                 
-                y_scaled = self.target_scaler.transform(y.values)
+                y_scaled = self.scaler.transform(y.values)
                 y = pd.DataFrame(y_scaled, index=y.index, columns=y.columns)
         
         self.data = pd.concat([X, y], axis=1)
@@ -167,6 +216,11 @@ class DDFMDataset(Dataset):
         self.y = y.values
         self.missing_y = y.isna().values
         self.observed_y = ~self.missing_y
+
+    @property
+    def target_scaler(self):
+        """Backward compatibility: returns scaler."""
+        return self.scaler
 
     @property
     def target_nan_ratio(self) -> float:
@@ -249,13 +303,13 @@ class DDFMDataset(Dataset):
         Returns
         -------
         DDFMDataset
-            New dataset with same time_idx, target_series, target_scaler, feature_scaler.
+            New dataset with same time_idx, covariates, scaler, feature_scaler.
         """
         return cls(
             data=new_data,
             time_idx=dataset.time_idx,
-            target_series=dataset.target_series,
-            target_scaler=dataset.target_scaler,
+            covariates=getattr(dataset, 'covariates', None) or [],
+            scaler=getattr(dataset, 'scaler', None),
             feature_scaler=getattr(dataset, 'feature_scaler', None)
         )
     

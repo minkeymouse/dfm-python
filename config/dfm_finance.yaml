@@ -6,7 +6,6 @@
 # Reduced series for testing purposes
 
 # EM Algorithm Parameters
-ar_lag: 1  # Global AR lag order (applies to all blocks)
 threshold: 1.0e-05  # EM convergence threshold
 max_iter: 5000  # Maximum EM iterations
 
@@ -25,10 +24,8 @@ idio_min_var: 1.0e-08
 
 # Data Handling
 clock: m  # Monthly clock frequency (tutorial uses monthly, adjust to 'd' for daily or 'w' for weekly)
-# target_scaler: Pass sklearn scaler object directly (e.g., StandardScaler(), RobustScaler())
-# Example in Python:
-#   from sklearn.preprocessing import StandardScaler
-#   config.target_scaler = StandardScaler()
+scaler: standard  # Scaler for all series: 'standard', 'robust', 'minmax', 'maxabs', 'quantile', or null
+# Note: scaler is handled internally by the model, not set on config object
 # Note: nan_method and nan_k are internal constants (not user-configurable)
 
 # Block Structure for Financial Data

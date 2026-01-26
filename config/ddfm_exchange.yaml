@@ -22,7 +22,7 @@ seed: 3  # Random seed (matching original seed=3)
 
 # Data Handling (used by Dataset, not Model)
 clock: d  # Daily clock frequency (all series are daily)
-target_scaler: null  # No target scaler - data should be pre-scaled before passing to Dataset
+scaler: null  # No scaler - data should be pre-scaled before passing to Dataset
 
 # Frequency mapping (all series are daily)
 # If not specified, all series use clock frequency (d)

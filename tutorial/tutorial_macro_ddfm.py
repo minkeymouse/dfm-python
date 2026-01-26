@@ -205,8 +205,7 @@ config = DDFMConfig(
     encoder_layers=[32, 16],  # Reduced for faster execution
     n_mc_samples=10,  # Number of MC samples per MCMC iteration (reduced for faster execution)
     learning_rate=DEFAULT_LEARNING_RATE,
-    window_size=DEFAULT_DDFM_WINDOW_SIZE,  # Window size (time-step batch size) for training
-    target_scaler=y_scaler  # Fitted scaler for target series inverse transformation
+    window_size=DEFAULT_DDFM_WINDOW_SIZE  # Window size (time-step batch size) for training
 )
 
 print(f"   Number of series: {len(selected_cols)}")
@@ -227,11 +226,20 @@ print("\n[Step 4] Creating Dataset...")
 # Remove date column from data before passing to Dataset
 df_for_dataset = df_processed.drop(columns=['date']) if 'date' in df_processed.columns else df_processed
 
+# Use covariates to exclude non-target series
+all_cols = list(df_for_dataset.columns)
+covariates = [col for col in all_cols if col != target_col]
+
+# Create scaler for target series (fitted internally by dataset)
+# Note: scaler parameter accepts a scaler instance or None (None means StandardScaler by default)
+target_scaler = StandardScaler()
+target_scaler.fit(df_for_dataset[[target_col]].values)
+
 dataset = DDFMDataset(
     data=df_for_dataset,  # Pass DataFrame directly (not .values) - already preprocessed
     time_idx='index',  # Use DataFrame index as time identifier
-    target_series=[target_col],  # Specify target series
-    target_scaler=y_scaler  # Fitted scaler for target series
+    covariates=covariates if covariates else None,  # Exclude non-target series from targets
+    scaler=target_scaler  # Use standard scaler (fitted on target series)
 )
 
 print(f"   Dataset created successfully")
@@ -280,7 +288,7 @@ print("   State-space model built successfully")
 # ============================================================================
 print("\n[Step 6] Making predictions...")
 
-# Predict with horizon=6 (uses target_series from Dataset)
+# Predict with horizon=6 (uses target series computed from covariates)
 # Note: predict() requires build_state_space() to be called first
 X_forecast, Z_forecast = model.predict(horizon=6, return_series=True, return_factors=True)
 

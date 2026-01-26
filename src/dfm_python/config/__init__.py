@@ -81,12 +81,7 @@ from .types import (
 )
 # Import lazily to avoid circular dependencies
 try:
-    from ..numeric.builder import compute_idio_lengths
-except ImportError:
-    compute_idio_lengths = None
-
-try:
-    from ..numeric.tent import get_agg_structure, group_by_freq
+    from ..models.dfm.tent import get_agg_structure, group_by_freq
 except ImportError:
     get_agg_structure = None
     group_by_freq = None
@@ -100,7 +95,7 @@ def get_periods_per_year(frequency: str) -> int:
 __all__ = [
     # Base classes
     'BaseModelConfig', 'BaseResult',
-    # 'DEFAULT_BLOCK_NAME',  # Removed to avoid circular import - import directly from functional.dfm_block
+    # 'DEFAULT_BLOCK_NAME',  # Removed to avoid circular import
     # Model-specific configs (from schema.py)
     'DFMConfig', 'DDFMConfig',
     # State-space parameters
@@ -117,7 +112,6 @@ __all__ = [
     'FREQUENCY_HIERARCHY',
     'PERIODS_PER_YEAR',
     'get_periods_per_year',
-    'compute_idio_lengths',
     'get_agg_structure',
     'group_by_freq',
     # Type definitions (from types.py)

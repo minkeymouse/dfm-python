@@ -5,6 +5,7 @@ the codebase to reduce duplication and improve consistency.
 """
 
 from typing import Any, Optional, Type
+import numpy as np
 
 
 def check_condition(

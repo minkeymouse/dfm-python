@@ -19,7 +19,7 @@ from dfm_python.config.schema.model import DDFMConfig
 class TestDDFM:
     """Test suite for DDFM model."""
     
-    def _create_test_dataset(self, num_series=5, time_steps=10, target_scaler=None, random_seed=42):
+    def _create_test_dataset(self, num_series=5, time_steps=10, scaler=None, random_seed=42):
         """Helper to create DDFMDataset for testing.
         
         Parameters
@@ -28,7 +28,7 @@ class TestDDFM:
             Number of series (columns)
         time_steps : int, default 10
             Number of time steps (rows)
-        target_scaler : sklearn scaler class or None, default None
+        scaler : sklearn scaler class or None, default None
             Scaler for target series (None = no scaling)
         random_seed : int, default 42
             Random seed for deterministic test data
@@ -45,14 +45,11 @@ class TestDDFM:
             columns=[f'series_{i}' for i in range(num_series)]
         )
         
-        # All series are targets for testing
-        target_series = list(data.columns)
-        
+        # All series are targets by default (no covariates specified)
         dataset = DDFMDataset(
             data=data,
             time_idx='index',
-            target_series=target_series,
-            target_scaler=target_scaler
+            scaler=scaler
         )
         return dataset
     
@@ -154,8 +151,7 @@ class TestDDFM:
         dataset = DDFMDataset(
             data=data,
             time_idx='index',
-            target_series=list(data.columns),
-            target_scaler=None
+            scaler=None
         )
         model = DDFM(
             dataset=dataset,
@@ -303,17 +299,17 @@ class TestDDFM:
         """Test DDFM variance diagnostics detects standardized vs non-standardized data."""
         np.random.seed(42)
         
-        dataset_std = self._create_test_dataset(num_series=5, time_steps=50, target_scaler=StandardScaler())
-        dataset_std.target_scaler.fit(dataset_std.data.values)
+        dataset_std = self._create_test_dataset(num_series=5, time_steps=50, scaler=StandardScaler())
+        dataset_std.scaler.fit(dataset_std.data.values)
         dataset_std.data = pd.DataFrame(
-            dataset_std.target_scaler.transform(dataset_std.data.values),
+            dataset_std.scaler.transform(dataset_std.data.values),
             columns=dataset_std.data.columns,
             index=dataset_std.data.index
         )
         model_std = DDFM(dataset=dataset_std, encoder_size=tuple(DEFAULT_ENCODER_LAYERS), max_iter=1)
         model_std.fit()
         
-        dataset_robust = self._create_test_dataset(num_series=5, time_steps=50, target_scaler=RobustScaler())
+        dataset_robust = self._create_test_dataset(num_series=5, time_steps=50, scaler=RobustScaler())
         model_robust = DDFM(dataset=dataset_robust, encoder_size=tuple(DEFAULT_ENCODER_LAYERS), max_iter=1)
         model_robust.fit()
         
@@ -327,7 +323,7 @@ class TestDDFM:
             prediction_mean=prediction_mean,
             factors_mean=factors_mean,
             y_actual=model_std.y_actual,
-            target_scaler=dataset_std.target_scaler,
+            target_scaler=dataset_std.scaler,
             encoder=model_std.encoder,
             decoder=model_std.decoder,
         )
@@ -338,7 +334,7 @@ class TestDDFM:
             prediction_mean=prediction_mean,
             factors_mean=factors_mean,
             y_actual=model_robust.y_actual,
-            target_scaler=dataset_robust.target_scaler,
+            target_scaler=dataset_robust.scaler,
             encoder=model_robust.encoder,
             decoder=model_robust.decoder,
         )
@@ -362,7 +358,7 @@ class TestDDFM:
             prediction_mean=prediction_mean,
             factors_mean=factors_mean,
             y_actual=model.y_actual,
-            target_scaler=dataset.target_scaler,
+            target_scaler=dataset.scaler,
             encoder=model.encoder,
             decoder=model.decoder,
         )
@@ -376,7 +372,7 @@ class TestDDFM:
             prediction_mean=prediction_mean,
             factors_mean=factors_mean,
             y_actual=model.y_actual,
-            target_scaler=dataset.target_scaler,
+            target_scaler=dataset.scaler,
             encoder=model.encoder,
             decoder=model.decoder,
         )
@@ -391,7 +387,7 @@ class TestDDFM:
                 prediction_mean=prediction_mean,
                 factors_mean=factors_mean,
                 y_actual=model.y_actual,
-                target_scaler=dataset.target_scaler,
+                target_scaler=dataset.scaler,
                 encoder=model.encoder,
                 decoder=model.decoder,
             )
@@ -405,7 +401,7 @@ class TestDDFM:
             prediction_mean=prediction_mean,
             factors_mean=factors_mean,
             y_actual=model.y_actual,
-            target_scaler=dataset.target_scaler,
+            target_scaler=dataset.scaler,
             encoder=model.encoder,
             decoder=model.decoder,
         )
@@ -435,10 +431,10 @@ class TestDDFM:
     
     def test_ddfm_predict_requires_state_space(self):
         """Test DDFM predict() requires build_state_space() to be called."""
-        dataset = self._create_test_dataset(num_series=5, time_steps=50, target_scaler=StandardScaler())
-        dataset.target_scaler.fit(dataset.data.values)
+        dataset = self._create_test_dataset(num_series=5, time_steps=50, scaler=StandardScaler())
+        dataset.scaler.fit(dataset.data.values)
         dataset.data = pd.DataFrame(
-            dataset.target_scaler.transform(dataset.data.values),
+            dataset.scaler.transform(dataset.data.values),
             columns=dataset.data.columns,
             index=dataset.data.index
         )
@@ -457,10 +453,10 @@ class TestDDFM:
     
     def test_ddfm_get_result_requires_state_space(self):
         """Test DDFM get_result() requires build_state_space() to be called."""
-        dataset = self._create_test_dataset(num_series=5, time_steps=50, target_scaler=StandardScaler())
-        dataset.target_scaler.fit(dataset.data.values)
+        dataset = self._create_test_dataset(num_series=5, time_steps=50, scaler=StandardScaler())
+        dataset.scaler.fit(dataset.data.values)
         dataset.data = pd.DataFrame(
-            dataset.target_scaler.transform(dataset.data.values),
+            dataset.scaler.transform(dataset.data.values),
             columns=dataset.data.columns,
             index=dataset.data.index
         )
@@ -482,10 +478,10 @@ class TestDDFM:
     
     def test_ddfm_full_workflow(self):
         """Test complete DDFM workflow: initialization -> fit -> build_state_space -> predict -> get_result."""
-        dataset = self._create_test_dataset(num_series=5, time_steps=50, target_scaler=StandardScaler())
-        dataset.target_scaler.fit(dataset.data.values)
+        dataset = self._create_test_dataset(num_series=5, time_steps=50, scaler=StandardScaler())
+        dataset.scaler.fit(dataset.data.values)
         dataset.data = pd.DataFrame(
-            dataset.target_scaler.transform(dataset.data.values),
+            dataset.scaler.transform(dataset.data.values),
             columns=dataset.data.columns,
             index=dataset.data.index
         )
@@ -528,8 +524,7 @@ class TestDDFM:
         new_dataset = DDFMDataset(
             data=new_data,
             time_idx='index',
-            target_series=list(new_data.columns),
-            target_scaler=dataset.target_scaler
+            scaler=dataset.scaler
         )
         
         old_factors = model.factors.copy()
@@ -555,8 +550,7 @@ class TestDDFM:
         )
         new_dataset = DDFMDataset(
             data=new_data,
-            time_idx='index',
-            target_series=list(new_data.columns)
+            time_idx='index'
         )
         
         with pytest.raises(ModelNotTrainedError, match="model has not been trained"):

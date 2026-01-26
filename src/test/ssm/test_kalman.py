@@ -133,8 +133,7 @@ class TestDFMKalmanFilter:
             transition_covariance=Q,
             observation_covariance=R,
             initial_state_mean=Z0,
-            initial_state_covariance=V0,
-            use_cholesky=False
+            initial_state_covariance=V0
         )
         
         # Create observations

@@ -7,7 +7,7 @@ from pathlib import Path
 from dfm_python.config import DFMConfig
 from dfm_python.config.adapter import YamlSource
 from dfm_python.dataset import DFMDataset
-from dfm_python.numeric.tent import get_agg_structure
+from dfm_python.models.dfm.tent import get_agg_structure
 
 
 class TestTentWeightsConfig:

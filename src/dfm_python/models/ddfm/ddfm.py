@@ -68,8 +68,7 @@ from ..config.constants import (
 )
 from ..utils.errors import ModelNotTrainedError, ModelNotInitializedError, ConfigurationError, NumericalError
 from ..utils.validation import check_condition
-from ..numeric.validator import validate_horizon, validate_no_nan_inf, validate_update_data_shape
-from ..numeric.estimator import forecast_ar1_factors
+from ..numeric.validator import validate_no_nan_inf, validate_update_data_shape
 from ..utils.helper import interpolate_array, interpolate_dataframe
 from ..config.types import to_tensor, to_numpy
 
@@ -134,7 +133,7 @@ class DDFM(BaseFactorModel, nn.Module):
         self.tolerance = tolerance
         self.disp = disp
         
-        self.target_scaler = dataset.target_scaler
+        self.scaler = getattr(dataset, 'scaler', None) or getattr(dataset, 'target_scaler', None)  # Backward compatibility
         self.min_target_interporate_ratio = min_target_interporate_ratio
         
         # Interpolation parameters (extract from config if available, otherwise use defaults)
@@ -587,7 +586,7 @@ class DDFM(BaseFactorModel, nn.Module):
                         prediction_mean=y_pred_full,
                         factors_mean=factors_mean,
                         y_actual=self.y_actual,
-                        target_scaler=self._get_target_scaler(),
+                        target_scaler=self.scaler,
                         encoder=self.encoder,
                         decoder=self.decoder,
                         factors_std=self.factor_std
@@ -759,13 +758,20 @@ class DDFM(BaseFactorModel, nn.Module):
         # Sync training_state dataclass with current model state
         self.training_state.sync_from_model(self)
         
-        # Get result dataclass if model is trained
-        result = None
-        if self._has_factors and self.state_space_params is not None:
-            try:
-                result = self.get_result()
-            except (ModelNotTrainedError, ModelNotInitializedError):
-                pass
+        # Get result dataclass if model is trained (uses base class helper)
+        result = self._prepare_checkpoint_result()
+        
+        # Extract dataset metadata if available (needed for forecasting) (uses base class helper)
+        dataset_metadata = self._extract_dataset_metadata()
+        
+        # Add DDFM-specific dimensions to metadata
+        if dataset_metadata is not None:
+            dataset_metadata.update({
+                'input_dim': self.input_dim,
+                'output_dim': self.output_dim,
+                'num_series': self.num_series,
+                'window_size': self.window_size,  # Also save window_size for dummy data creation
+            })
         
         # Collect checkpoint using dataclasses
         checkpoint = {
@@ -777,21 +783,24 @@ class DDFM(BaseFactorModel, nn.Module):
             'encoder_size': self.encoder_size,
             'decoder_type': self.decoder_type,
             'decoder_size': self.decoder_size,
+            'dataset_metadata': dataset_metadata,  # Save dataset metadata in model checkpoint
+            'scaler': self.scaler,  # Save scaler for forecast scaling
+            'feature_scaler': getattr(self._dataset, 'feature_scaler', None),  # Save feature_scaler if available
         }
         
         torch.save(checkpoint, path)
         _logger.info(f"DDFM model saved to {path}")
     
     @classmethod
-    def load(cls, path: Union[str, Path], dataset: DDFMDataset) -> 'DDFM':
+    def load(cls, path: Union[str, Path], dataset: Optional[DDFMDataset] = None) -> 'DDFM':
         """Load DDFM model from checkpoint file.
         
         Parameters
         ----------
         path : str or Path
             Path to the checkpoint file
-        dataset : DDFMDataset
-            Dataset instance (required for model initialization)
+        dataset : DDFMDataset, optional
+            Dataset instance. If None, a minimal dataset will be created from checkpoint metadata.
             
         Returns
         -------
@@ -812,6 +821,52 @@ class DDFM(BaseFactorModel, nn.Module):
         encoder_size = checkpoint.get('encoder_size')
         decoder_type = checkpoint.get('decoder_type', 'linear')
         config = checkpoint.get('config')
+        
+        # Create minimal dataset from metadata if dataset not provided
+        if dataset is None:
+            dataset_metadata = checkpoint.get('dataset_metadata')
+            if dataset_metadata is None:
+                raise ValueError(
+                    "Cannot load DDFM model: dataset_metadata not found in checkpoint. "
+                    "Either provide a dataset parameter or ensure the checkpoint was saved with dataset_metadata."
+                )
+            
+            # Extract metadata
+            colnames = dataset_metadata.get('colnames')
+            covariates = dataset_metadata.get('covariates', [])
+            time_idx = dataset_metadata.get('time_idx')
+            
+            if colnames is None:
+                raise ValueError("Cannot create dataset: colnames not found in checkpoint metadata")
+            
+            # Create minimal dummy data with correct column structure
+            # We only need the shape properties, not actual data
+            # Use enough rows to satisfy DDFMDataset initialization requirements
+            window_size = dataset_metadata.get('window_size', checkpoint.get('window_size', 10))
+            num_rows = max(10, window_size)
+            dummy_data = pd.DataFrame(
+                np.zeros((num_rows, len(colnames))),
+                columns=colnames,
+                index=pd.date_range('2000-01-01', periods=num_rows, freq='W')
+            )
+            
+            # If time_idx is a column name, ensure it exists in dummy_data
+            # Otherwise, use None (DDFMDataset will use index)
+            if time_idx and time_idx not in colnames:
+                time_idx = None
+            
+            # Get scaler from checkpoint if available
+            scaler = checkpoint.get('scaler')
+            feature_scaler = checkpoint.get('feature_scaler')
+            
+            # Create minimal dataset with metadata
+            dataset = DDFMDataset(
+                data=dummy_data,
+                time_idx=time_idx if time_idx else 'date',  # Use 'date' as default if not specified
+                covariates=covariates if covariates else None,
+                scaler=scaler,  # Restore scaler from checkpoint
+                feature_scaler=feature_scaler  # Restore feature_scaler from checkpoint
+            )
         
         # Create model instance
         model = cls(
@@ -855,14 +910,29 @@ class DDFM(BaseFactorModel, nn.Module):
         
         # Reconstruct runtime attributes needed for update()/forecast paths
         # (these are not part of state_dict/training_state but are expected by methods).
+        # For minimal datasets created from metadata, we still need these attributes
         model.data = model._dataset.data.copy()
         model.target_indices = model._dataset.target_indices
         if not model._dataset.all_columns_are_targets:
             model._target_col_tensor = torch.tensor(model.target_indices, device=model.device, dtype=torch.long)
         
+        # Restore checkpoint metadata (uses base class helper)
+        model._restore_checkpoint_metadata(checkpoint)
+        
         # Restore result
         if checkpoint.get('result') is not None:
             model._result = checkpoint['result']
+        
+        # Ensure scaler is set (from checkpoint or dataset)
+        if model.scaler is None:
+            # Try to get from checkpoint first
+            if checkpoint.get('scaler') is not None:
+                model.scaler = checkpoint['scaler']
+            # Fallback to dataset scaler
+            elif dataset is not None and hasattr(dataset, 'scaler') and dataset.scaler is not None:
+                model.scaler = dataset.scaler
+            else:
+                _logger.warning("DDFM model loaded without scaler - forecasts may not be properly scaled")
         
         _logger.info(f"DDFM model loaded from {path}")
         return model
@@ -888,10 +958,31 @@ class DDFM(BaseFactorModel, nn.Module):
         self,
         horizon: Optional[int] = None,
         *,
+        data: Optional[Union[np.ndarray, Any]] = None,
+        update: bool = True,
         return_series: bool = True,
         return_factors: bool = True
     ) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
-        """Forecast future values using trained state-space model. Requires build_state_space() to be called."""
+        """Forecast future values using trained state-space model. Requires build_state_space() to be called.
+        
+        **New Data Initialization**: If `data` is provided:
+        - If `update=True` (default): Updates the model's internal state with new data
+          via neural network forward pass, then forecasts from the updated state.
+        - If `update=False`: Uses data only for initializing factor state without modifying model state.
+        
+        Parameters
+        ----------
+        horizon : int, optional
+            Number of periods ahead to forecast
+        data : DDFMDataset, optional
+            New preprocessed dataset to use for updating model state. If provided:
+            - With `update=True` (default): Updates model state, then forecasts from updated state.
+            - With `update=False`: Uses data only for initializing factor state without modifying model state.
+        update : bool, default True
+            If True and `data` is provided, updates the model's internal state with new data
+            before forecasting. If False, uses data only for initializing factor state without
+            modifying model state.
+        """
         
         # Validate model is trained
         check_condition(
@@ -908,10 +999,18 @@ class DDFM(BaseFactorModel, nn.Module):
             details="Please call build_state_space() after training to enable prediction"
         )
         
-        # Validate horizon
-        if horizon is None:
-            horizon = DEFAULT_FORECAST_HORIZON
-        horizon = validate_horizon(horizon)
+        # Handle data update if provided
+        if data is not None and update:
+            # Update model state with new data, then use updated state for forecasting
+            if not isinstance(data, DDFMDataset):
+                raise TypeError(
+                    f"DDFM.predict() requires data to be a DDFMDataset when update=True. "
+                    f"Got {type(data)} instead."
+                )
+            self._update(data)
+        
+        # Validate and resolve horizon (uses base class helper)
+        horizon = self._validate_and_resolve_horizon(horizon)
         
         # Get state-space parameters
         params = self.state_space_params
@@ -936,8 +1035,8 @@ class DDFM(BaseFactorModel, nn.Module):
         validate_no_nan_inf(F, name="transition matrix F")
         validate_no_nan_inf(H, name="observation matrix H")
         
-        # Forecast factors forward using AR(1) dynamics
-        Z_forecast = forecast_ar1_factors(Z_last, F, horizon, dtype=DEFAULT_DTYPE)
+        # Forecast factors forward using AR(1) dynamics (uses base class helper)
+        Z_forecast = self._forecast_factors(Z_last, F, horizon)
         
         # Transform factors to observations (target series only)
         # H shape: (num_target_series, num_factors)
@@ -945,17 +1044,25 @@ class DDFM(BaseFactorModel, nn.Module):
         # y_forecast shape: (horizon, num_target_series)
         y_forecast_std = Z_forecast @ H.T
         
-        # Inverse transform target series to original scale (only during forecasting)
-        target_scaler = self._get_target_scaler()
-        
-        if target_scaler is None:
+        # Inverse transform target series to original scale (uses base class helper)
+        # DDFM always has target series, so we can use all indices
+        if self.scaler is None:
             raise ConfigurationError(
-                f"{self.__class__.__name__} forecast failed: target_scaler is None",
-                details="Dataset must provide target_scaler for proper forecast scaling"
+                f"{self.__class__.__name__} forecast failed: scaler is None",
+                details="Dataset must provide scaler for proper forecast scaling"
             )
         
-        # Scaler is already fitted in dataset.__init__, just apply inverse transform
-        y_forecast = target_scaler.inverse_transform(y_forecast_std)
+        # Get target indices from dataset
+        # target_indices are indices into the original data columns, but scaler was fitted on target series only
+        # So we need indices relative to target series (0, 1, 2, ...)
+        if hasattr(self._dataset, 'target_indices'):
+            # target_indices are indices into original data, but scaler is fitted on target series only
+            # So we need to map them to indices relative to target series
+            num_targets = len(self._dataset.target_series)
+            target_indices = list(range(num_targets))
+        else:
+            target_indices = list(range(y_forecast_std.shape[1]))
+        y_forecast = self._inverse_transform_predictions(y_forecast_std, target_indices, scaler=self.scaler)
         y_forecast = np.nan_to_num(y_forecast, nan=0.0, posinf=0.0, neginf=0.0)
         
         # Ensure numpy array and validate
@@ -1004,9 +1111,6 @@ class DDFM(BaseFactorModel, nn.Module):
         # x_sm contains only target series (features X are only for encoder input, not in results)
         x_sm = Z @ H.T  # (T, num_target_series)
         
-        # Get target scaler from dataset
-        target_scaler = self._get_target_scaler()
-        
         # Create result
         # For DDFM: A = F (transition), C = H (observation), r = [num_factors], p = 1
         # Z already computed above, reuse it instead of calling _get_averaged_factors() again
@@ -1022,13 +1126,13 @@ class DDFM(BaseFactorModel, nn.Module):
             V_0=Sigma_0,
             r=np.array([num_factors]),  # Single block with num_factors
             p=DEFAULT_FACTOR_ORDER,  # AR(1) dynamics
-            target_scaler=target_scaler,
+            target_scaler=self.scaler,  # Store scaler in target_scaler field (DFMResult API)
             converged=getattr(self, '_converged', False),
             num_iter=getattr(self, '_num_iter', self.max_iter),  # Use actual iteration count if available
             loglik=-DEFAULT_INF_VALUE  # DDFM doesn't compute log-likelihood
         )
     
-    def update(self, dataset: DDFMDataset) -> None:
+    def _update(self, dataset: DDFMDataset) -> None:
         """Update model factors with new data using neural network forward pass."""
         from ..utils.errors import DataValidationError
         
@@ -1048,12 +1152,48 @@ class DDFM(BaseFactorModel, nn.Module):
             details="Please call build_model() first"
         )
         
-        # Validate dataset has same number of features
+        # Validate dataset has same number of features and column order
         # DDFMDataset has self.data (DataFrame), not data_processed attribute
+        # CRITICAL: Column order must match training data exactly for correct scaling
+        new_data_df = dataset.data.copy()
+        training_data_df = self.data.copy()
+        
+        # Validate column count matches
+        if len(new_data_df.columns) != len(training_data_df.columns):
+            raise DataValidationError(
+                f"DDFM._update(): Column count mismatch!\n"
+                f"Training data has {len(training_data_df.columns)} columns, "
+                f"but update data has {len(new_data_df.columns)} columns.\n"
+                f"Update data must have exactly the same columns as training data.\n"
+                f"Training columns (first 5): {list(training_data_df.columns[:5])}\n"
+                f"Update columns (first 5): {list(new_data_df.columns[:5])}"
+            )
+        
+        # Validate column order matches exactly
+        if list(new_data_df.columns) != list(training_data_df.columns):
+            # Find first mismatch
+            first_mismatch = next((i for i, (expected, actual) in enumerate(zip(training_data_df.columns, new_data_df.columns)) if expected != actual), None)
+            if first_mismatch is not None:
+                raise DataValidationError(
+                    f"DDFM._update(): Column order mismatch at index {first_mismatch}!\n"
+                    f"Expected '{training_data_df.columns[first_mismatch]}', got '{new_data_df.columns[first_mismatch]}'.\n"
+                    f"Update data columns must be in the EXACT same order as training data.\n"
+                    f"Expected order (first 5): {list(training_data_df.columns[:5])}\n"
+                    f"Got order (first 5): {list(new_data_df.columns[:5])}\n"
+                    f"Reorder columns to match training order before creating DDFMDataset."
+                )
+        
+        # Validate all columns are numeric (same format as training)
+        non_numeric_cols = [col for col in new_data_df.columns if not pd.api.types.is_numeric_dtype(new_data_df[col])]
+        if non_numeric_cols:
+            raise DataValidationError(
+                f"DDFM._update(): Non-numeric columns found: {non_numeric_cols[:5]}{'...' if len(non_numeric_cols) > 5 else ''}.\n"
+                f"All columns must be numeric to match training data format."
+            )
+        
         # Ensure no NaNs/Infs are fed into the encoder during update.
         # Mixed-frequency data updates often include missing values; without interpolation,
         # encoder outputs NaNs and forecasting fails.
-        new_data_df = dataset.data.copy()
         if new_data_df.isna().sum().sum() > 0:
             new_data_df = interpolate_dataframe(
                 new_data_df,
@@ -1062,34 +1202,121 @@ class DDFM(BaseFactorModel, nn.Module):
                 limit_direction=self.interpolation_limit_direction
             )
         
-        # Ensure update data is scaled with training scalers
-        try:
-            target_scaler = self._get_target_scaler()
-            feature_scaler = getattr(self._dataset, "feature_scaler", None)
-            target_cols = list(self._dataset.target_series)
-            feature_cols = [c for c in new_data_df.columns if c not in target_cols]
-            if target_scaler is not None and target_cols:
-                target_vals = target_scaler.transform(new_data_df[target_cols].values)
-                new_data_df[target_cols] = target_vals
-            if feature_scaler is not None and feature_cols:
-                feature_vals = feature_scaler.transform(new_data_df[feature_cols].values)
-                new_data_df[feature_cols] = feature_vals
-        except Exception:
-            pass
+        # Re-fit scalers with combined data (training + new) to update statistics
+        # CRITICAL: When updating, we re-fit scalers to reflect all data seen so far
+        feature_scaler = getattr(self._dataset, "feature_scaler", None)
+        target_cols = list(self._dataset.target_series)
+        feature_cols = [c for c in new_data_df.columns if c not in target_cols]
+        
+        # Get unstandardized new data from dataset for scaler re-fitting
+        # Dataset stores original (unstandardized) data in data_original before scaling
+        # If data_original is available, use it; otherwise inverse-standardize the scaled data
+        if hasattr(dataset, 'data_original') and dataset.data_original is not None:
+            # Use original unstandardized data from dataset
+            new_data_unstd_df = dataset.data_original.copy()
+            # Extract target and feature columns (unstandardized)
+            new_targets_unstd = new_data_unstd_df[target_cols].values if target_cols and len(target_cols) > 0 else np.array([]).reshape(new_data_unstd_df.shape[0], 0)
+            new_features_unstd = new_data_unstd_df[feature_cols].values if feature_cols and len(feature_cols) > 0 else np.array([]).reshape(new_data_unstd_df.shape[0], 0)
+            _logger.debug(f"DDFM._update(): Using data_original for scaler re-fitting ({new_data_unstd_df.shape[0]} observations)")
+        else:
+            # Fallback: inverse-standardize the already-scaled data
+            _logger.warning("DDFM._update(): dataset.data_original not available, inverse-standardizing scaled data (may have precision loss)")
+            new_targets_unstd = new_data_df[target_cols].values if target_cols and len(target_cols) > 0 else np.array([]).reshape(new_data_df.shape[0], 0)
+            new_features_unstd = new_data_df[feature_cols].values if feature_cols and len(feature_cols) > 0 else np.array([]).reshape(new_data_df.shape[0], 0)
+            # Inverse-standardize targets
+            if self.scaler is not None and target_cols and len(target_cols) > 0 and hasattr(self.scaler, 'mean_') and hasattr(self.scaler, 'scale_'):
+                new_targets_unstd = new_targets_unstd * self.scaler.scale_[np.newaxis, :] + self.scaler.mean_[np.newaxis, :]
+            # Inverse-standardize features
+            if feature_scaler is not None and feature_cols and len(feature_cols) > 0 and hasattr(feature_scaler, 'mean_') and hasattr(feature_scaler, 'scale_'):
+                new_features_unstd = new_features_unstd * feature_scaler.scale_[np.newaxis, :] + feature_scaler.mean_[np.newaxis, :]
+        
+        # Get training data (already scaled, need to inverse-standardize for re-fitting)
+        training_data_df = self.data.copy()
+        
+        # Re-fit target scaler on combined data (training + new)
+        if self.scaler is not None and target_cols and len(new_targets_unstd) > 0:
+            # Inverse-standardize training target data
+            if hasattr(self.scaler, 'mean_') and hasattr(self.scaler, 'scale_'):
+                training_targets_scaled = training_data_df[target_cols].values
+                training_targets_unstd = training_targets_scaled * self.scaler.scale_[np.newaxis, :] + self.scaler.mean_[np.newaxis, :]
+            else:
+                training_targets_unstd = training_data_df[target_cols].values
+            
+            # Combine training + new target data for re-fitting
+            combined_targets = np.vstack([training_targets_unstd, new_targets_unstd])
+            
+            # Re-fit scaler on combined data
+            self.scaler.fit(combined_targets)
+            _logger.debug(f"DDFM._update(): Re-fitted target scaler on {combined_targets.shape[0]} observations (training + new data)")
+            
+            # Transform new data with updated scaler
+            target_vals = self.scaler.transform(new_targets_unstd)
+            new_data_df[target_cols] = target_vals
+            # Update dataset's data and y with newly transformed values (keep in sync)
+            dataset.data[target_cols] = target_vals
+            if hasattr(dataset, 'y') and dataset.y is not None:
+                # Update y array (target series values) to match updated data
+                dataset.y = new_data_df[target_cols].values
+                _logger.debug(f"DDFM._update(): Updated dataset.y with re-scaled target values")
+        
+        # Re-fit feature scaler on combined data (training + new)
+        if feature_scaler is not None and feature_cols and len(new_features_unstd) > 0:
+            # Inverse-standardize training feature data
+            if hasattr(feature_scaler, 'mean_') and hasattr(feature_scaler, 'scale_'):
+                training_features_scaled = training_data_df[feature_cols].values
+                training_features_unstd = training_features_scaled * feature_scaler.scale_[np.newaxis, :] + feature_scaler.mean_[np.newaxis, :]
+            else:
+                training_features_unstd = training_data_df[feature_cols].values
+            
+            # Combine training + new feature data for re-fitting
+            combined_features = np.vstack([training_features_unstd, new_features_unstd])
+            
+            # Re-fit feature scaler on combined data
+            feature_scaler.fit(combined_features)
+            _logger.debug(f"DDFM._update(): Re-fitted feature scaler on {combined_features.shape[0]} observations (training + new data)")
+            
+            # Transform new data with updated scaler
+            feature_vals = feature_scaler.transform(new_features_unstd)
+            new_data_df[feature_cols] = feature_vals
+            # Update dataset's data and X with newly transformed values (keep in sync)
+            dataset.data[feature_cols] = feature_vals
+            if hasattr(dataset, 'X') and dataset.X is not None and len(feature_cols) > 0:
+                # Update X array (feature/covariate values) to match updated data
+                dataset.X = new_data_df[feature_cols].values
+                _logger.debug(f"DDFM._update(): Updated dataset.X with re-scaled feature values")
         new_data = np.asarray(new_data_df.values)
         training_data = np.asarray(self.data.values)
+        
+        # Validate data shape matches training format
         validate_update_data_shape(
             data=new_data,
             training_data=training_data,
             model_name=self.__class__.__name__
         )
         
-        # Validate target_series match
-        if dataset.target_series != self._dataset.target_series:
+        # Additional validation: ensure 2D array format
+        if new_data.ndim != 2:
             raise DataValidationError(
-                f"target_series mismatch: new dataset has {dataset.target_series}, "
-                f"but training dataset has {self._dataset.target_series}"
+                f"DDFM._update(): Data must be 2D array (time_steps × features), got shape {new_data.shape}.\n"
+                f"Expected format: (T, {training_data.shape[1]}) where T is number of time steps."
             )
+        
+        # Validate target_series match (or covariates match, which determines target_series)
+        # Check if target_series match, or if covariates match (which would result in same target_series)
+        new_targets = getattr(dataset, 'target_series', None)
+        new_covariates = getattr(dataset, 'covariates', None) or []
+        train_targets = getattr(self._dataset, 'target_series', None)
+        train_covariates = getattr(self._dataset, 'covariates', None) or []
+        
+        # If target_series don't match, check if it's due to covariates difference
+        if new_targets != train_targets:
+            # If covariates match, target_series should also match (unless data columns changed)
+            if new_covariates != train_covariates:
+                raise DataValidationError(
+                    f"target_series mismatch: new dataset has {new_targets}, "
+                    f"but training dataset has {train_targets}. "
+                    f"This may be due to covariates difference: new={new_covariates}, train={train_covariates}"
+                )
         
         # Convert new data to tensor and move to GPU
         new_data_tensor = to_tensor(new_data, dtype=DEFAULT_TORCH_DTYPE, device=self.device)

@@ -303,7 +303,6 @@ class YamlSource:
         _EXCLUDED_KEYS = {
             'defaults', '_target_', '_recursive_', '_convert_', 
             'series', 'blocks', 'data', 'output', 'description', 'name', 'target', 'model',
-            'nan_method', 'nan_k'  # Internal constants, not user-configurable
         }
         main_settings = {k: v for k, v in cfg_dict.items() if k not in _EXCLUDED_KEYS}
         

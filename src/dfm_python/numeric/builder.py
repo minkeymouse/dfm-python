@@ -5,183 +5,193 @@ including observation matrix construction and state-space assembly.
 """
 
 import numpy as np
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Tuple, Dict, Any, List
 
 from ..logger import get_logger
-from ..utils.errors import ConfigurationError
 from ..config.constants import (
-    DEFAULT_HIERARCHY_VALUE,
     DEFAULT_IDENTITY_SCALE,
+    DEFAULT_DTYPE,
+    DEFAULT_FACTOR_ORDER,
 )
-from .stability import ensure_positive_definite, compute_cov_safe, create_scaled_identity
+from .stability import create_scaled_identity
 
 _logger = get_logger(__name__)
 
 
-def build_observation_matrix(C: np.ndarray) -> np.ndarray:
-    """Build observation matrix H including idiosyncratic components.
-    
-    Constructs the observation matrix H = [C, I] for AR(1), where C loads on factors and I on idio.
+def build_dfm_structure(config: Any) -> Tuple[np.ndarray, np.ndarray, int, int]:
+    """Build DFM model structure from configuration.
     
     Parameters
     ----------
-    C : np.ndarray
-        Loading matrix (N x m) from decoder
+    config : Any
+        DFMConfig instance with get_blocks_array() method
+    
+    Returns
+    -------
+    blocks : np.ndarray
+        Block structure array (N x n_blocks)
+    r : np.ndarray
+        Number of factors per block (n_blocks,)
+    num_factors : int
+        Total number of factors
+    p : int
+        VAR lag order (always 1 for factors)
+    """
+    # Get model structure (stored as NumPy arrays)
+    # Cache blocks array to avoid multiple calls to get_blocks_array()
+    blocks_array = config.get_blocks_array()
+    blocks = np.array(blocks_array, dtype=DEFAULT_DTYPE)
+    
+    # Get factors per block (r)
+    factors_per_block = getattr(config, 'factors_per_block', None)
+    if factors_per_block is not None:
+        r = np.array(factors_per_block, dtype=DEFAULT_DTYPE)
+    else:
+        r = np.ones(blocks_array.shape[1], dtype=DEFAULT_DTYPE)
+    
+    # Total number of factors (computed from r to avoid redundancy)
+    num_factors = int(np.sum(r))
+    
+    # AR order (always AR(1) for factors)
+    p = DEFAULT_FACTOR_ORDER
+    
+    return blocks, r, num_factors, p
+
+
+def build_dfm_blocks(
+    blocks: np.ndarray,
+    config: Any,
+    columns: Optional[List[str]],
+    N_actual: int
+) -> np.ndarray:
+    """Rebuild DFM blocks array to match data dimensions.
+    
+    Parameters
+    ----------
+    blocks : np.ndarray
+        Current blocks array
+    config : Any
+        Config object with get_blocks_array() method
+    columns : Optional[List[str]]
+        Column names if available
+    N_actual : int
+        Expected number of series
         
     Returns
     -------
-    H : np.ndarray
-        Observation matrix (N x state_dim)
+    np.ndarray
+        Updated blocks array matching data dimensions
     """
-    N_series, m = C.shape
+    from ..logger.dfm_logger import log_blocks_diagnostics
     
-    # H = [C, I] where C loads on f_t, I loads on eps_t
-    H = np.hstack([C, create_scaled_identity(N_series, DEFAULT_IDENTITY_SCALE)])
-    
-    return H
+    if columns is not None:
+        # Clear cache and rebuild from config
+        if hasattr(config, '_cached_blocks'):
+            config._cached_blocks = None
+        blocks_array = config.get_blocks_array(columns=columns)
+        new_blocks = np.array(blocks_array, dtype=DEFAULT_DTYPE)
+        _logger.info(f"Rebuilt blocks array: shape={new_blocks.shape}")
+        log_blocks_diagnostics(new_blocks, columns, N_actual)
+        return new_blocks
+    else:
+        # Fallback: pad or truncate to match dimensions
+        n_blocks = blocks.shape[1]
+        if blocks.shape[0] < N_actual:
+            padding = np.zeros((N_actual - blocks.shape[0], n_blocks), dtype=DEFAULT_DTYPE)
+            new_blocks = np.vstack([blocks, padding])
+            _logger.warning(f"Padded blocks array with zeros: {N_actual - blocks.shape[0]} rows")
+            return new_blocks
+        elif blocks.shape[0] > N_actual:
+            new_blocks = blocks[:N_actual, :]
+            _logger.warning(f"Truncated blocks array: {blocks.shape[0]} -> {N_actual} rows")
+            return new_blocks
+        else:
+            return blocks
 
 
-def build_state_space(
+def build_dfm_slower_freq_observation_matrix(
+    N: int,
+    n_clock_freq: int,
+    n_slower_freq: int,
+    tent_weights: np.ndarray,
+    dtype: type = np.float32
+) -> np.ndarray:
+    """Build observation matrix for slower-frequency idiosyncratic chains.
+    
+    Parameters
+    ----------
+    N : int
+        Total number of series
+    n_clock_freq : int
+        Number of clock-frequency series (series at the clock frequency, generic)
+    n_slower_freq : int
+        Number of slower-frequency series (series slower than clock frequency, generic)
+    tent_weights : np.ndarray
+        Tent weights array (e.g., [1, 2, 3, 2, 1])
+    dtype : type, default np.float32
+        Data type for output matrix
+        
+    Returns
+    -------
+    np.ndarray
+        Observation matrix (N x (tent_kernel_size * n_slower_freq))
+    """
+    tent_kernel_size = len(tent_weights)
+    C_slower_freq = np.zeros((N, tent_kernel_size * n_slower_freq), dtype=dtype)
+    C_slower_freq[n_clock_freq:, :] = np.kron(create_scaled_identity(n_slower_freq, DEFAULT_IDENTITY_SCALE, dtype=dtype), tent_weights.reshape(1, -1))
+    return C_slower_freq
+
+
+def build_lag_matrix(
     factors: np.ndarray,
-    A_f: np.ndarray,
-    Q_f: np.ndarray,
-    A_eps: np.ndarray,
-    Q_eps: np.ndarray,
-    factor_order: int = 1,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Build state-space model with companion form.
-    
-    Constructs the complete state-space model including both factors
-    and idiosyncratic components in the state vector.
+    T: int,
+    num_factors: int,
+    tent_kernel_size: int,
+    p: int,
+    dtype: type = np.float32
+) -> np.ndarray:
+    """Build lag matrix for factors.
     
     Parameters
     ----------
     factors : np.ndarray
-        Extracted factors (T x m)
-    A_f : np.ndarray
-        Factor transition matrix (m x m) for AR(1)
-    Q_f : np.ndarray
-        Factor innovation covariance (m x m)
-    A_eps : np.ndarray
-        Idiosyncratic AR(1) coefficients (N x N), diagonal
-    Q_eps : np.ndarray
-        Idiosyncratic innovation covariance (N x N), diagonal
-    factor_order : int, default 1
-        AR lag order (always 1)
+        Factor matrix (T x num_factors)
+    T : int
+        Number of time periods
+    num_factors : int
+        Number of factors
+    tent_kernel_size : int
+        Tent kernel size
+    p : int
+        AR lag order
+    dtype : type
+        Data type
         
     Returns
     -------
-    A : np.ndarray
-        Complete transition matrix (state_dim x state_dim)
-    Q : np.ndarray
-        Complete innovation covariance (state_dim x state_dim)
-    Z_0 : np.ndarray
-        Initial state vector
-    V_0 : np.ndarray
-        Initial state covariance
+    np.ndarray
+        Lag matrix (T x (num_factors * num_lags))
     """
-    T, m = factors.shape
-    N = A_eps.shape[0]
+    num_lags = max(p + 1, tent_kernel_size)
+    lag_matrix = np.zeros((T, num_factors * num_lags), dtype=dtype)
     
-    # State: [f_t, eps_t]
-    # Transition: f_t = A_f @ f_{t-1} + v_f, eps_t = A_eps @ eps_{t-1} + v_eps
-    # Block diagonal structure
-    A = np.block([
-        [A_f, np.zeros((m, N))],
-        [np.zeros((N, m)), A_eps]
-    ])
+    # Vectorized implementation: build all lags at once
+    for lag_idx in range(num_lags):
+        start_idx = max(0, tent_kernel_size - lag_idx)
+        end_idx = T - lag_idx
+        if start_idx < end_idx:
+            col_start = lag_idx * num_factors
+            col_end = col_start + num_factors
+            # Use advanced indexing for better performance
+            lag_matrix[start_idx:end_idx, col_start:col_end] = factors[start_idx:end_idx, :num_factors].copy()
     
-    Q = np.block([
-        [Q_f, np.zeros((m, N))],
-        [np.zeros((N, m)), Q_eps]
-    ])
-    
-    # Initial state: [f_0, eps_0]
-    Z_0 = np.concatenate([factors[0, :], np.zeros(N)])
-    
-    # Initial covariance: block diagonal
-    V_f = compute_cov_safe(factors.T, rowvar=True, pairwise_complete=False)
-    V_eps = np.diag(np.diag(Q_eps))  # Use Q_eps as initial idio covariance
-    V_0 = np.block([
-        [V_f, np.zeros((m, N))],
-        [np.zeros((N, m)), V_eps]
-    ])
-    
-    return A, Q, Z_0, V_0
-
-
-
-
-def compute_idio_lengths(
-    config: Any,
-    clock: str,
-    tent_weights_dict: Optional[Dict[str, np.ndarray]] = None
-) -> np.ndarray:
-    """Compute idiosyncratic chain length for each series.
-    
-    For clock-frequency series: returns 1 (single AR(1) state).
-    For slower-frequency series: returns tent length (L) if augment_idio_slow is True, else 0.
-    If augment_idio is False: all series return 0.
-    
-    Parameters
-    ----------
-    config : DFMConfig
-        Model configuration containing series frequencies and idio augmentation flags
-    clock : str
-        Clock frequency ('d', 'w', 'm', 'q', 'sa', 'a')
-    tent_weights_dict : Dict[str, np.ndarray], optional
-        Dictionary mapping frequency strings to tent weight arrays.
-        If None, will be computed from config using get_agg_structure.
-        
-    Returns
-    -------
-    idio_chain_lengths : np.ndarray
-        Array of chain lengths, one per series.
-        - 0: no idio augmentation
-        - 1: clock-frequency series (AR(1) idio)
-        - L: slower-frequency series (tent-length chain, where L = len(tent_weights))
-    """
-    from ..config.constants import FREQUENCY_HIERARCHY
-    from .tent import get_agg_structure
-    
-    # Get frequencies using new API
-    frequencies = config.get_frequencies()
-    if not frequencies:
-        return np.zeros(0, dtype=int)
-    
-    if not config.augment_idio:
-        # Feature disabled: all zeros
-        return np.zeros(len(frequencies), dtype=int)
-    clock_hierarchy = FREQUENCY_HIERARCHY.get(clock, DEFAULT_HIERARCHY_VALUE)
-    
-    # Get tent weights if not provided
-    if tent_weights_dict is None:
-        agg_structure = get_agg_structure(config, clock=clock)
-        tent_weights_dict = agg_structure.get('tent_weights', {})
-    
-    lengths = np.zeros(len(frequencies), dtype=int)
-    
-    for i, freq in enumerate(frequencies):
-        freq_hierarchy = FREQUENCY_HIERARCHY.get(freq, DEFAULT_HIERARCHY_VALUE)
-        
-        if freq_hierarchy == clock_hierarchy:
-            # Clock-frequency series: AR(1) idio state
-            lengths[i] = 1
-        elif freq_hierarchy > clock_hierarchy:
-            # Slower-frequency series: tent-length chain (if enabled)
-            if config.augment_idio_slow and tent_weights_dict is not None:
-                tent_weights = tent_weights_dict.get(freq)
-                if tent_weights is not None:
-                    lengths[i] = len(tent_weights)
-                # If no tent weights available, length stays 0 (no idio for this series)
-            # If augment_idio_slow is False, length stays 0
-    
-    return lengths
+    return lag_matrix
 
 
 __all__ = [
-    'build_observation_matrix',
-    'build_state_space',
-    'compute_idio_lengths',
+    'build_dfm_structure',
+    'build_dfm_blocks',
+    'build_dfm_slower_freq_observation_matrix',
+    'build_lag_matrix',
 ]
 

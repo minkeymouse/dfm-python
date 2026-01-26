@@ -36,7 +36,6 @@ from ..config.constants import (
 )
 from .stability import (
     ensure_process_noise_stable,
-    clean_matrix,
     cap_max_eigenval,
     compute_var_safe,
     compute_cov_safe,
@@ -542,98 +541,7 @@ def estimate_idio_dynamics(
     return A_eps, Q_eps
 
 
-def estimate_idio_params(
-    eps: np.ndarray,
-    idx_no_missings: Optional[np.ndarray] = None,
-    min_obs: int = DEFAULT_MIN_OBS,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Estimate AR(1) parameters for idiosyncratic components.
-    
-    Falls back to zero-coefficient models when insufficient observations are
-    available instead of raising errors, ensuring downstream pipelines remain
-    robust.
-    
-    Parameters
-    ----------
-    eps : np.ndarray
-        Idiosyncratic residuals (T x N)
-    idx_no_missings : np.ndarray, optional
-        Boolean mask (T x N) indicating non-missing values
-    min_obs : int, default DEFAULT_MIN_OBS
-        Minimum number of observations required
-        
-    Returns
-    -------
-    phi : np.ndarray
-        AR(1) coefficients (N x N), diagonal
-    mu_eps : np.ndarray
-        Mean of idiosyncratic components (N,)
-    std_eps : np.ndarray
-        Standard deviation of idiosyncratic components (N,)
-    """
-    T, N = eps.shape
-    phi = np.zeros((N, N))
-    mu_eps = np.zeros(N)
-    std_eps = np.zeros(N)
-    
-    if idx_no_missings is None:
-        idx_no_missings = np.ones((T, N), dtype=bool)
-    
-    insufficient_series = []
-    
-    for j in range(N):
-        mask = idx_no_missings[:, j]
-        observed = eps[mask, j]
-        
-        if observed.size == 0:
-            mu_eps[j] = DEFAULT_ZERO_VALUE
-            std_eps[j] = MIN_DIAGONAL_VARIANCE
-            insufficient_series.append((j, 0))
-            continue
-        
-        mu_eps[j] = float(np.mean(observed))
-        std_eps_j = float(np.std(observed))
-        std_eps[j] = max(std_eps_j, MIN_STD)
-        
-        valid_pairs = mask[:-1] & mask[1:]
-        pair_count = int(np.sum(valid_pairs))
-        
-        if pair_count < max(min_obs, 1):
-            insufficient_series.append((j, pair_count))
-            continue
-        
-        eps_t = eps[1:, j][valid_pairs]
-        eps_t_1 = eps[:-1, j][valid_pairs]
-        var_prev = compute_var_safe(eps_t_1, ddof=0, min_variance=MIN_FACTOR_VARIANCE)
-        
-        if var_prev < MIN_FACTOR_VARIANCE:
-            insufficient_series.append((j, pair_count))
-            continue
-        
-        cov_matrix = compute_cov_safe(np.vstack([eps_t, eps_t_1]), rowvar=True, pairwise_complete=False)
-        cov_eps = cov_matrix[0, 1]
-        coeff = cov_eps / var_prev
-        # Use clip_ar for consistency
-        coeff_clipped, _ = clip_ar(np.array([[coeff]]), warn=False)
-        phi[j, j] = float(coeff_clipped[0, 0])
-    
-    if insufficient_series:
-        from ..config.constants import MAX_WARNING_ITEMS
-        preview = ", ".join(f"{idx}:{cnt}" for idx, cnt in insufficient_series[:MAX_WARNING_ITEMS])
-        more = ""
-        if len(insufficient_series) > MAX_WARNING_ITEMS:
-            more = f", ... (+{len(insufficient_series) - MAX_WARNING_ITEMS} more)"
-        _logger.warning(
-            "Falling back to zero AR coefficients for %d series (insufficient observations). "
-            "Series indices and available pairs: %s%s",
-            len(insufficient_series),
-            preview,
-            more,
-        )
-    
-    return phi, mu_eps, std_eps
-
-
+# Removed estimate_idio_params - unused (estimate_idio_dynamics is used instead)
 # Removed estimate_state_space_params - unused function
 
 # ============================================================================
@@ -1230,7 +1138,6 @@ __all__ = [
     # Estimation functions
     'estimate_var',
     'estimate_idio_dynamics',
-    'estimate_idio_params',
     # DDFM-specific functions
     'get_idio',
     'get_transition_params',

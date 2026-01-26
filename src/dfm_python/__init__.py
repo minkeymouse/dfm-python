@@ -32,7 +32,9 @@ Example:
     >>> df_processed = df[[col for col in df.columns if col != 'date']]
     >>> 
     >>> # Step 2: Create Dataset
-    >>> dataset = DFMDataset(config_path='config/default.yaml', data=df_processed)
+    >>> from dfm_python.config import DFMConfig
+    >>> config = DFMConfig.from_yaml('config/default.yaml')
+    >>> dataset = DFMDataset(config=config, data=df_processed)
     >>> 
     >>> # Step 3: Create model and load config
     >>> model = DFM()

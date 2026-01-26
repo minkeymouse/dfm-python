@@ -2,26 +2,37 @@
 
 import pytest
 import numpy as np
-from dfm_python.config.constants import DEFAULT_DTYPE
+from dfm_python.numeric.builder import build_dfm_structure, build_dfm_blocks
+from dfm_python.config import DFMConfig
 
 
 class TestBuilder:
-    """Test suite for numeric builder utilities."""
+    """Test suite for builder utilities."""
     
-    def test_build_observation_matrix(self):
-        """Test build_observation_matrix."""
-        import numpy as np
-        from dfm_python.numeric.builder import build_observation_matrix
+    def test_build_dfm_structure(self):
+        """Test build_dfm_structure."""
+        config = DFMConfig(
+            blocks={'block1': {'num_factors': 2, 'series': ['s1', 's2']}},
+            frequency={'w': ['s1', 's2']}
+        )
         
-        N = 3
-        m = 2
-        C = np.eye(N, m, dtype=DEFAULT_DTYPE)
-        H = build_observation_matrix(C)
-        # Should be [C, I] where I is N x N identity
-        assert H.shape == (N, m + N)
-        assert np.allclose(H[:, :m], C)
-        assert np.allclose(H[:, m:], np.eye(N))
+        blocks, r, num_factors, p = build_dfm_structure(config)
+        assert blocks is not None
+        assert r is not None
+        assert num_factors > 0
+        assert p >= 0
     
-    # VAR(2) tests removed - factors now always use AR(1) dynamics (simplified)
-    # build_observation_matrix now only supports factor_order=1 (AR(1))
-
+    def test_build_dfm_blocks(self):
+        """Test build_dfm_blocks."""
+        config = DFMConfig(
+            blocks={'block1': {'num_factors': 1, 'series': ['s1', 's2', 's3']}},
+            frequency={'w': ['s1', 's2', 's3']}
+        )
+        
+        initial_blocks = np.ones((2, 1))
+        columns = ['s1', 's2', 's3']
+        n_series = 3
+        
+        blocks = build_dfm_blocks(initial_blocks, config, columns, n_series)
+        assert blocks.shape[0] == n_series
+        assert blocks.shape[1] == 1

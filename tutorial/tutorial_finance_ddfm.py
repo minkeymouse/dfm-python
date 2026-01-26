@@ -183,7 +183,7 @@ config = DDFMConfig(
     n_mc_samples=10,  # Number of MC samples per MCMC iteration (reduced for faster execution)
     learning_rate=DEFAULT_LEARNING_RATE,
     window_size=DEFAULT_DDFM_WINDOW_SIZE,  # Window size (time-step batch size) for training
-    target_scaler=y_scaler  # Fitted scaler for target series inverse transformation
+    scaler='standard'  # Use standard scaler (fitted internally)
 )
 
 print(f"   Number of series: {len(selected_cols)}")
@@ -204,11 +204,13 @@ print("\n[Step 4] Creating Dataset...")
 # Create DDFMDataset with preprocessed data
 # Data must be preprocessed before passing to Dataset
 # Target series are specified separately - they remain in raw form (not preprocessed)
+# Use covariates to exclude non-target series
+all_cols = list(df_processed.columns)
+covariates = [col for col in all_cols if col != target_col]
 dataset = DDFMDataset(
     data=df_processed,  # Pass DataFrame directly (not .values) - already preprocessed
     time_idx='index',  # Use DataFrame index as time identifier
-    target_series=[target_col],  # Specify target series
-    target_scaler=y_scaler  # Fitted scaler for target series
+    covariates=covariates if covariates else None  # Exclude non-target series from targets
 )
 
 print(f"   Dataset created successfully")
@@ -257,7 +259,7 @@ print("   State-space model built successfully")
 # ============================================================================
 print("\n[Step 6] Making predictions...")
 
-# Predict with horizon=6 (uses target_series from Dataset)
+# Predict with horizon=6 (uses target series computed from covariates)
 # Note: predict() requires build_state_space() to be called first
 X_forecast, Z_forecast = model.predict(horizon=6, return_series=True, return_factors=True)
 

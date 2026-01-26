@@ -194,17 +194,20 @@ def resolve_target_series(
     result: Optional[Any] = None,
     model_name: str = "model"
 ) -> Tuple[Optional[List[str]], Optional[List[int]]]:
-    """Resolve target series from Dataset.
+    """Resolve target series from Dataset using covariates.
     
-    This utility function resolves target series from the Dataset's target_series attribute
-    and maps them to indices in the series_ids list.
+    This utility function resolves target series from the Dataset's covariates attribute.
+    Targets are computed as: target_series = all_series - covariates.
+    
+    If covariates is None or empty and series_ids is available, all series are used as targets
+    (default behavior when covariates is not specified).
     
     Parameters
     ----------
     dataset : Any, optional
-        Dataset instance with target_series attribute
+        Dataset instance with covariates attribute
     series_ids : List[str], optional
-        Available series IDs from config or result. Used for validation.
+        Available series IDs from config or result. Used for validation and default targets.
     result : Any, optional
         Result object that may contain series_ids. Used as fallback.
     model_name : str, default="model"
@@ -225,12 +228,27 @@ def resolve_target_series(
     from ..utils.errors import DataError
     from ..config.constants import MAX_WARNING_ITEMS, MAX_ERROR_ITEMS
     
-    # Get target series from Dataset
+    # Compute target series from Dataset's covariates
     target_series = None
     if dataset is not None:
-        target_series = getattr(dataset, 'target_series', None)
-        if target_series is not None and len(target_series) > 0:
-            target_series = target_series if isinstance(target_series, list) else [target_series]
+        # Get covariates from dataset
+        covariates = getattr(dataset, 'covariates', None)
+        if covariates is not None and len(covariates) > 0:
+            # Compute target_series = all_series - covariates
+            if series_ids is not None:
+                valid_covariates = [c for c in covariates if c in series_ids]
+                target_series = [s for s in series_ids if s not in valid_covariates]
+            else:
+                # If series_ids not available, try to get from dataset's processed columns
+                processed_columns = getattr(dataset, '_processed_columns', None)
+                if processed_columns is not None:
+                    valid_covariates = [c for c in covariates if c in processed_columns]
+                    target_series = [s for s in processed_columns if s not in valid_covariates]
+    
+    # Default case: if target_series is None/empty and series_ids is available, use all series as targets
+    if (target_series is None or len(target_series) == 0) and series_ids is not None:
+        target_series = list(series_ids)
+        _logger.debug(f"{model_name}: No target_series specified, using all {len(series_ids)} series as targets")
     
     # Resolve indices if we have both target_series and series_ids
     target_indices = None
@@ -280,7 +298,10 @@ def select_columns_by_prefix(df: pd.DataFrame, prefixes: List[str], count_per_pr
 
 
 def get_target_scaler(dataset: Optional[Any] = None, model: Optional[Any] = None) -> Optional[Any]:
-    """Get target scaler from dataset or model.
+    """Get scaler from dataset or model.
+    
+    Checks 'scaler' attribute first, then falls back to 'target_scaler' for backward compatibility.
+    Both DFM and DDFM now use 'scaler' attribute.
     
     Parameters
     ----------
@@ -292,12 +313,14 @@ def get_target_scaler(dataset: Optional[Any] = None, model: Optional[Any] = None
     Returns
     -------
     Any or None
-        Target scaler from dataset or model, or None if not available
+        Scaler from dataset or model, or None if not available
     """
     if dataset is not None:
-        return getattr(dataset, 'target_scaler', None)
+        # Check 'scaler' first, then 'target_scaler' for backward compatibility
+        return getattr(dataset, 'scaler', None) or getattr(dataset, 'target_scaler', None)
     if model is not None:
-        return getattr(model, 'target_scaler', None)
+        # Check 'scaler' first, then 'target_scaler' for backward compatibility
+        return getattr(model, 'scaler', None) or getattr(model, 'target_scaler', None)
     return None
 
 # Metric functions (moved to metric.py)

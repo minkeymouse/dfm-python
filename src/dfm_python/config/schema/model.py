@@ -65,8 +65,6 @@ from ..constants import (
     MIN_EIGENVALUE,
     MAX_EIGENVALUE,
     MIN_DIAGONAL_VARIANCE,
-    DEFAULT_NAN_METHOD,
-    DEFAULT_NAN_K,
     DEFAULT_CLOCK_FREQUENCY,
     DEFAULT_KDFM_AR_ORDER,
     DEFAULT_KDFM_MA_ORDER,
@@ -138,7 +136,6 @@ class BaseModelConfig:
     # ========================================================================
     clock: str = 'm'  # Required: Base frequency for latent factors (global clock): 'd', 'w', 'm', 'q', 'sa', 'a' (defaults to 'm' for monthly)
     target_scaler: Optional[ScalerType] = None  # Fitted sklearn scaler instance (StandardScaler, RobustScaler, etc.) for target series only. Must be a fitted scaler object (call .fit() on target data first). Pass scaler object directly, not string. Feature series are assumed to be manually preprocessed. If None, target series are assumed to be already in the desired scale.
-    # Note: nan_method and nan_k are internal constants (DEFAULT_NAN_METHOD, DEFAULT_NAN_K) used during initialization only
     
     def __post_init__(self):
         """Validate basic model structure.
@@ -294,9 +291,6 @@ class DFMConfig(BaseModelConfig):
     # - If mixed frequencies detected: augment_idio=True, augment_idio_slow=True (required for tent kernel)
     # These are properties, not config fields - automatically determined from frequency configuration
     
-    # Kalman Filter Type
-    use_cholesky_filter: bool = False  # Use CholeskyKalmanFilter for better numerical stability (default: False)
-    
     # Tent Kernel Weights (for mixed-frequency aggregation)
     tent_weights: Optional[Union[Dict[str, List[float]], Dict[str, np.ndarray]]] = None  # Required for mixed-frequency data: tent weights for frequency pairs. Format: {'freq_pair': [weights]} or {'freq': [weights]}. Example: {'m:w': [1, 2, 1]} or {'m': [1, 2, 1]}. Must be specified in config for all slower-frequency pairs.
     
@@ -379,7 +373,11 @@ class DFMConfig(BaseModelConfig):
         object.__setattr__(self, '_augment_idio_slow', is_mixed_freq)
     
     def to_em_config(self) -> 'EMConfig':
-        """Create EMConfig from DFMConfig consolidated parameters."""
+        """Create EMConfig from DFMConfig consolidated parameters.
+        
+        Automatically passes all numerical stability parameters (regularization, ar_clip,
+        damping_factor, data_clip) from DFMConfig to EMConfig for use in EM algorithm.
+        """
         from ...functional.em import EMConfig
         from ..constants import DEFAULT_REGULARIZATION, VAR_STABILITY_THRESHOLD
         
@@ -397,6 +395,10 @@ class DFMConfig(BaseModelConfig):
             regularization=reg_scale,
             min_norm=min_eigenval,
             max_eigenval=max_eigenval,
+            # Pass numerical stability parameters from DFMConfig
+            ar_clip=self.ar_clip,
+            damping_factor=self.damping_factor,
+            data_clip=self.data_clip,
             # Other parameters use defaults from EMConfig
         )
     
@@ -453,7 +455,6 @@ class DFMConfig(BaseModelConfig):
             'data_clip': data.get('data_clip', None),
             'regularization': data.get('regularization', None),
             'damping_factor': data.get('damping_factor', None),
-            'use_cholesky_filter': data.get('use_cholesky_filter', False),
             'tent_weights': data.get('tent_weights', None),
         }
         

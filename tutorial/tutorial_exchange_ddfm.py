@@ -76,16 +76,16 @@ print("   Note: Features (non-target series) should be preprocessed by user.")
 print("   Target series will be scaled within DDFM pipeline using scaler class.")
 
 # For exchange_rate data, all series are targets, so no feature preprocessing needed
-# In general, identify features vs targets and preprocess features here
-target_series = list(df_processed.columns)  # All series are targets for exchange_rate
-feature_series = []  # No features for exchange_rate case
+# In general, identify covariates vs targets and preprocess covariates here
+# All series are targets by default (no covariates specified)
+feature_series = []  # No features/covariates for exchange_rate case
 
 if len(feature_series) > 0:
-    # Preprocess features (standardization, normalization, etc.)
+    # Preprocess features/covariates (standardization, normalization, etc.)
     # User should do this before passing to DDFM
     print(f"   {len(feature_series)} feature series should be preprocessed by user")
 else:
-    print(f"   No features to preprocess (all {len(target_series)} series are targets)")
+    print(f"   No features to preprocess (all {len(df_processed.columns)} series are targets)")
     print(f"   Target series will be scaled within DDFM pipeline")
 
 # Store for later use
@@ -186,9 +186,8 @@ print(f"   - Seed: {seed} (matching original)")
 # ============================================================================
 print("\n[Step 4] Creating Dataset...")
 
-# For DDFM, we need to specify target_series (series to forecast)
+# For DDFM, all series are targets by default (no covariates specified)
 # In this tutorial, all series are targets (no features)
-target_series = list(df_processed_final.columns)
 
 # Mimic original TensorFlow scaling: pandas (data - mean) / std (ddof=1)
 # This matches the original: self.data = (data - self.mean_z) / self.sigma_z
@@ -204,20 +203,20 @@ print(f"   Std (should be ~1): {df_scaled.std().values[:3]}")
 # Create scaler for target series (needed for prediction inverse transformation)
 # Even though data is already scaled, we need a scaler for prediction
 from sklearn.preprocessing import StandardScaler
-target_scaler = StandardScaler()
-target_scaler.fit(df_processed_final[target_series].values)
+scaler = StandardScaler()
+scaler.fit(df_processed_final.values)  # Fit on all series (all are targets)
 
 # Create Dataset - data is already scaled, but scaler needed for prediction
+# All series are targets by default (no covariates specified)
 dataset = DDFMDataset(
     data=df_scaled,  # Data already scaled using pandas (matching original)
     time_idx='index',  # Use DataFrame index as time identifier
-    target_series=target_series,  # All series are targets
-    target_scaler=target_scaler  # Scaler for prediction inverse transformation
+    scaler=scaler  # Scaler for prediction inverse transformation
 )
 
 print(f"   Dataset created successfully")
 print(f"   Data shape: {dataset.data.shape}")
-print(f"   Target series: {dataset.target_series}")
+print(f"   Target series: {dataset.target_series} (all series, no covariates)")
 
 # ============================================================================
 # Step 5: Create and Train Model
@@ -320,7 +319,7 @@ print(f"✅ Data loaded: {df.shape[0]} rows, {df.shape[1]} series")
 if len(feature_series) > 0:
     print(f"✅ Features preprocessed: {len(feature_series)} feature series")
 else:
-    print(f"✅ No features: all {len(target_series)} series are targets (scaled within DDFM pipeline)")
+    print(f"✅ No features: all {len(df_processed.columns)} series are targets (scaled within DDFM pipeline)")
 print(f"✅ Model trained: {len(df_processed_final.columns)} series, {len(factors[0]) if len(factors) > 0 else 'N/A'} factors, VAR(1) dynamics")
 print(f"✅ Factors extracted: {factors.shape[0]} periods, {factors.shape[1]} factors")
 print(f"✅ Configuration matches original TensorFlow DDFM")

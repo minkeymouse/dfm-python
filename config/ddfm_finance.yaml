@@ -20,7 +20,7 @@ seed: null  # Random seed (None uses default)
 
 # Data Handling (used by Dataset, not Model)
 clock: m  # Monthly clock frequency
-target_scaler: standard  # Scaler for target series: 'standard', 'robust', 'minmax', 'maxabs', 'quantile', or null
+scaler: standard  # Scaler for target series: 'standard', 'robust', 'minmax', 'maxabs', 'quantile', or null
 
 # Frequency mapping (optional)
 # If not specified, all series use clock frequency

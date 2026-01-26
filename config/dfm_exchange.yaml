@@ -1,0 +1,32 @@
+# DFM Configuration for Exchange Rate Datasets
+# Clock: Daily (d) - base frequency for latent factors
+
+# EM Algorithm Parameters
+threshold: 1.0e-05
+max_iter: 5000
+
+# Numerical Stability Parameters
+clip_ar_coefficients: true
+ar_clip_min: -0.99
+ar_clip_max: 0.99
+use_regularization: true
+regularization_scale: 1.0e-05
+
+# Idiosyncratic Component Parameters
+augment_idio: true
+augment_idio_slow: false
+idio_rho0: 0.1
+idio_min_var: 1.0e-08
+
+# Data Handling
+clock: d
+scaler: standard
+
+# Block Structure
+blocks:
+  Block_Global:
+    num_factors: 1
+    series: []  # Will be populated from data
+
+# Frequency mapping
+frequency: {}  # Will be populated from data
