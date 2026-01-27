@@ -7,7 +7,7 @@
 
 # EM Algorithm Parameters
 threshold: 1.0e-05  # EM convergence threshold
-max_iter: 50  # Maximum EM iterations
+max_iter: 12  # Maximum EM iterations
 
 # Data Handling
 clock: d  # Daily clock frequency (finance.csv uses daily index via date_id)
