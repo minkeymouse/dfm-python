@@ -459,9 +459,16 @@ def initialize_block_transition(
                 transition_coef_new[:min_rows, :min_cols] = A_transition[:min_rows, :min_cols]
                 A_transition = transition_coef_new
             
-            A_i[:num_factors, :num_factors * p] = A_transition
-            Q_i = np.zeros((block_size, block_size), dtype=dtype)
-            Q_i[:num_factors, :num_factors] = Q_transition
+            # Check for NaN/Inf values in estimated matrices
+            if np.any(~np.isfinite(A_transition)) or np.any(~np.isfinite(Q_transition)):
+                # Fallback to default if estimation produced non-finite values
+                A_i[:num_factors, :num_factors] = default_A_block
+                Q_i = np.zeros((block_size, block_size), dtype=dtype)
+                Q_i[:num_factors, :num_factors] = create_scaled_identity(num_factors, default_process_noise, dtype)
+            else:
+                A_i[:num_factors, :num_factors * p] = A_transition
+                Q_i = np.zeros((block_size, block_size), dtype=dtype)
+                Q_i[:num_factors, :num_factors] = Q_transition
         except (np.linalg.LinAlgError, ValueError):
             A_i[:num_factors, :num_factors] = default_A_block
             Q_i = np.zeros((block_size, block_size), dtype=dtype)
@@ -479,6 +486,13 @@ def initialize_block_transition(
     Q_i[:num_factors, :num_factors] = ensure_process_noise_stable(
         Q_i[:num_factors, :num_factors], min_eigenval=eigenval_floor, warn=True, dtype=dtype
     )
+    
+    # Ensure A_i doesn't contain NaN/Inf before computing initial covariance
+    if np.any(~np.isfinite(A_i)):
+        # Replace NaN/Inf with default values
+        A_i = np.where(np.isfinite(A_i), A_i, 0.0).astype(dtype)
+        # Reset to default if A_i is all zeros or invalid
+        A_i[:num_factors, :num_factors] = default_A_block
     
     # Initial covariance: solve (I - A ⊗ A) vec(V_0) = vec(Q)
     A_i_block = A_i[:block_size, :block_size]

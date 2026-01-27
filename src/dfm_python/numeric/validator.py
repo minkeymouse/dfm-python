@@ -15,6 +15,9 @@ Common validation patterns:
 from typing import Optional, Union, List, Tuple, Any, Dict, TYPE_CHECKING
 import numpy as np
 
+# Tensor type for DDFM compatibility
+# Note: DFM only uses numpy arrays, but DDFM uses torch.Tensor
+# This shared validator module supports both for validate_no_nan_inf and validate_data_shape
 if TYPE_CHECKING:
     try:
         import torch

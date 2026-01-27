@@ -16,8 +16,12 @@ __all__ = [
 ]
 
 # DDFM implementation
-from .ddfm import DDFM
-__all__.extend([
-    'DDFM',  # High-level API
-])
+try:
+    from .ddfm.ddfm import DDFM
+    __all__.extend([
+        'DDFM',  # High-level API
+    ])
+except ImportError:
+    # DDFM not available (missing torch or other dependencies)
+    pass
 

@@ -34,7 +34,6 @@ from ..config import (
     validate_frequency,
     get_agg_structure,
     group_by_freq,
-    compute_idio_lengths,
     detect_config_type,
 )
 
@@ -134,7 +133,6 @@ __all__ = [
     'generate_R_mat',
     'get_agg_structure',
     'group_by_freq',
-    'compute_idio_lengths',
     'detect_config_type',
     # Helper utilities
     'resolve_param',

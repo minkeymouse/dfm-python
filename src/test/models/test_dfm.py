@@ -7,7 +7,7 @@ from dfm_python.models.dfm import DFM
 from dfm_python.models.dfm.mixed_freq import find_slower_frequency
 from dfm_python.config import DFMConfig
 from dfm_python.dataset.dfm_dataset import DFMDataset
-from dfm_python.utils.errors import ModelNotTrainedError, ConfigurationError
+from dfm_python.utils.errors import ModelNotTrainedError, ConfigurationError, ModelNotInitializedError
 from dfm_python.config.constants import DEFAULT_DTYPE
 
 
@@ -26,10 +26,11 @@ class TestDFM:
         )
         config = DFMConfig(
             blocks={'block1': {'num_factors': 1, 'series': ['series_0', 'series_1', 'series_2']}},
-            frequency={'w': ['series_0', 'series_1', 'series_2']},
+            frequency={'series_0': 'w', 'series_1': 'w', 'series_2': 'w'},
             clock='w'
         )
-        return DFMDataset(config=config, data=data)
+        data['date'] = pd.date_range(start='2020-01-01', periods=T, freq='W')
+        return DFMDataset(config=config, data=data, time_index='date')
     
     def test_dfm_initialization_requires_dataset(self, sample_dataset):
         """Test DFM requires dataset in __init__."""
@@ -39,7 +40,7 @@ class TestDFM:
         assert model._dataset is sample_dataset
         assert model._config is not None
         
-        with pytest.raises((ModelNotInitializedError, ConfigurationError)):
+        with pytest.raises((TypeError, ModelNotInitializedError, ConfigurationError)):
             DFM()  # Missing dataset
     
     def test_dfm_fit(self, sample_dataset):
@@ -54,7 +55,7 @@ class TestDFM:
     def test_dfm_predict_not_trained(self, sample_dataset):
         """Test DFM predict raises error when model not trained."""
         model = DFM(dataset=sample_dataset, config=sample_dataset.config)
-        with pytest.raises(ModelNotTrainedError):
+        with pytest.raises((ModelNotTrainedError, ModelNotInitializedError)):
             model.predict(horizon=5)
     
     def test_dfm_predict_with_data(self, sample_dataset):

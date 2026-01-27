@@ -104,7 +104,10 @@ from .models.base import BaseFactorModel
 from .models.dfm import DFM
 
 # DDFM high-level API (PyTorch is mandatory)
-from .models.ddfm import DDFM
+try:
+    from .models.ddfm.ddfm import DDFM
+except ImportError:
+    DDFM = None
 
 __all__ = [
     # Core classes

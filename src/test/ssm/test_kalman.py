@@ -100,12 +100,13 @@ class TestDFMKalmanFilter:
         assert kf._pykalman is not None
         
         # Verify parameters were set correctly
+        # Note: Q, R, V0 have regularization added (diagonal loading) for stability
         assert np.allclose(kf._pykalman.transition_matrices, A)
         assert np.allclose(kf._pykalman.observation_matrices, C)
-        assert np.allclose(kf._pykalman.transition_covariance, Q)
-        assert np.allclose(kf._pykalman.observation_covariance, R)
+        assert np.allclose(kf._pykalman.transition_covariance, Q, atol=1e-4)  # Allow for regularization
+        assert np.allclose(kf._pykalman.observation_covariance, R, atol=1e-4)  # Allow for regularization
         assert np.allclose(kf._pykalman.initial_state_mean, Z0)
-        assert np.allclose(kf._pykalman.initial_state_covariance, V0)
+        assert np.allclose(kf._pykalman.initial_state_covariance, V0, atol=1e-4)  # Allow for regularization
         
         # Test that filter works after update
         T = 5

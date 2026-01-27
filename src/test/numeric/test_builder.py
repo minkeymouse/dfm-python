@@ -13,7 +13,8 @@ class TestBuilder:
         """Test build_dfm_structure."""
         config = DFMConfig(
             blocks={'block1': {'num_factors': 2, 'series': ['s1', 's2']}},
-            frequency={'w': ['s1', 's2']}
+            frequency={'s1': 'w', 's2': 'w'},
+            clock='w'
         )
         
         blocks, r, num_factors, p = build_dfm_structure(config)
@@ -26,7 +27,8 @@ class TestBuilder:
         """Test build_dfm_blocks."""
         config = DFMConfig(
             blocks={'block1': {'num_factors': 1, 'series': ['s1', 's2', 's3']}},
-            frequency={'w': ['s1', 's2', 's3']}
+            frequency={'s1': 'w', 's2': 'w', 's3': 'w'},
+            clock='w'
         )
         
         initial_blocks = np.ones((2, 1))
