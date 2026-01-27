@@ -215,3 +215,4 @@ Nowcasting/
 agent/
 
 *.db
+*.pkl
