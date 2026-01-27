@@ -6,7 +6,7 @@
 
 # EM Algorithm Parameters
 threshold: 1.0e-05  # EM convergence threshold
-max_iter: 5000  # Maximum EM iterations
+max_iter: 50  # Maximum EM iterations
 
 # Numerical Stability Parameters
 clip_ar_coefficients: true
@@ -37,7 +37,7 @@ tent_weights:
 # Series order: clock-frequency (weekly) first, then slower-frequency (monthly)
 blocks:
   Block_Global:
-    num_factors: 5  # Number of factors for global block
+    num_factors: 3  # Number of factors for global block
     series:
       # Weekly series (clock frequency) - must come first
       - KORFBEV  # Retail, Food & Beverages (weekly)

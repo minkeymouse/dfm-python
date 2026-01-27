@@ -875,7 +875,7 @@ wheels = [
 
 [[package]]
 name = "dfm-python"
-version = "0.5.60"
+version = "0.6.0"
 source = { editable = "." }
 dependencies = [
     { name = "build" },

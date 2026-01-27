@@ -44,6 +44,12 @@ def main(cfg: DictConfig) -> None:
     X_forecast, Z_forecast = model.predict(horizon=6)
     print(f"   Forecast shape: {X_forecast.shape}")
 
+    print("\n[Step 5] Saving model...")
+    model_path = project_root / "models" / "dfm_macro.pkl"
+    model_path.parent.mkdir(exist_ok=True)
+    model.save(model_path)
+    print(f"   Model saved to: {model_path}")
+
     print("\n" + result.summary())
 
 if __name__ == "__main__":

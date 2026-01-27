@@ -37,9 +37,146 @@ from ...numeric.estimator import (
 )
 from ...utils.helper import handle_linear_algebra_error
 from ...utils.validation import has_shape_with_min_dims
+from ...utils.errors import NumericalError
 from ...logger import get_logger
+from ...config.constants import DEFAULT_NAN_K, DEFAULT_NAN_METHOD
 
 _logger = get_logger(__name__)
+
+
+def remNaNs_spline(x: np.ndarray, optNaN: Dict[str, Any]) -> Tuple[np.ndarray, np.ndarray]:
+    """Spline interpolation to remove NaNs (matching FRBNY MATLAB remNaNs_spline).
+    
+    This function creates splined data (xBal) with no NaNs, while preserving
+    the original NaN positions (indNaN) for later use. This matches FRBNY's
+    approach of using splined data for initialization.
+    
+    Parameters
+    ----------
+    x : np.ndarray
+        Input data (T x N) with potential NaN values
+    optNaN : Dict[str, Any]
+        Options for NaN handling:
+        - method: int, method for NaN removal (2 = remove leading/trailing, 3 = spline)
+        - k: int, spline order (default 3)
+    
+    Returns
+    -------
+    xBal : np.ndarray
+        Splined data with no NaNs (T x N)
+    indNaN : np.ndarray
+        Boolean array (T x N) indicating original NaN positions
+    """
+    T, N = x.shape
+    indNaN = np.isnan(x)
+    xBal = x.copy()
+    
+    method = optNaN.get('method', DEFAULT_NAN_METHOD)
+    k = optNaN.get('k', DEFAULT_NAN_K)
+    
+    # Method 2: Remove leading and trailing NaNs, then spline
+    if method == 2:
+        # For each series, find leading and trailing NaNs
+        for j in range(N):
+            col = x[:, j]
+            valid_mask = ~np.isnan(col)
+            
+            if not valid_mask.any():
+                # All NaN - fill with zeros
+                xBal[:, j] = 0.0
+                continue
+            
+            # Find first and last valid indices
+            valid_indices = np.where(valid_mask)[0]
+            first_valid = valid_indices[0]
+            last_valid = valid_indices[-1]
+            
+            # Set leading/trailing NaNs to NaN (will be handled by spline)
+            # Keep middle NaNs for spline interpolation
+            col_processed = col.copy()
+            if first_valid > 0:
+                col_processed[:first_valid] = np.nan
+            if last_valid < T - 1:
+                col_processed[last_valid + 1:] = np.nan
+            
+            # Spline interpolation for remaining NaNs
+            if np.isnan(col_processed).any():
+                try:
+                    from scipy.interpolate import interp1d
+                    valid_mask_processed = ~np.isnan(col_processed)
+                    if valid_mask_processed.sum() >= k + 1:  # Need at least k+1 points for spline
+                        valid_indices_processed = np.where(valid_mask_processed)[0]
+                        valid_values = col_processed[valid_indices_processed]
+                        f = interp1d(valid_indices_processed, valid_values, kind='cubic', 
+                                    fill_value='extrapolate', bounds_error=False)
+                        all_indices = np.arange(T)
+                        col_interpolated = f(all_indices)
+                        # Only fill NaNs, keep existing values
+                        nan_mask = np.isnan(col_processed)
+                        col_processed[nan_mask] = col_interpolated[nan_mask]
+                    else:
+                        # Not enough points for spline - use linear
+                        from scipy.interpolate import interp1d
+                        valid_indices_processed = np.where(valid_mask_processed)[0]
+                        valid_values = col_processed[valid_indices_processed]
+                        f = interp1d(valid_indices_processed, valid_values, kind='linear',
+                                    fill_value='extrapolate', bounds_error=False)
+                        all_indices = np.arange(T)
+                        col_interpolated = f(all_indices)
+                        nan_mask = np.isnan(col_processed)
+                        col_processed[nan_mask] = col_interpolated[nan_mask]
+                except Exception:
+                    # Fallback: forward/backward fill
+                    import pandas as pd
+                    s = pd.Series(col_processed)
+                    col_processed = s.ffill().bfill().fillna(0.0).values
+            
+            xBal[:, j] = col_processed
+    
+    # Method 3: Spline all NaNs (used during EM)
+    elif method == 3:
+        for j in range(N):
+            col = x[:, j]
+            valid_mask = ~np.isnan(col)
+            
+            if not valid_mask.any():
+                xBal[:, j] = 0.0
+                continue
+            
+            if valid_mask.sum() >= k + 1:
+                try:
+                    from scipy.interpolate import interp1d
+                    valid_indices = np.where(valid_mask)[0]
+                    valid_values = col[valid_indices]
+                    f = interp1d(valid_indices, valid_values, kind='cubic',
+                                fill_value='extrapolate', bounds_error=False)
+                    all_indices = np.arange(T)
+                    xBal[:, j] = f(all_indices)
+                except Exception:
+                    # Fallback: linear interpolation
+                    from scipy.interpolate import interp1d
+                    valid_indices = np.where(valid_mask)[0]
+                    valid_values = col[valid_indices]
+                    f = interp1d(valid_indices, valid_values, kind='linear',
+                                fill_value='extrapolate', bounds_error=False)
+                    all_indices = np.arange(T)
+                    xBal[:, j] = f(all_indices)
+            else:
+                # Not enough points - forward/backward fill
+                import pandas as pd
+                s = pd.Series(col)
+                xBal[:, j] = s.ffill().bfill().fillna(0.0).values
+    else:
+        # Default: simple forward/backward fill
+        import pandas as pd
+        df = pd.DataFrame(x)
+        xBal = df.ffill().bfill().fillna(0.0).values
+    
+    # Ensure no NaNs remain
+    if np.isnan(xBal).any():
+        xBal = np.nan_to_num(xBal, nan=0.0)
+    
+    return xBal, indNaN
 
 
 def impute_for_init(data: np.ndarray) -> np.ndarray:
@@ -190,8 +327,7 @@ def initialize_block_loadings(
     N: int,
     max_lag_size: int,
     matrix_regularization: Optional[float] = None,
-    dtype: type = np.float32,
-    impute_func: Optional[Callable[[np.ndarray], np.ndarray]] = None
+    dtype: type = np.float32
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Initialize loadings for a block (clock frequency PCA + slower frequency constrained OLS).
     
@@ -225,9 +361,6 @@ def initialize_block_loadings(
         Regularization for matrix operations
     dtype : type, default np.float32
         Data type
-    impute_func : Optional[Callable[[np.ndarray], np.ndarray]], optional
-        Function to impute NaN values for initialization fallback.
-        Only used when insufficient non-NaN observations for regression.
         
     Returns
     -------
@@ -243,6 +376,7 @@ def initialize_block_loadings(
     
     
     T = data_for_extraction.shape[0]
+
     C_i = np.zeros((N, num_factors * max_lag_size), dtype=dtype)
     
     # Clock frequency series: PCA extraction
@@ -330,33 +464,28 @@ def initialize_block_loadings(
             if idx == 0 or (idx + 1) % 10 == 0 or (idx + 1) == total_slower:
                 _logger.info(f"      Series {idx + 1}/{total_slower} (index {series_idx})")
             series_idx_int = int(series_idx)
-            series_data = data_with_nans[tent_kernel_size:, series_idx_int]
-            non_nan_mask = ~np.isnan(series_data)
             
-            # For mixed-frequency: monthly series on weekly clock have many missing values (expected)
-            # Use imputed data ONLY if insufficient non-NaN values for regression
-            # But still use only non-missing observations for alignment (original FRBNY pattern)
+            # FRBNY pattern: Always use splined data (data_for_extraction) for initialization
+            # If insufficient non-NaN observations in original data, use splined data
+            series_data_original = data_with_nans[tent_kernel_size:, series_idx_int]
+            series_data_splined = data_for_extraction[tent_kernel_size:, series_idx_int]  # Already splined
+            
+            # Check if we have enough non-NaN observations in original data
+            non_nan_mask = ~np.isnan(series_data_original)
             min_required = slower_freq_factors.shape[1] + 2
-            use_imputed = False
-            if np.sum(non_nan_mask) < min_required:
-                # Try data_for_extraction first (may already be imputed)
-                series_data_attempt = data_for_extraction[tent_kernel_size:, series_idx_int]
-                if np.sum(~np.isnan(series_data_attempt)) < min_required and impute_func is not None:
-                    # Fallback: use imputation function (only for initialization)
-                    series_data_imputed = impute_func(series_data)
-                    # Use imputed data, but keep original non_nan_mask to use only actual observations
-                    series_data = series_data_imputed
-                    use_imputed = True
-                    _logger.debug(f"      Using imputed data for series {series_idx_int} (insufficient observations)")
-                else:
-                    series_data = series_data_attempt
-                    # Update mask if data_for_extraction has more valid observations
-                    non_nan_mask = ~np.isnan(series_data)
             
-            # Use only non-missing observations (even if we imputed, align with actual data pattern)
-            # This ensures tent kernel factors align with weeks where monthly data actually exists
-            slower_freq_factors_clean = slower_freq_factors[tent_kernel_size:][non_nan_mask, :]
-            series_data_clean = series_data[non_nan_mask]
+            if np.sum(non_nan_mask) < min_required:
+                # Use splined data (matches MATLAB line 704: xx_j = res(pC:end,j))
+                series_data = series_data_splined
+                # Still align with original data pattern (use non_nan_mask for alignment)
+                # This ensures tent kernel factors align with weeks where monthly data actually exists
+                slower_freq_factors_clean = slower_freq_factors[tent_kernel_size:][non_nan_mask, :]
+                series_data_clean = series_data[non_nan_mask]
+            else:
+                # Use original data (with NaNs) - align with actual observations
+                series_data = series_data_original
+                slower_freq_factors_clean = slower_freq_factors[tent_kernel_size:][non_nan_mask, :]
+                series_data_clean = series_data[non_nan_mask]
             
             # Skip if insufficient data
             if len(slower_freq_factors_clean) < slower_freq_factors_clean.shape[1]:
@@ -379,54 +508,24 @@ def initialize_block_loadings(
                     regularization=reg,
                     dtype=dtype
                 )
-                # Validate loadings are finite
+                # Validate loadings are finite - raise error if not (no fallback)
                 if np.any(~np.isfinite(loadings_constrained)):
-                    # Fallback to default loadings that satisfy tent kernel constraints (FRBNY pattern)
-                    _logger.warning(
+                    raise NumericalError(
                         f"Constrained OLS returned non-finite values for series {series_idx_int}. "
-                        f"Using default loadings that satisfy tent kernel constraints (FRBNY fallback pattern)."
+                        f"This indicates numerical instability. Check data quality and tent kernel configuration.",
+                        details=f"Series index: {series_idx_int}, tent_kernel_size: {tent_kernel_size}, "
+                                f"num_factors: {num_factors}, regularization: {reg}"
                     )
-                    # Extract tent weights from R_mat: R_mat[i, 0] = tent_weights[i+1]
-                    # For tent weights [1, 2, 1], R_mat[0, 0] = 2, R_mat[1, 0] = 1
-                    tent_weights = np.ones(tent_kernel_size, dtype=dtype)
-                    if R_mat is not None and R_mat.shape[0] > 0:
-                        # Extract tent weights from first column of R_mat
-                        # R_mat[i, 0] = tent_weights[i+1], so tent_weights[0] = 1 (by convention)
-                        tent_weights[0] = 1.0
-                        for i in range(min(R_mat.shape[0], tent_kernel_size - 1)):
-                            tent_weights[i + 1] = R_mat[i, 0]
-                    # Create default loadings: for each factor, apply tent kernel pattern
-                    # c0 = base value, c_i = tent_weights[i] * c0
-                    # Use larger default (0.1) for better numerical stability with sparse data
-                    c0 = 0.1  # Default base loading (increased from 0.01 for numerical stability)
-                    default_loadings = np.zeros(num_factors * tent_kernel_size, dtype=dtype)
-                    for f in range(num_factors):
-                        start_idx = f * tent_kernel_size
-                        for k in range(tent_kernel_size):
-                            default_loadings[start_idx + k] = c0 * tent_weights[k]
-                    loadings_constrained = default_loadings
                 C_i[series_idx_int, :num_factors * tent_kernel_size] = loadings_constrained
             except (np.linalg.LinAlgError, ValueError) as e:
-                # Fallback to default loadings that satisfy tent kernel constraints
-                _logger.warning(
+                # No fallback - raise error to surface the problem
+                raise NumericalError(
                     f"Constrained OLS failed for series {series_idx_int}: {e}. "
-                    f"Using default loadings that satisfy tent kernel constraints (FRBNY fallback pattern)."
-                )
-                # Extract tent weights from R_mat
-                tent_weights = np.ones(tent_kernel_size, dtype=dtype)
-                if R_mat is not None and R_mat.shape[0] > 0:
-                    tent_weights[0] = 1.0
-                    for i in range(min(R_mat.shape[0], tent_kernel_size - 1)):
-                        tent_weights[i + 1] = R_mat[i, 0]
-                # Create default loadings with tent kernel pattern
-                # Use larger default (0.1) for better numerical stability with sparse data
-                c0 = 0.1  # Default base loading (increased from 0.01 for numerical stability)
-                default_loadings = np.zeros(num_factors * tent_kernel_size, dtype=dtype)
-                for f in range(num_factors):
-                    start_idx = f * tent_kernel_size
-                    for k in range(tent_kernel_size):
-                        default_loadings[start_idx + k] = c0 * tent_weights[k]
-                C_i[series_idx_int, :num_factors * tent_kernel_size] = default_loadings
+                    f"This indicates the matrix is too ill-conditioned even with splined data. "
+                    f"Check data quality, tent kernel configuration, or increase regularization.",
+                    details=f"Series index: {series_idx_int}, tent_kernel_size: {tent_kernel_size}, "
+                            f"num_factors: {num_factors}, regularization: {reg}, error: {str(e)}"
+                ) from e
     
     return C_i, factors
 
@@ -650,6 +749,7 @@ def initialize_block_factors(
         C : np.ndarray
             Observation/loading matrix (N x total_factor_dim)
         """
+
         C_list = []
         A_list = []
         Q_list = []
@@ -674,8 +774,7 @@ def initialize_block_factors(
             C_i, factors = initialize_block_loadings(
                 data_for_extraction, data_with_nans, clock_freq_indices, slower_freq_indices,
                 num_factors_block, tent_kernel_size, R_mat, q,
-                N, max_lag_size, _DEFAULT_EM_CONFIG.matrix_regularization, dtype,
-                impute_func=impute_for_init
+                N, max_lag_size, _DEFAULT_EM_CONFIG.matrix_regularization, dtype
             )
             
             # Build lag matrix for transition equation
@@ -947,11 +1046,19 @@ def initialize_parameters(
             (data_std < 0.01 and not has_zero_iqr)  # Very small std (might indicate no scaling)
         )
         
-    # Initialize data for factor extraction
-    # Block 1: original data. Subsequent blocks: residuals. NaN preserved for Kalman filter
-    data_for_extraction = x_clean.copy()
-    data_with_nans = x_clean.copy()
-    indNaN = np.isnan(x_clean)  # Track NaN positions for initialization (only)
+    # FRBNY pattern: Spline data first, then preserve NaN positions
+    # This ensures we have complete data for initialization (especially for slower-frequency series)
+    optNaN = {
+        'method': DEFAULT_NAN_METHOD,  # Method 2: remove leading/trailing, then spline
+        'k': DEFAULT_NAN_K  # Spline order (default 3, matches MATLAB)
+    }
+    xBal, indNaN = remNaNs_spline(x_clean, optNaN)
+    
+    # Create two versions:
+    # - xBal: Splined data (no NaNs) - used for factor extraction and initialization
+    # - xNaN: Original data with NaNs preserved - used for alignment and EM algorithm
+    data_for_extraction = xBal.copy()  # Splined data for initialization
+    data_with_nans = x_clean.copy()  # Original data with NaNs (for EM algorithm)
     
     # Determine tent kernel size from user-specified tent weights
     # Tent weights are user-specified (e.g., [1,2,3,2,1] → tent_kernel_size=5)
@@ -962,13 +1069,16 @@ def initialize_parameters(
         first_weights = next(iter(tent_weights_dict.values()))
         tent_kernel_size = len(first_weights)
     else:
-        tent_kernel_size = _DEFAULT_EM_CONFIG.tent_kernel_size  # Fallback default
+        # Single-frequency (no tent weights): no aggregation kernel.
+        # Using a large default here unnecessarily inflates the state dimension (max_lag_size),
+        # masks initial observations, and slows EM for daily/weekly data.
+        tent_kernel_size = 1
     # State dimension per factor = max(p + 1, tent_kernel_size)
     # For slower freq: state dimension expanded by tent_kernel_size (reflecting aggregation structure)
     max_lag_size = max(p + 1, tent_kernel_size)
     
-    # Set initial observations as NaN for slower-frequency aggregation
-    if tent_kernel_size > 1:
+    # Set initial observations as NaN only when tent kernel aggregation is actually used.
+    if tent_kernel_size > 1 and (R_mat is not None or n_slower_freq > 0):
         data_with_nans[:tent_kernel_size-1, :] = np.nan
     
     # === BUILD STATE-SPACE MATRICES ===

@@ -7,37 +7,98 @@
 
 # EM Algorithm Parameters
 threshold: 1.0e-05  # EM convergence threshold
-max_iter: 5000  # Maximum EM iterations
-
-# Numerical Stability Parameters
-clip_ar_coefficients: true
-ar_clip_min: -0.99
-ar_clip_max: 0.99
-use_regularization: true
-regularization_scale: 1.0e-05
-
-# Idiosyncratic Component Parameters
-augment_idio: true
-augment_idio_slow: false  # Financial data typically at same frequency
-idio_rho0: 0.1
-idio_min_var: 1.0e-08
+max_iter: 50  # Maximum EM iterations
 
 # Data Handling
-clock: m  # Monthly clock frequency (tutorial uses monthly, adjust to 'd' for daily or 'w' for weekly)
+clock: d  # Daily clock frequency (finance.csv uses daily index via date_id)
 scaler: standard  # Scaler for all series: 'standard', 'robust', 'minmax', 'maxabs', 'quantile', or null
 # Note: scaler is handled internally by the model, not set on config object
 # Note: nan_method and nan_k are internal constants (not user-configurable)
 
-# Block Structure for Financial Data
-# Single global block for all series
+# Block Structure for Financial Data (testing configuration)
+# 4 blocks, 2 factors per block (reduced from 3 for faster testing)
+# This still verifies all block mechanisms while reducing state dimension
 blocks:
-  Block_Global:
-    num_factors: 2  # Number of factors for global block
-    series: []  # Will be populated from data
+  Block_ALL:
+    num_factors: 2  # Reduced from 3 for faster testing
+    series:
+      # Contains all series from Block_EI, Block_MD, and Block_PSV
+      # From Block_EI:
+      - E1
+      - E5
+      - E10
+      - E15
+      - E20
+      - I1
+      - I5
+      - I9
+      # From Block_MD:
+      - M1
+      - M5
+      - M10
+      - M15
+      - M18
+      - D1
+      - D5
+      - D9
+      # From Block_PSV:
+      - P1
+      - P5
+      - P10
+      - P13
+      - S1
+      - S5
+      - S10
+      - V1
+      - V5
+      - V10
+      - market_forward_excess_returns
 
-# Frequency mapping for financial data
-# All series are monthly (same as clock frequency)
-# Grouped format: frequencies are specified as lists grouped by frequency code
-frequency:
-  # Monthly series (same as clock frequency)
-  m: []  # Will be populated from data
+  Block_EI:
+    num_factors: 2  # Reduced from 3 for faster testing
+    series:
+      # E series: ~6 series
+      - E1
+      - E5
+      - E10
+      - E15
+      - E20
+      # I series: ~4 series
+      - I1
+      - I5
+      - I9
+
+  Block_MD:
+    num_factors: 2  # Reduced from 3 for faster testing
+    series:
+      # M series: ~6 series
+      - M1
+      - M5
+      - M10
+      - M15
+      - M18
+      # D series: ~4 series
+      - D1
+      - D5
+      - D9
+
+  Block_PSV:
+    num_factors: 2  # Reduced from 3 for faster testing
+    series:
+      # P series: ~4 series
+      - P1
+      - P5
+      - P10
+      - P13
+      # S series: ~3 series
+      - S1
+      - S5
+      - S10
+      # V series: ~3 series
+      - V1
+      - V5
+      - V10
+      - market_forward_excess_returns
+
+# Frequency mapping: Not required for single-frequency cases
+# The code will automatically create frequency dict from data columns using clock frequency (d)

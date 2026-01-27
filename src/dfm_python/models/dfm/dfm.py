@@ -187,7 +187,10 @@ class DFM(BaseFactorModel):
         self._idio_indicator = None  # i_idio: indicator for idiosyncratic components
         
         # Build model structure from config
-        self.blocks, self.r, self.num_factors, self.p = build_dfm_structure(self._config)
+        # Allow "minimal" configs that omit frequency by late-binding to dataset columns.
+        # If config.frequency is missing, get_blocks_array(columns=...) will default all series to clock frequency.
+        dataset_columns = list(self._dataset.variables.columns) if self._dataset.variables is not None else None
+        self.blocks, self.r, self.num_factors, self.p = build_dfm_structure(self._config, columns=dataset_columns)
         
         # Create empty training state with structure parameters only
         # State-space parameters (A, C, Q, R, Z_0, V_0) will be set during fit()
@@ -304,6 +307,7 @@ class DFM(BaseFactorModel):
         DFMModelState
             Complete model state including structure, mixed-frequency parameters, and fitted state-space parameters
         """
+
         # Bug fix 1.3: Clear cached smoothed factors on retrain
         self._cached_smoothed_factors = None
         self._result = None  # Also clear result cache
@@ -342,7 +346,7 @@ class DFM(BaseFactorModel):
             data_df = dataset.variables  # Extract variables DataFrame
             X_np = data_df.values  # Convert to numpy array
             columns = list(data_df.columns)
-        
+
         # Get clock frequency from config
         clock = getattr(self._config, 'clock', DEFAULT_CLOCK_FREQUENCY)
         

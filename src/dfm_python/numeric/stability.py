@@ -33,7 +33,7 @@ import warnings
 from typing import Optional, Tuple, Dict, Any
 
 from ..logger import get_logger
-from ..utils.errors import DataValidationError, DataError, NumericalError
+from ..utils.errors import DataError, NumericalError
 from ..utils.helper import handle_linear_algebra_error
 from ..config.constants import (
     MIN_EIGENVALUE,
@@ -544,8 +544,10 @@ def compute_cov_safe(
                                    default_variance=DEFAULT_VARIANCE_FALLBACK)
         return np.array([[var_val]])
     
-    # Determine number of variables
-    n_vars = data.shape[1] if rowvar else data.shape[0]
+    # Determine number of variables.
+    # numpy.cov semantics: when rowvar=True, each ROW represents a variable.
+    # So for rowvar=True, variables=N=data.shape[0]. For rowvar=False, variables=N=data.shape[1].
+    n_vars = data.shape[0] if rowvar else data.shape[1]
     
     # Handle single variable case
     if n_vars == 1:
@@ -717,6 +719,204 @@ def convergence_checker(
     return delta, loss_now
 
 
+def stabilize_em_process_noise(
+    Q: np.ndarray,
+    min_eigenval: float = MIN_EIGENVALUE,
+    max_eigenval: float = MAX_EIGENVALUE,
+    default_process_noise: float = None,
+    dtype: type = np.float64,
+    warn: bool = True
+) -> np.ndarray:
+    """Stabilize process noise Q for EM algorithm with robust fallback.
+    
+    This is a high-level wrapper that:
+    1. Applies ensure_process_noise_stable
+    2. Checks for non-finite values and falls back to scaled identity if needed
+    3. Re-stabilizes the fallback
+    
+    Parameters
+    ----------
+    Q : np.ndarray
+        Process noise matrix to stabilize
+    min_eigenval : float, default MIN_EIGENVALUE
+        Minimum eigenvalue to enforce
+    max_eigenval : float, default MAX_EIGENVALUE
+        Maximum eigenvalue cap
+    default_process_noise : float, optional
+        Default value for fallback identity. If None, uses DEFAULT_PROCESS_NOISE from constants.
+    dtype : type, default np.float64
+        Data type
+    warn : bool, default True
+        Whether to log warnings
+        
+    Returns
+    -------
+    np.ndarray
+        Stabilized Q matrix (guaranteed finite)
+    """
+    from ..config.constants import DEFAULT_PROCESS_NOISE
+    
+    if default_process_noise is None:
+        default_process_noise = DEFAULT_PROCESS_NOISE
+    
+    Q_stable = ensure_process_noise_stable(Q, min_eigenval=min_eigenval, max_eigenval=max_eigenval, warn=warn, dtype=dtype)
+    
+    # CRITICAL: Ensure Q is finite after stabilization (fallback if still problematic)
+    if np.any(~np.isfinite(Q_stable)):
+        _logger.error(
+            f"Q is non-finite after ensure_process_noise_stable. "
+            f"Inf: {np.sum(np.isinf(Q_stable))}, NaN: {np.sum(np.isnan(Q_stable))}. "
+            f"Using fallback scaled identity."
+        )
+        Q_stable = create_scaled_identity(Q_stable.shape[0], default_process_noise, dtype=dtype)
+        Q_stable = ensure_process_noise_stable(Q_stable, min_eigenval=min_eigenval, warn=False, dtype=dtype)
+    
+    return Q_stable
+
+
+def stabilize_em_initial_covariance(
+    V_0: np.ndarray,
+    min_eigenval: float = MIN_EIGENVALUE,
+    max_eigenval: float = MAX_EIGENVALUE,
+    warn: bool = True
+) -> np.ndarray:
+    """Stabilize initial state covariance V_0 for EM algorithm.
+    
+    This prevents overflow in Kalman filter prediction step: A @ V_0 @ A.T + Q
+    
+    Parameters
+    ----------
+    V_0 : np.ndarray
+        Initial state covariance to stabilize
+    min_eigenval : float, default MIN_EIGENVALUE
+        Minimum eigenvalue to enforce
+    max_eigenval : float, default MAX_EIGENVALUE
+        Maximum eigenvalue cap
+    warn : bool, default True
+        Whether to log warnings
+        
+    Returns
+    -------
+    np.ndarray
+        Stabilized V_0 matrix
+    """
+    # First ensure positive definiteness, then cap maximum eigenvalue
+    V_0_stable = ensure_covariance_stable(V_0, min_eigenval=min_eigenval)
+    V_0_stable = cap_max_eigenval(V_0_stable, max_eigenval=max_eigenval, symmetric=True, warn=warn)
+    return V_0_stable
+
+
+def cap_smoothed_states(
+    EZ: np.ndarray,
+    max_eigenval: float = MAX_EIGENVALUE,
+    warn: bool = True
+) -> np.ndarray:
+    """Cap extreme values in smoothed states EZ to prevent overflow in M-step.
+    
+    EZ is used to compute EZZ = EZ.T @ EZ, which can overflow if EZ has extreme values.
+    This is a defensive measure - ideally the smoother shouldn't produce extreme states,
+    but numerical issues can cause this even with stabilized covariances.
+    
+    Parameters
+    ----------
+    EZ : np.ndarray
+        Smoothed states (T x m)
+    max_eigenval : float, default MAX_EIGENVALUE
+        Maximum eigenvalue for EZZ = EZ.T @ EZ
+    warn : bool, default True
+        Whether to log warnings
+        
+    Returns
+    -------
+    np.ndarray
+        Capped EZ matrix (guaranteed finite and bounded)
+    """
+    if EZ.size == 0:
+        return EZ
+    
+    max_EZ = np.max(np.abs(EZ))
+    EZ_safe_max = np.sqrt(max_eigenval * EZ.shape[0])  # Safe max for EZ.T @ EZ <= max_eigenval * T
+    
+    if max_EZ > EZ_safe_max or np.any(~np.isfinite(EZ)):
+        n_capped = np.sum(np.abs(EZ) > EZ_safe_max) + np.sum(~np.isfinite(EZ))
+        if warn:
+            _logger.warning(
+                f"Smoothed states EZ have extreme values (max={max_EZ:.2e} > {EZ_safe_max:.2e}) "
+                f"or non-finite values. Capping {n_capped}/{EZ.size} values to prevent overflow in M-step."
+            )
+        EZ = np.clip(EZ, -EZ_safe_max, EZ_safe_max)
+        EZ = np.where(np.isfinite(EZ), EZ, 0.0)
+    
+    return EZ
+
+
+def rescale_ssm_params_for_C_normalization(
+    A: Optional[np.ndarray],
+    Q: Optional[np.ndarray],
+    V_0: Optional[np.ndarray],
+    Z_0: Optional[np.ndarray],
+    D_inv: np.ndarray,
+    *,
+    min_variance: float = MIN_DIAGONAL_VARIANCE,
+    max_abs_A: float = 1e6,
+    max_abs_Q: float = MAX_EIGENVALUE * 10,
+    dtype: type = np.float64,
+) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray]]:
+    """Rescale (A, Q, V_0, Z_0) to preserve invariance under C → C D.
+
+    If C is column-normalized via C → C D (D diagonal), the state-space model is invariant under:
+      - A → D⁻¹ A D
+      - Q → D⁻¹ Q D⁻¹
+      - V₀ → D⁻¹ V₀ D⁻¹
+      - Z₀ → D⁻¹ Z₀
+
+    This helper performs those transforms on raw arrays (no DFMModelState dependency),
+    and includes basic overflow/non-finite guards with revert behavior.
+    """
+    if D_inv.size == 0:
+        return A, Q, V_0, Z_0
+
+    D_inv_diag = np.diag(D_inv.astype(dtype, copy=False))
+    D_diag = np.diag((1.0 / D_inv).astype(dtype, copy=False))
+
+    A_new = A.copy() if A is not None else None
+    Q_new = Q.copy() if Q is not None else None
+    V_0_new = V_0.copy() if V_0 is not None else None
+    Z_0_new = Z_0.copy() if Z_0 is not None else None
+
+    if A_new is not None:
+        if np.any(~np.isfinite(A_new)):
+            _logger.warning("A contains non-finite values before C-normalization rescaling. Skipping A rescale.")
+        else:
+            A_rescaled = D_inv_diag @ A_new @ D_diag
+            A_rescaled = ensure_symmetric(A_rescaled)
+            if np.any(~np.isfinite(A_rescaled)) or np.max(np.abs(A_rescaled)) > max_abs_A:
+                _logger.warning("A overflowed during C-normalization rescaling. Reverting A.")
+            else:
+                A_new = A_rescaled
+
+    if Q_new is not None:
+        if np.any(~np.isfinite(Q_new)):
+            _logger.warning("Q contains non-finite values before C-normalization rescaling. Skipping Q rescale.")
+        else:
+            Q_rescaled = D_inv_diag @ Q_new @ D_inv_diag
+            Q_rescaled = ensure_symmetric(Q_rescaled)
+            if np.any(~np.isfinite(Q_rescaled)) or np.max(np.abs(Q_rescaled)) > max_abs_Q:
+                _logger.warning("Q overflowed during C-normalization rescaling. Reverting and re-stabilizing Q.")
+                Q_new = ensure_process_noise_stable(Q_new, min_eigenval=min_variance, warn=False, dtype=dtype)
+            else:
+                Q_new = Q_rescaled
+
+    if V_0_new is not None:
+        V_0_new = D_inv_diag @ V_0_new @ D_inv_diag
+        V_0_new = ensure_symmetric(V_0_new)
+
+    if Z_0_new is not None:
+        Z_0_new = Z_0_new * D_inv
+
+    return A_new, Q_new, V_0_new, Z_0_new
+
+
 __all__ = [
     # Matrix utilities
     'create_scaled_identity',
@@ -729,5 +929,10 @@ __all__ = [
     'compute_cov_safe',
     'convergence_checker',
     'solve_regularized_ols',
+    # EM-specific stabilization
+    'stabilize_em_process_noise',
+    'stabilize_em_initial_covariance',
+    'cap_smoothed_states',
+    'rescale_ssm_params_for_C_normalization',
 ]
 

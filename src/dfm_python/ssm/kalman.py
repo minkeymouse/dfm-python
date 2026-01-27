@@ -12,12 +12,14 @@ from pykalman.standard import _filter, _smooth, _smooth_pair
 from ..logger import get_logger
 from ..utils.errors import ModelNotInitializedError, NumericalError
 from ..config.types import FloatArray
-from ..numeric.stability import ensure_symmetric
+from ..numeric.stability import ensure_symmetric, cap_max_eigenval
 from ..config.constants import (
     MAX_CONDITION_NUMBER_SMOOTHER,
     MAX_CONDITION_NUMBER_INIT,
     MAX_STABILIZATION_AMOUNT,
     MAX_STABILIZATION_AMOUNT_INIT,
+    MAX_EIGENVALUE,
+    VAR_STABILITY_THRESHOLD,
 )
 
 _logger = get_logger(__name__)
@@ -198,6 +200,23 @@ class DFMKalmanFilter:
                         f"Data likely unscaled or model misconfigured. Please apply a scaler before fitting.",
                         details=f"Stabilization applied to initial_state_covariance: {self._stabilization_amount:.2e}"
                     )
+            
+            # Option 4: Cap V_0 maximum eigenvalue to prevent overflow in prediction step
+            # V_0 is used to compute P_pred = A @ V_0 @ A.T + Q, which can overflow if V_0 is too large
+            # This matches the stabilization we do in the EM step
+            try:
+                initial_state_covariance = cap_max_eigenval(
+                    initial_state_covariance,
+                    max_eigenval=MAX_EIGENVALUE,  # Same cap as Q
+                    symmetric=True,
+                    warn=False  # Don't warn here (too verbose, already logged in EM step)
+                )
+            except (np.linalg.LinAlgError, ValueError):
+                # Eigenvalue capping failed - use fallback
+                _logger.warning(
+                    f"V_0 eigenvalue capping failed in update_parameters. Using scaled identity fallback."
+                )
+                initial_state_covariance = create_scaled_identity(m_init, MAX_EIGENVALUE, dtype=initial_state_covariance.dtype)
         
         if self._pykalman is None:
             self._pykalman = PyKalmanFilter(
@@ -320,10 +339,6 @@ class DFMKalmanFilter:
         loglik : float
             Log-likelihood of observations (or -inf if compute_loglik=False)
         """
-        # #region agent log
-        import json
-        e_step_start_time = time_module.time()
-        # #endregion
         if self._pykalman is None:
             raise ModelNotInitializedError(
                 "DFMKalmanFilter parameters not initialized. "
@@ -369,20 +384,135 @@ class DFMKalmanFilter:
                     f"observation_offsets shape mismatch: expected ({N},), got {observation_offsets_final.shape}"
                 )
             
-            return _filter(
-                self._pykalman.transition_matrices,
-                self._pykalman.observation_matrices,
-                self._pykalman.transition_covariance,
-                self._pykalman.observation_covariance,
-                transition_offsets_final,
-                observation_offsets_final,
-                self._pykalman.initial_state_mean,
-                self._pykalman.initial_state_covariance,
-                observations
-            )
+            # Option 4: Try filter with current parameters, retry with more aggressive stabilization if overflow
+            try:
+                return _filter(
+                    self._pykalman.transition_matrices,
+                    self._pykalman.observation_matrices,
+                    self._pykalman.transition_covariance,
+                    self._pykalman.observation_covariance,
+                    transition_offsets_final,
+                    observation_offsets_final,
+                    self._pykalman.initial_state_mean,
+                    self._pykalman.initial_state_covariance,
+                    observations
+                )
+            except (ValueError, FloatingPointError, OverflowError) as e:
+                if "infs or NaNs" in str(e) or "overflow" in str(e).lower():
+                    _logger.warning(
+                        f"    Filter: Overflow detected in _filter ({type(e).__name__}: {e}). "
+                        f"Retrying with more aggressively stabilized V_0..."
+                    )
+                    # Retry with more aggressively stabilized V_0
+                    V_0_retry = self._pykalman.initial_state_covariance.copy()
+                    # Cap at smaller value for retry
+                    V_0_retry = cap_max_eigenval(V_0_retry, max_eigenval=MAX_EIGENVALUE / 10, symmetric=True, warn=False)
+                    # Also ensure Q is well-bounded
+                    Q_retry = self._pykalman.transition_covariance.copy()
+                    Q_retry = cap_max_eigenval(Q_retry, max_eigenval=MAX_EIGENVALUE, symmetric=True, warn=False)
+                    
+                    return _filter(
+                        self._pykalman.transition_matrices,
+                        self._pykalman.observation_matrices,
+                        Q_retry,
+                        self._pykalman.observation_covariance,
+                        transition_offsets_final,
+                        observation_offsets_final,
+                        self._pykalman.initial_state_mean,
+                        V_0_retry,
+                        observations
+                    )
+                else:
+                    raise
         
         # Run filter
         predicted_state_means, predicted_state_covariances, _, filtered_state_means, filtered_state_covariances = run_filter()
+        
+        # Option 4: Stabilize filtered and predicted state covariances to prevent overflow
+        # The overflow occurs because P_filtered grows unbounded during filtering, causing
+        # A @ P_filtered @ A.T + Q to overflow in the NEXT timestep's prediction step.
+        # By capping maximum eigenvalues of both filtered and predicted covariances,
+        # we prevent this growth and ensure numerical stability.
+        # This is similar to how we stabilize V_0 and Q - we need to bound all covariances.
+        _logger.debug(f"    Filter: Stabilizing {len(filtered_state_covariances)} filtered and {len(predicted_state_covariances)} predicted covariance matrices...")
+        n_filtered_stab = 0
+        n_predicted_stab = 0
+        n_predicted_recovered = 0
+        
+        # Stabilize filtered covariances (used in next timestep's prediction: A @ P_filtered @ A.T + Q)
+        # CRITICAL: This prevents overflow in the NEXT filter run's prediction step
+        for t in range(len(filtered_state_covariances)):
+            P_filtered_t = filtered_state_covariances[t]
+            # Check for non-finite values (shouldn't happen, but handle gracefully)
+            if np.any(~np.isfinite(P_filtered_t)):
+                _logger.warning(
+                    f"    Filter: filtered_state_covariances[{t}] contains non-finite values. Recovering..."
+                )
+                P_filtered_t = np.where(np.isfinite(P_filtered_t), P_filtered_t, 0.0)
+                P_filtered_t = ensure_symmetric(P_filtered_t)
+            
+            # Cap maximum eigenvalue to prevent overflow in prediction step
+            P_filtered_t_stab = cap_max_eigenval(
+                P_filtered_t,
+                max_eigenval=MAX_EIGENVALUE,  # Same cap as Q
+                symmetric=True,
+                warn=False  # Don't warn for each timestep (too verbose)
+            )
+            if not np.array_equal(P_filtered_t, P_filtered_t_stab):
+                n_filtered_stab += 1
+                filtered_state_covariances[t] = P_filtered_t_stab
+        
+        # Stabilize predicted covariances (used in correction step, can overflow if too large)
+        # CRITICAL: Overflow may have already occurred inside _filter, so we need to recover
+        from ..numeric.stability import create_scaled_identity
+        for t in range(len(predicted_state_covariances)):
+            P_pred_t = predicted_state_covariances[t]
+            # Check for non-finite values first (overflow already occurred inside _filter)
+            if np.any(~np.isfinite(P_pred_t)):
+                n_predicted_recovered += 1
+                if n_predicted_recovered <= 5:  # Only log first few to avoid spam
+                    _logger.warning(
+                        f"    Filter: predicted_state_covariances[{t}] contains non-finite values "
+                        f"(Inf: {np.sum(np.isinf(P_pred_t))}, NaN: {np.sum(np.isnan(P_pred_t))}). "
+                        f"Overflow occurred during prediction step. Recovering..."
+                    )
+                # Use safe fallback: identity matrix scaled by MAX_EIGENVALUE
+                # This ensures we have a valid covariance matrix for correction step
+                P_pred_t = create_scaled_identity(P_pred_t.shape[0], MAX_EIGENVALUE, dtype=P_pred_t.dtype)
+                predicted_state_covariances[t] = P_pred_t
+                continue  # Skip eigenvalue capping since we already replaced with safe value
+            
+            # Cap maximum eigenvalue to prevent overflow in correction step
+            try:
+                P_pred_t_stab = cap_max_eigenval(
+                    P_pred_t,
+                    max_eigenval=MAX_EIGENVALUE,  # Same cap as Q
+                    symmetric=True,
+                    warn=False
+                )
+                if not np.array_equal(P_pred_t, P_pred_t_stab):
+                    n_predicted_stab += 1
+                    predicted_state_covariances[t] = P_pred_t_stab
+            except (np.linalg.LinAlgError, ValueError):
+                # Eigenvalue capping failed (matrix too ill-conditioned)
+                # Use safe fallback
+                P_pred_t = create_scaled_identity(P_pred_t.shape[0], MAX_EIGENVALUE, dtype=P_pred_t.dtype)
+                predicted_state_covariances[t] = P_pred_t
+                n_predicted_recovered += 1
+        
+        if n_predicted_recovered > 0:
+            _logger.error(
+                f"    Filter: Recovered {n_predicted_recovered}/{len(predicted_state_covariances)} predicted covariances "
+                f"from overflow. This indicates severe numerical instability. "
+                f"Consider: (1) Better initialization, (2) More aggressive V_0/Q stabilization, "
+                f"(3) Data scaling issues."
+            )
+        if n_filtered_stab > 0 or n_predicted_stab > 0:
+            _logger.warning(
+                f"    Filter: Stabilized {n_filtered_stab}/{len(filtered_state_covariances)} filtered and "
+                f"{n_predicted_stab}/{len(predicted_state_covariances)} predicted covariance matrices "
+                f"(capped max eigenvalue to {MAX_EIGENVALUE:.2e}). This prevents overflow in prediction/correction steps."
+            )
         
         # Bug fix 1.1 & 1.2: We'll create stabilized copies inside run_smooth() and save them
         # for use in _smooth_pair. The stabilized versions must be used consistently.
@@ -427,7 +557,7 @@ class DFMKalmanFilter:
                         f"Refusing to smooth. Data likely unscaled or ill-conditioned. "
                         f"Please apply a scaler (e.g., StandardScaler) before fitting the model.",
                         details=f"Condition number check failed before smoothing. "
-                               f"Sample indices checked: {sample_indices}, max condition: {max_cond:.2e}"
+                               f"Sample time indices checked (t): {sample_indices}, max condition: {max_cond:.2e}"
                     )
                 elif max_cond > MAX_CONDITION_NUMBER_INIT:
                     # High but not fatal - log warning and proceed with stabilization
@@ -462,7 +592,7 @@ class DFMKalmanFilter:
                     regularization = base_regularization
             except Exception as e:
                 # Fallback to base regularization if condition check fails
-                _logger.warning(f"    Smooth: Condition check failed ({e}), using base regularization")
+                _logger.warning(f"    Smooth: Condition check failed ({e}); interpreting indices as time (t). Using base regularization")
                 regularization = base_regularization
 
             _logger.info(f"    Smooth: Stabilizing {len(predicted_state_covariances)} covariance matrices "
@@ -514,25 +644,6 @@ class DFMKalmanFilter:
         
         smooth_time = time_module.time() - smooth_start
         _logger.info(f"    Smooth: Completed in {smooth_time:.2f}s ({smooth_time/T*1000:.2f}ms/timestep)")
-        # #region agent log
-        import json
-        with open('/data/nowcasting-kr/.cursor/debug.log', 'a') as f:
-            f.write(json.dumps({
-                'sessionId': 'debug-session',
-                'runId': 'run1',
-                'hypothesisId': 'D',
-                'location': 'kalman.py:510',
-                'message': 'Kalman smoother timing',
-                'data': {
-                    'T': T,
-                    'm': m,
-                    'smooth_time': smooth_time,
-                    'filter_time': getattr(self, '_last_filter_time', 0.0),
-                    'total_e_step_time': time_module.time() - e_step_start_time
-                },
-                'timestamp': int(time_module.time() * 1000)
-            }) + '\n')
-        # #endregion
         
         # Compute lag-1 cross-covariances (needed for M-step)
         _logger.info(f"    Smooth-pair: Computing cross-covariances...")
@@ -563,26 +674,6 @@ class DFMKalmanFilter:
         if compute_loglik:
             _logger.info(f"    Log-likelihood: Computing...")
             loglik_start = time_module.time()
-            # #region agent log
-            import json
-            with open('/data/nowcasting-kr/.cursor/debug.log', 'a') as f:
-                f.write(json.dumps({
-                    'sessionId': 'debug-session',
-                    'runId': 'run1',
-                    'hypothesisId': 'C',
-                    'location': 'kalman.py:540',
-                    'message': 'Before loglik computation',
-                    'data': {
-                        'T': T,
-                        'm': m,
-                        'stabilization_applied': self._stabilization_applied,
-                        'stabilization_amount': float(self._stabilization_amount) if hasattr(self, '_stabilization_amount') else 0.0,
-                        'observation_cov_shape': self._pykalman.observation_covariance.shape if self._pykalman else None,
-                        'transition_cov_shape': self._pykalman.transition_covariance.shape if self._pykalman else None
-                    },
-                    'timestamp': int(time_module.time() * 1000)
-                }) + '\n')
-            # #endregion
             try:
                 # CRITICAL: pykalman.loglikelihood() doesn't handle masked arrays correctly
                 # Convert masked array to regular array with NaNs (pykalman handles NaNs for missing data)

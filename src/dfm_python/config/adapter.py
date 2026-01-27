@@ -508,18 +508,16 @@ def make_config_source(
 # ============================================================================
 
 # Model type constants (exported for use in schema/model.py)
-MODEL_TYPE_KDFM = 'kdfm'
+# NOTE: KDFM is legacy and has been removed from this codebase.
 MODEL_TYPE_DDFM = 'ddfm'
 MODEL_TYPE_DFM = 'dfm'
 
 # Model type detection patterns
-_KDFM_TYPE_ALIASES = {'kdfm', 'kernelized'}
 _DDFM_TYPE_ALIASES = {'ddfm', 'deep'}
-_KDFM_PARAMS = {'ar_order', 'ma_order', 'structural_method', 'structural_reg_weight'}
 _DDFM_PARAMS = {'encoder_layers', 'epochs', 'learning_rate', 'batch_size'}
 
 def detect_config_type(data: Dict[str, Any]) -> str:
-    """Detect config type (DFM, DDFM, or KDFM) from data dictionary.
+    """Detect config type (DFM or DDFM) from data dictionary.
     
     Parameters
     ----------
@@ -529,7 +527,7 @@ def detect_config_type(data: Dict[str, Any]) -> str:
     Returns
     -------
     str
-        'kdfm', 'ddfm', or 'dfm'
+        'ddfm' or 'dfm'
         
     Raises
     ------
@@ -544,8 +542,6 @@ def detect_config_type(data: Dict[str, Any]) -> str:
     model_type = data.get('model_type', '').lower()
     
     # Check explicit model type
-    if model_type in _KDFM_TYPE_ALIASES:
-        return MODEL_TYPE_KDFM
     if model_type in _DDFM_TYPE_ALIASES:
         return MODEL_TYPE_DDFM
     if model_type == MODEL_TYPE_DFM:
@@ -558,8 +554,6 @@ def detect_config_type(data: Dict[str, Any]) -> str:
     
     # Check for model-specific parameters
     keys = set(data.keys())
-    if keys & _KDFM_PARAMS:
-        return MODEL_TYPE_KDFM
     if any(k.startswith('ddfm_') for k in keys) or (keys & _DDFM_PARAMS):
         return MODEL_TYPE_DDFM
     

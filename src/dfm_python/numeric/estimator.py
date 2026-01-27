@@ -43,6 +43,8 @@ from .stability import (
     solve_regularized_ols,
     stabilize_innovation_covariance,
     create_scaled_identity,
+    ensure_symmetric,
+    cap_smoothed_states,
 )
 from ..utils.helper import handle_linear_algebra_error
 from ..utils.misc import get_config_attr
@@ -602,12 +604,6 @@ def estimate_var(
         # CRITICAL FIX: Cap V_smooth eigenvalues before computing EZZ to prevent explosion
         # This addresses root cause of Q explosions: V_smooth explosion → EZZ explosion → Q explosion
         # 
-        # IMPORTANT: Cap per-time-step value to account for T summation
-        # If we cap each V_smooth[t] at 1e4, and T=2135, sum can be up to 2.1e7
-        # So we cap each at MAX_EIGENVALUE / max(T, 100) to ensure sum is bounded
-        # cap_max_eigenval is already imported at top of file
-        max_per_timestep = MAX_EIGENVALUE / max(T, 100)  # Cap per timestep so sum is bounded
-        
         if V_smooth.ndim == 3:
             # PERFORMANCE FIX: Validate shapes BEFORE the loop to avoid exceptions in hot path
             # V_smooth should be (T, m, m) where each V_smooth[t] is square
@@ -640,6 +636,9 @@ def estimate_var(
             V_smooth_sum = V_smooth.astype(dtype) if V_smooth is not None else None
         
         # Compute expectations
+        # De-duplicate: use shared helper for state capping (also used in EM).
+        y = cap_smoothed_states(y, max_eigenval=MAX_EIGENVALUE, warn=True)
+        
         EZZ = y.T @ y
         if V_smooth_sum is not None:
             EZZ = EZZ + V_smooth_sum
@@ -705,6 +704,9 @@ def estimate_var(
                         f"Provide V_smooth_lag explicitly."
                     )
         
+        # De-duplicate: reuse shared helper for lagged state capping.
+        x = cap_smoothed_states(x, max_eigenval=MAX_EIGENVALUE, warn=True)
+        
         EZZ_FB = y[1:].T @ x if y.shape[0] > x.shape[0] else y.T @ x
         # CRITICAL FIX: Cap VVsmooth eigenvalues as well to prevent explosion
         if VVsmooth is not None:
@@ -755,64 +757,115 @@ def estimate_var(
                 ).astype(dtype)
                 EZZ_FB = EZZ_FB + VVsmooth_capped
         
+        # Check for extreme values in EZZ and EZZ_FB before Q computation (prevent overflow)
+        # EZZ = y.T @ y + V_smooth_sum can be huge if y has extreme values
+        max_EZZ = np.max(np.abs(EZZ)) if EZZ.size > 0 else 0.0
+        max_EZZ_FB = np.max(np.abs(EZZ_FB)) if EZZ_FB.size > 0 else 0.0
+        safe_max = MAX_EIGENVALUE * T  # Safe maximum for Q computation
+        
+        if max_EZZ > safe_max or max_EZZ_FB > safe_max:
+            _logger.warning(
+                f"EZZ or EZZ_FB has extreme values (max_EZZ={max_EZZ:.2e}, max_EZZ_FB={max_EZZ_FB:.2e}, "
+                f"safe_max={safe_max:.2e}). This will cause Q to overflow. "
+                f"Scaling moments to safe range to prevent overflow..."
+            )
+            # IMPORTANT:
+            # - EZZ is (m x m)
+            # - EZZ_FB is (m x p) and MUST remain rectangular when p != m (companion form)
+            #
+            # FRBNY-style safe fallback: shrink (scale) the moments rather than reshaping them.
+            # This preserves the cross-cov structure and avoids shape-mismatch errors (e.g., 5 vs 15).
+
+            # Stabilize EZZ: keep it PSD-ish by using a scaled identity at the correct (m x m) shape.
+            EZZ = create_scaled_identity(EZZ.shape[0], MAX_EIGENVALUE, dtype=dtype) * T
+
+            # Stabilize EZZ_FB: keep its (m x p) shape by scaling existing values down to safe_max.
+            EZZ_FB = np.where(np.isfinite(EZZ_FB), EZZ_FB, 0.0)
+            max_abs_fb = np.max(np.abs(EZZ_FB)) if EZZ_FB.size > 0 else 0.0
+            if max_abs_fb > safe_max and max_abs_fb > 0:
+                scale = safe_max / max_abs_fb
+                EZZ_FB = (EZZ_FB * scale).astype(dtype, copy=False)
+            else:
+                EZZ_FB = EZZ_FB.astype(dtype, copy=False)
+
+            _logger.warning(
+                f"Stabilized moments for Q computation: EZZ set to scaled identity, "
+                f"EZZ_FB scaled to preserve shape={EZZ_FB.shape} (safe_max={safe_max:.2e})."
+            )
+        
         # Regularize
         EZZ_BB_reg = EZZ_BB + create_scaled_identity(p, regularization, dtype=dtype)
         
         def _compute_A_Q():
-            # #region agent log
-            import json
-            try:
-                with open('/data/nowcasting-kr/.cursor/debug.log', 'a') as f:
-                    f.write(json.dumps({
-                        'sessionId': 'debug-session',
-                        'runId': 'run1',
-                        'hypothesisId': 'A',
-                        'location': 'estimator.py:761',
-                        'message': 'Before A computation in _compute_A_Q',
-                        'data': {
-                            'm': m,
-                            'p': p,
-                            'T': T,
-                            'EZZ_BB_reg_shape': EZZ_BB_reg.shape,
-                            'EZZ_FB_shape': EZZ_FB.shape,
-                            'EZZ_FB_T_shape': EZZ_FB.T.shape,
-                            'EZZ_shape': EZZ.shape
-                        },
-                        'timestamp': int(__import__('time').time() * 1000)
-                    }) + '\n')
-            except:
-                pass
-            # #endregion
             # OLS: A = (EZZ_BB)^(-1) @ EZZ_FB'
             # Note: EZZ_BB_reg is already regularized, so use use_XTX=False
             # EZZ_BB_reg is (p x p), EZZ_FB.T is (p x m)
             # solve_regularized_ols with use_XTX=False returns (p x m), so we transpose to get (m x p)
             A = solve_regularized_ols(EZZ_BB_reg, EZZ_FB.T, regularization=DEFAULT_ZERO_VALUE, use_XTX=False, dtype=dtype).T  # (m x p)
             
-            # #region agent log
-            try:
-                with open('/data/nowcasting-kr/.cursor/debug.log', 'a') as f:
-                    f.write(json.dumps({
-                        'sessionId': 'debug-session',
-                        'runId': 'run1',
-                        'hypothesisId': 'A',
-                        'location': 'estimator.py:768',
-                        'message': 'After A computation, before Q computation',
-                        'data': {
-                            'A_shape': A.shape,
-                            'A_expected_shape': (m, p),
-                            'EZZ_shape': EZZ.shape,
-                            'EZZ_FB_T_shape': EZZ_FB.T.shape
-                        },
-                        'timestamp': int(__import__('time').time() * 1000)
-                    }) + '\n')
-            except:
-                pass
-            # #endregion
             
             # Q = (EZZ - A @ EZZ_FB') / T
-            Q = (EZZ - A @ EZZ_FB.T) / T
+            # CRITICAL: Check EZZ and EZZ_FB for non-finite values before computation
+            if np.any(~np.isfinite(EZZ)) or np.any(~np.isfinite(EZZ_FB)) or np.any(~np.isfinite(A)):
+                _logger.error(
+                    f"EZZ, EZZ_FB, or A contains non-finite values before Q computation. "
+                    f"EZZ: Inf={np.sum(np.isinf(EZZ))}, NaN={np.sum(np.isnan(EZZ))}. "
+                    f"EZZ_FB: Inf={np.sum(np.isinf(EZZ_FB))}, NaN={np.sum(np.isnan(EZZ_FB))}. "
+                    f"A: Inf={np.sum(np.isinf(A))}, NaN={np.sum(np.isnan(A))}. "
+                    f"Using fallback Q."
+                )
+                Q = create_scaled_identity(m, DEFAULT_PROCESS_NOISE, dtype=dtype)
+            else:
+                # Check for extreme values that will cause overflow
+                max_EZZ_val = np.max(np.abs(EZZ))
+                max_EZZ_FB_val = np.max(np.abs(EZZ_FB))
+                max_A_val = np.max(np.abs(A))
+                safe_max = MAX_EIGENVALUE * T  # Safe maximum for Q computation
+                
+                if max_EZZ_val > safe_max or max_EZZ_FB_val > safe_max or max_A_val > 10:
+                    _logger.error(
+                        f"Extreme values detected before Q computation: "
+                        f"max_EZZ={max_EZZ_val:.2e}, max_EZZ_FB={max_EZZ_FB_val:.2e}, max_A={max_A_val:.2e}. "
+                        f"Safe max={safe_max:.2e}. Using fallback Q."
+                    )
+                    Q = create_scaled_identity(m, DEFAULT_PROCESS_NOISE, dtype=dtype)
+                else:
+                    try:
+                        # Compute A @ EZZ_FB.T first to check for overflow
+                        A_EZZ_FB_T = A @ EZZ_FB.T
+                        if np.any(~np.isfinite(A_EZZ_FB_T)):
+                            _logger.error("A @ EZZ_FB.T produced non-finite values. Using fallback Q.")
+                            Q = create_scaled_identity(m, DEFAULT_PROCESS_NOISE, dtype=dtype)
+                        else:
+                            Q = (EZZ - A_EZZ_FB_T) / T
+                    except (OverflowError, FloatingPointError) as e:
+                        _logger.error(
+                            f"Overflow in Q computation: {e}. Using fallback Q."
+                        )
+                        Q = create_scaled_identity(m, DEFAULT_PROCESS_NOISE, dtype=dtype)
+                    else:
+                        # Check for non-finite values after computation (overflow recovery)
+                        if np.any(~np.isfinite(Q)):
+                            _logger.warning(
+                                f"Q computation produced non-finite values (Inf: {np.sum(np.isinf(Q))}, NaN: {np.sum(np.isnan(Q))}). "
+                                f"This indicates overflow. Using fallback Q."
+                            )
+                            Q = create_scaled_identity(m, DEFAULT_PROCESS_NOISE, dtype=dtype)
+            
             Q = ensure_process_noise_stable(Q, min_eigenval=min_variance, warn=True, dtype=dtype)
+            
+            # Final check: ensure Q is finite and bounded before return (prevent overflow in downstream code)
+            if np.any(~np.isfinite(Q)) or np.max(np.abs(Q)) > MAX_EIGENVALUE * 10:
+                _logger.warning(
+                    f"Q still has extreme values after stabilization (max={np.max(np.abs(Q)):.2e}). "
+                    f"Applying additional clipping..."
+                )
+                Q = np.clip(Q, -MAX_EIGENVALUE, MAX_EIGENVALUE)
+                Q = np.where(np.isfinite(Q), Q, DEFAULT_PROCESS_NOISE)
+                Q = ensure_symmetric(Q)
+                # Re-stabilize after clipping
+                Q = ensure_process_noise_stable(Q, min_eigenval=min_variance, warn=False, dtype=dtype)
+            
             return A, Q
         
         def _fallback_A_Q():
@@ -830,6 +883,7 @@ def estimate_var(
         )
     else:
         # Raw data mode
+
         T = y.shape[0]
         m = y.shape[1]
         p = x.shape[1]
@@ -981,7 +1035,23 @@ def estimate_ar1(
             except (np.linalg.LinAlgError, ValueError):
                 A_diag[i] = default_ar_coef
                 Q_diag[i] = default_noise
-    
+        
+        # Ensure all values are finite and bounded before cast (prevent overflow)
+        A_diag = np.where(np.isfinite(A_diag), A_diag, default_ar_coef)
+        Q_diag = np.where(np.isfinite(Q_diag), Q_diag, default_noise)
+        # Cap extreme values to prevent overflow in cast
+        A_diag = np.clip(A_diag, -VAR_STABILITY_THRESHOLD, VAR_STABILITY_THRESHOLD)
+        Q_diag = np.clip(Q_diag, min_variance, MAX_EIGENVALUE)
+
+    # Final guard (applies to BOTH smoothed-mode and raw-mode):
+    # prevent "overflow encountered in cast" when dtype is float32 by clipping in float64 first.
+    A_diag = np.asarray(A_diag, dtype=np.float64)
+    Q_diag = np.asarray(Q_diag, dtype=np.float64)
+    A_diag = np.nan_to_num(A_diag, nan=default_ar_coef, posinf=VAR_STABILITY_THRESHOLD, neginf=-VAR_STABILITY_THRESHOLD)
+    Q_diag = np.nan_to_num(Q_diag, nan=default_noise, posinf=MAX_EIGENVALUE, neginf=min_variance)
+    A_diag = np.clip(A_diag, -VAR_STABILITY_THRESHOLD, VAR_STABILITY_THRESHOLD)
+    Q_diag = np.clip(Q_diag, min_variance, MAX_EIGENVALUE)
+
     return A_diag.astype(dtype), Q_diag.astype(dtype)
 
 

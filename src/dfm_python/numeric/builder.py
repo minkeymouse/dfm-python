@@ -18,13 +18,16 @@ from .stability import create_scaled_identity
 _logger = get_logger(__name__)
 
 
-def build_dfm_structure(config: Any) -> Tuple[np.ndarray, np.ndarray, int, int]:
+def build_dfm_structure(config: Any, *, columns: Optional[List[str]] = None) -> Tuple[np.ndarray, np.ndarray, int, int]:
     """Build DFM model structure from configuration.
     
     Parameters
     ----------
     config : Any
         DFMConfig instance with get_blocks_array() method
+    columns : list[str], optional
+        If provided, used to auto-create a single-frequency mapping (all series use clock)
+        when config.frequency is missing. This enables "minimal" configs that omit frequency.
     
     Returns
     -------
@@ -39,7 +42,7 @@ def build_dfm_structure(config: Any) -> Tuple[np.ndarray, np.ndarray, int, int]:
     """
     # Get model structure (stored as NumPy arrays)
     # Cache blocks array to avoid multiple calls to get_blocks_array()
-    blocks_array = config.get_blocks_array()
+    blocks_array = config.get_blocks_array(columns=columns) if columns is not None else config.get_blocks_array()
     blocks = np.array(blocks_array, dtype=DEFAULT_DTYPE)
     
     # Get factors per block (r)

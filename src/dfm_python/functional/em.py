@@ -54,6 +54,7 @@ from ..config.constants import (
     DEFAULT_LOG_INTERVAL,
     DEFAULT_PROGRESS_LOG_INTERVAL,
     DEFAULT_TENT_KERNEL_SIZE,
+    MAX_EIGENVALUE,
 )
 from ..numeric.stability import (
     cap_max_eigenval,
@@ -62,12 +63,16 @@ from ..numeric.stability import (
     solve_regularized_ols,
     create_scaled_identity,
     ensure_symmetric,
+    stabilize_em_process_noise,
+    stabilize_em_initial_covariance,
+    cap_smoothed_states,
+    rescale_ssm_params_for_C_normalization,
 )
-from dataclasses import replace as dataclass_replace
 from ..numeric.estimator import (
     estimate_var,
     estimate_ar1,
     estimate_constrained_ols,
+    apply_ar_clipping,
 )
 from ..utils.helper import handle_linear_algebra_error
 from ..utils.misc import get_config_attr
@@ -110,6 +115,49 @@ class EMConfig:
 
 
 _DEFAULT_EM_CONFIG = EMConfig()
+
+
+def _stabilize_q_and_v0(
+    Q: np.ndarray,
+    V_0: np.ndarray,
+    config: EMConfig,
+    warn: bool = True
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Stabilize Q and V_0 parameters with consistent configuration.
+    
+    Helper to reduce duplication in em_step between blocked and unblocked paths.
+    
+    Parameters
+    ----------
+    Q : np.ndarray
+        Process noise matrix
+    V_0 : np.ndarray
+        Initial state covariance
+    config : EMConfig
+        EM configuration
+    warn : bool, default True
+        Whether to log warnings
+        
+    Returns
+    -------
+    Tuple[np.ndarray, np.ndarray]
+        (Q_stable, V_0_stable)
+    """
+    Q_new = stabilize_em_process_noise(
+        Q,
+        min_eigenval=config.min_variance,
+        max_eigenval=config.max_eigenval,
+        default_process_noise=DEFAULT_PROCESS_NOISE,
+        dtype=np.float64,
+        warn=warn
+    )
+    V_0_new = stabilize_em_initial_covariance(
+        V_0,
+        min_eigenval=config.min_variance,
+        max_eigenval=config.max_eigenval,
+        warn=warn
+    )
+    return Q_new, V_0_new
 
 
 def _normalize_C_with_invariance(
@@ -167,43 +215,19 @@ def _normalize_C_with_invariance(
             )
     
     # Rescale state-space parameters to maintain invariance
-    A_new = state.A.copy() if state.A is not None else None
-    Q_new = state.Q.copy() if state.Q is not None else None
-    V_0_new = state.V_0.copy() if state.V_0 is not None else None
-    Z_0_new = state.Z_0.copy() if state.Z_0 is not None else None
-    
     if np.any(valid_mask):
-        D_inv_diag = np.diag(D_inv)
-        D_diag = np.diag(1.0 / D_inv)  # D = diag(norms), so D = 1/D_inv
-        
-        if A_new is not None:
-            # A → D⁻¹ A D
-            # Since D is diagonal: D⁻¹ A D = diag(1/norms) @ A @ diag(norms)
-            A_new = D_inv_diag @ A_new @ D_diag
-        
-        if Q_new is not None:
-            # Q → D⁻¹ Q D⁻¹
-            Q_new = D_inv_diag @ Q_new @ D_inv_diag
-            Q_new = ensure_symmetric(Q_new)
-        
-        if V_0_new is not None:
-            # V₀ → D⁻¹ V₀ D⁻¹
-            V_0_new = D_inv_diag @ V_0_new @ D_inv_diag
-            V_0_new = ensure_symmetric(V_0_new)
-        
-        if Z_0_new is not None:
-            # Z₀ → D⁻¹ Z₀
-            Z_0_new = Z_0_new * D_inv
-    
-    # Update state with rescaled parameters
-    state_rescaled = replace(
-        state,
-        A=A_new,
-        C=C_new,
-        Q=Q_new,
-        V_0=V_0_new,
-        Z_0=Z_0_new
-    )
+        A_new, Q_new, V_0_new, Z_0_new = rescale_ssm_params_for_C_normalization(
+            state.A,
+            state.Q,
+            state.V_0,
+            state.Z_0,
+            D_inv,
+            min_variance=config.min_variance,
+            dtype=np.float64,
+        )
+        state_rescaled = replace(state, A=A_new, Q=Q_new, V_0=V_0_new, Z_0=Z_0_new, C=C_new)
+    else:
+        state_rescaled = replace(state, C=C_new)
     
     return C_new, state_rescaled
 
@@ -1159,9 +1183,6 @@ def em_step(
     - Fallback tracking (fails if fallbacks exceed threshold)
     - First iteration must be fast (diagnostic check)
     """
-    # GUARDRAIL: Track fallbacks for this iteration
-    # Principle 3: Fallbacks must count as failures, not successes
-    fallback_count = 0
     if config is None:
         config = _DEFAULT_EM_CONFIG
     
@@ -1220,6 +1241,9 @@ def em_step(
     V_smooth = V_smooth.astype(np.float64) if V_smooth.dtype != np.float64 else V_smooth
     VVsmooth = VVsmooth.astype(np.float64) if VVsmooth.dtype != np.float64 else VVsmooth
     
+    # Cap extreme values in smoothed states EZ to prevent overflow in M-step
+    EZ = cap_smoothed_states(EZ, max_eigenval=MAX_EIGENVALUE, warn=True)
+    
     e_step_time = time_module.time() - e_step_start
     
     # GUARDRAIL: Time budget check for E-step
@@ -1244,22 +1268,32 @@ def em_step(
         if not block_structure.has_cached_indices():
             N = X.shape[1]
             _compute_and_cache_block_indices(block_structure, N)
+        n_blocks = len(block_structure.r) if block_structure.r is not None else 0
+    else:
+        n_blocks = 0
+    
     if verbose_iterations:
-        if block_structure is not None:
-            n_blocks = len(block_structure.r) if hasattr(block_structure, 'r') and block_structure.r is not None else 0
+        if block_structure is not None and block_structure.is_valid():
             _logger.info(f"    M-step: Updating parameters (block structure: {n_blocks} blocks)...")
         else:
             _logger.info(f"    M-step: Updating parameters (unconstrained)...")
     
     if block_structure is not None and block_structure.is_valid():
-        n_blocks = len(block_structure.r) if hasattr(block_structure, 'r') and block_structure.r is not None else 0
         
         if verbose_iterations:
             _logger.info(f"      → Updating transition matrix A and process noise Q...")
         state = _update_transition_matrix_blocked(EZ, V_smooth, VVsmooth, state, config)
+
+        # Option B: Bound transition matrix A (critical for pykalman numerical stability).
+        # If A becomes large (e.g., |A|~1e3+), pykalman can overflow in A @ P @ A.T during filtering,
+        # which then poisons predicted_observation_covariance and causes pinv(...) to fail.
+        A_capped = cap_max_eigenval(state.A, max_eigenval=config.max_eigenval, symmetric=False, warn=True)
+        if not np.array_equal(A_capped, state.A):
+            state = replace(state, A=A_capped)
         
-        Q_new = ensure_process_noise_stable(state.Q, min_eigenval=config.min_variance, warn=True, dtype=np.float64)
-        state = replace(state, Q=Q_new)
+        # Stabilize Q and V_0 with robust fallback handling
+        Q_new, V_0_new = _stabilize_q_and_v0(state.Q, state.V_0, config, warn=True)
+        state = replace(state, Q=Q_new, V_0=V_0_new)
         
         if verbose_iterations:
             _logger.info(f"      → Updating observation matrix C...")
@@ -1268,9 +1302,6 @@ def em_step(
         if verbose_iterations:
             _logger.info(f"      → Updating observation noise R...")
         state = _update_observation_noise_blocked(X, EZ, V_smooth, state, config)
-        
-        Z_0_new = EZ[0, :] if EZ.shape[0] > 0 else state.Z_0
-        state = replace(state, Z_0=Z_0_new)
     else:
         EZZ = V_smooth + np.einsum('ti,tj->tij', EZ, EZ)
         
@@ -1279,12 +1310,19 @@ def em_step(
         state = _update_process_noise(EZ, state, config)
         state = _update_observation_noise(X, EZ, state, config)
         
-        Z_0_new = EZ[0, :] if EZ.shape[0] > 0 else state.Z_0
-        V_0_new = ensure_covariance_stable(V_smooth[0] if len(V_smooth) > 0 else state.V_0, min_eigenval=config.min_variance)
-        state = replace(state, Z_0=Z_0_new, V_0=V_0_new)
+        V_0_new = stabilize_em_initial_covariance(
+            V_smooth[0] if len(V_smooth) > 0 else state.V_0,
+            min_eigenval=config.min_variance,
+            max_eigenval=config.max_eigenval,
+            warn=False
+        )
+        state = replace(state, V_0=V_0_new)
+    
+    # Update Z_0 from smoothed states (common to both blocked and unblocked paths)
+    Z_0_new = EZ[0, :] if EZ.shape[0] > 0 else state.Z_0
+    state = replace(state, Z_0=Z_0_new)
     
     if config.ar_clip is not None:
-        from ..numeric.estimator import apply_ar_clipping
         A_new, clip_stats = apply_ar_clipping(state.A, config)
         if clip_stats['n_clipped'] > 0:
             _logger.debug(f"AR clipping: {clip_stats['n_clipped']}/{clip_stats['n_total']} coefficients clipped")
@@ -1387,6 +1425,7 @@ def run_em_algorithm(
     
     For strict EM, disable stabilization, normalization, and damping.
     """
+
     if config is None:
         config = _DEFAULT_EM_CONFIG
     
@@ -1452,6 +1491,9 @@ def run_em_algorithm(
     
     while num_iter < max_iter and not converged:
         iter_start_time = time_module.time()
+        # Heartbeat every 10 iterations
+        if num_iter % 10 == 0:
+            _logger.info(f"EM heartbeat: iteration {num_iter}/{max_iter}")
         
         if num_iter < 3:
             _logger.info(f"Starting iteration {num_iter + 1}/{max_iter}...")
@@ -1636,8 +1678,17 @@ def run_em_algorithm(
     # If cache was invalidated, recompute with final parameters
     if kalman_filter._cached_smoothed_factors is None:
         X_masked = np.ma.masked_invalid(X)
-        EZ_cached, _, _, _ = kalman_filter.filter_and_smooth(X_masked, compute_loglik=False)
-        kalman_filter._cached_smoothed_factors = EZ_cached
+        try:
+            EZ_cached, _, _, _ = kalman_filter.filter_and_smooth(X_masked, compute_loglik=False)
+            kalman_filter._cached_smoothed_factors = EZ_cached
+        except Exception as e:
+            # Option A: Never fail the whole fit just because the *final* cache recomputation is unstable.
+            # We already have a valid model state and may have cached factors from the last successful E-step.
+            _logger.warning(
+                f"Final filter_and_smooth() failed while recomputing smoothed factors ({type(e).__name__}: {e}). "
+                f"Returning last cached factors if available."
+            )
+            # Keep _cached_smoothed_factors as-is (may be None). Downstream code should handle this.
     
     metadata = {
         'loglik': loglik,

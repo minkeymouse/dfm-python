@@ -418,16 +418,32 @@ class DFMConfig(BaseModelConfig):
             series_ids = list(self.frequency.keys()) if columns is None else columns
             
             # Build blocks array from block series lists (N x B matrix)
-            block_series_sets = {
-                name: set(self.blocks[name].get('series', []))
-                for name in self.block_names
-            }
+            # Default global block behavior:
+            # If config omitted blocks.series (empty list) and we have runtime columns,
+            # interpret a single empty Block_Global as "all series in this block".
+            block_series_sets: Dict[str, set] = {}
+            default_global_applied = False
+            for name in self.block_names:
+                series_list = self.blocks[name].get('series', [])
+                if (
+                    columns is not None
+                    and (series_list is None or len(series_list) == 0)
+                    and len(self.block_names) == 1
+                    and name == "Block_Global"
+                ):
+                    block_series_sets[name] = set(series_ids)
+                    default_global_applied = True
+                else:
+                    block_series_sets[name] = set(series_list or [])
+
             blocks_list = [
                 [1 if series_id in block_series_sets[name] else 0 for name in self.block_names]
                 for series_id in series_ids
             ]
             
             self._cached_blocks = np.array(blocks_list, dtype=int)
+
+            # Quick sanity on membership counts for the first block (if any)
         return self._cached_blocks
     
     @classmethod
@@ -463,14 +479,14 @@ class DFMConfig(BaseModelConfig):
         return result
     
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> Union['DFMConfig', 'DDFMConfig', 'KDFMConfig']:
-        """Create DFMConfig, DDFMConfig, or KDFMConfig from dictionary.
+    def from_dict(cls, data: Dict[str, Any]) -> Union['DFMConfig', 'DDFMConfig']:
+        """Create DFMConfig or DDFMConfig from dictionary.
         
         Expected format: {'frequency': {'column_name': 'frequency'}, 'blocks': {...}, ...}
         
         Also accepts estimation parameters: threshold, max_iter, etc.
         """
-        from ...config.adapter import detect_config_type, MODEL_TYPE_DDFM, MODEL_TYPE_KDFM, _normalize_blocks_dict
+        from ...config.adapter import detect_config_type, MODEL_TYPE_DDFM, _normalize_blocks_dict
         from ...utils.errors import ConfigurationError
         
         # Extract base params (handles frequency conversion from series if needed)
@@ -482,14 +498,24 @@ class DFMConfig(BaseModelConfig):
         if config_type == MODEL_TYPE_DDFM:
             return DDFMConfig(**base_params, **DDFMConfig._extract_ddfm(data))
         
-        if config_type == MODEL_TYPE_KDFM:
-            return KDFMConfig(**base_params, **KDFMConfig._extract_kdfm(data))
-        
         # Handle blocks for DFM
         from ...config.adapter import _raise_config_error, _is_dict_like
         blocks_dict = data.get('blocks', {})
         if not blocks_dict:
-            _raise_config_error("blocks dict is required for DFM config")
+            # Default behavior: single global block.
+            # This enables minimal configs like:
+            #   clock: d
+            #   num_factors: 2
+            # and lets the model bind series names from the dataset at runtime.
+            default_num_factors = int(data.get('num_factors', 1) or 1)
+            if default_num_factors < 1:
+                _raise_config_error(f"num_factors must be >= 1, got {default_num_factors}")
+            blocks_dict = {
+                "Block_Global": {
+                    "num_factors": default_num_factors,
+                    "series": [],  # to be bound from dataset columns
+                }
+            }
         if not _is_dict_like(blocks_dict):
             _raise_config_error(f"blocks must be a dict, got {type(blocks_dict)}")
         
@@ -597,72 +623,6 @@ class DDFMConfig(BaseModelConfig):
         raise ConfigurationError(
             "Expected DDFMConfig but got DFMConfig",
             details=f"Result type: {type(result).__name__}, expected: DDFMConfig"
-        )
-
-
-@dataclass
-class KDFMConfig(BaseModelConfig):
-    """KDFM configuration dataclass.
-    
-    This dataclass contains all configuration parameters for the KDFM model.
-    It inherits from BaseModelConfig and adds KDFM-specific parameters.
-    
-    Note: KDFM does not use blocks structure (unlike DFM). Only frequency dict is needed.
-    """
-    # VARMA parameters
-    ar_order: int = DEFAULT_KDFM_AR_ORDER  # VAR order p
-    ma_order: int = DEFAULT_KDFM_MA_ORDER  # MA order q (0 = pure VAR)
-    
-    # Structural identification
-    structural_method: str = 'cholesky'  # 'cholesky', 'full', 'low_rank'
-    structural_rank: Optional[int] = None  # For low-rank parameterization
-    
-    # Training parameters (use constants for defaults)
-    learning_rate: float = DEFAULT_LEARNING_RATE
-    max_epochs: int = DEFAULT_MAX_EPOCHS
-    batch_size: int = DEFAULT_BATCH_SIZE
-    weight_decay: float = DEFAULT_REGULARIZATION_SCALE
-    grad_clip_val: float = DEFAULT_GRAD_CLIP_VAL
-    
-    # Regularization
-    structural_reg_weight: float = DEFAULT_STRUCTURAL_REG_WEIGHT  # Weight for structural loss
-    use_regularization: bool = True
-    regularization_scale: float = DEFAULT_REGULARIZATION_SCALE
-    
-    # ========================================================================
-    # Factory Methods
-    # ========================================================================
-    
-    @classmethod
-    def _extract_kdfm(cls, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Extract KDFM-specific parameters from config dict."""
-        # Don't extract base params here - they're already in base_params from from_dict
-        kdfm_params = cls._extract_params(data, {
-            'ar_order': DEFAULT_KDFM_AR_ORDER,
-            'ma_order': DEFAULT_KDFM_MA_ORDER,
-            'structural_method': 'cholesky',
-            'structural_rank': None,
-            'learning_rate': DEFAULT_LEARNING_RATE,
-            'max_epochs': DEFAULT_MAX_EPOCHS,
-            'batch_size': DEFAULT_BATCH_SIZE,
-            'weight_decay': DEFAULT_REGULARIZATION_SCALE,
-            'grad_clip_val': DEFAULT_GRAD_CLIP_VAL,
-            'structural_reg_weight': DEFAULT_STRUCTURAL_REG_WEIGHT,
-            'use_regularization': True,
-            'regularization_scale': DEFAULT_REGULARIZATION_SCALE,
-        })
-        return kdfm_params
-    
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'KDFMConfig':
-        """Create KDFMConfig from dictionary (delegates to DFMConfig.from_dict for type detection)."""
-        result = DFMConfig.from_dict(data)
-        if isinstance(result, KDFMConfig):
-            return result
-        from ..utils.errors import ConfigurationError
-        raise ConfigurationError(
-            f"Expected KDFMConfig but got {type(result).__name__}",
-            details=f"Result type: {type(result).__name__}, expected: KDFMConfig"
         )
 
 

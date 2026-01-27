@@ -191,3 +191,63 @@ class TestDFM:
         assert np.all(np.isfinite(state.C)), "C should not contain NaN/Inf"
         assert np.all(np.isfinite(state.Q)), "Q should not contain NaN/Inf"
         assert np.all(np.isfinite(state.R)), "R should not contain NaN/Inf"
+    
+    def test_dfm_save_and_load(self, sample_dataset, tmp_path):
+        """Test DFM save and load functionality."""
+        import pickle
+        from pathlib import Path
+        
+        # Train a model
+        model = DFM(dataset=sample_dataset, config=sample_dataset.config)
+        model.fit()
+        
+        # Get original predictions
+        X_forecast_orig, Z_forecast_orig = model.predict(horizon=5)
+        result_orig = model.result
+        
+        # Save model
+        save_path = tmp_path / "test_dfm_model.pkl"
+        model.save(save_path)
+        assert save_path.exists(), "Model file should be created"
+        
+        # Load model
+        loaded_model = DFM.load(save_path, dataset=sample_dataset)
+        
+        # Verify loaded model can make predictions
+        X_forecast_loaded, Z_forecast_loaded = loaded_model.predict(horizon=5)
+        
+        # Verify predictions match (within numerical precision)
+        assert X_forecast_loaded.shape == X_forecast_orig.shape
+        assert Z_forecast_loaded.shape == Z_forecast_orig.shape
+        np.testing.assert_allclose(X_forecast_loaded, X_forecast_orig, rtol=1e-5, atol=1e-6)
+        np.testing.assert_allclose(Z_forecast_loaded, Z_forecast_orig, rtol=1e-5, atol=1e-6)
+        
+        # Verify result matches
+        result_loaded = loaded_model.result
+        assert result_loaded.converged == result_orig.converged
+        assert result_loaded.num_iter == result_orig.num_iter
+        np.testing.assert_allclose(result_loaded.loglik, result_orig.loglik, rtol=1e-5)
+        
+        # Verify state-space parameters match
+        assert loaded_model.training_state is not None
+        assert model.training_state is not None
+        np.testing.assert_allclose(loaded_model.training_state.A, model.training_state.A, rtol=1e-5)
+        np.testing.assert_allclose(loaded_model.training_state.C, model.training_state.C, rtol=1e-5)
+        np.testing.assert_allclose(loaded_model.training_state.Q, model.training_state.Q, rtol=1e-5)
+    
+    def test_dfm_save_and_load_without_dataset(self, sample_dataset, tmp_path):
+        """Test DFM load requires dataset parameter."""
+        # Train and save model
+        model = DFM(dataset=sample_dataset, config=sample_dataset.config)
+        model.fit()
+        
+        save_path = tmp_path / "test_dfm_model.pkl"
+        model.save(save_path)
+        
+        # Load should work with dataset
+        loaded_model = DFM.load(save_path, dataset=sample_dataset)
+        assert loaded_model is not None
+        
+        # Load should also work with config override
+        loaded_model2 = DFM.load(save_path, config=sample_dataset.config, dataset=sample_dataset)
+        assert loaded_model2 is not None
