@@ -384,44 +384,146 @@ class DFMKalmanFilter:
                     f"observation_offsets shape mismatch: expected ({N},), got {observation_offsets_final.shape}"
                 )
             
+            # Validate parameters for NaN/Inf before calling _filter (prevents cryptic errors)
+            A = self._pykalman.transition_matrices
+            C = self._pykalman.observation_matrices
+            Q = self._pykalman.transition_covariance
+            R = self._pykalman.observation_covariance
+            Z_0 = self._pykalman.initial_state_mean
+            V_0 = self._pykalman.initial_state_covariance
+            
+            # Check for non-finite values in parameters
+            param_checks = {
+                'A (transition)': A,
+                'C (observation)': C,
+                'Q (process noise)': Q,
+                'R (observation noise)': R,
+                'Z_0 (initial state mean)': Z_0,
+                'V_0 (initial state cov)': V_0,
+            }
+            non_finite_params = []
+            for name, param in param_checks.items():
+                if param is not None and not np.isfinite(param).all():
+                    n_inf = np.sum(np.isinf(param)) if param is not None else 0
+                    n_nan = np.sum(np.isnan(param)) if param is not None else 0
+                    non_finite_params.append(f"{name}: {n_inf} Inf, {n_nan} NaN")
+            
+            if non_finite_params:
+                # Try to recover by stabilizing parameters
+                _logger.warning(
+                    f"    Filter: Non-finite values detected in parameters: {', '.join(non_finite_params)}. "
+                    f"Attempting to stabilize before filtering..."
+                )
+                # Stabilize all covariance matrices
+                if Q is not None and not np.isfinite(Q).all():
+                    Q = ensure_symmetric(Q)
+                    Q = np.where(np.isfinite(Q), Q, 0.0)
+                    Q = cap_max_eigenval(Q, max_eigenval=MAX_EIGENVALUE, symmetric=True, warn=False)
+                if R is not None and not np.isfinite(R).all():
+                    R = ensure_symmetric(R)
+                    R = np.where(np.isfinite(R), R, np.diag(np.diag(R)))  # Preserve diagonal structure
+                    # Ensure R diagonal is positive
+                    R_diag = np.diag(R)
+                    R_diag = np.where(np.isfinite(R_diag) & (R_diag > 0), R_diag, 1.0)  # Fallback to 1.0
+                    np.fill_diagonal(R, R_diag)
+                    R = cap_max_eigenval(R, max_eigenval=MAX_EIGENVALUE, symmetric=True, warn=False)
+                if V_0 is not None and not np.isfinite(V_0).all():
+                    V_0 = ensure_symmetric(V_0)
+                    V_0 = np.where(np.isfinite(V_0), V_0, 0.0)
+                    V_0 = cap_max_eigenval(V_0, max_eigenval=MAX_EIGENVALUE / 10, symmetric=True, warn=False)
+                if A is not None and not np.isfinite(A).all():
+                    A = np.where(np.isfinite(A), A, 0.0)
+                if C is not None and not np.isfinite(C).all():
+                    C = np.where(np.isfinite(C), C, 0.0)
+                if Z_0 is not None and not np.isfinite(Z_0).all():
+                    Z_0 = np.where(np.isfinite(Z_0), Z_0, 0.0)
+            
             # Option 4: Try filter with current parameters, retry with more aggressive stabilization if overflow
             try:
                 return _filter(
-                    self._pykalman.transition_matrices,
-                    self._pykalman.observation_matrices,
-                    self._pykalman.transition_covariance,
-                    self._pykalman.observation_covariance,
+                    A,
+                    C,
+                    Q,
+                    R,
                     transition_offsets_final,
                     observation_offsets_final,
-                    self._pykalman.initial_state_mean,
-                    self._pykalman.initial_state_covariance,
+                    Z_0,
+                    V_0,
                     observations
                 )
             except (ValueError, FloatingPointError, OverflowError) as e:
                 if "infs or NaNs" in str(e) or "overflow" in str(e).lower():
                     _logger.warning(
                         f"    Filter: Overflow detected in _filter ({type(e).__name__}: {e}). "
-                        f"Retrying with more aggressively stabilized V_0..."
+                        f"Retrying with more aggressively stabilized parameters..."
                     )
-                    # Retry with more aggressively stabilized V_0
-                    V_0_retry = self._pykalman.initial_state_covariance.copy()
-                    # Cap at smaller value for retry
+                    # Retry with more aggressively stabilized parameters
+                    V_0_retry = V_0.copy() if V_0 is not None else self._pykalman.initial_state_covariance.copy()
+                    V_0_retry = ensure_symmetric(V_0_retry)
+                    V_0_retry = np.where(np.isfinite(V_0_retry), V_0_retry, 0.0)
                     V_0_retry = cap_max_eigenval(V_0_retry, max_eigenval=MAX_EIGENVALUE / 10, symmetric=True, warn=False)
-                    # Also ensure Q is well-bounded
-                    Q_retry = self._pykalman.transition_covariance.copy()
+                    
+                    Q_retry = Q.copy() if Q is not None else self._pykalman.transition_covariance.copy()
+                    Q_retry = ensure_symmetric(Q_retry)
+                    Q_retry = np.where(np.isfinite(Q_retry), Q_retry, 0.0)
                     Q_retry = cap_max_eigenval(Q_retry, max_eigenval=MAX_EIGENVALUE, symmetric=True, warn=False)
                     
-                    return _filter(
-                        self._pykalman.transition_matrices,
-                        self._pykalman.observation_matrices,
-                        Q_retry,
-                        self._pykalman.observation_covariance,
-                        transition_offsets_final,
-                        observation_offsets_final,
-                        self._pykalman.initial_state_mean,
-                        V_0_retry,
-                        observations
-                    )
+                    # Also stabilize R (critical: R appears in predicted_observation_covariance = C P C^T + R)
+                    R_retry = R.copy() if R is not None else self._pykalman.observation_covariance.copy()
+                    R_retry = ensure_symmetric(R_retry)
+                    R_retry = np.where(np.isfinite(R_retry), R_retry, np.diag(np.diag(R_retry)))
+                    # Ensure R diagonal is positive and finite
+                    R_diag = np.diag(R_retry)
+                    R_diag = np.where(np.isfinite(R_diag) & (R_diag > 0), R_diag, 1.0)
+                    np.fill_diagonal(R_retry, R_diag)
+                    R_retry = cap_max_eigenval(R_retry, max_eigenval=MAX_EIGENVALUE, symmetric=True, warn=False)
+                    
+                    # Also stabilize A if it has eigenvalues > 1 (causes unbounded growth in prediction step)
+                    # P_{t|t-1} = A P_{t-1|t-1} A^T + Q grows unbounded if A has eigenvalues > 1
+                    A_retry = A.copy() if A is not None else self._pykalman.transition_matrices.copy()
+                    if A_retry is not None:
+                        A_retry = np.where(np.isfinite(A_retry), A_retry, 0.0)
+                        # Check if A has eigenvalues > 1 (unstable)
+                        try:
+                            eigvals = np.linalg.eigvals(A_retry)
+                            max_eig = np.max(np.abs(eigvals))  # Use absolute value for complex eigenvalues
+                            if max_eig > 0.99:  # Close to or above 1.0
+                                _logger.warning(
+                                    f"    Filter: A has max |eigenvalue| {max_eig:.2e} > 0.99, capping to 0.99 to prevent unbounded growth"
+                                )
+                                A_retry = cap_max_eigenval(A_retry, max_eigenval=0.99, symmetric=False, warn=False)
+                        except (np.linalg.LinAlgError, ValueError):
+                            # If eigendecomposition fails, just ensure finite and scale down
+                            _logger.warning("    Filter: Could not compute A eigenvalues, scaling A by 0.9 as safety measure")
+                            A_retry = A_retry * 0.9
+                    else:
+                        A_retry = A
+                    
+                    try:
+                        return _filter(
+                            A_retry,
+                            C,
+                            Q_retry,
+                            R_retry,
+                            transition_offsets_final,
+                            observation_offsets_final,
+                            Z_0,
+                            V_0_retry,
+                            observations
+                        )
+                    except (ValueError, FloatingPointError, OverflowError) as e2:
+                        # Even retry failed - parameters are too unstable
+                        _logger.error(
+                            f"    Filter: Retry also failed with {type(e2).__name__}: {e2}. "
+                            f"Parameters are too unstable to filter. This indicates severe numerical issues."
+                        )
+                        raise NumericalError(
+                            "Kalman filter failed even after parameter stabilization. "
+                            "Model parameters contain extreme values that cannot be filtered. "
+                            "This typically indicates: (1) model is too complex for the data, "
+                            "(2) data scaling issues, (3) numerical instability in EM convergence.",
+                            details=f"Original error: {type(e).__name__}: {e}, Retry error: {type(e2).__name__}: {e2}"
+                        ) from e2
                 else:
                     raise
         

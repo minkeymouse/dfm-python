@@ -539,13 +539,43 @@ class DFM(BaseFactorModel):
         
         # Fallback: compute smoothed factors (should rarely happen if EM completed successfully)
         _logger.debug("Computing smoothed factors (cache not available)")
-        kalman_final = self._create_kalman_filter()
-        y_masked = np.ma.masked_invalid(self.data_processed)
-        # Use filter_and_smooth() with compute_loglik=False to save time (log-likelihood already known)
-        # This prevents SVD convergence failures with ill-conditioned covariance matrices
-        smoothed_state_means, _, _, _ = kalman_final.filter_and_smooth(y_masked, compute_loglik=False)
-        
-        return smoothed_state_means
+        try:
+            kalman_final = self._create_kalman_filter()
+            y_masked = np.ma.masked_invalid(self.data_processed)
+            # Use filter_and_smooth() with compute_loglik=False to save time (log-likelihood already known)
+            # This prevents SVD convergence failures with ill-conditioned covariance matrices
+            smoothed_state_means, _, _, _ = kalman_final.filter_and_smooth(y_masked, compute_loglik=False)
+            return smoothed_state_means
+        except (ValueError, FloatingPointError, OverflowError) as e:
+            if "infs or NaNs" in str(e) or "overflow" in str(e).lower() or "not contain infs" in str(e):
+                # Parameters are too unstable to recompute factors
+                # This can happen if EM converged to numerically unstable parameters
+                # Raise a clear error with diagnostic information
+                param_status = {}
+                if self.training_state is not None:
+                    for name, param in [
+                        ('A', self.training_state.A),
+                        ('C', self.training_state.C),
+                        ('Q', self.training_state.Q),
+                        ('R', self.training_state.R),
+                        ('V_0', self.training_state.V_0),
+                    ]:
+                        if param is not None:
+                            n_inf = np.sum(np.isinf(param))
+                            n_nan = np.sum(np.isnan(param))
+                            if n_inf > 0 or n_nan > 0:
+                                param_status[name] = f"{n_inf} Inf, {n_nan} NaN"
+                
+                error_msg = (
+                    f"Cannot compute smoothed factors: final parameters contain non-finite values. "
+                    f"This indicates numerical instability in the fitted model. "
+                    f"Parameter status: {param_status if param_status else 'all finite'}. "
+                    f"Consider: (1) reducing model complexity (fewer factors/blocks), "
+                    f"(2) increasing regularization, (3) checking data scaling."
+                )
+                raise NumericalError(error_msg, details=f"Original error: {type(e).__name__}: {e}") from e
+            else:
+                raise
     
     def get_result(self) -> DFMResult:
         """Extract DFMResult from trained model.
