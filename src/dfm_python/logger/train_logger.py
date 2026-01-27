@@ -331,14 +331,6 @@ class DFMTrainLogger(BaseTrainLogger):
         super().__init__(model_name="DFM", verbose=verbose)
 
 
-class DDFMTrainLogger(BaseTrainLogger):
-    """Training logger for DDFM models (gradient descent)."""
-    
-    def __init__(self, verbose: bool = True):
-        """Initialize DDFM training logger."""
-        super().__init__(model_name="DDFM", verbose=verbose)
-
-
 # Convenience functions for simpler usage
 
 def log_training_start(
@@ -365,6 +357,7 @@ def log_training_start(
     if model_name.upper() == "DFM":
         logger = DFMTrainLogger()
     elif model_name.upper() == "DDFM":
+        from .ddfm_logger import DDFMTrainLogger
         logger = DDFMTrainLogger()
     else:
         logger = BaseTrainLogger(model_name=model_name)

@@ -17,7 +17,6 @@ from .logger import (
 from .train_logger import (
     BaseTrainLogger,
     DFMTrainLogger,
-    DDFMTrainLogger,
     log_training_start,
     log_training_step,
     log_training_end,
@@ -29,11 +28,15 @@ from .train_logger import (
 from .inference_logger import (
     BaseInferenceLogger,
     DFMInferenceLogger,
-    DDFMInferenceLogger,
     log_inference_start,
     log_inference_step,
     log_inference_end,
     log_prediction,
+)
+
+from .ddfm_logger import (
+    DDFMTrainLogger,
+    DDFMInferenceLogger,
 )
 
 __all__ = [

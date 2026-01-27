@@ -13,7 +13,7 @@ from typing import Optional, List, Dict, Any, Tuple
 from datetime import datetime
 
 from .model import DFMConfig
-from .params import DDFMStateSpaceParams
+from .params import DDFMModelState
 
 
 
@@ -311,7 +311,7 @@ class DDFMResult(BaseResult):
         Architecture of the encoder network used.
     use_idiosyncratic : bool, optional
         Whether idiosyncratic components were modeled.
-    fit_params : DDFMStateSpaceParams, optional
+    fit_params : DDFMModelState, optional
         State-space model parameters created during fit (F, Q, mu_0, sigma_0, H, R).
         These are computed during build_state_space() and represent the fitted
         state-space model structure.
@@ -365,7 +365,7 @@ class DDFMResult(BaseResult):
     use_idiosyncratic: Optional[bool] = None  # Whether idio components were used
     
     # State-space parameters (fitted during training)
-    fit_params: Optional[DDFMStateSpaceParams] = None
+    fit_params: Optional[DDFMModelState] = None
     
     # Training hyperparameters
     training_max_iter: Optional[int] = None

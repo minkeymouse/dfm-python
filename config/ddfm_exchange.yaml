@@ -20,6 +20,11 @@ tolerance: 0.0005  # Convergence tolerance (matching original tolerance=0.0005)
 disp: 10  # Display frequency for training progress (matching original disp=10)
 seed: 3  # Random seed (matching original seed=3)
 
+# Interpolation Parameters
+interpolation_method: linear  # Interpolation method for missing values
+interpolation_limit: 10  # Maximum consecutive NaNs to interpolate
+interpolation_limit_direction: both  # Direction to fill ('forward', 'backward', or 'both')
+
 # Data Handling (used by Dataset, not Model)
 clock: d  # Daily clock frequency (all series are daily)
 scaler: null  # No scaler - data should be pre-scaled before passing to Dataset

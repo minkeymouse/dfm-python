@@ -1,283 +1,186 @@
 """Tutorial: DDFM for Finance Data
 
-This tutorial demonstrates the complete workflow for training, prediction
+This tutorial demonstrates the complete workflow for training and prediction
 using finance data with market_forward_excess_returns as the target variable.
-
-Target: market_forward_excess_returns
-Excluded: risk_free_rate, forward_returns
-
-Note: DDFM uses noise injection integrated into the Autoencoder class.
-Noise is pre-sampled on GPU and injected by subtracting epsilon from clean data,
-following the original DDFM pattern: y_t^(mc) = ỹ_t - ε_t^(mc).
-
 """
 
 import sys
 from pathlib import Path
+import traceback
+import json
+from datetime import datetime
 
-# Add src to path for imports
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root / "src"))
 
 import pandas as pd
 import numpy as np
-from datetime import datetime
 from dfm_python import DDFM, DDFMDataset
 from dfm_python.config import DDFMConfig
-from dfm_python.config.constants import TUTORIAL_MAX_PERIODS, DEFAULT_LEARNING_RATE, DEFAULT_DDFM_WINDOW_SIZE, DEFAULT_DDFM_LEARNING_RATE
-from dfm_python.utils.misc import select_columns_by_prefix
-from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
-from sktime.transformations.series.impute import Imputer
+import hydra
+from omegaconf import DictConfig, OmegaConf
 
-# Preprocessing pipeline helper (uses sktime internally)
+def save_failure_report(step: str, error: Exception, context: dict, project_root: Path):
+    """Save detailed failure report to file."""
+    reports_dir = project_root / "failure_reports"
+    reports_dir.mkdir(exist_ok=True)
+    
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    report_file = reports_dir / f"finance_ddfm_failure_{timestamp}.json"
+    
+    report = {
+        "experiment": "finance_ddfm",
+        "step": step,
+        "timestamp": timestamp,
+        "error_type": type(error).__name__,
+        "error_message": str(error),
+        "traceback": traceback.format_exc(),
+        "context": context
+    }
+    
+    with open(report_file, 'w') as f:
+        json.dump(report, f, indent=2, default=str)
+    
+    print(f"\n[FAILURE] Error report saved to: {report_file}")
+    return report_file
 
-print("=" * 80)
-print("DDFM Tutorial: Finance Data")
-print("=" * 80)
+@hydra.main(version_base=None, config_path="../config", config_name="ddfm_finance")
+def main(cfg: DictConfig) -> None:
+    print("=" * 80)
+    print("DDFM Tutorial: Finance Data")
+    print("=" * 80)
+    
+    start_time = datetime.now()
+    model = None
+    dataset = None
+    config = None
+    df = None
+    
+    try:
+        print("\n[Step 1] Loading data...")
+        try:
+            df = pd.read_csv(project_root / "data" / "finance.csv")
+            if "date" not in df.columns:
+                from datetime import datetime as dt
+                start_date = dt(1980, 1, 1)
+                df["date"] = pd.date_range(start=start_date, periods=len(df), freq="D")
+            print(f"   Data shape: {df.shape}")
+        except Exception as e:
+            context = {
+                "data_shape": df.shape if df is not None else None,
+                "data_columns": list(df.columns) if df is not None else None,
+            }
+            save_failure_report("Step 1: Loading data", e, context, project_root)
+            raise
 
-# ============================================================================
-# Step 1: Load Data
-# ============================================================================
-print("\n[Step 1] Loading finance data...")
-data_path = project_root / "data" / "finance.csv"
-df = pd.read_csv(data_path)
+        try:
+            print("\n[Step 2] Creating Dataset...")
+            config = DDFMConfig.from_dict(OmegaConf.to_container(cfg, resolve=True))
+            
+            # Filter data to only include series specified in config
+            all_block_series = set()
+            if hasattr(config, 'blocks') and config.blocks:
+                for block_name, block_config in config.blocks.items():
+                    if isinstance(block_config, dict) and 'series' in block_config:
+                        all_block_series.update(block_config['series'])
+            
+            columns_to_keep = ['date'] + list(all_block_series) if all_block_series else list(df.columns)
+            columns_to_keep = [col for col in columns_to_keep if col in df.columns]
+            df_filtered = df[columns_to_keep].copy()
+            
+            target_col = "market_forward_excess_returns"
+            covariates = [col for col in df_filtered.columns if col != target_col and col != 'date']
+            
+            dataset = DDFMDataset(
+                data=df_filtered,
+                time_idx='date',
+                covariates=covariates if covariates else None,
+                scaler=StandardScaler()
+            )
+            print(f"   Dataset created: {dataset.data.shape}")
+        except Exception as e:
+            context = {
+                "config_max_epoch": cfg.get('max_epoch', None),
+                "data_shape": df.shape if df is not None else None,
+            }
+            save_failure_report("Step 2: Creating Dataset", e, context, project_root)
+            raise
 
-print(f"   Data shape: {df.shape}")
-print(f"   Columns: {len(df.columns)}")
+        try:
+            print("\n[Step 3] Training DDFM model...")
+            encoder_layers = getattr(config, 'encoder_layers', [32, 1])
+            encoder_size = tuple(encoder_layers) if encoder_layers else (32, 1)
+            
+            model = DDFM(
+                dataset=dataset,
+                config=config,
+                encoder_size=encoder_size,
+                decoder_type="linear",
+                activation=getattr(config, 'activation', 'relu'),
+                learning_rate=getattr(config, 'learning_rate', 0.001),
+                optimizer='Adam',
+                n_mc_samples=getattr(config, 'n_mc_samples', 1),
+                window_size=getattr(config, 'window_size', 100),
+                max_iter=getattr(config, 'max_epoch', 200),  # Config uses max_epoch, DDFM uses max_iter
+                tolerance=getattr(config, 'tolerance', 0.0005),
+                disp=getattr(config, 'disp', 10),
+                seed=getattr(config, 'seed', None),
+                interpolation_method=getattr(config, 'interpolation_method', 'linear'),
+                interpolation_limit=getattr(config, 'interpolation_limit', 10),
+                interpolation_limit_direction=getattr(config, 'interpolation_limit_direction', 'both')
+            )
+            model.fit()
+            model.build_state_space()
+            
+            result = model.get_result()
+            print(f"   Converged: {result.converged if hasattr(result, 'converged') else 'N/A'}, Iterations: {getattr(model, '_num_iter', 'N/A')}")
+        except Exception as e:
+            context = {
+                "config_max_epoch": cfg.get('max_epoch', None),
+                "dataset_shape": dataset.data.shape if dataset is not None else None,
+                "elapsed_time": str(datetime.now() - start_time),
+            }
+            save_failure_report("Step 3: Training DDFM model", e, context, project_root)
+            raise
 
-# ============================================================================
-# Step 2: Prepare Data
-# ============================================================================
-print("\n[Step 2] Preparing data...")
+        try:
+            print("\n[Step 4] Making predictions...")
+            X_forecast, Z_forecast = model.predict(horizon=6, return_series=True, return_factors=True)
+            print(f"   Forecast shape: {X_forecast.shape}")
+            
+            if np.any(np.isnan(X_forecast)) or np.any(np.isinf(X_forecast)):
+                print(f"   WARNING: Forecast contains NaN or Inf!")
+        except Exception as e:
+            context = {
+                "result_converged": result.converged if 'result' in locals() else None,
+            }
+            save_failure_report("Step 4: Making predictions", e, context, project_root)
+            raise
 
-# Exclude target and excluded variables from predictors
-target_col = "market_forward_excess_returns"
-exclude_cols = ["risk_free_rate", "forward_returns", "date_id"]
+        try:
+            print("\n[Step 5] Saving model...")
+            model_path = project_root / "models" / "ddfm_finance.pkl"
+            model_path.parent.mkdir(exist_ok=True)
+            model.save(model_path)
+            print(f"   Model saved to: {model_path}")
+        except Exception as e:
+            context = {
+                "model_path": str(model_path) if 'model_path' in locals() else None,
+                "result_converged": result.converged if 'result' in locals() else None,
+            }
+            save_failure_report("Step 5: Saving model", e, context, project_root)
+            raise
 
-# Select a subset of series for faster execution
-# Use first 2 series from each category: D, E, I, M, P, S, V (balanced for speed)
-selected_cols = select_columns_by_prefix(df, ["D", "E", "I", "M", "P", "S", "V"], count_per_prefix=2)
+        elapsed = datetime.now() - start_time
+        print(f"\n[SUCCESS] Tutorial completed in {elapsed}")
+        
+    except Exception as e:
+        elapsed = datetime.now() - start_time
+        print(f"\n[FAILURE] Tutorial failed after {elapsed}")
+        print(f"Error: {type(e).__name__}: {str(e)}")
+        raise
 
-# Add target to selected columns
-if target_col not in selected_cols:
-    selected_cols.append(target_col)
 
-# Filter data
-df_processed = df[selected_cols].copy()
-print(f"   Selected {len(selected_cols)} series (including target)")
-print(f"   Excluded: {exclude_cols}")
-
-# Remove rows with all NaN
-df_processed = df_processed.dropna(how='all')
-
-# Use only recent data for faster execution and to avoid date overflow
-# Take last TUTORIAL_MAX_PERIODS periods (reduced for faster execution)
-if len(df_processed) > TUTORIAL_MAX_PERIODS:
-    df_processed = df_processed.iloc[-TUTORIAL_MAX_PERIODS:]
-    print(f"   Using last {TUTORIAL_MAX_PERIODS} periods for faster execution")
-
-print(f"   Data shape after cleaning: {df_processed.shape}")
-
-# Check for missing values
-missing_before = df_processed.isnull().sum().sum()
-print(f"   Missing values before preprocessing: {missing_before}")
-
-# ============================================================================
-# Step 2.5: Create Preprocessing Pipeline
-# ============================================================================
-print("\n[Step 2.5] Creating preprocessing pipeline...")
-
-# Separate X (features) and y (target)
-X_cols = [col for col in selected_cols if col != target_col]
-y_col = target_col
-
-X = df_processed[X_cols].copy()
-y = df_processed[[y_col]].copy()  # Keep y raw (no preprocessing)
-
-print("   Separating features (X) and target (y)...")
-print(f"   X (features): {len(X_cols)} series - will be preprocessed")
-print(f"   y (target): 1 series ({y_col}) - kept raw (no preprocessing pipeline, no differencing)")
-
-# Create preprocessing pipeline for X (features): Imputation → Scaling
-X_pipeline = Pipeline(
-    steps=[
-        ('impute_ffill', Imputer(method="ffill")),
-        ('impute_bfill', Imputer(method="bfill")),
-        ('scaler', StandardScaler())
-    ]
-)
-
-print("   Pipeline for X: Imputer(ffill) → Imputer(bfill) → StandardScaler")
-print("   y (target): Raw series (no preprocessing pipeline)")
-print("   Applying preprocessing pipeline to X only...")
-
-# Fit and transform X (features)
-X_pipeline.fit(X)
-X_preprocessed = X_pipeline.transform(X)
-
-# Create scaler for y (target) - fit but don't transform
-# This scaler will be used for inverse transformation during prediction
-y_scaler = StandardScaler()
-y_scaler.fit(y)
-
-# Ensure X output is DataFrame
-if isinstance(X_preprocessed, np.ndarray):
-    X_preprocessed = pd.DataFrame(X_preprocessed, columns=X_cols, index=X.index)
-
-# Combine X (preprocessed) and y (raw) back together
-df_preprocessed = pd.concat([X_preprocessed, y], axis=1)
-
-# Ensure output is DataFrame
-if isinstance(df_preprocessed, np.ndarray):
-    df_preprocessed = pd.DataFrame(df_preprocessed, columns=df_processed.columns, index=df_processed.index)
-elif not isinstance(df_preprocessed, pd.DataFrame):
-    df_preprocessed = pd.DataFrame(df_preprocessed)
-
-missing_after = df_preprocessed.isnull().sum().sum()
-print(f"   Missing values after preprocessing: {missing_after}")
-print(f"   Preprocessed data shape: {df_preprocessed.shape}")
-
-# Standardize ALL data (matching original TensorFlow DDFM)
-# Original TensorFlow: self.data = (data - self.mean_z) / self.sigma_z
-print("\n[Step 2.6] Standardizing ALL data (matching original TensorFlow DDFM)...")
-print("   Original TensorFlow: self.data = (data - self.mean_z) / self.sigma_z")
-print("   All series (including target) must be standardized before passing to Dataset")
-
-# Standardize all data (matching original TensorFlow DDFM)
-mean_z = df_preprocessed.mean().values
-sigma_z = df_preprocessed.std().values
-df_standardized = (df_preprocessed - mean_z) / sigma_z
-
-# Verify standardization
-mean_vals = df_standardized.mean()
-std_vals = df_standardized.std()
-max_mean = float(mean_vals.abs().max())
-max_std_dev = float((std_vals - 1.0).abs().max())
-print(f"   Standardization check - Max |mean|: {max_mean:.6f} (should be ~0)")
-print(f"   Standardization check - Max |std - 1|: {max_std_dev:.6f} (should be ~0)")
-
-# Update df_preprocessed to use standardized data
-df_preprocessed = df_standardized
-
-# Update df_processed to use preprocessed data
-df_processed = df_preprocessed
-
-# ============================================================================
-# Step 3: Create Configuration
-# ============================================================================
-print("\n[Step 3] Creating configuration...")
-
-# Create frequency dict (maps column names to frequencies)
-# All series are monthly, so use 'm' for all
-frequency_dict = {col: "m" for col in selected_cols}
-
-# Create DDFM config (DDFM does not use blocks structure)
-# DDFM uses num_factors directly, not blocks
-# Note: factor_order is not a parameter - factors always use AR(1) dynamics
-config = DDFMConfig(
-    frequency=frequency_dict,
-    clock="m",  # Monthly clock frequency
-    num_factors=1,  # Reduced to 1 for faster execution
-    encoder_layers=[32, 16],  # Reduced for faster execution
-    n_mc_samples=10,  # Number of MC samples per MCMC iteration (reduced for faster execution)
-    learning_rate=DEFAULT_LEARNING_RATE,
-    window_size=DEFAULT_DDFM_WINDOW_SIZE,  # Window size (time-step batch size) for training
-    scaler='standard'  # Use standard scaler (fitted internally)
-)
-
-print(f"   Number of series: {len(selected_cols)}")
-print(f"   Number of factors: {config.num_factors} (DDFM uses num_factors parameter)")
-print(f"   Factor dynamics: VAR(1) (always AR(1), not configurable)")
-print(f"   MC samples per iteration: {config.n_mc_samples}")
-print(f"   Target series: {target_col}")
-print(f"   Noise injection: Integrated in Autoencoder (pre-sampled on GPU)")
-
-# ============================================================================
-# Step 4: Create Dataset
-# ============================================================================
-print("\n[Step 4] Creating Dataset...")
-
-# Note: DDFMDataset uses time_idx='index' to use DataFrame index as time identifier
-# No need to create separate TimeIndex object
-
-# Create DDFMDataset with preprocessed data
-# Data must be preprocessed before passing to Dataset
-# Target series are specified separately - they remain in raw form (not preprocessed)
-# Use covariates to exclude non-target series
-all_cols = list(df_processed.columns)
-covariates = [col for col in all_cols if col != target_col]
-dataset = DDFMDataset(
-    data=df_processed,  # Pass DataFrame directly (not .values) - already preprocessed
-    time_idx='index',  # Use DataFrame index as time identifier
-    covariates=covariates if covariates else None  # Exclude non-target series from targets
-)
-
-print(f"   Dataset created successfully")
-print(f"   Data shape: {dataset.data.shape}")
-print(f"   Target series: {dataset.target_series}")
-
-# ============================================================================
-# Step 5: Train Model
-# ============================================================================
-print("\n[Step 5] Training DDFM model...")
-
-# Create model with parameters from config
-# Map config parameters to model parameters
-encoder_layers = getattr(config, 'encoder_layers', [32, 1])
-encoder_size = tuple(encoder_layers) if encoder_layers else (32, 1)
-max_epoch = getattr(config, 'max_epoch', 3)  # Reduced for faster execution
-
-model = DDFM(
-    dataset=dataset,
-    config=config,
-    encoder_size=encoder_size,  # Convert list to tuple
-    decoder_type="linear",
-    activation=getattr(config, 'activation', 'relu'),
-    learning_rate=getattr(config, 'learning_rate', DEFAULT_DDFM_LEARNING_RATE),
-    optimizer='Adam',
-    n_mc_samples=getattr(config, 'n_mc_samples', 10),
-    window_size=getattr(config, 'window_size', DEFAULT_DDFM_WINDOW_SIZE),
-    max_iter=max_epoch,  # Map max_epoch -> max_iter
-    tolerance=getattr(config, 'tolerance', 0.0005),
-    disp=getattr(config, 'disp', 10),
-    seed=getattr(config, 'seed', None)
-)
-
-# Train model - fit() builds model, pre-trains, and trains in one method
-print(f"   Starting training (max {model.max_iter} iterations)...")
-model.fit()
-print("   Training completed!")
-
-# Build state-space model for prediction
-print("\n[Step 5.5] Building state-space model...")
-model.build_state_space()
-print("   State-space model built successfully")
-
-# ============================================================================
-# Step 6: Prediction
-# ============================================================================
-print("\n[Step 6] Making predictions...")
-
-# Predict with horizon=6 (uses target series computed from covariates)
-# Note: predict() requires build_state_space() to be called first
-X_forecast, Z_forecast = model.predict(horizon=6, return_series=True, return_factors=True)
-
-print(f"   Forecast shape: {X_forecast.shape}")
-print(f"   Factor forecast shape: {Z_forecast.shape}")
-print(f"   First forecast value (target): {X_forecast[0, 0]:.6f}")
-
-# ============================================================================
-# Step 7: Summary
-# ============================================================================
-print("\n" + "=" * 80)
-print("Tutorial Summary")
-print("=" * 80)
-print(f"✅ Data loaded: {df.shape[0]} rows, {len(selected_cols)} series")
-print(f"✅ Model trained: {len(selected_cols)} series, 1 factor, VAR(1) dynamics")
-if X_forecast is not None:
-    print(f"✅ Predictions generated: {X_forecast.shape[0]} periods ahead")
-else:
-    print(f"⚠️  Predictions: Failed (see error message above)")
-print(f"✅ Target series: {target_col}")
-print("=" * 80)
+if __name__ == "__main__":
+    main()

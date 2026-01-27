@@ -7,7 +7,7 @@ import torch
 import torch.nn
 import pandas as pd
 from sklearn.preprocessing import StandardScaler, RobustScaler
-from dfm_python.models.ddfm import DDFM
+from dfm_python.models import DDFM
 from dfm_python.dataset.ddfm_dataset import DDFMDataset
 from dfm_python.utils.errors import DataError, DataValidationError, ModelNotTrainedError, ModelNotInitializedError
 from dfm_python.config.constants import MIN_VARIABLES, MIN_DDFM_TIME_STEPS, DEFAULT_ENCODER_LAYERS
@@ -414,20 +414,19 @@ class TestDDFM:
         model = DDFM(dataset=dataset, encoder_size=tuple(DEFAULT_ENCODER_LAYERS), max_iter=1)
         model.fit()
         
-        assert getattr(model, 'state_space_params', None) is None
+        assert model.training_state.F is None
         
         model.build_state_space()
         
-        assert model.state_space_params is not None
-        assert hasattr(model.state_space_params, 'F')
-        assert hasattr(model.state_space_params, 'H')
-        assert hasattr(model.state_space_params, 'Q')
-        assert hasattr(model.state_space_params, 'R')
-        assert hasattr(model.state_space_params, 'mu_0')
-        assert hasattr(model.state_space_params, 'Sigma_0')
+        assert model.training_state.F is not None
+        assert model.training_state.H is not None
+        assert model.training_state.Q is not None
+        assert model.training_state.R is not None
+        assert model.training_state.mu_0 is not None
+        assert model.training_state.Sigma_0 is not None
         
-        assert model.state_space_params.F.shape[0] == model.state_space_params.F.shape[1]
-        assert model.state_space_params.H.shape[1] == model.state_space_params.F.shape[0]
+        assert model.training_state.F.shape[0] == model.training_state.F.shape[1]
+        assert model.training_state.H.shape[1] == model.training_state.F.shape[0]
     
     def test_ddfm_predict_requires_state_space(self):
         """Test DDFM predict() requires build_state_space() to be called."""
@@ -441,7 +440,7 @@ class TestDDFM:
         model = DDFM(dataset=dataset, encoder_size=tuple(DEFAULT_ENCODER_LAYERS), max_iter=1)
         model.fit()
         
-        assert not hasattr(model, 'state_space_params') or getattr(model, 'state_space_params', None) is None
+        assert model.training_state.F is None
         
         with pytest.raises(ModelNotInitializedError, match="state-space model has not been built"):
             model.predict(horizon=5)
@@ -463,7 +462,7 @@ class TestDDFM:
         model = DDFM(dataset=dataset, encoder_size=tuple(DEFAULT_ENCODER_LAYERS), max_iter=1)
         model.fit()
         
-        assert not hasattr(model, 'state_space_params') or getattr(model, 'state_space_params', None) is None
+        assert model.training_state.F is None
         
         with pytest.raises(ModelNotInitializedError, match="state-space model has not been built"):
             model.get_result()
@@ -498,8 +497,8 @@ class TestDDFM:
         
         model.build_state_space()
         
-        assert hasattr(model, 'state_space_params')
-        assert model.state_space_params is not None
+        assert model.training_state.F is not None
+        assert model.training_state.H is not None
         
         forecasts = model.predict(horizon=5)
         assert forecasts is not None

@@ -21,7 +21,10 @@ from ..config.constants import DEFAULT_TORCH_DTYPE
 class DDFMDataset(Dataset):
     """Dataset for DDFM training.
     
-    Scales target series if scaler provided. Feature series can also be scaled if provided.
+    Scales target series if scaler provided.
+    
+    All columns are treated as targets by default. When covariates are specified,
+    they are excluded from targets (targets = all_columns - covariates).
     
     Parameters
     ----------
@@ -32,15 +35,8 @@ class DDFMDataset(Dataset):
     covariates : List[str], optional
         Series to exclude from targets (used for factor extraction but not forecasted).
         If None, all series are targets (default).
-    target_series : List[str], optional
-        Target series column names (deprecated, use covariates instead).
-        If None or empty, all columns will be used as targets.
     scaler : StandardScaler | RobustScaler | MinMaxScaler, optional
         Scaler instance to scale target series. If None, no scaling.
-    feature_scaler : StandardScaler | RobustScaler | MinMaxScaler, optional
-        Scaler instance to scale feature series. If None, no scaling.
-    target_scaler : StandardScaler | RobustScaler | MinMaxScaler, optional
-        Deprecated: use scaler instead.
     """
     
     def __init__(
@@ -48,10 +44,7 @@ class DDFMDataset(Dataset):
         data: Union[pd.DataFrame, PolarsDataFrame],
         time_idx: str,
         covariates: Optional[List[str]] = None,
-        target_series: Optional[List[str]] = None,  # Deprecated: use covariates instead
         scaler: Optional[Union[StandardScaler, RobustScaler, MinMaxScaler]] = None,
-        feature_scaler: Optional[Union[StandardScaler, RobustScaler, MinMaxScaler]] = None,
-        target_scaler: Optional[Union[StandardScaler, RobustScaler, MinMaxScaler]] = None,  # Deprecated: use scaler instead
     ):
         if _has_polars and isinstance(data, pl.DataFrame):
             data = data.to_pandas()
@@ -60,257 +53,75 @@ class DDFMDataset(Dataset):
         data.sort_index(inplace=True)
         
         self.time_idx = time_idx
-        
-        # Extract time index values
-        if time_idx and time_idx in data.columns:
-            self.time_index = pd.Index(data[time_idx])
-        else:
-            self.time_index = data.index
-        
-        # Get all available columns (excluding time_idx if it's a column)
-        all_columns = [col for col in data.columns if col != time_idx] if time_idx in data.columns else list(data.columns)
-        
-        # Handle backward compatibility: if target_series is provided, compute covariates from it
-        if target_series is not None and len(target_series) > 0:
-            import warnings
-            warnings.warn(
-                "target_series parameter is deprecated. Use covariates instead. "
-                "If you specify target_series, it will be converted to covariates automatically.",
-                DeprecationWarning,
-                stacklevel=2
-            )
-            # Compute covariates = all_columns - target_series
-            valid_targets = [t for t in target_series if t in all_columns]
-            missing_cols = [col for col in target_series if col not in all_columns]
-            if missing_cols:
-                raise ValueError(
-                    f"target_series columns {missing_cols} not found in data. "
-                    f"Available columns: {all_columns}"
-                )
-            # Compute covariates from target_series
-            covariates = [col for col in all_columns if col not in valid_targets]
-        else:
-            covariates = covariates if covariates is not None else []
-        
-        # Compute target_series from covariates
-        # If covariates is empty, all series are targets
-        if covariates:
-            # Filter covariates to only those that exist in data
-            valid_covariates = [c for c in covariates if c in all_columns]
-            missing_covariates = [c for c in covariates if c not in all_columns]
-            if missing_covariates:
-                import warnings
-                warnings.warn(
-                    f"Some covariates not found in data: {missing_covariates}. "
-                    f"Available columns: {all_columns}",
-                    UserWarning
-                )
-            # target_series = all_columns - covariates
-            target_series_list = [col for col in all_columns if col not in valid_covariates]
-            self.covariates = valid_covariates
-        else:
-            # No covariates: all series are targets
-            target_series_list = all_columns
-            self.covariates = []
-        
-        # Store computed target_series for backward compatibility
-        self.target_series = target_series_list
+        self.time_index = pd.Index(data[time_idx]) if time_idx in data.columns else data.index
         self.data_original = data.copy()
-        # Use scaler parameter, fallback to target_scaler for backward compatibility
-        self.scaler = scaler if scaler is not None else target_scaler
-        self.feature_scaler = feature_scaler
         
-        # Exclude time_idx from data when splitting X and y
-        # time_idx is metadata, not a data column
+        # Get variables (all columns excluding time_idx)
+        variables = [col for col in data.columns if col != time_idx] if time_idx in data.columns else list(data.columns)
+        
+        # Filter covariates and compute targets
+        covariates = [c for c in (covariates or []) if c in variables]
+        self.covariates = covariates
+        self.target_series = [col for col in variables if col not in covariates]
+        
+        # Split into covariates (X) and targets (y)
         data_for_split = data.drop(columns=[time_idx]) if time_idx in data.columns else data
+        y = data_for_split[self.target_series]
+        X = data_for_split.drop(columns=self.target_series) if self.target_series else pd.DataFrame()
         
-        y = data_for_split[target_series_list]
-        X = data_for_split.drop(columns=target_series_list)
+        # Scale covariates separately (temporary scaler, not stored)
+        if scaler is not None and not X.empty:
+            X = pd.DataFrame(type(scaler)().fit_transform(X.values), index=X.index, columns=X.columns)
         
-        # Optionally scale feature series to avoid scale dominance in encoder input
-        if feature_scaler is not None and not X.empty:
-            x_mean = X.mean().abs().max()
-            x_std = (X.std() - 1.0).abs().max()
-            x_is_already_scaled = x_mean < 0.1 and x_std < 0.1
-            x_scaler_is_fitted = (
-                hasattr(feature_scaler, 'mean_') and
-                feature_scaler.mean_ is not None and
-                hasattr(feature_scaler, 'scale_') and
-                feature_scaler.scale_ is not None
-            )
-            if not x_is_already_scaled:
-                if not x_scaler_is_fitted:
-                    self.feature_scaler.fit(X.values)
-                X_scaled = self.feature_scaler.transform(X.values)
-                X = pd.DataFrame(X_scaled, index=X.index, columns=X.columns)
-            else:
-                if not x_scaler_is_fitted:
-                    self.feature_scaler.fit(X.values)
+        # Scale targets and store scaler for prediction
+        if scaler is not None:
+            y = pd.DataFrame(scaler.fit_transform(y.values), index=y.index, columns=y.columns)
         
-        # Check if data is already standardized (mean≈0, std≈1) to avoid double scaling
-        # If data is already scaled, we still need scaler for inverse transformation
-        # but we should NOT scale again
-        if self.scaler is not None:
-            # Check if target data appears already standardized
-            y_mean = y.mean().abs().max()
-            y_std = (y.std() - 1.0).abs().max()
-            is_already_scaled = y_mean < 0.1 and y_std < 0.1
-            
-            # Check if scaler is already fitted
-            scaler_is_fitted = (
-                hasattr(self.scaler, 'mean_') and 
-                self.scaler.mean_ is not None and
-                hasattr(self.scaler, 'scale_') and
-                self.scaler.scale_ is not None
-            )
-            
-            if is_already_scaled:
-                # Data is already standardized - don't scale again
-                # IMPORTANT: If scaler is already fitted, do NOT refit it on already-scaled data
-                # The scaler should have been fitted on original unscaled data by the caller
-                # Refitting on already-scaled data would break inverse transformation
-                if not scaler_is_fitted:
-                    # Only fit if scaler is not already fitted
-                    # This assumes caller passed unscaled data (edge case)
-                    import warnings
-                    warnings.warn(
-                        "DDFMDataset: Data appears already scaled but scaler is not fitted. "
-                        "Fitting scaler on already-scaled data may break inverse transformation. "
-                        "Ensure scaler is fitted on original unscaled data before passing to DDFMDataset.",
-                        UserWarning
-                    )
-                    self.scaler.fit(y.values)
-                # Don't transform - data is already scaled
-            else:
-                # Data is not standardized - apply scaling
-                # If scaler is already fitted, DO NOT refit (preserve training scaler).
-                if scaler_is_fitted:
-                    # Check if scaler was fitted on data with similar scale
-                    # If mean/scale are very different, warn user but keep scaler.
-                    scaler_mean = np.abs(self.scaler.mean_)
-                    scaler_scale = self.scaler.scale_
-                    data_mean = np.abs(y.mean().values)
-                    data_std = y.std().values
-                    
-                    # Check for significant mismatch (more than 2x difference)
-                    mean_mismatch = np.any((data_mean > 2 * scaler_mean) | (scaler_mean > 2 * data_mean))
-                    scale_mismatch = np.any((data_std > 2 * scaler_scale) | (scaler_scale > 2 * data_std))
-                    
-                    if mean_mismatch or scale_mismatch:
-                        import warnings
-                        warnings.warn(
-                            "DDFMDataset: Scaler appears to be fitted on data with different scale. "
-                            "Using existing scaler to preserve inverse transformation. "
-                            "Ensure scaler consistency across train/test.",
-                            UserWarning
-                        )
-                else:
-                    # Scaler not fitted - fit on current data
-                    self.scaler.fit(y.values)
-                
-                y_scaled = self.scaler.transform(y.values)
-                y = pd.DataFrame(y_scaled, index=y.index, columns=y.columns)
+        self.scaler = scaler
         
-        self.data = pd.concat([X, y], axis=1)
-        self.X = X.values
+        # Store processed data
+        self.data = pd.concat([X, y], axis=1) if not X.empty else y
+        self.X = X.values if not X.empty else np.empty((len(y), 0))
         self.y = y.values
         self.missing_y = y.isna().values
         self.observed_y = ~self.missing_y
 
     @property
-    def target_scaler(self):
-        """Backward compatibility: returns scaler."""
-        return self.scaler
-
-    @property
-    def target_nan_ratio(self) -> float:
-        """Target interpolate ratio."""
-        return self.missing_y.sum() / self.missing_y.size
-
-    @property
     def target_shape(self) -> Tuple[int, int]:
-        """Target shape."""
+        """Target shape (T, num_target_series)."""
         return self.y.shape
-    
-    @property
-    def feature_shape(self) -> Tuple[int, int]:
-        """Feature shape."""
-        return self.X.shape
 
     @property
     def data_shape(self) -> Tuple[int, int]:
-        """Data shape."""
-        return self.feature_shape[0], self.feature_shape[1] + self.target_shape[1]
-
-    @property
-    def colnames(self) -> List[str]:
-        """Column names from original data."""
-        return list(self.data_original.columns)
-
-    @property
-    def target_columns(self) -> List[str]:
-        """Target series column names."""
-        return self.target_series
-    
-    @property
-    def feature_columns(self) -> List[str]:
-        """Feature column names (non-target series)."""
-        return [col for col in self.colnames if col not in self.target_series]
+        """Data shape (T, num_features + num_target_series)."""
+        return self.X.shape[0], self.X.shape[1] + self.y.shape[1]
     
     @property
     def all_columns_are_targets(self) -> bool:
-        """Whether all columns are target series."""
-        return len(self.target_series) == len(self.colnames)
+        """Whether all columns are target series (no covariates)."""
+        return len(self.covariates) == 0
     
     def split_features_and_targets(self, data: pd.DataFrame) -> Tuple[Optional[pd.DataFrame], pd.DataFrame]:
-        """Split DataFrame into features (X) and targets (y).
-        
-        Parameters
-        ----------
-        data : pd.DataFrame
-            Input DataFrame to split
-            
-        Returns
-        -------
-        X : Optional[pd.DataFrame]
-            Features DataFrame (None if all columns are targets)
-        y : pd.DataFrame
-            Targets DataFrame (all columns if all columns are targets, target columns only otherwise)
-        """
+        """Split DataFrame into features (X) and targets (y)."""
         if self.all_columns_are_targets:
             return None, data
-        else:
-            X = data.drop(columns=self.target_series)
-            y = data[self.target_series]
-            return X, y
+        X = data.drop(columns=self.target_series)
+        y = data[self.target_series]
+        return X, y
     
     @property
     def target_indices(self) -> np.ndarray:
         """Target series column indices in original data."""
-        return np.array([self.colnames.index(col) for col in self.target_series])
+        return np.array([self.data_original.columns.get_loc(col) for col in self.target_series])
     
     @classmethod
     def from_dataset(cls, new_data: Union[pd.DataFrame, PolarsDataFrame], dataset: 'DDFMDataset') -> 'DDFMDataset':
-        """Create new dataset with new data, preserving configuration.
-        
-        Parameters
-        ----------
-        new_data : pd.DataFrame | PolarsDataFrame
-            New data (same columns as original).
-        dataset : DDFMDataset
-            Original dataset to copy configuration from.
-            
-        Returns
-        -------
-        DDFMDataset
-            New dataset with same time_idx, covariates, scaler, feature_scaler.
-        """
+        """Create new dataset with new data, preserving configuration."""
         return cls(
             data=new_data,
             time_idx=dataset.time_idx,
-            covariates=getattr(dataset, 'covariates', None) or [],
-            scaler=getattr(dataset, 'scaler', None),
-            feature_scaler=getattr(dataset, 'feature_scaler', None)
+            covariates=dataset.covariates,
+            scaler=dataset.scaler
         )
     
     def create_autoencoder_dataset(
@@ -320,71 +131,23 @@ class DDFMDataset(Dataset):
         y_actual: torch.Tensor,
         eps_draw: torch.Tensor
     ) -> 'AutoencoderDataset':
-        """Create a single AutoencoderDataset with corrupted targets.
-        
-        Parameters
-        ----------
-        X : torch.Tensor, optional
-            Features (T, N_features) - already on device.
-        y_tmp : torch.Tensor
-            Target data (T, num_target_series) - already on device.
-        y_actual : torch.Tensor
-            Clean targets (T, num_target_series) - already on device.
-        eps_draw : torch.Tensor
-            Noise sample (T, num_target_series) - already on device.
-            
-        Returns
-        -------
-        AutoencoderDataset
-            Dataset with corrupted targets.
-        """
-        y_corrupted = y_tmp - eps_draw
-        return AutoencoderDataset(
-            X=X,
-            y_corrupted=y_corrupted,
-            y_clean=y_actual
-        )
+        """Create a single AutoencoderDataset with corrupted targets."""
+        return AutoencoderDataset(X=X, y_corrupted=y_tmp - eps_draw, y_clean=y_actual)
     
     def create_pretrain_dataset(
         self,
         data: pd.DataFrame,
         device: Optional[torch.device] = None
     ) -> 'AutoencoderDataset':
-        """Create AutoencoderDataset for pre-training (no corruption, clean data).
-        
-        Parameters
-        ----------
-        data : pd.DataFrame
-            Pre-training data (may contain NaN values, handled by masked loss).
-        device : torch.device, optional
-            Device for tensors. Defaults to 'cuda'.
-            
-        Returns
-        -------
-        AutoencoderDataset
-            Dataset with clean data (y_corrupted = y_clean for pre-training).
-        """
+        """Create AutoencoderDataset for pre-training (no corruption, clean data)."""
         if device is None:
             device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
-        # Split into X (features) and y (targets)
-        if self.all_columns_are_targets:
-            X_df = None
-            y_df = data
-        else:
-            X_df = data.drop(columns=self.target_series)
-            y_df = data[self.target_series]
-        
-        # Convert to tensors
+        X_df, y_df = self.split_features_and_targets(data)
         X = None if X_df is None else torch.from_numpy(X_df.values).to(dtype=DEFAULT_TORCH_DTYPE, device=device)
         y = torch.from_numpy(y_df.values).to(dtype=DEFAULT_TORCH_DTYPE, device=device)
         
-        # For pre-training: y_corrupted = y_clean (no corruption)
-        return AutoencoderDataset(
-            X=X,
-            y_corrupted=y,
-            y_clean=y
-        )
+        return AutoencoderDataset(X=X, y_corrupted=y, y_clean=y)
     
     def create_autoencoder_datasets_list(
         self,
@@ -397,62 +160,28 @@ class DDFMDataset(Dataset):
         rng: np.random.RandomState,
         device: Optional[torch.device] = None
     ) -> List['AutoencoderDataset']:
-        """Create AutoencoderDataset instances with pre-sampled MC noise.
-        
-        Parameters
-        ----------
-        n_mc_samples : int
-            Number of Monte Carlo samples.
-        mu_eps : np.ndarray
-            Noise mean (num_target_series,).
-        std_eps : np.ndarray
-            Noise std (num_target_series,).
-        X : np.ndarray | pd.DataFrame
-            Features (T x N_features) - lags, dummies, etc. Not corrupted.
-        y_tmp : np.ndarray | pd.DataFrame
-            Target data (T x num_target_series) to corrupt.
-        y_actual : np.ndarray
-            Clean targets (T x num_target_series) for reconstruction.
-        rng : np.random.RandomState
-            Random number generator.
-        device : torch.device, optional
-            Device for tensors. Defaults to 'cuda'.
-            
-        Returns
-        -------
-        List[AutoencoderDataset]
-            One dataset per MC sample.
-        """
+        """Create AutoencoderDataset instances with pre-sampled MC noise."""
         if device is None:
             device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
         X_array = X.values if isinstance(X, pd.DataFrame) else X
         y_tmp_array = y_tmp.values if isinstance(y_tmp, pd.DataFrame) else y_tmp
-        
         T = y_tmp_array.shape[0]
-        has_features = X_array.size > 0
         
-        # Pre-sample all MC noise at once (efficient)
+        # Pre-sample all MC noise at once
         eps_draws = rng.multivariate_normal(mu_eps, np.diag(std_eps), (n_mc_samples, T))
         
-        # Convert to tensors once (efficient)
-        X_tensor = torch.from_numpy(X_array).to(dtype=DEFAULT_TORCH_DTYPE, device=device) if has_features else None
+        # Convert to tensors once
+        X_tensor = torch.from_numpy(X_array).to(dtype=DEFAULT_TORCH_DTYPE, device=device) if X_array.size > 0 else None
         y_tmp_tensor = torch.from_numpy(y_tmp_array).to(dtype=DEFAULT_TORCH_DTYPE, device=device)
         y_actual_tensor = torch.from_numpy(y_actual).to(dtype=DEFAULT_TORCH_DTYPE, device=device)
         eps_draws_tensor = torch.from_numpy(eps_draws).to(dtype=DEFAULT_TORCH_DTYPE, device=device)
         
-        # Create datasets using the single-dataset method
-        datasets = []
-        for i in range(n_mc_samples):
-            dataset = self.create_autoencoder_dataset(
-                X=X_tensor,
-                y_tmp=y_tmp_tensor,
-                y_actual=y_actual_tensor,
-                eps_draw=eps_draws_tensor[i, :, :]
-            )
-            datasets.append(dataset)
-        
-        return datasets
+        # Create datasets
+        return [
+            self.create_autoencoder_dataset(X_tensor, y_tmp_tensor, y_actual_tensor, eps_draws_tensor[i])
+            for i in range(n_mc_samples)
+        ]
 
 
 class AutoencoderDataset:

@@ -163,11 +163,11 @@ class DFMModelState:
             )
 
 @dataclass
-class DDFMTrainingState:
-    """Training state for DDFM model.
+class DDFMModelState:
+    """DDFM model state including training state and state-space parameters.
     
-    Stores the current state of DDFM training, including convergence status,
-    loss, factors, and residuals. Used for checkpointing and resuming training.
+    Consolidates all DDFM model state for checkpointing: training state (convergence,
+    loss, factors, residuals) and fitted state-space parameters.
     
     Attributes
     ----------
@@ -184,15 +184,84 @@ class DDFMTrainingState:
     last_neurons : np.ndarray, optional
         Last layer neurons for MLP decoder (n_mc_samples x T x num_neurons) or (T x num_neurons).
         For linear decoder, this equals factors.
+    F : np.ndarray, optional
+        Transition matrix (m x m) - VAR(1) dynamics for factors (A in paper)
+    Q : np.ndarray, optional
+        Process noise covariance (m x m) - innovation covariance (W in original code)
+    mu_0 : np.ndarray, optional
+        Initial state mean (m,) - initial factor values
+    Sigma_0 : np.ndarray, optional
+        Initial state covariance (m x m) - initial uncertainty
+    H : np.ndarray, optional
+        Observation matrix (N x m) - decoder weights (measurement equation, theta in paper)
+    R : np.ndarray, optional
+        Observation noise covariance (N x N) - typically diagonal, small values
     """
+    # Training state
     num_iter: int = 0
     loss_now: Optional[float] = None
     converged: bool = False
     eps: Optional[np.ndarray] = None
     factors: Optional[np.ndarray] = None
     last_neurons: Optional[np.ndarray] = None
+    # State-space parameters (fitted during build_state_space)
+    F: Optional[np.ndarray] = None  # Transition matrix (m x m) - A in paper
+    Q: Optional[np.ndarray] = None  # Process noise covariance (m x m) - W in original code
+    mu_0: Optional[np.ndarray] = None  # Initial state mean (m,)
+    Sigma_0: Optional[np.ndarray] = None  # Initial state covariance (m x m)
+    H: Optional[np.ndarray] = None  # Observation matrix (N x m) - theta in paper
+    R: Optional[np.ndarray] = None  # Observation noise covariance (N x N)
     
-    def sync_from_model(self, model: Any) -> 'DDFMTrainingState':
+    @classmethod
+    def from_model(cls, model: Any) -> 'DDFMModelState':
+        """Create DDFMModelState from DDFM model instance.
+        
+        Parameters
+        ----------
+        model : DDFM
+            DDFM model instance
+            
+        Returns
+        -------
+        DDFMModelState
+            Model state dataclass
+        """
+        # Get training state from model attributes
+        factors = getattr(model, 'factors', None)
+        eps = getattr(model, 'eps', None)
+        last_neurons = getattr(model, 'last_neurons', None)
+        num_iter = getattr(model, '_num_iter', 0)
+        loss_now = getattr(model, 'loss_now', None)
+        converged = getattr(model, '_converged', False)
+        
+        # Get state-space parameters from training_state
+        F = Q = mu_0 = Sigma_0 = H = R = None
+        if hasattr(model, 'training_state') and model.training_state is not None:
+            ts = model.training_state
+            if hasattr(ts, 'F'):
+                F = ts.F
+                Q = ts.Q
+                mu_0 = ts.mu_0
+                Sigma_0 = ts.Sigma_0
+                H = ts.H
+                R = ts.R
+        
+        return cls(
+            num_iter=num_iter,
+            loss_now=loss_now,
+            converged=converged,
+            eps=eps,
+            factors=factors,
+            last_neurons=last_neurons,
+            F=F,
+            Q=Q,
+            mu_0=mu_0,
+            Sigma_0=Sigma_0,
+            H=H,
+            R=R
+        )
+    
+    def sync_from_model(self, model: Any) -> 'DDFMModelState':
         """Update this dataclass from model instance attributes.
         
         Parameters
@@ -202,7 +271,7 @@ class DDFMTrainingState:
             
         Returns
         -------
-        DDFMTrainingState
+        DDFMModelState
             Self (for chaining)
         """
         if hasattr(model, '_has_factors') and model._has_factors:
@@ -212,37 +281,52 @@ class DDFMTrainingState:
             self.num_iter = getattr(model, '_num_iter', 0)
             self.loss_now = getattr(model, 'loss_now', None)
             self.converged = getattr(model, '_converged', False)
+        
+        # Sync state-space parameters if available
+        if hasattr(model, 'training_state') and model.training_state is not None:
+            ts = model.training_state
+            if hasattr(ts, 'F'):
+                self.F = ts.F
+                self.Q = ts.Q
+                self.mu_0 = ts.mu_0
+                self.Sigma_0 = ts.Sigma_0
+                self.H = ts.H
+                self.R = ts.R
+        
         return self
+    
+    def apply_to_model(self, model: Any) -> None:
+        """Apply this state to DDFM model instance.
+        
+        Parameters
+        ----------
+        model : DDFM
+            DDFM model instance to update
+        """
+        # Apply training state
+        if self.factors is not None:
+            model.factors = self.factors
+        if self.eps is not None:
+            model.eps = self.eps
+        if self.last_neurons is not None:
+            model.last_neurons = self.last_neurons
+        model._num_iter = self.num_iter
+        model.loss_now = self.loss_now
+        model._converged = self.converged
+        
+        # Apply state-space parameters if available
+        if self.F is not None and self.Q is not None and self.mu_0 is not None:
+            if hasattr(model, 'training_state'):
+                model.training_state.F = self.F
+                model.training_state.Q = self.Q
+                model.training_state.mu_0 = self.mu_0
+                model.training_state.Sigma_0 = self.Sigma_0
+                model.training_state.H = self.H
+                model.training_state.R = self.R
 
-@dataclass
-class DDFMStateSpaceParams:
-    """State-space model parameters for DDFM (fitted during model training).
-    
-    These parameters are computed during DDFM.build_state_space() and represent
-    the fitted state-space model structure. Similar to DFMStateSpaceParams, this contains
-    the fitted state-space parameters but for DDFM. Naming follows original paper conventions.
-    
-    Parameters
-    ----------
-    F : np.ndarray
-        Transition matrix (m x m) - VAR(1) dynamics for factors (A in paper)
-    Q : np.ndarray
-        Process noise covariance (m x m) - innovation covariance (W in original code)
-    mu_0 : np.ndarray
-        Initial state mean (m,) - initial factor values
-    Sigma_0 : np.ndarray
-        Initial state covariance (m x m) - initial uncertainty
-    H : np.ndarray
-        Observation matrix (N x m) - decoder weights (measurement equation, theta in paper)
-    R : np.ndarray
-        Observation noise covariance (N x N) - typically diagonal, small values
-    """
-    F: np.ndarray  # Transition matrix (m x m) - A in paper
-    Q: np.ndarray  # Process noise covariance (m x m) - W in original code
-    mu_0: np.ndarray  # Initial state mean (m,)
-    Sigma_0: np.ndarray  # Initial state covariance (m x m)
-    H: np.ndarray  # Observation matrix (N x m) - theta in paper
-    R: np.ndarray  # Observation noise covariance (N x N)
+# Backward compatibility aliases
+DDFMTrainingState = DDFMModelState
+DDFMStateSpaceParams = DDFMModelState
 
 # Backward compatibility alias
 DFMStateSpaceParams = DFMModelState

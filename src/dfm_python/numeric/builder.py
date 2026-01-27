@@ -12,8 +12,15 @@ from ..config.constants import (
     DEFAULT_IDENTITY_SCALE,
     DEFAULT_DTYPE,
     DEFAULT_FACTOR_ORDER,
+    DEFAULT_ADAM_BETA1,
+    DEFAULT_ADAM_BETA2,
+    DEFAULT_ADAM_EPS,
+    DEFAULT_LR_DECAY_RATE,
+    DEFAULT_DDFM_OBSERVATION_NOISE,
 )
 from .stability import create_scaled_identity
+from .estimator import get_transition_params
+from ..utils.errors import ModelNotTrainedError, NumericalError
 
 _logger = get_logger(__name__)
 
@@ -191,10 +198,210 @@ def build_lag_matrix(
     return lag_matrix
 
 
+def build_ddfm_optimizer(
+    model: Any,
+    learning_rate: float,
+    optimizer_type: str,
+    n_mc_samples: int
+) -> Tuple[Any, Any]:
+    """Build optimizer and scheduler for DDFM training.
+    
+    Creates optimizer (Adam/AdamW/SGD) and learning rate scheduler (LambdaLR).
+    
+    **Learning Rate Decay Implementation:**
+    TensorFlow's ExponentialDecay with decay_steps=n_mc_samples (DEFAULT_N_MC_SAMPLES) and staircase=True
+    decays every n_mc_samples optimizer steps (batches), not every n_mc_samples epochs.
+    
+    **Implementation (Fixed 2026-01-07):**
+    - Scheduler steps after each batch in autoencoder.fit() (simple_autoencoder.py:269)
+    - LambdaLR scheduler uses step count (number of batches) to compute decay
+    - Decays every n_mc_samples scheduler steps (batches) → matches TensorFlow behavior
+    - Learning rate multiplier: decay_rate ^ (step // n_mc_samples)
+    - Mathematical verification: Matches TensorFlow's ExponentialDecay(decay_steps=n_mc_samples, decay_rate=0.96, staircase=True)
+    
+    Parameters
+    ----------
+    model : Any
+        PyTorch model (autoencoder) with parameters() method
+    learning_rate : float
+        Initial learning rate
+    optimizer_type : str
+        Optimizer type ('Adam', 'AdamW', or 'SGD')
+    n_mc_samples : int
+        Number of Monte Carlo samples (used for learning rate decay steps)
+        
+    Returns
+    -------
+    optimizer : torch.optim.Optimizer
+        PyTorch optimizer instance
+    scheduler : torch.optim.lr_scheduler._LRScheduler
+        Learning rate scheduler instance
+    """
+    import torch
+    
+    optimizers = {
+        'Adam': lambda: torch.optim.Adam(
+            model.parameters(),
+            lr=learning_rate,
+            betas=(DEFAULT_ADAM_BETA1, DEFAULT_ADAM_BETA2),
+            eps=DEFAULT_ADAM_EPS
+        ),
+        'AdamW': lambda: torch.optim.AdamW(
+            model.parameters(),
+            lr=learning_rate,
+            betas=(DEFAULT_ADAM_BETA1, DEFAULT_ADAM_BETA2),
+            eps=DEFAULT_ADAM_EPS
+        ),
+        'SGD': lambda: torch.optim.SGD(model.parameters(), lr=learning_rate)
+    }
+    optimizer = optimizers.get(optimizer_type, optimizers['SGD'])()
+    
+    def lr_lambda(step: int) -> float:
+        """Compute learning rate multiplier for per-batch decay (matches TensorFlow behavior).
+        
+        TensorFlow: ExponentialDecay(decay_steps=n_mc_samples, decay_rate=DEFAULT_LR_DECAY_RATE, staircase=True)
+        - Decays every n_mc_samples optimizer steps (batches)
+        
+        Our implementation (fixed 2026-01-07):
+        - Scheduler steps after each batch in autoencoder.fit() (simple_autoencoder.py:269)
+        - step parameter is scheduler step count (number of batches completed)
+        - Decays every n_mc_samples scheduler steps (batches) → matches TensorFlow behavior
+        - Mathematical equivalence: DEFAULT_LR_DECAY_RATE ^ (step // n_mc_samples) matches TensorFlow's staircase=True behavior
+        
+        Returns:
+            Learning rate multiplier: DEFAULT_LR_DECAY_RATE ^ (step // n_mc_samples)
+        """
+        # Decay every n_mc_samples scheduler steps (batches)
+        # Scheduler steps after each batch, so step count equals batch count
+        decay_steps = step // n_mc_samples
+        return DEFAULT_LR_DECAY_RATE ** decay_steps
+    
+    scheduler = torch.optim.lr_scheduler.LambdaLR(
+        optimizer,
+        lr_lambda=lr_lambda
+    )
+    
+    return optimizer, scheduler
+
+
+def build_ddfm_state_space(
+    factors: np.ndarray,
+    eps: np.ndarray,
+    decoder_weight: np.ndarray,
+    observed_y: np.ndarray,
+    model_name: str = "DDFM"
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Build DDFM state-space model parameters from trained autoencoder.
+    
+    Parameters
+    ----------
+    factors : np.ndarray
+        Extracted factors (T x num_factors) - averaged across MC samples
+    eps : np.ndarray
+        Idiosyncratic residuals (T x num_target_series)
+    decoder_weight : np.ndarray
+        Decoder linear layer weight matrix (output_dim x input_dim)
+    observed_y : np.ndarray
+        Boolean mask for observed target values (T x num_target_series)
+    model_name : str, default "DDFM"
+        Model name for error messages
+        
+    Returns
+    -------
+    F : np.ndarray
+        Factor transition matrix (num_factors x num_factors)
+    Q : np.ndarray
+        Factor process noise covariance (num_factors x num_factors)
+    mu_0 : np.ndarray
+        Initial factor mean (num_factors,)
+    Sigma_0 : np.ndarray
+        Initial factor covariance (num_factors x num_factors)
+    H : np.ndarray
+        Observation matrix (num_target_series x num_factors)
+    R : np.ndarray
+        Observation noise covariance (num_target_series x num_target_series)
+        
+    Raises
+    ------
+    ModelNotTrainedError
+        If factors or residuals are empty
+    ValueError
+        If decoder weight shape is incompatible with number of factors
+    NumericalError
+        If transition parameter estimation fails
+    """
+    # Validate factors and residuals
+    if factors is None or len(factors) == 0:
+        raise ModelNotTrainedError(
+            f"{model_name}: Cannot build state space - factors are empty. "
+            "Model must be trained before building state space."
+        )
+    if eps is None or len(eps) == 0:
+        raise ModelNotTrainedError(
+            f"{model_name}: Cannot build state space - residuals are empty. "
+            "Model must be trained before building state space."
+        )
+    
+    # Check for non-finite values
+    if not np.all(np.isfinite(factors)):
+        _logger.warning(
+            f"build_ddfm_state_space: Factors contain non-finite values. "
+            "Replacing with zeros to allow state space construction."
+        )
+        factors = np.nan_to_num(factors, nan=0.0, posinf=0.0, neginf=0.0)
+    
+    if not np.all(np.isfinite(eps)):
+        _logger.warning(
+            f"build_ddfm_state_space: Residuals contain non-finite values. "
+            "Replacing with zeros to allow state space construction."
+        )
+        eps = np.nan_to_num(eps, nan=0.0, posinf=0.0, neginf=0.0)
+    
+    num_factors = factors.shape[1]
+    
+    # Validate decoder weight shape
+    if decoder_weight.shape[1] < num_factors:
+        raise ValueError(
+            f"build_ddfm_state_space: Decoder weight shape {decoder_weight.shape} incompatible with "
+            f"{num_factors} factors. Expected at least {num_factors} columns."
+        )
+    
+    # Extract observation matrix from decoder weights
+    H = decoder_weight[:, :num_factors]
+    
+    # Get transition equation params (factor_order is fixed to 1)
+    # F_full includes both factors and idiosyncratic components: shape (m + N, m + N)
+    try:
+        F_full, Q_full, mu_0_full, Sigma_0_full, _ = get_transition_params(
+            factors, eps, bool_no_miss=observed_y
+        )
+    except (np.linalg.LinAlgError, ValueError) as e:
+        raise NumericalError(
+            f"{model_name}: Failed to estimate transition parameters. "
+            f"Error: {type(e).__name__}: {str(e)}. "
+            "This may indicate numerical instability in factor estimation. "
+            "Consider: (1) Checking data quality, (2) Reducing number of factors, "
+            "(3) Increasing training iterations."
+        ) from e
+    
+    # F_full structure: [[A_f, 0], [0, Phi]] where A_f is (m x m) factor transition
+    F = F_full[:num_factors, :num_factors]  # Factor transition matrix (m x m)
+    Q = Q_full[:num_factors, :num_factors]  # Factor process noise (m x m)
+    mu_0 = mu_0_full[:num_factors]  # Initial factor mean (m,)
+    Sigma_0 = Sigma_0_full[:num_factors, :num_factors]  # Initial factor covariance (m x m)
+    
+    # Observation noise covariance (diagonal, small values)
+    R = np.eye(eps.shape[1], dtype=DEFAULT_DTYPE) * DEFAULT_DDFM_OBSERVATION_NOISE
+    
+    return F, Q, mu_0, Sigma_0, H, R
+
+
 __all__ = [
     'build_dfm_structure',
     'build_dfm_blocks',
     'build_dfm_slower_freq_observation_matrix',
     'build_lag_matrix',
+    'build_ddfm_optimizer',
+    'build_ddfm_state_space',
 ]
 
