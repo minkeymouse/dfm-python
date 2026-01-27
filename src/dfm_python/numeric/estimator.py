@@ -548,16 +548,17 @@ def estimate_idio_dynamics(
 # Unified Estimation Functions (work with raw data or smoothed expectations)
 # ============================================================================
 
-def estimate_var_unified(
+def estimate_var(
     y: np.ndarray,
     x: np.ndarray,
     V_smooth: Optional[np.ndarray] = None,
+    V_smooth_lag: Optional[np.ndarray] = None,
     VVsmooth: Optional[np.ndarray] = None,
     regularization: float = DEFAULT_REGULARIZATION,
     min_variance: float = MIN_EIGENVALUE,
     dtype: type = np.float32
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Unified VAR estimation that works with raw data or smoothed expectations.
+    """VAR estimation that works with raw data or smoothed expectations.
     
     Parameters
     ----------
@@ -566,9 +567,14 @@ def estimate_var_unified(
     x : np.ndarray
         Lagged state (T-1 x p) for raw data, or smoothed expectations E[z_{t-1}]
     V_smooth : np.ndarray, optional
-        Smoothed state covariances (T x m x m) or (T-1 x m x m). Required for smoothed expectations.
+        Smoothed state covariances for current state (T x m x m) or (T-1 x m x m). 
+        Required for smoothed expectations mode.
+    V_smooth_lag : np.ndarray, optional
+        Smoothed state covariances for lagged state (T-1 x p x p). 
+        If None and V_smooth is provided, will attempt to derive from V_smooth.
+        Required when lagged state dimension (p) differs from current state dimension (m).
     VVsmooth : np.ndarray, optional
-        Lag-1 cross-covariances (T x m x m). Required for smoothed expectations.
+        Lag-1 cross-covariances (T x m x p). Required for smoothed expectations.
     regularization : float, default DEFAULT_REGULARIZATION
         Regularization parameter for OLS
     min_variance : float, default MIN_EIGENVALUE
@@ -603,17 +609,20 @@ def estimate_var_unified(
         max_per_timestep = MAX_EIGENVALUE / max(T, 100)  # Cap per timestep so sum is bounded
         
         if V_smooth.ndim == 3:
-            # Cap each V_smooth[t] before summing to prevent explosion
-            V_smooth_capped = np.zeros_like(V_smooth, dtype=dtype)
-            for t in range(V_smooth.shape[0]):
-                V_smooth_capped[t] = cap_max_eigenval(
-                    V_smooth[t], 
-                    max_eigenval=max_per_timestep, 
-                    symmetric=True, 
-                    warn=False
-                ).astype(dtype)
-            V_smooth_sum = np.sum(V_smooth_capped, axis=0)
-            # CRITICAL: Also cap the sum after accumulation to prevent any explosion
+            # PERFORMANCE FIX: Validate shapes BEFORE the loop to avoid exceptions in hot path
+            # V_smooth should be (T, m, m) where each V_smooth[t] is square
+            T_v, m_v, n_v = V_smooth.shape
+            if m_v != n_v:
+                raise ValueError(
+                    f"V_smooth must contain square matrices, got shape={V_smooth.shape}. "
+                    f"This indicates a bug in state structure or slicing."
+                )
+            
+            # CRITICAL FIX: Sum in float64 first to prevent overflow, then cap, then cast
+            # The sum of 2538 large covariance matrices can exceed float32 max (~3.4e38)
+            # Sum in higher precision, cap eigenvalues, then cast to target dtype
+            V_smooth_sum = np.sum(V_smooth.astype(np.float64), axis=0)
+            # CRITICAL: Cap the sum after accumulation to prevent explosion
             V_smooth_sum = cap_max_eigenval(
                 V_smooth_sum,
                 max_eigenval=MAX_EIGENVALUE,
@@ -636,42 +645,106 @@ def estimate_var_unified(
             EZZ = EZZ + V_smooth_sum
         
         EZZ_BB = x.T @ x
-        if V_smooth.ndim == 3:
-            V_smooth_lag = V_smooth_capped[:-1] if V_smooth_capped.shape[0] == T + 1 else V_smooth_capped
-            V_smooth_lag_sum = np.sum(V_smooth_lag, axis=0)
-            # Cap the lag sum as well
-            V_smooth_lag_sum = cap_max_eigenval(
-                V_smooth_lag_sum,
-                max_eigenval=MAX_EIGENVALUE,
-                symmetric=True,
-                warn=False
-            ).astype(dtype)
-            EZZ_BB = EZZ_BB + V_smooth_lag_sum
-        elif V_smooth.ndim == 2:
-            EZZ_BB = EZZ_BB + V_smooth_sum
-        
-        EZZ_FB = y[1:].T @ x if y.shape[0] > x.shape[0] else y.T @ x
-        # CRITICAL FIX: Cap VVsmooth eigenvalues as well to prevent explosion
-        # Use same per-timestep cap as V_smooth (defined above: MAX_EIGENVALUE / max(T, 100))
-        if VVsmooth is not None:
-            if VVsmooth.ndim == 3:
-                # Cap each VVsmooth[t] before summing
-                VVsmooth_capped = np.zeros_like(VVsmooth, dtype=dtype)
-                for t in range(VVsmooth.shape[0]):
-                    VVsmooth_capped[t] = cap_max_eigenval(
-                        VVsmooth[t], 
-                        max_eigenval=max_per_timestep, 
-                        symmetric=True, 
-                        warn=False
-                    ).astype(dtype)
-                VVsmooth_sum = np.sum(VVsmooth_capped[1:], axis=0) if VVsmooth_capped.shape[0] == T + 1 else np.sum(VVsmooth_capped, axis=0)
-                # CRITICAL: Also cap the sum after accumulation
-                VVsmooth_sum = cap_max_eigenval(
-                    VVsmooth_sum,
+        # Use V_smooth_lag if provided, otherwise try to derive from V_smooth
+        if V_smooth_lag is not None:
+            # Use explicitly provided lagged state covariance
+            if V_smooth_lag.ndim == 3:
+                # PERFORMANCE FIX: Validate shapes BEFORE processing
+                T_lag, m_lag, n_lag = V_smooth_lag.shape
+                if m_lag != n_lag:
+                    raise ValueError(
+                        f"V_smooth_lag must contain square matrices, got shape={V_smooth_lag.shape}. "
+                        f"This indicates a bug in state structure or slicing."
+                    )
+                
+                # CRITICAL FIX: Sum in float64 first to prevent overflow, then cap, then cast
+                V_smooth_lag_sum = np.sum(V_smooth_lag.astype(np.float64), axis=0)
+                V_smooth_lag_sum = cap_max_eigenval(
+                    V_smooth_lag_sum,
                     max_eigenval=MAX_EIGENVALUE,
                     symmetric=True,
                     warn=False
                 ).astype(dtype)
+            elif V_smooth_lag.ndim == 2:
+                V_smooth_lag_sum = cap_max_eigenval(
+                    V_smooth_lag,
+                    max_eigenval=MAX_EIGENVALUE,
+                    symmetric=True,
+                    warn=False
+                ).astype(dtype)
+            else:
+                V_smooth_lag_sum = V_smooth_lag.astype(dtype)
+            EZZ_BB = EZZ_BB + V_smooth_lag_sum
+        elif V_smooth is not None:
+            # Fallback: derive from V_smooth (only works if m == p)
+            if V_smooth.ndim == 3:
+                # Use original V_smooth, not V_smooth_capped (which no longer exists after optimization)
+                V_smooth_lag_derived = V_smooth[:-1] if V_smooth.shape[0] == T + 1 else V_smooth
+                # CRITICAL FIX: Sum in float64 first to prevent overflow, then cap, then cast
+                V_smooth_lag_sum = np.sum(V_smooth_lag_derived.astype(np.float64), axis=0)
+                # Validate shape matches x dimension
+                if V_smooth_lag_sum.shape[0] != p or V_smooth_lag_sum.shape[1] != p:
+                    _logger.warning(
+                        f"Shape mismatch: V_smooth_lag derived from V_smooth has shape {V_smooth_lag_sum.shape}, "
+                        f"but x has {p} columns. This may cause errors. Provide V_smooth_lag explicitly."
+                    )
+                # Cap the lag sum as well
+                V_smooth_lag_sum = cap_max_eigenval(
+                    V_smooth_lag_sum,
+                    max_eigenval=MAX_EIGENVALUE,
+                    symmetric=True,
+                    warn=False
+                ).astype(dtype)
+                EZZ_BB = EZZ_BB + V_smooth_lag_sum
+            elif V_smooth.ndim == 2:
+                if V_smooth_sum.shape[0] == p and V_smooth_sum.shape[1] == p:
+                    EZZ_BB = EZZ_BB + V_smooth_sum
+                else:
+                    _logger.warning(
+                        f"Shape mismatch: V_smooth has shape {V_smooth_sum.shape}, but x has {p} columns. "
+                        f"Provide V_smooth_lag explicitly."
+                    )
+        
+        EZZ_FB = y[1:].T @ x if y.shape[0] > x.shape[0] else y.T @ x
+        # CRITICAL FIX: Cap VVsmooth eigenvalues as well to prevent explosion
+        if VVsmooth is not None:
+            if VVsmooth.ndim == 3:
+                # PERFORMANCE FIX: Validate shapes BEFORE processing
+                T_vv, m_vv, n_vv = VVsmooth.shape
+                # NOTE: VVsmooth can be rectangular (m_vv × n_vv) when used in block updates
+                # For VAR(p) estimation, VVsmooth_block has shape (T-1, r_i, rp) where:
+                # - r_i = number of factors in current state
+                # - rp = r_i * (p+1) = number of factors in all state (current + lags)
+                # This is correct: it's cross-covariance between current state and lagged state
+                # Only validate that dimensions are positive, not that they're square
+                if m_vv <= 0 or n_vv <= 0:
+                    raise ValueError(
+                        f"VVsmooth has invalid dimensions: shape={VVsmooth.shape}. "
+                        f"Both m_vv={m_vv} and n_vv={n_vv} must be positive."
+                    )
+                
+                # CRITICAL FIX: Sum in float64 first to prevent overflow, then cap/clip, then cast
+                # VVsmooth is cross-covariance, so we sum over time axis
+                # NOTE: VVsmooth can be rectangular (m_vv × n_vv) for block updates
+                # For VAR(p): VVsmooth_block is (T-1, r_i, rp) where r_i < rp
+                # This is cross-covariance between current state (r_i) and lagged state (rp)
+                VVsmooth_to_sum = VVsmooth[1:] if VVsmooth.shape[0] == T + 1 else VVsmooth
+                VVsmooth_sum = np.sum(VVsmooth_to_sum.astype(np.float64), axis=0)
+                # CRITICAL: Cap the sum after accumulation
+                # For rectangular matrices, only cap if square (symmetric case)
+                # For rectangular cross-covariance, just add directly (no eigenvalue capping)
+                if m_vv == n_vv:
+                    # Square case: symmetric cross-covariance, can cap eigenvalues
+                    VVsmooth_sum = cap_max_eigenval(
+                        VVsmooth_sum,
+                        max_eigenval=MAX_EIGENVALUE,
+                        symmetric=True,
+                        warn=False
+                    ).astype(dtype)
+                else:
+                    # Rectangular case: cross-covariance between different state dimensions
+                    # Clip values to prevent numerical issues, but don't cap eigenvalues
+                    VVsmooth_sum = np.clip(VVsmooth_sum, -MAX_EIGENVALUE, MAX_EIGENVALUE).astype(dtype)
                 EZZ_FB = EZZ_FB + VVsmooth_sum
             elif VVsmooth.ndim == 2:
                 VVsmooth_capped = cap_max_eigenval(
@@ -686,9 +759,56 @@ def estimate_var_unified(
         EZZ_BB_reg = EZZ_BB + create_scaled_identity(p, regularization, dtype=dtype)
         
         def _compute_A_Q():
+            # #region agent log
+            import json
+            try:
+                with open('/data/nowcasting-kr/.cursor/debug.log', 'a') as f:
+                    f.write(json.dumps({
+                        'sessionId': 'debug-session',
+                        'runId': 'run1',
+                        'hypothesisId': 'A',
+                        'location': 'estimator.py:761',
+                        'message': 'Before A computation in _compute_A_Q',
+                        'data': {
+                            'm': m,
+                            'p': p,
+                            'T': T,
+                            'EZZ_BB_reg_shape': EZZ_BB_reg.shape,
+                            'EZZ_FB_shape': EZZ_FB.shape,
+                            'EZZ_FB_T_shape': EZZ_FB.T.shape,
+                            'EZZ_shape': EZZ.shape
+                        },
+                        'timestamp': int(__import__('time').time() * 1000)
+                    }) + '\n')
+            except:
+                pass
+            # #endregion
             # OLS: A = (EZZ_BB)^(-1) @ EZZ_FB'
             # Note: EZZ_BB_reg is already regularized, so use use_XTX=False
+            # EZZ_BB_reg is (p x p), EZZ_FB.T is (p x m)
+            # solve_regularized_ols with use_XTX=False returns (p x m), so we transpose to get (m x p)
             A = solve_regularized_ols(EZZ_BB_reg, EZZ_FB.T, regularization=DEFAULT_ZERO_VALUE, use_XTX=False, dtype=dtype).T  # (m x p)
+            
+            # #region agent log
+            try:
+                with open('/data/nowcasting-kr/.cursor/debug.log', 'a') as f:
+                    f.write(json.dumps({
+                        'sessionId': 'debug-session',
+                        'runId': 'run1',
+                        'hypothesisId': 'A',
+                        'location': 'estimator.py:768',
+                        'message': 'After A computation, before Q computation',
+                        'data': {
+                            'A_shape': A.shape,
+                            'A_expected_shape': (m, p),
+                            'EZZ_shape': EZZ.shape,
+                            'EZZ_FB_T_shape': EZZ_FB.T.shape
+                        },
+                        'timestamp': int(__import__('time').time() * 1000)
+                    }) + '\n')
+            except:
+                pass
+            # #endregion
             
             # Q = (EZZ - A @ EZZ_FB') / T
             Q = (EZZ - A @ EZZ_FB.T) / T
@@ -739,7 +859,7 @@ def estimate_var_unified(
     return A.astype(dtype), Q.astype(dtype)
 
 
-def estimate_ar1_unified(
+def estimate_ar1(
     y: np.ndarray,
     x: Optional[np.ndarray] = None,
     V_smooth: Optional[np.ndarray] = None,
@@ -749,7 +869,7 @@ def estimate_ar1_unified(
     default_noise: float = DEFAULT_PROCESS_NOISE,
     dtype: type = np.float32
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Unified AR(1) estimation that works with raw data or smoothed expectations.
+    """AR(1) estimation that works with raw data or smoothed expectations.
     
     Parameters
     ----------
@@ -865,7 +985,7 @@ def estimate_ar1_unified(
     return A_diag.astype(dtype), Q_diag.astype(dtype)
 
 
-def estimate_constrained_ols_unified(
+def estimate_constrained_ols(
     y: np.ndarray,
     X: np.ndarray,
     R: np.ndarray,
@@ -874,7 +994,7 @@ def estimate_constrained_ols_unified(
     regularization: float = DEFAULT_REGULARIZATION,
     dtype: type = np.float32
 ) -> np.ndarray:
-    """Unified constrained OLS estimation that works with raw data or smoothed expectations.
+    """Constrained OLS estimation that works with raw data or smoothed expectations.
     
     Solves: min ||y - X*beta||^2 subject to R @ beta = q
     
@@ -984,7 +1104,7 @@ def estimate_constrained_ols_unified(
     return beta_constrained.astype(dtype)
 
 
-def estimate_variance_unified(
+def estimate_variance(
     residuals: Optional[np.ndarray] = None,
     X: Optional[np.ndarray] = None,
     EZ: Optional[np.ndarray] = None,
@@ -994,7 +1114,7 @@ def estimate_variance_unified(
     default_variance: float = DEFAULT_PROCESS_NOISE,
     dtype: type = np.float32
 ) -> np.ndarray:
-    """Unified variance estimation that works with raw residuals or smoothed expectations.
+    """Variance estimation that works with raw residuals or smoothed expectations.
     
     Parameters
     ----------
@@ -1136,16 +1256,15 @@ __all__ = [
     'clip_ar',
     'apply_ar_clipping',
     # Estimation functions
-    'estimate_var',
     'estimate_idio_dynamics',
     # DDFM-specific functions
     'get_idio',
     'get_transition_params',
-    # Unified estimation functions
-    'estimate_var_unified',
-    'estimate_ar1_unified',
-    'estimate_constrained_ols_unified',
-    'estimate_variance_unified',
+    # Estimation functions
+    'estimate_var',
+    'estimate_ar1',
+    'estimate_constrained_ols',
+    'estimate_variance',
     'compute_initial_covariance_from_transition',
     'stabilize_innovation_covariance',
     # Forecast functions

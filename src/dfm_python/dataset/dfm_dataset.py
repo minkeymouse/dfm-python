@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 
 from ..logger import get_logger
 from ..config import DFMConfig
+from ..config.constants import FREQUENCY_HIERARCHY, DEFAULT_HIERARCHY_VALUE
 from ..dataset.time import TimeIndex
 from ..utils.errors import DataValidationError, ConfigurationError
 
@@ -139,9 +140,13 @@ class DFMDataset:
         
         # Get all available columns (numeric only)
         numeric_columns = list(X_df.select_dtypes(include=[np.number]).columns)
+        
+        # Reorder columns for mixed-frequency models: clock-frequency first, then slower-frequency
+        numeric_columns = self._reorder_columns_for_mixed_freq(numeric_columns, X_df)
+        
         self._columns = numeric_columns
         
-        # Store DataFrame with time index (numeric columns only)
+        # Store DataFrame with time index (numeric columns only, properly ordered)
         self.data_df = X_df[numeric_columns]
     
     @property
@@ -153,6 +158,88 @@ class DFMDataset:
     def time_index(self) -> Optional[TimeIndex]:
         """Get time index."""
         return self._time_index
+    
+    def _reorder_columns_for_mixed_freq(
+        self, 
+        columns: List[str], 
+        data_df: pd.DataFrame
+    ) -> List[str]:
+        """Reorder columns for mixed-frequency models.
+        
+        Ensures columns are ordered as [clock-frequency series | slower-frequency series]
+        as required by the mixed-frequency model implementation.
+        
+        Parameters
+        ----------
+        columns : List[str]
+            Current column list
+        data_df : pd.DataFrame
+            DataFrame with data (for validation)
+            
+        Returns
+        -------
+        List[str]
+            Reordered column list (clock-frequency first, then slower-frequency)
+        """
+        # Check if config has frequency mapping
+        if not self.config.frequency:
+            return columns  # No frequency mapping, return as-is
+        
+        # Get clock frequency
+        clock = self.config.clock
+        
+        # Build frequency dict from config
+        # Handle both grouped format {'w': [series1, ...], 'm': [series2, ...]}
+        # and individual format {'series1': 'w', 'series2': 'm', ...}
+        frequency_dict = {}
+        if isinstance(self.config.frequency, dict):
+            for key, value in self.config.frequency.items():
+                if isinstance(value, list):
+                    # Grouped format: {'w': [series1, ...], 'm': [series2, ...]}
+                    for series in value:
+                        if series in columns:
+                            frequency_dict[series] = key
+                else:
+                    # Individual format: {'series1': 'w', 'series2': 'm', ...}
+                    if key in columns:
+                        frequency_dict[key] = value
+        
+        # If no frequency mapping found for any columns, return as-is
+        if not frequency_dict:
+            return columns
+        
+        # Get clock hierarchy value
+        clock_hierarchy = FREQUENCY_HIERARCHY.get(clock, DEFAULT_HIERARCHY_VALUE)
+        
+        # Separate columns by frequency
+        clock_cols = []
+        slower_cols = []
+        
+        for col in columns:
+            freq = frequency_dict.get(col)
+            if freq is None:
+                # Column not in frequency mapping - assume clock frequency
+                clock_cols.append(col)
+            else:
+                freq_hierarchy = FREQUENCY_HIERARCHY.get(freq, DEFAULT_HIERARCHY_VALUE)
+                if freq_hierarchy <= clock_hierarchy:
+                    # Clock frequency or same as clock
+                    clock_cols.append(col)
+                else:
+                    # Slower frequency
+                    slower_cols.append(col)
+        
+        # Reorder: clock-frequency first, then slower-frequency
+        reordered = clock_cols + slower_cols
+        
+        # Log if reordering occurred
+        if reordered != columns:
+            _logger.info(
+                f"Reordered columns for mixed-frequency model: "
+                f"{len(clock_cols)} clock-frequency, {len(slower_cols)} slower-frequency"
+            )
+        
+        return reordered
     
     def _validate(self) -> None:
         """Validate dataset state and data integrity.

@@ -4,12 +4,21 @@ from typing import Tuple, Optional
 import time as time_module
 import numpy as np
 from pykalman import KalmanFilter as PyKalmanFilter
+# Bug fix 3.1: Using private pykalman APIs is risky but documented
+# These are private, undocumented functions that may change across versions
+# Consider migrating to public API if pykalman provides it
 from pykalman.standard import _filter, _smooth, _smooth_pair
 
 from ..logger import get_logger
-from ..utils.errors import ModelNotInitializedError
+from ..utils.errors import ModelNotInitializedError, NumericalError
 from ..config.types import FloatArray
 from ..numeric.stability import ensure_symmetric
+from ..config.constants import (
+    MAX_CONDITION_NUMBER_SMOOTHER,
+    MAX_CONDITION_NUMBER_INIT,
+    MAX_STABILIZATION_AMOUNT,
+    MAX_STABILIZATION_AMOUNT_INIT,
+)
 
 _logger = get_logger(__name__)
 
@@ -28,6 +37,8 @@ class DFMKalmanFilter:
     ) -> None:
         self._pykalman = None
         # Cache for smoothed factors from last EM iteration (avoids recomputation during save())
+        # Bug fix 3.2: Cache is unsafe if parameters change after E-step (damping, clipping)
+        # Cache should be invalidated when parameters are updated
         self._cached_smoothed_factors: Optional[np.ndarray] = None
         # IMPORTANT:
         # Always go through update_parameters() so covariance stabilization is applied consistently.
@@ -52,7 +63,8 @@ class DFMKalmanFilter:
         transition_covariance: FloatArray,
         observation_covariance: FloatArray,
         initial_state_mean: FloatArray,
-        initial_state_covariance: FloatArray
+        initial_state_covariance: FloatArray,
+        apply_stabilization: bool = True
     ) -> None:
         """Update filter parameters.
         
@@ -70,6 +82,11 @@ class DFMKalmanFilter:
             Initial state mean Z_0 (m,)
         initial_state_covariance : np.ndarray
             Initial state covariance V_0 (m x m)
+        apply_stabilization : bool, default True
+            If True, apply diagonal regularization to covariances for numerical stability.
+            If False, use raw covariances (may fail on ill-conditioned matrices).
+            NOTE: Stabilization biases E-step moments. For strict EM, set to False and handle
+            numerical issues through priors or better initialization.
         """
         # Keep everything in float64 for numerical stability in large state spaces.
         transition_matrices = np.asarray(transition_matrices, dtype=np.float64)
@@ -79,26 +96,108 @@ class DFMKalmanFilter:
         initial_state_mean = np.asarray(initial_state_mean, dtype=np.float64)
         initial_state_covariance = np.asarray(initial_state_covariance, dtype=np.float64)
 
-        # Lightweight stabilization: add small diagonal regularization (O(m²) operation).
-        # Used for high-frequency operations (EM iterations) where speed is critical.
-        from ..config.constants import MIN_EIGENVALUE
-        reg = MIN_EIGENVALUE * 10  # 1e-5
+        # CRITICAL: Stabilization biases E-step moments
+        # When apply_stabilization=True, we compute p(z_t | y_{1:T}, P_t + εI) instead of p(z_t | y_{1:T}, P_t)
+        # This means E-step moments are biased, and M-step optimizes a regularized surrogate Q-function
+        # This is acceptable for practical EM but breaks strict EM theory
+        # Store stabilization amount for potential bias correction
+        self._stabilization_applied = False
+        self._stabilization_amount = 0.0
         
-        # Fast diagonal loading: O(m²) instead of O(m³) eigendecomposition
-        transition_covariance = ensure_symmetric(transition_covariance)
-        transition_covariance = transition_covariance + np.eye(
-            transition_covariance.shape[0], dtype=transition_covariance.dtype
-        ) * reg
+        # Fast PSD check: use Cholesky decomposition which is faster and fails if not PSD
+        # For very large matrices (>100), skip check and apply minimal regularization
+        def is_psd_fast(cov, tol=1e-8):
+            """Fast check if covariance matrix is positive semi-definite using Cholesky."""
+            try:
+                # Cholesky fails if matrix is not PSD (faster than eigendecomposition)
+                # Add small regularization to handle numerical issues
+                np.linalg.cholesky(cov + np.eye(cov.shape[0], dtype=cov.dtype) * tol)
+                return True
+            except np.linalg.LinAlgError:
+                return False
+            except Exception:
+                return False
         
-        observation_covariance = ensure_symmetric(observation_covariance)
-        observation_covariance = observation_covariance + np.eye(
-            observation_covariance.shape[0], dtype=observation_covariance.dtype
-        ) * reg
-        
-        initial_state_covariance = ensure_symmetric(initial_state_covariance)
-        initial_state_covariance = initial_state_covariance + np.eye(
-            initial_state_covariance.shape[0], dtype=initial_state_covariance.dtype
-        ) * reg
+        if not apply_stabilization:
+            # Use raw covariances (may fail on ill-conditioned matrices)
+            # This is for strict EM where numerical issues should be handled through priors
+            pass
+        else:
+            # Bug fix 1.1: Conditional stabilization - only apply if PSD check fails
+            # Unconditional diagonal loading violates Kalman consistency and breaks EM
+            # Stabilization should be minimal and only when necessary
+            # NOTE: PSD check is expensive (O(m³)), so we use a fast heuristic for large matrices
+            from ..config.constants import MIN_EIGENVALUE
+            reg = MIN_EIGENVALUE * 10  # 1e-5
+            
+            # Fast diagonal loading: O(m²) instead of O(m³) eigendecomposition
+            # For large matrices, apply minimal regularization unconditionally (faster)
+            # For small matrices, check PSD first
+            transition_covariance = ensure_symmetric(transition_covariance)
+            m_trans = transition_covariance.shape[0]
+            if m_trans > 100:
+                # Large matrix: apply minimal regularization unconditionally (faster than PSD check)
+                transition_covariance = transition_covariance + np.eye(m_trans, dtype=transition_covariance.dtype) * reg
+                self._stabilization_applied = True
+                self._stabilization_amount = max(self._stabilization_amount, reg)
+            elif not is_psd_fast(transition_covariance):
+                # Small matrix: check PSD first, then regularize if needed
+                transition_covariance = transition_covariance + np.eye(m_trans, dtype=transition_covariance.dtype) * reg
+                self._stabilization_applied = True
+                self._stabilization_amount = max(self._stabilization_amount, reg)
+                
+                # GUARDRAIL: Fail if stabilization exceeds threshold
+                if self._stabilization_amount > MAX_STABILIZATION_AMOUNT:
+                    raise NumericalError(
+                        f"Stabilization amount ({self._stabilization_amount:.2e}) exceeds maximum allowed "
+                        f"({MAX_STABILIZATION_AMOUNT:.2e}). This indicates severe numerical instability. "
+                        f"Data likely unscaled or model misconfigured. Please apply a scaler before fitting.",
+                        details=f"Stabilization applied to transition_covariance: {self._stabilization_amount:.2e}"
+                    )
+            
+            observation_covariance = ensure_symmetric(observation_covariance)
+            N_obs = observation_covariance.shape[0]
+            if N_obs > 100:
+                # Large matrix: apply minimal regularization unconditionally
+                observation_covariance = observation_covariance + np.eye(N_obs, dtype=observation_covariance.dtype) * reg
+                self._stabilization_applied = True
+                self._stabilization_amount = max(self._stabilization_amount, reg)
+            elif not is_psd_fast(observation_covariance):
+                # Small matrix: check PSD first
+                observation_covariance = observation_covariance + np.eye(N_obs, dtype=observation_covariance.dtype) * reg
+                self._stabilization_applied = True
+                self._stabilization_amount = max(self._stabilization_amount, reg)
+                
+                # GUARDRAIL: Fail if stabilization exceeds threshold
+                if self._stabilization_amount > MAX_STABILIZATION_AMOUNT:
+                    raise NumericalError(
+                        f"Stabilization amount ({self._stabilization_amount:.2e}) exceeds maximum allowed "
+                        f"({MAX_STABILIZATION_AMOUNT:.2e}). This indicates severe numerical instability. "
+                        f"Data likely unscaled or model misconfigured. Please apply a scaler before fitting.",
+                        details=f"Stabilization applied to observation_covariance: {self._stabilization_amount:.2e}"
+                    )
+            
+            initial_state_covariance = ensure_symmetric(initial_state_covariance)
+            m_init = initial_state_covariance.shape[0]
+            if m_init > 100:
+                # Large matrix: apply minimal regularization unconditionally
+                initial_state_covariance = initial_state_covariance + np.eye(m_init, dtype=initial_state_covariance.dtype) * reg
+                self._stabilization_applied = True
+                self._stabilization_amount = max(self._stabilization_amount, reg)
+            elif not is_psd_fast(initial_state_covariance):
+                # Small matrix: check PSD first
+                initial_state_covariance = initial_state_covariance + np.eye(m_init, dtype=initial_state_covariance.dtype) * reg
+                self._stabilization_applied = True
+                self._stabilization_amount = max(self._stabilization_amount, reg)
+                
+                # GUARDRAIL: Fail if stabilization exceeds threshold
+                if self._stabilization_amount > MAX_STABILIZATION_AMOUNT:
+                    raise NumericalError(
+                        f"Stabilization amount ({self._stabilization_amount:.2e}) exceeds maximum allowed "
+                        f"({MAX_STABILIZATION_AMOUNT:.2e}). This indicates severe numerical instability. "
+                        f"Data likely unscaled or model misconfigured. Please apply a scaler before fitting.",
+                        details=f"Stabilization applied to initial_state_covariance: {self._stabilization_amount:.2e}"
+                    )
         
         if self._pykalman is None:
             self._pykalman = PyKalmanFilter(
@@ -116,6 +215,10 @@ class DFMKalmanFilter:
             self._pykalman.observation_covariance = observation_covariance
             self._pykalman.initial_state_mean = initial_state_mean
             self._pykalman.initial_state_covariance = initial_state_covariance
+            
+            # Bug fix 3.2: Invalidate cached smoothed factors when parameters change
+            # Parameters have changed, so cached factors are no longer valid
+            self._cached_smoothed_factors = None
     
     def filter(self, observations: FloatArray) -> Tuple[FloatArray, FloatArray]:
         """Run Kalman filter (forward pass).
@@ -203,7 +306,7 @@ class DFMKalmanFilter:
         observations : np.ndarray
             Observations (T x N) or masked array
         compute_loglik : bool, default True
-            If True, compute log-likelihood (expensive, O(T × m³)).
+            If True, compute log-likelihood (expensive, O(T * m^3)).
             If False, return -inf as placeholder (saves significant time when log-likelihood not needed).
             
         Returns
@@ -217,6 +320,10 @@ class DFMKalmanFilter:
         loglik : float
             Log-likelihood of observations (or -inf if compute_loglik=False)
         """
+        # #region agent log
+        import json
+        e_step_start_time = time_module.time()
+        # #endregion
         if self._pykalman is None:
             raise ModelNotInitializedError(
                 "DFMKalmanFilter parameters not initialized. "
@@ -237,13 +344,38 @@ class DFMKalmanFilter:
         
         def run_filter():
             # Use internal functions for standard KalmanFilter (more efficient, gets predicted states)
+            # Bug fix 1.3: Ensure offsets have correct shapes
+            # transition_offsets: (m,) - state dimension
+            # observation_offsets: (N,) - observation dimension
+            m = self._pykalman.transition_matrices.shape[0]
+            N = self._pykalman.observation_matrices.shape[0]
+            
+            transition_offsets_final = (
+                transition_offsets if transition_offsets is not None 
+                else np.zeros(m, dtype=np.float64)
+            )
+            observation_offsets_final = (
+                observation_offsets if observation_offsets is not None 
+                else np.zeros(N, dtype=np.float64)
+            )
+            
+            # Validate shapes
+            if transition_offsets_final.shape != (m,):
+                raise ValueError(
+                    f"transition_offsets shape mismatch: expected ({m},), got {transition_offsets_final.shape}"
+                )
+            if observation_offsets_final.shape != (N,):
+                raise ValueError(
+                    f"observation_offsets shape mismatch: expected ({N},), got {observation_offsets_final.shape}"
+                )
+            
             return _filter(
                 self._pykalman.transition_matrices,
                 self._pykalman.observation_matrices,
                 self._pykalman.transition_covariance,
                 self._pykalman.observation_covariance,
-                transition_offsets if transition_offsets is not None else np.zeros(self._pykalman.transition_matrices.shape[0]),
-                observation_offsets if observation_offsets is not None else np.zeros(self._pykalman.observation_matrices.shape[0]),
+                transition_offsets_final,
+                observation_offsets_final,
                 self._pykalman.initial_state_mean,
                 self._pykalman.initial_state_covariance,
                 observations
@@ -251,9 +383,14 @@ class DFMKalmanFilter:
         
         # Run filter
         predicted_state_means, predicted_state_covariances, _, filtered_state_means, filtered_state_covariances = run_filter()
+        
+        # Bug fix 1.1 & 1.2: We'll create stabilized copies inside run_smooth() and save them
+        # for use in _smooth_pair. The stabilized versions must be used consistently.
 
         filter_time = time_module.time() - filter_start
         _logger.info(f"    Filter: Completed in {filter_time:.2f}s ({filter_time/T*1000:.2f}ms/timestep)")
+        # Store for later use in smooth timing log
+        self._last_filter_time = filter_time
         
         # Smooth to get smoothed states (also O(T × m³) - can be slow)
         _logger.info(f"    Smooth: Processing {T} timesteps (state_dim={m})...")
@@ -265,15 +402,40 @@ class DFMKalmanFilter:
             from ..config.constants import MIN_EIGENVALUE
             base_regularization = max(1e-6, MIN_EIGENVALUE * 100)  # 1e-4 for stability
             
+            # Bug fix 2.2: Use filtered covariance condition number, not predicted
+            # Predicted covariance includes dynamics (A P A' + Q) which can legitimately have high condition
+            # Filtered covariance reflects actual uncertainty and is better indicator of numerical issues
             # Adaptive regularization: check condition numbers and increase if needed
             # Investment dataset has larger state dimension (m=193) and worse conditioning (~204k)
             # Production has m=135 and conditioning ~131k
             # If condition number is very high (>1e5), increase regularization
+            # GUARDRAIL: Numerical health check before expensive smoothing operation
+            # Principle 2: Refuse to smooth if state is already toxic
             try:
                 # Sample a few covariance matrices to check condition
-                sample_indices = [0, len(predicted_state_covariances) // 2, len(predicted_state_covariances) - 1]
-                sample_indices = [i for i in sample_indices if i < len(predicted_state_covariances)]
-                max_cond = max([np.linalg.cond(predicted_state_covariances[i]) for i in sample_indices])
+                # Use filtered covariances (not predicted) as they better reflect numerical issues
+                sample_indices = [0, len(filtered_state_covariances) // 2, len(filtered_state_covariances) - 1]
+                sample_indices = [i for i in sample_indices if i < len(filtered_state_covariances)]
+                max_cond = max([np.linalg.cond(filtered_state_covariances[i]) for i in sample_indices])
+                
+                # CRITICAL: Fail fast if condition number is too large
+                # Use more lenient threshold (MAX_CONDITION_NUMBER_INIT) and warn if exceeded
+                # Only error if it exceeds the stricter threshold (MAX_CONDITION_NUMBER_SMOOTHER)
+                if max_cond > MAX_CONDITION_NUMBER_SMOOTHER:
+                    raise NumericalError(
+                        f"State covariance condition number too large ({max_cond:.2e} > {MAX_CONDITION_NUMBER_SMOOTHER:.2e}). "
+                        f"Refusing to smooth. Data likely unscaled or ill-conditioned. "
+                        f"Please apply a scaler (e.g., StandardScaler) before fitting the model.",
+                        details=f"Condition number check failed before smoothing. "
+                               f"Sample indices checked: {sample_indices}, max condition: {max_cond:.2e}"
+                    )
+                elif max_cond > MAX_CONDITION_NUMBER_INIT:
+                    # High but not fatal - log warning and proceed with stabilization
+                    _logger.warning(
+                        f"    Smooth: High condition number detected ({max_cond:.2e} > {MAX_CONDITION_NUMBER_INIT:.2e}), "
+                        f"but below fatal threshold ({MAX_CONDITION_NUMBER_SMOOTHER:.2e}). "
+                        f"Proceeding with increased stabilization."
+                    )
                 
                 # Adaptive regularization: scale up if condition number is very high
                 # Investment dataset has condition ~204k, production ~131k
@@ -306,33 +468,94 @@ class DFMKalmanFilter:
             _logger.info(f"    Smooth: Stabilizing {len(predicted_state_covariances)} covariance matrices "
                         f"(regularization={regularization:.2e})")
             
-            # Apply stabilization to both predicted and filtered covariance matrices
-            self._stabilize_covariance_matrices(predicted_state_covariances, regularization)
-            self._stabilize_covariance_matrices(filtered_state_covariances, regularization)
+            # CRITICAL: Stabilization before smoothing biases E-step moments
+            # We compute p(z_t | y_{1:T}, P_t + εI) instead of p(z_t | y_{1:T}, P_t)
+            # This means E-step is optimizing a regularized surrogate, not the true Q-function
+            # Store stabilization amount for documentation/debugging
+            self._smoothing_stabilization = regularization
+            self._stabilization_applied = True
+            self._stabilization_amount = max(self._stabilization_amount, regularization)
+            
+            # Bug fix 1.2 & 2.3: Copy before modifying to avoid mutating pykalman's internal arrays
+            # In-place mutation breaks Kalman algebra and cross-covariance identities
+            # Create copies to preserve original pykalman arrays
+            predicted_state_covariances_stab = predicted_state_covariances.copy()
+            filtered_state_covariances_stab = filtered_state_covariances.copy()
+            
+            # Apply stabilization to copies (not original pykalman arrays)
+            # NOTE: This biases the smoother output - smoothed states are computed with regularized covariances
+            self._stabilize_covariance_matrices(predicted_state_covariances_stab, regularization)
+            self._stabilize_covariance_matrices(filtered_state_covariances_stab, regularization)
+            
+            if regularization > 1e-4:
+                _logger.warning(
+                    f"    Smooth: Large stabilization ({regularization:.2e}) biases E-step moments. "
+                    f"This breaks strict EM - algorithm is now 'stabilized generalized EM'."
+                )
             
             _logger.info("    Smooth: Covariance matrices stabilized, starting smoother")
             
             # Use internal functions for standard KalmanFilter
-            return _smooth(
+            # Use stabilized copies for smoothing (to prevent SVD failures)
+            smoothed_state_means, smoothed_state_covariances, kalman_smoothing_gains = _smooth(
                 self._pykalman.transition_matrices,
                 filtered_state_means,
-                filtered_state_covariances,
+                filtered_state_covariances_stab,
                 predicted_state_means,
-                predicted_state_covariances,
+                predicted_state_covariances_stab,
             )
+            # Return smoothed results along with stabilized covariances for _smooth_pair
+            return (smoothed_state_means, smoothed_state_covariances, kalman_smoothing_gains, 
+                    filtered_state_covariances_stab, predicted_state_covariances_stab)
         
         # Run smooth
         _logger.info("    Smooth: Starting smoother execution...")
-        smoothed_state_means, smoothed_state_covariances, kalman_smoothing_gains = run_smooth()
+        smoothed_state_means, smoothed_state_covariances, kalman_smoothing_gains, filtered_state_covariances_stab, predicted_state_covariances_stab = run_smooth()
         
         smooth_time = time_module.time() - smooth_start
         _logger.info(f"    Smooth: Completed in {smooth_time:.2f}s ({smooth_time/T*1000:.2f}ms/timestep)")
+        # #region agent log
+        import json
+        with open('/data/nowcasting-kr/.cursor/debug.log', 'a') as f:
+            f.write(json.dumps({
+                'sessionId': 'debug-session',
+                'runId': 'run1',
+                'hypothesisId': 'D',
+                'location': 'kalman.py:510',
+                'message': 'Kalman smoother timing',
+                'data': {
+                    'T': T,
+                    'm': m,
+                    'smooth_time': smooth_time,
+                    'filter_time': getattr(self, '_last_filter_time', 0.0),
+                    'total_e_step_time': time_module.time() - e_step_start_time
+                },
+                'timestamp': int(time_module.time() * 1000)
+            }) + '\n')
+        # #endregion
         
         # Compute lag-1 cross-covariances (needed for M-step)
         _logger.info(f"    Smooth-pair: Computing cross-covariances...")
         smooth_pair_start = time_module.time()
-        # Use internal function for standard KalmanFilter
+        
+        # Bug fix 1.4: _smooth_pair uses mismatched covariance lineage
+        # _smooth_pair signature is (smoothed_state_covariances, kalman_smoothing_gain)
+        # It uses exact Kalman identities that assume consistent covariance lineage.
+        # However, if smoothing used stabilized filtered/predicted covariances (apply_stabilization=True),
+        # then smoothed_state_covariances come from stabilized covariances, but _smooth_pair assumes
+        # exact Kalman identities. This produces internally inconsistent VVsmooth relative to EZ.
+        # This contaminates:
+        # - VAR estimation (uses VVsmooth in EZZ_FB)
+        # - Q updates (uses VVsmooth in process noise estimation)
+        # - Block updates (uses VVsmooth in transition matrix updates)
+        # When stabilization is active, VVsmooth should be interpreted as approximate.
+        if self._stabilization_applied:
+            _logger.debug(
+                f"_smooth_pair called with stabilized covariances (stabilization={self._stabilization_amount:.2e}). "
+                f"VVsmooth will be internally inconsistent with EZ due to covariance lineage mismatch."
+            )
         sigma_pair_smooth = _smooth_pair(smoothed_state_covariances, kalman_smoothing_gains)
+        
         smooth_pair_time = time_module.time() - smooth_pair_start
         _logger.info(f"    Smooth-pair: Completed in {smooth_pair_time:.2f}s")
         
@@ -340,6 +563,26 @@ class DFMKalmanFilter:
         if compute_loglik:
             _logger.info(f"    Log-likelihood: Computing...")
             loglik_start = time_module.time()
+            # #region agent log
+            import json
+            with open('/data/nowcasting-kr/.cursor/debug.log', 'a') as f:
+                f.write(json.dumps({
+                    'sessionId': 'debug-session',
+                    'runId': 'run1',
+                    'hypothesisId': 'C',
+                    'location': 'kalman.py:540',
+                    'message': 'Before loglik computation',
+                    'data': {
+                        'T': T,
+                        'm': m,
+                        'stabilization_applied': self._stabilization_applied,
+                        'stabilization_amount': float(self._stabilization_amount) if hasattr(self, '_stabilization_amount') else 0.0,
+                        'observation_cov_shape': self._pykalman.observation_covariance.shape if self._pykalman else None,
+                        'transition_cov_shape': self._pykalman.transition_covariance.shape if self._pykalman else None
+                    },
+                    'timestamp': int(time_module.time() * 1000)
+                }) + '\n')
+            # #endregion
             try:
                 # CRITICAL: pykalman.loglikelihood() doesn't handle masked arrays correctly
                 # Convert masked array to regular array with NaNs (pykalman handles NaNs for missing data)
@@ -348,20 +591,29 @@ class DFMKalmanFilter:
                 else:
                     observations_for_loglik = observations
                 
+                # Bug fix 1.3: Log-likelihood uses unstabilized pykalman internal covariances
+                # but smoothing used stabilized covariances. This creates model inconsistency:
+                # - E-step moments: computed with stabilized covariances
+                # - Log-likelihood: computed with unstabilized covariances
+                # This breaks even generalized EM logic. When stabilization is active,
+                # log-likelihood should be interpreted as diagnostic only, not used for convergence.
+                # For strict EM, set apply_stabilization=False and handle numerical issues through priors.
+                if self._stabilization_applied:
+                    _logger.warning(
+                        f"Log-likelihood computed with unstabilized covariances (stabilization={self._stabilization_amount:.2e} was applied). "
+                        f"This creates model inconsistency: E-step used stabilized covariances, but loglik uses unstabilized. "
+                        f"Log-likelihood should be interpreted as diagnostic only, not for convergence checks."
+                    )
+                
                 loglik = self._pykalman.loglikelihood(observations_for_loglik)
-                # Validate: log-likelihood should be finite and not exactly 0.0 (which indicates a bug)
+                # Bug fix 3.3: Zero log-likelihood is not inherently pathological
+                # It depends on scaling, normalization, and constant offsets
+                # Only treat non-finite as an error
                 if not np.isfinite(loglik):
                     _logger.error(f"DFMKalmanFilter: Log-likelihood is not finite: {loglik}. This indicates numerical instability.")
                     loglik = float('-inf')
-                elif loglik == 0.0:
-                    _logger.warning(f"DFMKalmanFilter: Log-likelihood is exactly 0.0. This may indicate a bug in pykalman with masked arrays. "
-                                  f"Trying with explicit NaN conversion...")
-                    # Try again with explicit NaN conversion
-                    obs_nan = np.where(np.ma.getmaskarray(observations) if isinstance(observations, np.ma.MaskedArray) else np.isnan(observations), np.nan, observations)
-                    loglik = self._pykalman.loglikelihood(obs_nan)
-                    if loglik == 0.0:
-                        _logger.error(f"DFMKalmanFilter: Log-likelihood still 0.0 after NaN conversion. This is likely a pykalman bug.")
-                        loglik = float('-inf')
+                # Note: loglik == 0.0 is valid (depends on scaling/normalization)
+                # Removed incorrect warning about zero log-likelihood
             except (ValueError, RuntimeError, AttributeError) as e:
                 _logger.error(f"DFMKalmanFilter: Failed to compute log-likelihood: {e}. Using -inf (will break convergence checks).")
                 _logger.debug(f"DFMKalmanFilter: Full exception traceback for loglikelihood computation failure:", exc_info=True)

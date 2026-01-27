@@ -25,6 +25,28 @@ def handle_linear_algebra_error(
     try:
         return operation(*args, **kwargs)
     except (np.linalg.LinAlgError, ValueError) as e:
+        # #region agent log
+        import json
+        try:
+            with open('/data/nowcasting-kr/.cursor/debug.log', 'a') as f:
+                f.write(json.dumps({
+                    'sessionId': 'debug-session',
+                    'runId': 'run1',
+                    'hypothesisId': 'A',
+                    'location': 'helper.py:27',
+                    'message': f'Linear algebra error caught: {operation_name}',
+                    'data': {
+                        'operation_name': operation_name,
+                        'error_type': type(e).__name__,
+                        'error_message': str(e),
+                        'has_fallback_value': fallback_value is not None,
+                        'has_fallback_func': fallback_func is not None
+                    },
+                    'timestamp': int(__import__('time').time() * 1000)
+                }) + '\n')
+        except:
+            pass
+        # #endregion
         _logger.warning(
             f"{operation_name} failed ({type(e).__name__}): {e}. Using fallback."
         )

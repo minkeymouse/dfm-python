@@ -8,10 +8,10 @@ from dfm_python.config.constants import DEFAULT_DTYPE
 class TestEstimator:
     """Test suite for numeric estimator utilities."""
     
-    def test_estimate_ar1_unified_basic(self):
-        """Test estimate_ar1_unified with basic input."""
+    def test_estimate_ar1_basic(self):
+        """Test estimate_ar1 with basic input."""
         import numpy as np
-        from dfm_python.numeric.estimator import estimate_ar1_unified
+        from dfm_python.numeric.estimator import estimate_ar1
         
         T = 100
         N = 2
@@ -19,7 +19,7 @@ class TestEstimator:
         x = y[:-1]  # Lagged values (T-1 x N)
         y_current = y[1:]  # Current values (T-1 x N) to match x
         
-        A_diag, Q_diag = estimate_ar1_unified(y_current, x=x)
+        A_diag, Q_diag = estimate_ar1(y_current, x=x)
         # Returns diagonal arrays, not matrices
         assert A_diag.shape == (N,)
         assert Q_diag.shape == (N,)
@@ -27,10 +27,10 @@ class TestEstimator:
         assert A_diag.ndim == 1
         assert Q_diag.ndim == 1
     
-    def test_estimate_var_unified_basic(self):
-        """Test estimate_var_unified with basic input."""
+    def test_estimate_var_basic(self):
+        """Test estimate_var with basic input."""
         import numpy as np
-        from dfm_python.numeric.estimator import estimate_var_unified
+        from dfm_python.numeric.estimator import estimate_var
         
         T = 100
         N = 2
@@ -38,7 +38,7 @@ class TestEstimator:
         x = y[:-1]  # Lagged values (T-1 x N)
         y_current = y[1:]  # Current values (T-1 x N) to match x
         
-        A, Q = estimate_var_unified(y_current, x)
+        A, Q = estimate_var(y_current, x)
         # Verify return types and basic properties
         assert A.ndim == 2
         assert Q.ndim == 2
@@ -47,16 +47,16 @@ class TestEstimator:
         # Q should be square matrix (implementation may vary, but should be 2D)
         assert Q.shape[0] == Q.shape[1]
     
-    def test_estimate_variance_unified_basic(self):
-        """Test estimate_variance_unified with basic input."""
+    def test_estimate_variance_basic(self):
+        """Test estimate_variance with basic input."""
         import numpy as np
-        from dfm_python.numeric.estimator import estimate_variance_unified
+        from dfm_python.numeric.estimator import estimate_variance
         
         T = 100
         N = 3
         residuals = np.random.randn(T, N).astype(DEFAULT_DTYPE)
         
-        R = estimate_variance_unified(residuals=residuals)
+        R = estimate_variance(residuals=residuals)
         # Returns diagonal matrix (N x N), not vector
         assert R.shape == (N, N)
         # Should be 2D matrix

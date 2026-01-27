@@ -117,7 +117,7 @@ def cap_max_eigenval(
     Parameters
     ----------
     M : np.ndarray
-        Matrix to cap (square matrix)
+        Matrix to cap (MUST be square matrix: shape (n, n))
     max_eigenval : float, default MAX_EIGENVALUE
         Maximum allowed eigenvalue
     symmetric : bool, default False
@@ -130,9 +130,28 @@ def cap_max_eigenval(
     -------
     np.ndarray
         Matrix with capped eigenvalues
+        
+    Raises
+    ------
+    ValueError
+        If matrix is not square (ndim != 2 or shape[0] != shape[1])
     """
     if M.size == 0 or M.shape[0] == 0:
         return M
+    
+    # CRITICAL: Validate matrix is square BEFORE attempting eigenvalue computation
+    # This prevents expensive exception handling in hot loops
+    if M.ndim != 2:
+        raise ValueError(
+            f"cap_max_eigenval requires 2D matrix, got ndim={M.ndim}, shape={M.shape}. "
+            f"This indicates a bug: eigenvalue capping should only be applied to square matrices."
+        )
+    if M.shape[0] != M.shape[1]:
+        raise ValueError(
+            f"cap_max_eigenval requires square matrix, got shape={M.shape}. "
+            f"This indicates a bug: eigenvalue capping should only be applied to square matrices. "
+            f"Check that you're not calling this on non-square slices or vectors."
+        )
     
     def _cap_max_eigenvalue():
         if symmetric:
@@ -415,19 +434,23 @@ def solve_regularized_ols(
             return beta.astype(dtype)
     else:
         # X is already X'X (covariance matrix)
+        # When use_XTX=False: solve (X'X)^(-1) @ y where X'X is (p x p) and y is (p x n)
+        # Result should be (p x n), which we return as-is (no transpose needed)
         try:
             X_reg = X + create_scaled_identity(X.shape[0], regularization, dtype)
             if y.ndim == 1:
                 beta = np.linalg.solve(X_reg, y)
             else:
-                beta = np.linalg.solve(X_reg, y.T).T
+                # y is (p x n), solve gives (p x n) - no transpose needed
+                beta = np.linalg.solve(X_reg, y)
             return beta.astype(dtype)
         except (np.linalg.LinAlgError, ValueError):
             # Fallback to pinv
             if y.ndim == 1:
                 beta = np.linalg.pinv(X) @ y
             else:
-                beta = (np.linalg.pinv(X) @ y.T).T
+                # y is (p x n), pinv(X) @ y gives (p x n) - no transpose needed
+                beta = np.linalg.pinv(X) @ y
             return beta.astype(dtype)
 
 

@@ -6,19 +6,14 @@ from dfm_python.numeric.stability import (
     ensure_covariance_stable,
     cap_max_eigenval,
     ensure_positive_definite,
-    safe_matrix_power,
     compute_cov_safe,
-    clean_matrix,
-    safe_determinant,
     ensure_symmetric,
     create_scaled_identity,
-    safe_divide,
     compute_var_safe,
     stabilize_innovation_covariance,
-    mse_missing_numpy,
     convergence_checker,
-    extract_matrix_block,
-    compute_forecast_metrics,
+    solve_regularized_ols,
+    ensure_process_noise_stable,
 )
 from dfm_python.utils.errors import DataValidationError, DataError, NumericalError
 from dfm_python.config.constants import (

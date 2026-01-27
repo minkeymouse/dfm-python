@@ -27,52 +27,53 @@ scaler: standard  # Scaler for all series: 'standard', 'robust', 'minmax', 'maxa
 # Note: scaler is handled internally by the model, not set on config object
 # Note: nan_method and nan_k are internal constants (not user-configurable)
 
+# Tent weights for mixed-frequency aggregation
+# 3-period tent kernel for monthly->weekly aggregation
+tent_weights:
+  m:w: [1, 2, 1]  # 3-period tent kernel for monthly->weekly aggregation
+
 # Block Structure for Macroeconomic Data
-# Simplified for faster testing - reduced to 2 blocks with essential series
-# Series can appear in multiple blocks to capture different factor structures
+# Single global block for all series
+# Series order: clock-frequency (weekly) first, then slower-frequency (monthly)
 blocks:
-  Block_Real:
-    num_factors: 2  # Real economy factors (production, employment, consumption, investment)
+  Block_Global:
+    num_factors: 5  # Number of factors for global block
     series:
-      - KOCONPRCF  # Production
-      - KOEMPTOTO  # Total employment
-      - KOHWRWEMP  # Hours worked
-      - KOWRCCNSE  # Consumption
-      - KOIMPCONA  # Investment
-  Block_Prices_Financial:
-    num_factors: 2  # Price, financial, and survey factors (combined for testing)
-    series:
-      - KOCPCOREF  # Consumer prices
-      - KOCPEXFEF  # Export prices
-      - KOWRCCNSE  # Consumption (overlap with Block_Real)
-      - KOCREU..A  # Credit
-      - KOLRLTHH  # Interest rates
-      - KOBSIHAPR  # Business survey
-      - KOCNFCONR  # Confidence
+      # Weekly series (clock frequency) - must come first
+      - KORFBEV  # Retail, Food & Beverages (weekly)
+      - KORWHLS  # Retail, Wholesale (weekly)
+      - KORMCMP  # Retail, Miscellaneous & Comparison (weekly)
+      - KORELEC  # Retail, Electronics (weekly)
+      - KORCNST  # Retail, Construction (weekly)
+      - KORMACH  # Retail, Machinery (weekly)
+      - KOROCOINF  # Retail, Other Consumer & Information (weekly)
+      # Monthly series (slower than clock) - must come after clock-frequency series
+      - KOEMPTOTO  # Total employment (monthly)
+      - KOHWRWEMP  # Hours worked (monthly)
+      - KOWRCDURE  # Durable goods consumption (monthly)
+      - KOCONPRCF  # Production (monthly)
+      - KOEQUIPTE  # Investment, Equipment (monthly, target series)
+      - KOWRCCNSE  # Consumption (monthly, target series)
+      - KOIMPCONA  # Investment, Construction (monthly, target series)
 
 # Frequency mapping for mixed-frequency macro data
 # Clock is weekly (w), so monthly series are slower frequency
 # Grouped format: frequencies are specified as lists grouped by frequency code
-# Reduced set for faster testing (~50% reduction: 18 monthly series kept from original ~36)
 frequency:
   # Monthly series (slower than weekly clock) - typically end-of-month observations
-  # Block_Real series
+  # These are the series used in the tutorial
   m:
     - KOEMPTOTO  # Total employment (monthly)
     - KOHWRWEMP  # Hours worked (monthly)
-    - KOIMPCONA  # Investment, Construction (monthly)
-    - KOWRCCNSE  # Consumption (monthly)
+    - KOWRCDURE  # Durable goods consumption (monthly)
     - KOCONPRCF  # Production (monthly)
-    # Block_Prices_Financial series
-    - KOCPCOREF  # Consumer prices (monthly)
-    - KOCPEXFEF  # Export prices (monthly)
-    - KOCREU..A  # Credit (monthly)
-    - KOLRLTHH  # Interest rates (monthly)
-    - KOBSIHAPR  # Business survey (monthly)
-    - KOCNFCONR  # Confidence (monthly)
-    # Target series
     - KOEQUIPTE  # Investment, Equipment (monthly, target series)
-  # Weekly series (same as clock frequency)
+    - KOWRCCNSE  # Consumption (monthly, target series)
+    - KOIMPCONA  # Investment, Construction (monthly, target series)
+  # Weekly series (same as clock frequency - these appear every week like the clock)
+  # This is a mixed-frequency example: clock is weekly, but monthly series are slower
+  # The tutorial now respects YAML frequencies for proper mixed-frequency handling
+  # These weekly series are available in the data at clock frequency
   w:
     - KORFBEV  # Retail, Food & Beverages (weekly)
     - KORWHLS  # Retail, Wholesale (weekly)

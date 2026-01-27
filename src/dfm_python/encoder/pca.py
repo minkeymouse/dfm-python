@@ -56,8 +56,11 @@ def compute_principal_components(
     
     n_series = cov_matrix.shape[0]
     
+    
+    
     try:
         eigenvalues, eigenvectors = np.linalg.eigh(cov_matrix)
+        
         # Sort by absolute value, descending
         sort_idx = np.argsort(np.abs(eigenvalues))[::-1][:n_components]
         eigenvalues_sorted = eigenvalues[sort_idx]

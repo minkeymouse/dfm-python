@@ -30,9 +30,9 @@ from ...numeric.stability import (
     create_scaled_identity,
 )
 from ...numeric.estimator import (
-    estimate_ar1_unified,
-    estimate_variance_unified,
-    estimate_var_unified,
+    estimate_ar1,
+    estimate_variance,
+    estimate_var,
     compute_initial_covariance_from_transition,
 )
 from ...utils.helper import handle_linear_algebra_error
@@ -118,7 +118,9 @@ def initialize_clock_freq_idio(
         default_noise = _DEFAULT_EM_CONFIG.default_process_noise
         
         for i, idx in enumerate(idio_indices):
-            res_i = data_with_nans[:, idx]
+            # Bug fix 1.1: Use same array for mask computation and slicing
+            # Compute mask from res (data_for_extraction) to match the array we'll slice
+            res_i = res[:, idx]
             non_nan_mask = ~np.isnan(res_i)
             if np.sum(non_nan_mask) > 1:
                 first_non_nan = np.where(non_nan_mask)[0][0]
@@ -130,7 +132,7 @@ def initialize_clock_freq_idio(
                         # Use unified AR(1) estimation with raw data
                         y_ar = res_i_clean[1:]
                         x_ar = res_i_clean[:-1].reshape(-1, 1)
-                        A_diag, Q_diag = estimate_ar1_unified(
+                        A_diag, Q_diag = estimate_ar1(
                             y=y_ar.reshape(-1, 1),  # (T-1 x 1)
                             x=x_ar,  # (T-1 x 1)
                             V_smooth=None,  # Raw data mode
@@ -155,12 +157,18 @@ def initialize_clock_freq_idio(
                 SM[i, i] = default_noise
         
         # Initial covariance for clock frequency idio
+        # Bug fix 1.2: Correct AR(1) initial variance formula: Var(u) = σ²/(1-ρ²)
+        # For diagonal case: initViM[i,i] = SM[i,i] / (1 - BM[i,i]²)
         def _compute_initViM() -> np.ndarray:
-            eye_BM = create_scaled_identity(n_idio_clock, DEFAULT_IDENTITY_SCALE, dtype=dtype)
-            BM_sq = BM ** 2
-            diag_inv = DEFAULT_IDENTITY_SCALE / np.diag(eye_BM - BM_sq)
-            diag_inv = np.where(np.isfinite(diag_inv), diag_inv, np.full_like(diag_inv, DEFAULT_IDENTITY_SCALE))
-            return np.diag(diag_inv) @ SM
+            initViM = np.zeros_like(SM)
+            for i in range(n_idio_clock):
+                denominator = 1.0 - BM[i, i] ** 2
+                if abs(denominator) > 1e-10 and np.isfinite(denominator):
+                    initViM[i, i] = SM[i, i] / denominator
+                else:
+                    # Fallback for near-unity AR coefficient
+                    initViM[i, i] = SM[i, i] * DEFAULT_IDENTITY_SCALE
+            return initViM
         
         initViM = handle_linear_algebra_error(
             _compute_initViM, "initial covariance computation",
@@ -229,8 +237,10 @@ def initialize_block_loadings(
         Extracted factors (T x num_factors)
     """
     from ...encoder.pca import compute_principal_components
-    from ...numeric.estimator import estimate_constrained_ols_unified
+    from ...numeric.estimator import estimate_constrained_ols
     from ...config.constants import DEFAULT_REGULARIZATION, DEFAULT_TENT_KERNEL_REGULARIZATION_MULTIPLIER
+    
+    
     
     T = data_for_extraction.shape[0]
     C_i = np.zeros((N, num_factors * max_lag_size), dtype=dtype)
@@ -256,27 +266,24 @@ def initialize_block_loadings(
             0.0
         )
         
-        # Compute covariance matrix (only over valid observations)
+        # Compute covariance matrix efficiently
+        # Use cleaned data directly (NaN already replaced with 0) for faster computation
         if clock_freq_data_centered_clean.shape[0] <= 1:
             cov_data = create_scaled_identity(len(clock_freq_indices), DEFAULT_IDENTITY_SCALE, dtype=dtype)
         elif len(clock_freq_indices) == 1:
             cov_data = np.atleast_2d(np.nanvar(clock_freq_data_centered, axis=0, ddof=0))
         else:
-            # Use nan-aware covariance for proper handling of missing values
-            # np.cov with NaN will produce NaN, so compute manually with nan-aware stats
-            valid_mask = np.all(np.isfinite(clock_freq_data_centered), axis=1)
-            if valid_mask.sum() > 1:
-                valid_data = clock_freq_data_centered[valid_mask, :]
-                cov_data = np.cov(valid_data.T)
-                cov_data = (cov_data + cov_data.T) / 2  # Ensure symmetry
-            else:
-                # Fallback: use identity if insufficient valid observations
-                cov_data = create_scaled_identity(len(clock_freq_indices), DEFAULT_IDENTITY_SCALE, dtype=dtype)
+            # Use cleaned data directly for covariance (faster than filtering)
+            # Since NaN was replaced with 0, we can compute covariance directly
+            cov_data = np.cov(clock_freq_data_centered_clean.T)
+            cov_data = (cov_data + cov_data.T) / 2  # Ensure symmetry
         
         try:
             # PCA can extract at most min(n_series, num_factors) components
             max_extractable = min(len(clock_freq_indices), num_factors)
+            
             _, eigenvectors = compute_principal_components(cov_data, max_extractable, block_idx=0)
+            
             loadings = eigenvectors
             # Ensure positive sign convention
             loadings = np.where(np.sum(loadings, axis=0) < 0, -loadings, loadings)
@@ -292,13 +299,17 @@ def initialize_block_loadings(
         # Extract only the actual factors (non-zero columns) for computing factors matrix
         # Handle NaN in data_for_extraction: NaN * loadings = NaN (preserved for Kalman filter)
         n_actual_factors = min(len(clock_freq_indices), num_factors)
+        
         factors = data_for_extraction[:, clock_freq_indices] @ loadings[:, :n_actual_factors]
+        
         # NaN values are preserved - will be handled by Kalman filter via masked arrays during EM
         
         # Pad factors matrix to expected shape if needed
         if factors.shape[1] < num_factors:
             padding = np.zeros((factors.shape[0], num_factors - factors.shape[1]), dtype=dtype)
             factors = np.hstack([factors, padding])
+    
+    
     
     # Slower frequency series: constrained least squares
     if R_mat is not None and q is not None and len(slower_freq_indices) > 0:
@@ -322,19 +333,28 @@ def initialize_block_loadings(
             series_data = data_with_nans[tent_kernel_size:, series_idx_int]
             non_nan_mask = ~np.isnan(series_data)
             
-            # Use imputed data if insufficient non-NaN values (following FRBNY pattern)
+            # For mixed-frequency: monthly series on weekly clock have many missing values (expected)
+            # Use imputed data ONLY if insufficient non-NaN values for regression
+            # But still use only non-missing observations for alignment (original FRBNY pattern)
             min_required = slower_freq_factors.shape[1] + 2
+            use_imputed = False
             if np.sum(non_nan_mask) < min_required:
                 # Try data_for_extraction first (may already be imputed)
                 series_data_attempt = data_for_extraction[tent_kernel_size:, series_idx_int]
                 if np.sum(~np.isnan(series_data_attempt)) < min_required and impute_func is not None:
                     # Fallback: use imputation function (only for initialization)
-                    series_data = impute_func(series_data)
+                    series_data_imputed = impute_func(series_data)
+                    # Use imputed data, but keep original non_nan_mask to use only actual observations
+                    series_data = series_data_imputed
+                    use_imputed = True
                     _logger.debug(f"      Using imputed data for series {series_idx_int} (insufficient observations)")
                 else:
                     series_data = series_data_attempt
-                non_nan_mask = np.ones(len(series_data), dtype=bool)
+                    # Update mask if data_for_extraction has more valid observations
+                    non_nan_mask = ~np.isnan(series_data)
             
+            # Use only non-missing observations (even if we imputed, align with actual data pattern)
+            # This ensures tent kernel factors align with weeks where monthly data actually exists
             slower_freq_factors_clean = slower_freq_factors[tent_kernel_size:][non_nan_mask, :]
             series_data_clean = series_data[non_nan_mask]
             
@@ -350,7 +370,7 @@ def initialize_block_loadings(
                 # Use significantly higher regularization for slower-frequency (tent kernel) series
                 # Increased multiplier handles extreme ill-conditioning (rcond ~1e-11)
                 reg = base_reg * DEFAULT_TENT_KERNEL_REGULARIZATION_MULTIPLIER
-                loadings_constrained = estimate_constrained_ols_unified(
+                loadings_constrained = estimate_constrained_ols(
                     y=series_data_clean,
                     X=slower_freq_factors_clean,
                     R=constraint_matrix_block,
@@ -361,11 +381,52 @@ def initialize_block_loadings(
                 )
                 # Validate loadings are finite
                 if np.any(~np.isfinite(loadings_constrained)):
-                    _logger.warning(f"Computed loadings contain non-finite values for series {series_idx_int}. Skipping.")
-                    continue
+                    # Fallback to default loadings that satisfy tent kernel constraints (FRBNY pattern)
+                    _logger.warning(
+                        f"Constrained OLS returned non-finite values for series {series_idx_int}. "
+                        f"Using default loadings that satisfy tent kernel constraints (FRBNY fallback pattern)."
+                    )
+                    # Extract tent weights from R_mat: R_mat[i, 0] = tent_weights[i+1]
+                    # For tent weights [1, 2, 1], R_mat[0, 0] = 2, R_mat[1, 0] = 1
+                    tent_weights = np.ones(tent_kernel_size, dtype=dtype)
+                    if R_mat is not None and R_mat.shape[0] > 0:
+                        # Extract tent weights from first column of R_mat
+                        # R_mat[i, 0] = tent_weights[i+1], so tent_weights[0] = 1 (by convention)
+                        tent_weights[0] = 1.0
+                        for i in range(min(R_mat.shape[0], tent_kernel_size - 1)):
+                            tent_weights[i + 1] = R_mat[i, 0]
+                    # Create default loadings: for each factor, apply tent kernel pattern
+                    # c0 = base value, c_i = tent_weights[i] * c0
+                    # Use larger default (0.1) for better numerical stability with sparse data
+                    c0 = 0.1  # Default base loading (increased from 0.01 for numerical stability)
+                    default_loadings = np.zeros(num_factors * tent_kernel_size, dtype=dtype)
+                    for f in range(num_factors):
+                        start_idx = f * tent_kernel_size
+                        for k in range(tent_kernel_size):
+                            default_loadings[start_idx + k] = c0 * tent_weights[k]
+                    loadings_constrained = default_loadings
                 C_i[series_idx_int, :num_factors * tent_kernel_size] = loadings_constrained
             except (np.linalg.LinAlgError, ValueError) as e:
-                _logger.warning(f"Failed to compute constrained loadings for series {series_idx_int}: {e}. Skipping.")
+                # Fallback to default loadings that satisfy tent kernel constraints
+                _logger.warning(
+                    f"Constrained OLS failed for series {series_idx_int}: {e}. "
+                    f"Using default loadings that satisfy tent kernel constraints (FRBNY fallback pattern)."
+                )
+                # Extract tent weights from R_mat
+                tent_weights = np.ones(tent_kernel_size, dtype=dtype)
+                if R_mat is not None and R_mat.shape[0] > 0:
+                    tent_weights[0] = 1.0
+                    for i in range(min(R_mat.shape[0], tent_kernel_size - 1)):
+                        tent_weights[i + 1] = R_mat[i, 0]
+                # Create default loadings with tent kernel pattern
+                # Use larger default (0.1) for better numerical stability with sparse data
+                c0 = 0.1  # Default base loading (increased from 0.01 for numerical stability)
+                default_loadings = np.zeros(num_factors * tent_kernel_size, dtype=dtype)
+                for f in range(num_factors):
+                    start_idx = f * tent_kernel_size
+                    for k in range(tent_kernel_size):
+                        default_loadings[start_idx + k] = c0 * tent_weights[k]
+                C_i[series_idx_int, :num_factors * tent_kernel_size] = default_loadings
     
     return C_i, factors
 
@@ -426,10 +487,17 @@ def initialize_block_transition(
     A_i = np.zeros((block_size, block_size), dtype=dtype)
     
     # Extract current and lagged states
+    # Bug fix 1.3: Correct VAR(p) regressor construction
+    # For VAR(p): y_t = A_1*y_{t-1} + ... + A_p*y_{t-p} + e_t
+    # lag_matrix structure: [lag_0, lag_1, ..., lag_{num_lags-1}]
+    # where each lag_i occupies columns [i*num_factors : (i+1)*num_factors]
+    # Current state (y_t) = lag_0 = columns 0:num_factors
+    # Lagged states [y_{t-1}, ..., y_{t-p}] = columns num_factors:(p+1)*num_factors
     n_cols = min(num_factors, lag_matrix.shape[1])
     current_state = lag_matrix[:, :n_cols] if n_cols > 0 else np.zeros((T, num_factors), dtype=dtype)
-    lag_cols = min(num_factors * (p + 1), lag_matrix.shape[1])
-    lagged_state = lag_matrix[:, num_factors:lag_cols] if lag_cols > num_factors else np.zeros((T, num_factors * p), dtype=dtype)
+    # For VAR(p), we need p lags, so lagged_state should be columns num_factors to (p+1)*num_factors
+    lag_cols_end = min(num_factors * (p + 1), lag_matrix.shape[1])
+    lagged_state = lag_matrix[:, num_factors:lag_cols_end] if lag_cols_end > num_factors else np.zeros((T, num_factors * p), dtype=dtype)
     
     # Initialize transition matrix
     default_A_block = create_scaled_identity(num_factors, default_transition_coef, dtype)
@@ -440,7 +508,7 @@ def initialize_block_transition(
     if T > p and lagged_state.shape[1] > 0:
         try:
             # Use unified VAR estimation (raw data mode)
-            A_transition, Q_transition = estimate_var_unified(
+            A_transition, Q_transition = estimate_var(
                 y=current_state[p:, :],  # Current state (T-p x num_factors)
                 x=lagged_state[p:, :],   # Lagged state (T-p x num_factors*p)
                 V_smooth=None,  # Raw data mode
@@ -626,8 +694,49 @@ def initialize_block_factors(
             # Update data_for_extraction: remove this block's contribution to get residuals for next block
             # After Block 1: data_for_extraction becomes residuals (original_data - Block1_contribution)
             # After Block 2: data_for_extraction becomes residuals (original_data - Block1 - Block2)
+            # 
+            # CRITICAL TIME-ALIGNMENT ASSERTION:
+            # With tent kernels, factor_t contributes to y_{t+k} (not y_t directly).
+            # However, for block residualization, we assume factor_t contributes to y_t.
+            # This is valid because:
+            # 1. Factors are extracted at clock frequency (aligned with clock-freq data)
+            # 2. Tent kernel expansion happens in state dimension, not time dimension
+            # 3. The residualization uses the factor values directly, which are already time-aligned
+            # 
+            # Assertion: factors and data must have same time dimension for valid residualization
             if data_for_extraction.shape[0] != slower_freq_factors.shape[0]:
+                # Truncate factors to match data time dimension
+                if slower_freq_factors.shape[0] > data_for_extraction.shape[0]:
+                    _logger.warning(
+                        f"Time alignment: Truncating slower_freq_factors from {slower_freq_factors.shape[0]} "
+                        f"to {data_for_extraction.shape[0]} timesteps for block residualization. "
+                        f"This may indicate timing misalignment."
+                    )
                 slower_freq_factors = slower_freq_factors[:data_for_extraction.shape[0], :]
+            
+            # Assert: factors and data are time-aligned (same T dimension)
+            # CRITICAL: With tent kernels, factor_t contributes to y_{t+k}, but for block residualization
+            # we assume factor_t contributes to y_t. This is valid because factors are extracted at
+            # clock frequency and are already time-aligned with clock-freq data.
+            if data_for_extraction.shape[0] != slower_freq_factors.shape[0]:
+                _logger.error(
+                    f"TIME ALIGNMENT VIOLATION in block residualization: "
+                    f"data_for_extraction has {data_for_extraction.shape[0]} timesteps, "
+                    f"slower_freq_factors has {slower_freq_factors.shape[0]} timesteps. "
+                    f"This breaks the assumption that factor_t contributes to y_t."
+                )
+            assert data_for_extraction.shape[0] == slower_freq_factors.shape[0], (
+                f"Time alignment violation: data_for_extraction has {data_for_extraction.shape[0]} timesteps, "
+                f"but slower_freq_factors has {slower_freq_factors.shape[0]} timesteps. "
+                f"This breaks the assumption that factor_t contributes to y_t in residualization."
+            )
+            _logger.debug(
+                f"Time alignment validated: data_for_extraction and slower_freq_factors both have "
+                f"{data_for_extraction.shape[0]} timesteps (block residualization safe)"
+            )
+            
+            # Compute residualization: data - factors @ C.T
+            # This assumes factor_t directly contributes to y_t (valid for clock-aligned factors)
             data_for_extraction = data_for_extraction - slower_freq_factors @ C_i[:, :num_factors_block * tent_kernel_size].T
             data_with_nans = data_for_extraction.copy()
             data_with_nans[indNaN] = np.nan
@@ -750,8 +859,8 @@ def initialize_observation_noise(
             R = create_scaled_identity(N_res, default_obs_noise, dtype)
         else:
             # Compute residuals (data itself, since we're initializing from raw data)
-            # estimate_variance_unified uses nan-aware variance if residuals contain NaN
-            R = estimate_variance_unified(
+            # estimate_variance uses nan-aware variance if residuals contain NaN
+            R = estimate_variance(
                 residuals=data_with_nans,  # Raw data as "residuals" for initialization (may contain NaN)
                 X=None,  # Not using smoothed expectations mode
                 EZ=None,
@@ -884,12 +993,21 @@ def initialize_parameters(
     )
     
     # Normalize C columns (vectorized for efficiency)
+    # NOTE: This normalization happens BEFORE Q, V_0, Z_0 are built,
+    # so invariance rescaling is not needed here. The normalized C will be used
+    # to build Q, V_0, Z_0, ensuring consistency from the start.
+    # In EM updates, normalization happens AFTER Q, V_0, Z_0 exist, so rescaling is required.
     norms = np.linalg.norm(C, axis=0)
     valid_mask = norms > MIN_EIGENVALUE
     if np.any(valid_mask):
         # Broadcasting: C[:, valid_mask] is (N, n_valid), norms[valid_mask] is (n_valid,)
         # Divide each column by its norm
         C[:, valid_mask] = C[:, valid_mask] / norms[valid_mask]
+        n_normalized = np.sum(valid_mask)
+        _logger.debug(
+            f"Initialization: Normalized {n_normalized}/{C.shape[1]} C columns "
+            f"(before Q, V_0, Z_0 construction - no rescaling needed)"
+        )
     
     # 3. Build observation noise R
     R = initialize_observation_noise(data_with_nans, N, idio_indicator, n_clock_freq, dtype)

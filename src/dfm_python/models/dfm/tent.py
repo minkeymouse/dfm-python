@@ -24,6 +24,7 @@ from ...config.constants import (
 
 
 def generate_tent_weights(n_periods: int, tent_type: str = 'symmetric') -> np.ndarray:
+    
     """Generate tent-shaped weights for aggregation.
     
     Parameters
@@ -67,7 +68,24 @@ def generate_tent_weights(n_periods: int, tent_type: str = 'symmetric') -> np.nd
             details=f"Invalid tent_type: {tent_type}"
         )
     
-    return weights.astype(int)
+    # Bug fix 1.1: Don't truncate non-integer weights (exponential, linear)
+    # Only convert to int if all values are already integers (symmetric case)
+    # For exponential/linear, preserve float precision
+    if tent_type in ('exponential', 'linear'):
+        # Keep as float - tent weights can be non-integer
+        return weights.astype(np.float32)
+    else:
+        # Symmetric tent should produce integers, but validate
+        if np.any(weights != np.round(weights)):
+            raise DataValidationError(
+                f"Symmetric tent weights should be integers, but got non-integer values: {weights}",
+                details=f"tent_type: {tent_type}, n_periods: {n_periods}"
+            )
+        result = weights.astype(int)
+        
+        
+        
+        return result
 
 
 def generate_R_mat(tent_weights: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
@@ -95,7 +113,26 @@ def generate_R_mat(tent_weights: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     q : np.ndarray
         Constraint vector of zeros, shape (n-1,)
     """
+    # Bug fix 4.4: Validate tent weights
+    if len(tent_weights) == 0:
+        raise DataValidationError(
+            "Tent weights array is empty",
+            details="tent_weights must have at least one element"
+        )
+    if np.any(tent_weights <= 0):
+        raise DataValidationError(
+            f"Tent weights must be positive, but got: {tent_weights}",
+            details="All tent weights must be > 0"
+        )
+    if np.sum(tent_weights) <= 0:
+        raise DataValidationError(
+            f"Tent weights sum must be > 0, but got sum: {np.sum(tent_weights)}",
+            details=f"tent_weights: {tent_weights}"
+        )
+    
     n = len(tent_weights)
+    
+    
     
     # Create constraint matrix: (n-1) rows × n columns
     R_mat = np.zeros((n - 1, n))
@@ -107,6 +144,8 @@ def generate_R_mat(tent_weights: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     for i in range(n - 1):
         R_mat[i, 0] = tent_weights[i + 1]  # Weight at index i+1
         R_mat[i, i + 1] = -1  # Always -1 (not -tent_weights[i+1])
+    
+    
     
     return R_mat, q
 
@@ -175,9 +214,19 @@ def get_agg_structure(
         - 'clock': str
             The clock frequency used
     """
+    
+    
     # Get frequencies from config (new API: frequency dict)
     frequencies_list = config.get_frequencies()
+    # Bug fix 4.1: Preserve frequency counts, don't use set() which loses multiplicity
+    # We still need unique frequencies for iteration, but we'll track counts separately
     frequencies = set(frequencies_list) if frequencies_list else set()
+    # Track frequency counts for validation
+    from collections import Counter
+    frequency_counts = Counter(frequencies_list) if frequencies_list else Counter()
+    
+    
+    
     structures = {}
     tent_weights = {}
     n_periods_map = {}
@@ -188,8 +237,10 @@ def get_agg_structure(
     
     if config_tent_weights is None:
         # No tent weights in config - check if any slower frequencies exist
+        # Bug fix 4.3: Use DEFAULT_HIERARCHY_VALUE consistently instead of hardcoded 999
+        clock_hierarchy = FREQUENCY_HIERARCHY.get(clock, DEFAULT_HIERARCHY_VALUE)
         slower_freqs = [freq for freq in frequencies 
-                       if FREQUENCY_HIERARCHY.get(freq, 999) > FREQUENCY_HIERARCHY.get(clock, 0)]
+                       if FREQUENCY_HIERARCHY.get(freq, DEFAULT_HIERARCHY_VALUE) > clock_hierarchy]
         if slower_freqs:
             raise DataValidationError(
                 f"Mixed-frequency data detected (slower frequencies: {slower_freqs}) but no tent_weights "
@@ -198,8 +249,11 @@ def get_agg_structure(
                 details=f"Slower frequencies detected: {slower_freqs}, clock: {clock}"
             )
     
+    # Bug fix 4.3: Use DEFAULT_HIERARCHY_VALUE consistently
+    clock_hierarchy_val = FREQUENCY_HIERARCHY.get(clock, DEFAULT_HIERARCHY_VALUE)
     for freq in frequencies:
-        if FREQUENCY_HIERARCHY.get(freq, 999) > FREQUENCY_HIERARCHY.get(clock, 0):
+        freq_hierarchy_val = FREQUENCY_HIERARCHY.get(freq, DEFAULT_HIERARCHY_VALUE)
+        if freq_hierarchy_val > clock_hierarchy_val:
             # This frequency is slower than clock, get tent weights from config
             tent_w = None
             
@@ -230,22 +284,35 @@ def get_agg_structure(
                 if not isinstance(tent_w, np.ndarray):
                     tent_w = np.array(tent_w)
                 
-                # Check size limit
-                if len(tent_w) <= MAX_TENT_SIZE:
-                    # Tent kernel available and within size limit
-                    tent_weights[freq] = tent_w
-                    n_periods_map[freq] = len(tent_w)
-                    # Generate R_mat from tent weights
-                    R_mat, q = generate_R_mat(tent_w)
-                    structures[(freq, clock)] = (R_mat, q)
-            # If tent kernel not available or too large, use missing data approach (no structure needed)
+                # Bug fix 4.2: Warn/raise when tent size exceeds MAX_TENT_SIZE
+                if len(tent_w) > MAX_TENT_SIZE:
+                    raise DataValidationError(
+                        f"Tent kernel size {len(tent_w)} exceeds maximum allowed size {MAX_TENT_SIZE} "
+                        f"for frequency '{freq}'. For frequency gaps larger than {MAX_TENT_SIZE}, "
+                        f"use the missing data approach instead. Please reduce tent kernel size or "
+                        f"remove tent_weights for this frequency pair.",
+                        details=f"Frequency: {freq}, tent_size: {len(tent_w)}, MAX_TENT_SIZE: {MAX_TENT_SIZE}"
+                    )
+                
+                # Tent kernel available and within size limit
+                tent_weights[freq] = tent_w
+                n_periods_map[freq] = len(tent_w)
+                # Generate R_mat from tent weights
+                R_mat, q = generate_R_mat(tent_w)
+                structures[(freq, clock)] = (R_mat, q)
+                
+                
     
-    return {
+    result = {
         'structures': structures,
         'tent_weights': tent_weights,
         'n_periods': n_periods_map,
         'clock': clock
     }
+    
+    
+    
+    return result
 
 
 def group_by_freq(
@@ -287,10 +354,17 @@ def group_by_freq(
     freq_groups: Dict[str, list] = {}
     faster_indices = []
     
+    
+    
     for idx in idx_i:
+        # Bug fix 5.1: Raise error instead of silently skipping out-of-bounds indices
         if idx >= len(frequencies):
-            # Index out of bounds - skip
-            continue
+            raise DataValidationError(
+                f"Index {idx} is out of bounds for frequencies array (length {len(frequencies)}). "
+                f"This indicates a mismatch between series indices and frequency data. "
+                f"All indices in idx_i must be < len(frequencies).",
+                details=f"idx: {idx}, frequencies length: {len(frequencies)}, idx_i: {idx_i[:10]}..."
+            )
         
         freq = frequencies[idx]
         freq_hierarchy = FREQUENCY_HIERARCHY.get(freq, DEFAULT_HIERARCHY_VALUE)
@@ -314,7 +388,11 @@ def group_by_freq(
         )
     
     # Convert lists to numpy arrays
-    return {freq: np.array(indices, dtype=int) for freq, indices in freq_groups.items()}
+    result = {freq: np.array(indices, dtype=int) for freq, indices in freq_groups.items()}
+    
+    
+    
+    return result
 
 
 __all__ = [

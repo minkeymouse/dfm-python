@@ -29,6 +29,10 @@ from ...config.constants import (
     DEFAULT_CLOCK_FREQUENCY,
     DEFAULT_FACTOR_ORDER,
     DEFAULT_ZERO_VALUE,
+    FREQUENCY_HIERARCHY,
+    DEFAULT_HIERARCHY_VALUE,
+    MAX_STD_UNSCALED,
+    MIN_STD_SCALED,
 )
 from ...logger import get_logger
 from ..base import BaseFactorModel
@@ -300,25 +304,83 @@ class DFM(BaseFactorModel):
         DFMModelState
             Complete model state including structure, mixed-frequency parameters, and fitted state-space parameters
         """
+        # Bug fix 1.3: Clear cached smoothed factors on retrain
+        self._cached_smoothed_factors = None
+        self._result = None  # Also clear result cache
+        
         # Clear all caches for fresh training run (ensures no stale data from previous runs)
         if self._config is not None and hasattr(self._config, '_cached_blocks'):
             self._config._cached_blocks = None
         
+        # Bug fix 1.1: Use X parameter if provided, otherwise extract from dataset
         # Extract data from DFMDataset (variables and time_index are extracted at initialization)
         # Dataset provides: variables (DataFrame) and time_index (TimeIndex)
         dataset = self._dataset
-        data_df = dataset.variables  # Extract variables DataFrame
-        X_np = data_df.values  # Convert to numpy array
-        columns = list(data_df.columns)
+        if X is not None:
+            # Use provided X - convert to numpy if needed
+            if isinstance(X, np.ndarray):
+                X_np = X
+                # Get columns from dataset for validation
+                data_df = dataset.variables
+                columns = list(data_df.columns)
+                if X_np.shape[1] != len(columns):
+                    raise DataValidationError(
+                        f"Provided X has {X_np.shape[1]} columns but dataset has {len(columns)} columns. "
+                        f"Column count must match.",
+                        details=f"X shape: {X_np.shape}, dataset columns: {columns[:5]}..."
+                    )
+            else:
+                # Convert DataFrame to numpy
+                X_np = np.asarray(X)
+                if hasattr(X, 'columns'):
+                    columns = list(X.columns)
+                else:
+                    data_df = dataset.variables
+                    columns = list(data_df.columns)
+        else:
+            # Extract from dataset (original behavior)
+            data_df = dataset.variables  # Extract variables DataFrame
+            X_np = data_df.values  # Convert to numpy array
+            columns = list(data_df.columns)
         
         # Get clock frequency from config
         clock = getattr(self._config, 'clock', DEFAULT_CLOCK_FREQUENCY)
         
+        # Bug fix 2.2: Store column names for validation (column order validation happens after standardization)
+        # Store column names for later validation in update()
+        self._training_columns = columns
+        
+        # Bug fix 1.2: Check if scaler is already fitted before fit_transform
         # Standardize data if scaler is available
         if self.scaler is not None:
-            X_np_std = self.scaler.fit_transform(X_np)
+            # Check if scaler is already fitted (has mean_ or scale_ attributes)
+            is_fitted = hasattr(self.scaler, 'mean_') and self.scaler.mean_ is not None
+            if is_fitted:
+                # Already fitted - only transform
+                X_np_std = self.scaler.transform(X_np)
+            else:
+                # Not fitted - fit and transform
+                X_np_std = self.scaler.fit_transform(X_np)
         else:
             X_np_std = X_np
+        
+        # GUARDRAIL: Validate data scaling after preprocessing
+        # Principle 4: Make preprocessing a contract, not a suggestion
+        # Unscaled data (e.g., raw FX levels) causes numerical instability and slow runs
+        # Check AFTER scaler is applied (if provided) to catch cases where scaler wasn't applied
+        data_std = np.nanstd(X_np_std, axis=0)
+        unscaled_series = np.where((data_std > MAX_STD_UNSCALED) | (data_std < MIN_STD_SCALED))[0]
+        if len(unscaled_series) > 0:
+            unscaled_names = [columns[i] for i in unscaled_series[:5]]  # Show first 5
+            raise DataValidationError(
+                f"Input data appears unscaled after preprocessing. Series with problematic std: {unscaled_names}... "
+                f"(std range: [{np.min(data_std):.2e}, {np.max(data_std):.2e}]). "
+                f"Please apply a scaler (e.g., StandardScaler) before fitting the model. "
+                f"Unscaled data causes numerical instability, excessive stabilization, and slow convergence.",
+                details=f"Expected std range: [{MIN_STD_SCALED:.2e}, {MAX_STD_UNSCALED:.2e}]. "
+                       f"Found {len(unscaled_series)}/{len(columns)} series outside this range. "
+                       f"Scaler provided: {self.scaler is not None}"
+            )
         
         # Build blocks array to match actual data dimensions
         N_actual = X_np_std.shape[1]
@@ -327,6 +389,10 @@ class DFM(BaseFactorModel):
         
         # Setup mixed-frequency parameters
         mf_params = setup_mixed_frequency_params(self._config, clock, columns, N_actual)
+        
+        # CRITICAL: Column ordering validation is now enforced in setup_mixed_frequency_params()
+        # It will raise DataValidationError if [clock series | slower series] ordering is violated
+        # This is a hard requirement for correct mixed-frequency handling
 
         self._mixed_freq        = mf_params['mixed_freq']
         self._constraint_matrix = mf_params['R_mat']
@@ -622,15 +688,35 @@ class DFM(BaseFactorModel):
             self._training_num_iter = training_metadata['num_iter']
             self._training_converged = training_metadata['converged']
             
-            # Invalidate cached result
+            # CRITICAL: Invalidate cached smoothed factors on retrain
+            # Cached factors become stale after parameter updates
             self._result = None
+            self._cached_smoothed_factors = None
+            _logger.debug("Invalidated cached smoothed factors due to retrain")
         else:
             # Only update state via Kalman filter
             result = self._ensure_result()
             
             # Get last smoothed state as initial state for new data
             Z_last = self._get_last_state(result)
-            V_last = result.V_0
+            
+            # Bug fix 1.4: Use last filtered covariance, not initial covariance V_0
+            # V_0 is initial state covariance, not the covariance of the last filtered state
+            # We need to run filter once to get the last filtered covariance
+            kalman_temp = self._create_kalman_filter()
+            y_masked_temp = np.ma.masked_invalid(self.data_processed)
+            # Run filter to get filtered covariances
+            filtered_states, filtered_covariances = kalman_temp.filter(y_masked_temp)
+            # Get last filtered covariance (T x m x m) -> (m x m)
+            if filtered_covariances.shape[0] > 0:
+                V_last = filtered_covariances[-1, :, :]
+            else:
+                # Fallback to initial covariance if no filtered states
+                V_last = result.V_0
+                _logger.warning(
+                    "No filtered covariances available, using initial covariance V_0. "
+                    "This may underestimate uncertainty in update()."
+                )
             
             # Create Kalman filter
             kalman_new = self._create_kalman_filter(
@@ -660,6 +746,12 @@ class DFM(BaseFactorModel):
             result.Z = np.vstack([result.Z, Z_new])
             self.data_processed = np.vstack([self.data_processed, data_new])
             result.x_sm = result.Z @ result.C.T
+            
+            # CRITICAL: Invalidate cached smoothed factors after update
+            # Cached factors are now stale because result.Z was mutated
+            self._cached_smoothed_factors = None
+            self._result = result  # Update cached result with new Z
+            _logger.debug("Invalidated cached smoothed factors after update() - result.Z was mutated")
     
     def load_config(
         self,

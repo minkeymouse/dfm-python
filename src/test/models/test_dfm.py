@@ -90,3 +90,104 @@ class TestDFM:
         """Test find_slower_frequency returns frequency from hierarchy."""
         slower_freq = find_slower_frequency('d', None)
         assert slower_freq is None or isinstance(slower_freq, str)
+    
+    @pytest.fixture
+    def mixed_freq_dataset_sparse_monthly(self):
+        """Create mixed-frequency dataset with sparse monthly data (expected pattern).
+        
+        In mixed-frequency setups, monthly series on weekly clock should have
+        many missing values (~80-90% missing). This is expected behavior, not an error.
+        """
+        np.random.seed(42)
+        T = 200  # 200 weeks
+        n_weekly = 3
+        n_monthly = 2
+        
+        # Create weekly data (all observations present)
+        dates = pd.date_range(start='2020-01-01', periods=T, freq='W')
+        weekly_data = np.random.randn(T, n_weekly)
+        
+        # Create monthly data with sparse observations (only ~15-20% of weeks have data)
+        # Monthly data typically appears at month-end weeks
+        monthly_data = np.full((T, n_monthly), np.nan)
+        monthly_indices = np.arange(0, T, step=4)  # Roughly monthly (every 4 weeks)
+        monthly_indices = monthly_indices[:int(T * 0.15)]  # ~15% of weeks have monthly data
+        monthly_data[monthly_indices, :] = np.random.randn(len(monthly_indices), n_monthly)
+        
+        # Combine: weekly first, then monthly (required ordering)
+        all_data = np.hstack([weekly_data, monthly_data])
+        columns = [f'weekly_{i}' for i in range(n_weekly)] + [f'monthly_{i}' for i in range(n_monthly)]
+        
+        data = pd.DataFrame(all_data, columns=columns, index=dates)
+        data = data.reset_index()
+        data.rename(columns={'index': 'date'}, inplace=True)
+        
+        config = DFMConfig(
+            blocks={
+                'Block_Global': {
+                    'num_factors': 2,
+                    'series': columns
+                }
+            },
+            frequency={
+                'w': [f'weekly_{i}' for i in range(n_weekly)],
+                'm': [f'monthly_{i}' for i in range(n_monthly)]
+            },
+            clock='w',
+            tent_weights={'m:w': [1, 2, 1]}  # Tent kernel for monthly-to-weekly aggregation
+        )
+        
+        return DFMDataset(config=config, data=data, time_index='date')
+    
+    def test_mixed_freq_initialization_sparse_monthly(self, mixed_freq_dataset_sparse_monthly):
+        """Test that mixed-frequency initialization handles sparse monthly data correctly.
+        
+        Monthly series on weekly clock should have many missing values (expected).
+        Initialization should:
+        1. Use imputation for regression if insufficient observations
+        2. Still align tent kernel factors with actual monthly observations
+        3. Initialize loadings (not all zeros) even with sparse data
+        4. Complete initialization without errors
+        """
+        dataset = mixed_freq_dataset_sparse_monthly
+        
+        # Verify data has expected sparsity
+        monthly_cols = [col for col in dataset.variables.columns if col.startswith('monthly_')]
+        for col in monthly_cols:
+            missing_ratio = dataset.variables[col].isna().sum() / len(dataset.variables)
+            assert missing_ratio > 0.7, f"Monthly series {col} should have >70% missing (got {missing_ratio:.1%})"
+        
+        # Create and fit model
+        model = DFM(dataset=dataset, config=dataset.config)
+        
+        # Fit should complete without errors
+        state = model.fit()
+        
+        # Verify state is initialized
+        assert state is not None
+        assert hasattr(state, 'A')
+        assert hasattr(state, 'C')
+        assert hasattr(state, 'Q')
+        assert hasattr(state, 'R')
+        
+        # Verify C matrix has non-zero loadings for monthly series
+        # (even if sparse, initialization should produce some loadings)
+        monthly_indices = [i for i, col in enumerate(dataset.variables.columns) if col.startswith('monthly_')]
+        for idx in monthly_indices:
+            monthly_loadings = state.C[idx, :]
+            # At least some loadings should be non-zero (not all skipped)
+            # Note: if all loadings are zero, it means initialization failed for that series
+            assert np.any(np.abs(monthly_loadings) > 1e-10), \
+                f"Monthly series {idx} has all-zero loadings - initialization may have failed"
+        
+        # Verify matrices have correct shapes
+        assert state.A.shape[0] == state.A.shape[1], "A should be square"
+        assert state.C.shape[0] == len(dataset.variables.columns), "C rows should match number of series"
+        assert state.Q.shape == state.A.shape, "Q should match A shape"
+        assert state.R.shape[0] == len(dataset.variables.columns), "R should match number of series"
+        
+        # Verify no NaN or Inf in initialized matrices
+        assert np.all(np.isfinite(state.A)), "A should not contain NaN/Inf"
+        assert np.all(np.isfinite(state.C)), "C should not contain NaN/Inf"
+        assert np.all(np.isfinite(state.Q)), "Q should not contain NaN/Inf"
+        assert np.all(np.isfinite(state.R)), "R should not contain NaN/Inf"

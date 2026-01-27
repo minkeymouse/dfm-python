@@ -29,72 +29,15 @@ scaler: standard  # Scaler for all series: 'standard', 'robust', 'minmax', 'maxa
 # Note: nan_method and nan_k are internal constants (not user-configurable)
 
 # Block Structure for Financial Data
-# Reduced series for testing (3-5 series per block)
+# Single global block for all series
 blocks:
   Block_Global:
-    num_factors: 2  # Global market factors (risk-on/risk-off, liquidity, etc.)
-    series:
-      - E1  # Equity indicator
-      - I1  # Interest rate indicator
-      - M1  # Market indicator
-      - P1  # Price indicator
-  Block_Equity:
-    num_factors: 2  # Equity market factors (reduced from 20 to 5 for testing)
-    series:
-      - E1
-      - E2
-      - E3
-      - E4
-      - E5
-  Block_Interest:
-    num_factors: 2  # Interest rate factors (reduced from 9 to 5 for testing)
-    series:
-      - I1
-      - I2
-      - I3
-      - I4
-      - I5
-  Block_Market:
-    num_factors: 2  # Market factors (reduced from 18 to 5 for testing)
-    series:
-      - M1
-      - M2
-      - M3
-      - M4
-      - M5
-  Block_Price:
-    num_factors: 1  # Price factors (reduced from 13 to 4 for testing)
-    series:
-      - P1
-      - P2
-      - P3
-      - P4
-  Block_Spread:
-    num_factors: 1  # Spread factors (reduced from 12 to 4 for testing)
-    series:
-      - S1
-      - S2
-      - S3
-      - S4
-  Block_Volatility:
-    num_factors: 1  # Volatility factors (reduced from 13 to 4 for testing)
-    series:
-      - V1
-      - V2
-      - V3
-      - V4
-  Block_Debt:
-    num_factors: 1  # Debt factors (reduced from 9 to 4 for testing)
-    series:
-      - D1
-      - D2
-      - D3
-      - D4
+    num_factors: 2  # Number of factors for global block
+    series: []  # Will be populated from data
 
 # Frequency mapping for financial data
-# If not specified, all series use clock frequency (monthly)
-# Uncomment and customize based on your dataset:
-# frequency:
-#   market_forward_excess_returns: m  # Monthly target
-#   D1: m  # Monthly debt indicators
-#   E1: m  # Monthly equity indicators
+# All series are monthly (same as clock frequency)
+# Grouped format: frequencies are specified as lists grouped by frequency code
+frequency:
+  # Monthly series (same as clock frequency)
+  m: []  # Will be populated from data

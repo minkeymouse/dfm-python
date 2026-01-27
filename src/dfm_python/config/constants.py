@@ -35,6 +35,29 @@ DEFAULT_VARIANCE_FALLBACK = 1.0  # Default variance fallback value for numerical
 # Maximum eigenvalues
 MAX_EIGENVALUE = 1e3  # Maximum eigenvalue cap (reduced to 1e3 to improve condition number: 1e3/1e-6 = 1e9)
 
+# ============================================================================
+# Performance and Numerical Health Guardrails
+# ============================================================================
+
+# Time budgets (hard limits to prevent pathological runs)
+# Single constraint: 10 minutes for all datasets
+MAX_ESTEP_SECONDS = 600.0  # Maximum E-step time (Kalman filter + smoother) - 10 minutes
+MAX_MSTEP_SECONDS = 600.0  # Maximum M-step time (parameter updates) - 10 minutes
+MAX_EM_ITERATION_SECONDS = 1200.0  # Maximum total EM iteration time - 20 minutes
+MAX_FIRST_ITERATION_SECONDS = 600.0  # Maximum first iteration E-step time (diagnostic) - 10 minutes
+
+# Numerical health thresholds (fail fast on pathological regimes)
+# Note: Condition number check is more lenient during initialization (first iteration)
+MAX_CONDITION_NUMBER_SMOOTHER = 1e8  # Maximum condition number before refusing to smooth (increased from 1e7)
+MAX_CONDITION_NUMBER_INIT = 1e10  # Maximum condition number during initialization (more lenient)
+MAX_STABILIZATION_AMOUNT = 1e-3  # Maximum stabilization amount before error (increased from 1e-4 to 0.1% diagonal loading)
+MAX_STABILIZATION_AMOUNT_INIT = 5e-3  # Maximum stabilization during initialization (more lenient)
+MAX_STD_UNSCALED = 100.0  # Maximum standard deviation for unscaled data (indicates missing preprocessing)
+MIN_STD_SCALED = 1e-4  # Minimum standard deviation for scaled data (indicates degenerate series)
+
+# Fallback tracking
+MAX_FALLBACKS_PER_ITERATION = 0  # Maximum allowed fallbacks per iteration (0 = fail on any fallback)
+
 # Eigenvalue stability thresholds
 DEFAULT_EIGENVALUE_MAX_MAGNITUDE = 1.0  # Default maximum eigenvalue magnitude for stability checks
 DEFAULT_EIGENVALUE_WARN_THRESHOLD = 0.99  # Default warning threshold for near-unstable eigenvalues
@@ -566,5 +589,17 @@ __all__ = [
     # Frequency hierarchy and tent kernels
     'FREQUENCY_HIERARCHY',
     'MAX_TENT_SIZE',
+    # Performance and numerical health guardrails
+    'MAX_ESTEP_SECONDS',
+    'MAX_MSTEP_SECONDS',
+    'MAX_EM_ITERATION_SECONDS',
+    'MAX_FIRST_ITERATION_SECONDS',
+    'MAX_CONDITION_NUMBER_SMOOTHER',
+    'MAX_CONDITION_NUMBER_INIT',
+    'MAX_STABILIZATION_AMOUNT',
+    'MAX_STABILIZATION_AMOUNT_INIT',
+    'MAX_STD_UNSCALED',
+    'MIN_STD_SCALED',
+    'MAX_FALLBACKS_PER_ITERATION',
 ]
 

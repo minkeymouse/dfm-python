@@ -1,9 +1,10 @@
 # DFM Configuration for Exchange Rate Datasets
 # Clock: Daily (d) - base frequency for latent factors
+# Data: Daily exchange rate data (all series at same frequency)
 
 # EM Algorithm Parameters
-threshold: 1.0e-05
-max_iter: 5000
+threshold: 1.0e-05  # EM convergence threshold
+max_iter: 5000  # Maximum EM iterations
 
 # Numerical Stability Parameters
 clip_ar_coefficients: true
@@ -14,19 +15,26 @@ regularization_scale: 1.0e-05
 
 # Idiosyncratic Component Parameters
 augment_idio: true
-augment_idio_slow: false
+augment_idio_slow: false  # Not needed for single-frequency (daily) data
 idio_rho0: 0.1
 idio_min_var: 1.0e-08
 
 # Data Handling
-clock: d
-scaler: standard
+clock: d  # Daily clock frequency (base frequency for latent factors)
+scaler: standard  # Scaler for all series: 'standard', 'robust', 'minmax', 'maxabs', 'quantile', or null
+# Note: scaler is handled internally by the model, not set on config object
+# Note: nan_method and nan_k are internal constants (not user-configurable)
 
-# Block Structure
+# Block Structure for Exchange Rate Data
+# Single global block for all exchange rate series
 blocks:
   Block_Global:
-    num_factors: 1
+    num_factors: 2  # Number of factors for global block
     series: []  # Will be populated from data
 
-# Frequency mapping
-frequency: {}  # Will be populated from data
+# Frequency mapping for exchange rate data
+# All series are daily (same as clock frequency)
+# Grouped format: frequencies are specified as lists grouped by frequency code
+frequency:
+  # Daily series (same as clock frequency)
+  d: []  # Will be populated from data
