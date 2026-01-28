@@ -5,6 +5,7 @@ including observation matrix construction and state-space assembly.
 """
 
 import numpy as np
+import torch
 from typing import Optional, Tuple, Dict, Any, List
 
 from ..logger import get_logger
@@ -284,6 +285,136 @@ def build_ddfm_optimizer(
     return optimizer, scheduler
 
 
+def build_ivdfm_optimizer(
+    model: Any,
+    learning_rate: float,
+    optimizer_type: str,
+    max_epochs: int,
+    optimizer_weight_decay: float = 0.0,
+    optimizer_momentum: float = 0.9,
+    scheduler_type: Optional[str] = 'step',
+    scheduler_step_size: Optional[int] = None,
+    scheduler_gamma: float = 0.5,
+    scheduler_patience: int = 10,
+    scheduler_factor: float = 0.1,
+    scheduler_min_lr: float = 0.0,
+) -> Tuple[Any, Optional[Any]]:
+    """Build optimizer and scheduler for iVDFM training.
+    
+    Creates optimizer (Adam/AdamW/SGD) with configurable parameters and
+    learning rate scheduler (StepLR, ReduceLROnPlateau, CosineAnnealingLR, ExponentialLR).
+    Uses epoch-based learning rate decay, unlike DDFM which uses per-batch decay.
+    
+    Parameters
+    ----------
+    model : Any
+        PyTorch model (iVDFM) with parameters() method
+    learning_rate : float
+        Initial learning rate
+    optimizer_type : str
+        Optimizer type ('Adam', 'AdamW', or 'SGD')
+    max_epochs : int
+        Maximum number of training epochs (used for scheduler step_size)
+    optimizer_weight_decay : float, default 0.0
+        Weight decay (L2 regularization) for optimizer
+    optimizer_momentum : float, default 0.9
+        Momentum for SGD optimizer
+    scheduler_type : Optional[str], default 'step'
+        Scheduler type: 'step', 'plateau', 'cosine', 'exponential', or None
+    scheduler_step_size : Optional[int], default None
+        Step size for StepLR (None = auto: max_epochs // 3)
+    scheduler_gamma : float, default 0.5
+        Gamma (decay factor) for StepLR/ExponentialLR
+    scheduler_patience : int, default 10
+        Patience for ReduceLROnPlateau
+    scheduler_factor : float, default 0.1
+        Factor for ReduceLROnPlateau
+    scheduler_min_lr : float, default 0.0
+        Minimum learning rate for ReduceLROnPlateau
+        
+    Returns
+    -------
+    optimizer : torch.optim.Optimizer
+        PyTorch optimizer instance
+    scheduler : Optional[torch.optim.lr_scheduler._LRScheduler]
+        Learning rate scheduler instance (None if scheduler_type is None)
+    """
+    import torch
+    
+    # Build optimizer with configurable parameters
+    optimizers = {
+        'Adam': lambda: torch.optim.Adam(
+            model.parameters(),
+            lr=learning_rate,
+            betas=(DEFAULT_ADAM_BETA1, DEFAULT_ADAM_BETA2),
+            eps=DEFAULT_ADAM_EPS,
+            weight_decay=optimizer_weight_decay
+        ),
+        'AdamW': lambda: torch.optim.AdamW(
+            model.parameters(),
+            lr=learning_rate,
+            betas=(DEFAULT_ADAM_BETA1, DEFAULT_ADAM_BETA2),
+            eps=DEFAULT_ADAM_EPS,
+            weight_decay=optimizer_weight_decay
+        ),
+        'SGD': lambda: torch.optim.SGD(
+            model.parameters(),
+            lr=learning_rate,
+            momentum=optimizer_momentum,
+            weight_decay=optimizer_weight_decay
+        )
+    }
+    optimizer = optimizers.get(optimizer_type, optimizers['Adam'])()
+    
+    # Build scheduler based on type
+    scheduler = None
+    if scheduler_type is None:
+        return optimizer, None
+    
+    if scheduler_type == 'step':
+        # StepLR: decays every step_size epochs
+        step_size = scheduler_step_size if scheduler_step_size is not None else max(1, max_epochs // 3)
+        scheduler = torch.optim.lr_scheduler.StepLR(
+            optimizer,
+            step_size=step_size,
+            gamma=scheduler_gamma
+        )
+    elif scheduler_type == 'plateau':
+        # ReduceLROnPlateau: reduces LR when metric plateaus
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode='min',
+            factor=scheduler_factor,
+            patience=scheduler_patience,
+            min_lr=scheduler_min_lr
+        )
+    elif scheduler_type == 'cosine':
+        # CosineAnnealingLR: cosine annealing schedule
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=max_epochs,
+            eta_min=scheduler_min_lr
+        )
+    elif scheduler_type == 'exponential':
+        # ExponentialLR: exponential decay
+        scheduler = torch.optim.lr_scheduler.ExponentialLR(
+            optimizer,
+            gamma=scheduler_gamma
+        )
+    else:
+        _logger.warning(
+            f"Unknown scheduler_type '{scheduler_type}', using StepLR as default"
+        )
+        step_size = max(1, max_epochs // 3)
+        scheduler = torch.optim.lr_scheduler.StepLR(
+            optimizer,
+            step_size=step_size,
+            gamma=scheduler_gamma
+        )
+    
+    return optimizer, scheduler
+
+
 def build_ddfm_state_space(
     factors: np.ndarray,
     eps: np.ndarray,
@@ -396,12 +527,90 @@ def build_ddfm_state_space(
     return F, Q, mu_0, Sigma_0, H, R
 
 
+def ivdfm_companion_from_p(p: torch.Tensor) -> torch.Tensor:
+    """Construct companion matrix from AR coefficients for iVDFM.
+    
+    For AR(p) with coefficients p = [p_0, p_1, ..., p_{p-1}]:
+    A = [[0, 1, 0, ..., 0],
+         [0, 0, 1, ..., 0],
+         ...
+         [p_0, p_1, ..., p_{p-1}]]
+    
+    Parameters
+    ----------
+    p : torch.Tensor
+        AR coefficients, shape (..., p)
+        
+    Returns
+    -------
+    torch.Tensor
+        Companion matrix, shape (..., p, p)
+    """
+    d = p.shape[-1]
+    batch_dims = p.shape[:-1]
+    
+    A = torch.zeros(*batch_dims, d, d, dtype=p.dtype, device=p.device)
+    # Shift matrix (upper diagonal)
+    if d > 1:
+        A[..., 1:, :-1] = torch.eye(d - 1, dtype=p.dtype, device=p.device)
+    # Last row = AR coefficients
+    A[..., -1, :] = p
+    
+    return A
+
+
+def build_ivdfm_diagonal_companion(
+    ar_coeffs: torch.Tensor
+) -> torch.Tensor:
+    """Build block-diagonal companion matrix for iVDFM multiple factors.
+    
+    Each factor has its own AR(p) dynamics. Creates block-diagonal structure
+    to preserve component-wise independence (identifiability requirement).
+    
+    Parameters
+    ----------
+    ar_coeffs : torch.Tensor
+        AR coefficients per factor, shape (r, p) where:
+        - r: number of factors
+        - p: AR order
+        
+    Returns
+    -------
+    torch.Tensor
+        Block-diagonal companion matrix, shape (r*p, r*p)
+        Each block is (p, p) companion matrix
+    """
+    r, p = ar_coeffs.shape
+    
+    # Initialize block-diagonal matrix
+    A_block = torch.zeros(r * p, r * p, dtype=ar_coeffs.dtype, device=ar_coeffs.device)
+    
+    # Build companion matrix for each factor
+    for i in range(r):
+        start_idx = i * p
+        end_idx = (i + 1) * p
+        
+        # Get AR coefficients for this factor
+        p_i = ar_coeffs[i, :]  # (p,)
+        
+        # Build companion matrix for this factor
+        A_i = ivdfm_companion_from_p(p_i)  # (p, p)
+        
+        # Place in block-diagonal position
+        A_block[start_idx:end_idx, start_idx:end_idx] = A_i
+    
+    return A_block
+
+
 __all__ = [
     'build_dfm_structure',
     'build_dfm_blocks',
     'build_dfm_slower_freq_observation_matrix',
     'build_lag_matrix',
     'build_ddfm_optimizer',
+    'build_ivdfm_optimizer',
     'build_ddfm_state_space',
+    'ivdfm_companion_from_p',
+    'build_ivdfm_diagonal_companion',
 ]
 

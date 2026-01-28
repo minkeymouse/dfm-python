@@ -345,6 +345,47 @@ DEFAULT_KDFM_AR_ORDER = 1  # Default AR order (VAR lag order p) for KDFM
 DEFAULT_KDFM_MA_ORDER = 0  # Default MA order (MA lag order q) for KDFM (0 = pure VAR)
 
 # ============================================================================
+# iVDFM Defaults
+# ============================================================================
+
+# iVDFM sequence and dimension defaults
+DEFAULT_IVDFM_SEQUENCE_LENGTH = 100  # Default sequence length for sliding windows
+DEFAULT_IVDFM_LATENT_DIM = 3  # Default number of factors
+DEFAULT_IVDFM_AUX_DIM = 1  # Default auxiliary variable dimension
+
+# iVDFM network architecture defaults
+DEFAULT_IVDFM_ENCODER_HIDDEN_DIM = 200  # Default encoder hidden dimension
+DEFAULT_IVDFM_ENCODER_N_LAYERS = 3  # Default encoder layers
+DEFAULT_IVDFM_DECODER_HIDDEN_DIM = 200  # Default decoder hidden dimension
+DEFAULT_IVDFM_DECODER_N_LAYERS = 3  # Default decoder layers
+DEFAULT_IVDFM_PRIOR_HIDDEN_DIM = 100  # Default prior network hidden dimension
+DEFAULT_IVDFM_PRIOR_N_LAYERS = 2  # Default prior network layers
+
+# iVDFM dynamics and distribution defaults
+DEFAULT_IVDFM_FACTOR_ORDER = 1  # Default AR order for factors
+DEFAULT_IVDFM_INNOVATION_DIST = 'laplace'  # Default innovation distribution
+DEFAULT_IVDFM_DECODER_VAR = 0.01  # Default decoder variance
+DEFAULT_IVDFM_ACTIVATION = 'lrelu'  # Default activation function
+DEFAULT_IVDFM_SLOPE = 0.1  # Default leaky ReLU slope
+
+# iVDFM training defaults
+DEFAULT_IVDFM_BATCH_SIZE = 32  # Default batch size
+DEFAULT_IVDFM_MAX_EPOCHS = 100  # Default maximum epochs
+DEFAULT_IVDFM_AUX_VARIABLE_TYPE = 'time'  # Default auxiliary variable type
+
+# iVDFM optimizer defaults
+DEFAULT_IVDFM_OPTIMIZER_WEIGHT_DECAY = 0.0  # Default weight decay for optimizer
+DEFAULT_IVDFM_OPTIMIZER_MOMENTUM = 0.9  # Default momentum for SGD
+
+# iVDFM scheduler defaults
+DEFAULT_IVDFM_SCHEDULER_TYPE = 'step'  # Default scheduler type: 'step', 'plateau', 'cosine', 'exponential', None
+DEFAULT_IVDFM_SCHEDULER_STEP_SIZE = None  # Default step_size for StepLR (auto: max_epochs // 3)
+DEFAULT_IVDFM_SCHEDULER_GAMMA = 0.5  # Default gamma for StepLR/ExponentialLR
+DEFAULT_IVDFM_SCHEDULER_PATIENCE = 10  # Default patience for ReduceLROnPlateau
+DEFAULT_IVDFM_SCHEDULER_FACTOR = 0.1  # Default factor for ReduceLROnPlateau
+DEFAULT_IVDFM_SCHEDULER_MIN_LR = 0.0  # Default min_lr for ReduceLROnPlateau
+
+# ============================================================================
 # Tutorial Defaults
 # ============================================================================
 
@@ -564,6 +605,24 @@ __all__ = [
     # KDFM defaults
     'DEFAULT_KDFM_AR_ORDER',
     'DEFAULT_KDFM_MA_ORDER',
+    # iVDFM defaults
+    'DEFAULT_IVDFM_SEQUENCE_LENGTH',
+    'DEFAULT_IVDFM_LATENT_DIM',
+    'DEFAULT_IVDFM_AUX_DIM',
+    'DEFAULT_IVDFM_ENCODER_HIDDEN_DIM',
+    'DEFAULT_IVDFM_ENCODER_N_LAYERS',
+    'DEFAULT_IVDFM_DECODER_HIDDEN_DIM',
+    'DEFAULT_IVDFM_DECODER_N_LAYERS',
+    'DEFAULT_IVDFM_PRIOR_HIDDEN_DIM',
+    'DEFAULT_IVDFM_PRIOR_N_LAYERS',
+    'DEFAULT_IVDFM_FACTOR_ORDER',
+    'DEFAULT_IVDFM_INNOVATION_DIST',
+    'DEFAULT_IVDFM_DECODER_VAR',
+    'DEFAULT_IVDFM_ACTIVATION',
+    'DEFAULT_IVDFM_SLOPE',
+    'DEFAULT_IVDFM_BATCH_SIZE',
+    'DEFAULT_IVDFM_MAX_EPOCHS',
+    'DEFAULT_IVDFM_AUX_VARIABLE_TYPE',
     # Tutorial defaults
     'TUTORIAL_MAX_PERIODS',
     'TUTORIAL_MAX_EPOCHS',

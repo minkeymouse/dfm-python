@@ -39,6 +39,11 @@ from .ddfm_logger import (
     DDFMInferenceLogger,
 )
 
+from .ivdfm_logger import (
+    iVDFMTrainLogger,
+    iVDFMInferenceLogger,
+)
+
 __all__ = [
     # Basic logging
     'get_logger',
@@ -58,9 +63,12 @@ __all__ = [
     'BaseInferenceLogger',
     'DFMInferenceLogger',
     'DDFMInferenceLogger',
+    'iVDFMInferenceLogger',
     'log_inference_start',
     'log_inference_step',
     'log_inference_end',
     'log_prediction',
+    # iVDFM training logger
+    'iVDFMTrainLogger',
 ]
 

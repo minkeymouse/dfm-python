@@ -48,6 +48,14 @@ from ..constants import (
     DEFAULT_BATCH_SIZE,
     DEFAULT_DDFM_WINDOW_SIZE,
     DEFAULT_GRAD_CLIP_VAL,
+    DEFAULT_IVDFM_OPTIMIZER_WEIGHT_DECAY,
+    DEFAULT_IVDFM_OPTIMIZER_MOMENTUM,
+    DEFAULT_IVDFM_SCHEDULER_TYPE,
+    DEFAULT_IVDFM_SCHEDULER_STEP_SIZE,
+    DEFAULT_IVDFM_SCHEDULER_GAMMA,
+    DEFAULT_IVDFM_SCHEDULER_PATIENCE,
+    DEFAULT_IVDFM_SCHEDULER_FACTOR,
+    DEFAULT_IVDFM_SCHEDULER_MIN_LR,
     DEFAULT_REGULARIZATION_SCALE,
     DEFAULT_STRUCTURAL_REG_WEIGHT,
     DEFAULT_CONVERGENCE_THRESHOLD,
@@ -70,6 +78,23 @@ from ..constants import (
     DEFAULT_KDFM_MA_ORDER,
     FREQUENCY_HIERARCHY,
     DEFAULT_HIERARCHY_VALUE,
+    DEFAULT_IVDFM_SEQUENCE_LENGTH,
+    DEFAULT_IVDFM_LATENT_DIM,
+    DEFAULT_IVDFM_AUX_DIM,
+    DEFAULT_IVDFM_ENCODER_HIDDEN_DIM,
+    DEFAULT_IVDFM_ENCODER_N_LAYERS,
+    DEFAULT_IVDFM_DECODER_HIDDEN_DIM,
+    DEFAULT_IVDFM_DECODER_N_LAYERS,
+    DEFAULT_IVDFM_PRIOR_HIDDEN_DIM,
+    DEFAULT_IVDFM_PRIOR_N_LAYERS,
+    DEFAULT_IVDFM_FACTOR_ORDER,
+    DEFAULT_IVDFM_INNOVATION_DIST,
+    DEFAULT_IVDFM_DECODER_VAR,
+    DEFAULT_IVDFM_ACTIVATION,
+    DEFAULT_IVDFM_SLOPE,
+    DEFAULT_IVDFM_BATCH_SIZE,
+    DEFAULT_IVDFM_MAX_EPOCHS,
+    DEFAULT_IVDFM_AUX_VARIABLE_TYPE,
 )
 
 
@@ -136,6 +161,7 @@ class BaseModelConfig:
     # ========================================================================
     clock: str = 'm'  # Required: Base frequency for latent factors (global clock): 'd', 'w', 'm', 'q', 'sa', 'a' (defaults to 'm' for monthly)
     target_scaler: Optional[ScalerType] = None  # Fitted sklearn scaler instance (StandardScaler, RobustScaler, etc.) for target series only. Must be a fitted scaler object (call .fit() on target data first). Pass scaler object directly, not string. Feature series are assumed to be manually preprocessed. If None, target series are assumed to be already in the desired scale.
+    scaler: Optional[str] = None  # Scaler type as string: 'standard', 'robust', 'minmax', 'maxabs', 'quantile', or null. Applied to targets only (not context/auxiliary variables). For iVDFM, this is the preferred way to specify scaler (like DDFM pattern).
     
     def __post_init__(self):
         """Validate basic model structure.
@@ -624,6 +650,244 @@ class DDFMConfig(BaseModelConfig):
             "Expected DDFMConfig but got DFMConfig",
             details=f"Result type: {type(result).__name__}, expected: DDFMConfig"
         )
+
+
+@dataclass
+class iVDFMConfig(BaseModelConfig):
+    """Identifiable Variational Dynamic Factor Model configuration.
+    
+    Uses 'scaler' (string) pattern like DDFM, not 'target_scaler' (instance).
+    Scaler is applied to targets only, not to context/auxiliary variables.
+    """
+    """Identifiable Variational Dynamic Factor Model configuration.
+    
+    This configuration class extends BaseModelConfig with parameters specific
+    to iVDFM models trained using variational inference with identifiable
+    innovation priors.
+    
+    Note: iVDFM does NOT use block structure. Use num_factors directly to specify
+    the number of factors.
+    
+    The configuration can be built from:
+    - Main settings (training parameters) from config files
+    - Series definitions via frequency dict (column names -> frequencies)
+    """
+    # ========================================================================
+    # Model Structure
+    # ========================================================================
+    num_factors: Optional[int] = None  # Number of factors (inferred from config if None)
+    sequence_length: int = DEFAULT_IVDFM_SEQUENCE_LENGTH  # Sequence length for training
+    context: Optional[Union[List[str], List[int]]] = None  # Column names (DataFrame) or indices (array) for context variables. If None, context_dim is used to generate time-based context.
+    context_dim: int = DEFAULT_IVDFM_AUX_DIM  # Dimension of context. Used when context is None (generates time-based context) or when context is multivariate.
+    
+    # ========================================================================
+    # Neural Network Architecture
+    # ========================================================================
+    encoder_hidden_dim: Union[int, List[int]] = DEFAULT_IVDFM_ENCODER_HIDDEN_DIM  # Encoder architecture
+    encoder_n_layers: int = DEFAULT_IVDFM_ENCODER_N_LAYERS  # Number of encoder layers
+    decoder_hidden_dim: Union[int, List[int]] = DEFAULT_IVDFM_DECODER_HIDDEN_DIM  # Decoder architecture
+    decoder_n_layers: int = DEFAULT_IVDFM_DECODER_N_LAYERS  # Number of decoder layers
+    prior_hidden_dim: Union[int, List[int]] = DEFAULT_IVDFM_PRIOR_HIDDEN_DIM  # Prior network architecture
+    prior_n_layers: int = DEFAULT_IVDFM_PRIOR_N_LAYERS  # Number of prior network layers
+    activation: str = DEFAULT_IVDFM_ACTIVATION  # Activation function
+    slope: float = DEFAULT_IVDFM_SLOPE  # Leaky ReLU slope
+    
+    # ========================================================================
+    # Dynamics and Distribution Parameters
+    # ========================================================================
+    factor_order: int = DEFAULT_IVDFM_FACTOR_ORDER  # AR order for factors
+    innovation_distribution: str = DEFAULT_IVDFM_INNOVATION_DIST  # Innovation distribution type
+    decoder_var: float = DEFAULT_IVDFM_DECODER_VAR  # Decoder variance
+    
+    # ========================================================================
+    # Training Parameters
+    # ========================================================================
+    learning_rate: float = DEFAULT_LEARNING_RATE  # Learning rate
+    optimizer: str = 'Adam'  # Optimizer type
+    optimizer_weight_decay: float = DEFAULT_IVDFM_OPTIMIZER_WEIGHT_DECAY  # Weight decay (L2 regularization)
+    optimizer_momentum: float = DEFAULT_IVDFM_OPTIMIZER_MOMENTUM  # Momentum for SGD
+    batch_size: int = DEFAULT_IVDFM_BATCH_SIZE  # Batch size
+    max_epochs: int = DEFAULT_IVDFM_MAX_EPOCHS  # Maximum epochs
+    tolerance: float = DEFAULT_TOLERANCE  # Convergence tolerance
+    seed: Optional[int] = None  # Random seed
+    
+    # ========================================================================
+    # Scheduler Parameters
+    # ========================================================================
+    scheduler_type: Optional[str] = DEFAULT_IVDFM_SCHEDULER_TYPE  # Scheduler type: 'step', 'plateau', 'cosine', 'exponential', None
+    scheduler_step_size: Optional[int] = DEFAULT_IVDFM_SCHEDULER_STEP_SIZE  # Step size for StepLR (None = auto: max_epochs // 3)
+    scheduler_gamma: float = DEFAULT_IVDFM_SCHEDULER_GAMMA  # Gamma for StepLR/ExponentialLR
+    scheduler_patience: int = DEFAULT_IVDFM_SCHEDULER_PATIENCE  # Patience for ReduceLROnPlateau
+    scheduler_factor: float = DEFAULT_IVDFM_SCHEDULER_FACTOR  # Factor for ReduceLROnPlateau
+    scheduler_min_lr: float = DEFAULT_IVDFM_SCHEDULER_MIN_LR  # Min learning rate for ReduceLROnPlateau
+    
+    def __post_init__(self):
+        """Validate iVDFM configuration."""
+        super().__post_init__()  # Validate base config
+        
+        from ...utils.errors import ConfigurationError
+        
+        # Validate sequence_length
+        if self.sequence_length < 1:
+            raise ConfigurationError(
+                f"sequence_length must be >= 1, got {self.sequence_length}"
+            )
+        
+        # Validate context_dim
+        if self.context_dim < 1:
+            raise ConfigurationError(
+                f"context_dim must be >= 1, got {self.context_dim}"
+            )
+        
+        # Validate num_factors if provided
+        if self.num_factors is not None and self.num_factors < 1:
+            raise ConfigurationError(
+                f"num_factors must be >= 1, got {self.num_factors}"
+            )
+        
+        # Validate factor_order
+        if self.factor_order < 1:
+            raise ConfigurationError(
+                f"factor_order must be >= 1, got {self.factor_order}"
+            )
+        
+        # Validate innovation_distribution
+        valid_dists = {'laplace', 'gaussian', 'student_t', 'gamma', 'beta', 'exponential'}
+        if self.innovation_distribution not in valid_dists:
+            raise ConfigurationError(
+                f"innovation_distribution must be one of {valid_dists}, got '{self.innovation_distribution}'"
+            )
+        
+        # Validate activation
+        valid_activations = {'relu', 'lrelu', 'tanh', 'sigmoid'}
+        if self.activation not in valid_activations:
+            raise ConfigurationError(
+                f"activation must be one of {valid_activations}, got '{self.activation}'"
+            )
+        
+        # Validate optimizer
+        from ..constants import VALID_OPTIMIZERS
+        if self.optimizer not in VALID_OPTIMIZERS:
+            raise ConfigurationError(
+                f"optimizer must be one of {VALID_OPTIMIZERS}, got '{self.optimizer}'"
+            )
+        
+        # Validate scheduler_type
+        valid_schedulers = {'step', 'plateau', 'cosine', 'exponential', None}
+        if self.scheduler_type not in valid_schedulers:
+            raise ConfigurationError(
+                f"scheduler_type must be one of {valid_schedulers}, got '{self.scheduler_type}'"
+            )
+        
+        # Validate scheduler parameters
+        if self.scheduler_gamma <= 0 or self.scheduler_gamma > 1:
+            raise ConfigurationError(
+                f"scheduler_gamma must be in (0, 1], got {self.scheduler_gamma}"
+            )
+        
+        if self.scheduler_patience < 0:
+            raise ConfigurationError(
+                f"scheduler_patience must be >= 0, got {self.scheduler_patience}"
+            )
+        
+        if self.scheduler_factor <= 0 or self.scheduler_factor > 1:
+            raise ConfigurationError(
+                f"scheduler_factor must be in (0, 1], got {self.scheduler_factor}"
+            )
+        
+        if self.scheduler_min_lr < 0:
+            raise ConfigurationError(
+                f"scheduler_min_lr must be >= 0, got {self.scheduler_min_lr}"
+            )
+    
+    @classmethod
+    def _extract_ivdfm(cls, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract iVDFM-specific parameters from config dict."""
+        from ..constants import (
+            DEFAULT_IVDFM_SEQUENCE_LENGTH,
+            DEFAULT_IVDFM_LATENT_DIM,
+            DEFAULT_IVDFM_AUX_DIM,
+            DEFAULT_IVDFM_ENCODER_HIDDEN_DIM,
+            DEFAULT_IVDFM_ENCODER_N_LAYERS,
+            DEFAULT_IVDFM_DECODER_HIDDEN_DIM,
+            DEFAULT_IVDFM_DECODER_N_LAYERS,
+            DEFAULT_IVDFM_PRIOR_HIDDEN_DIM,
+            DEFAULT_IVDFM_PRIOR_N_LAYERS,
+            DEFAULT_IVDFM_FACTOR_ORDER,
+            DEFAULT_IVDFM_INNOVATION_DIST,
+            DEFAULT_IVDFM_DECODER_VAR,
+            DEFAULT_IVDFM_ACTIVATION,
+            DEFAULT_IVDFM_SLOPE,
+            DEFAULT_IVDFM_BATCH_SIZE,
+            DEFAULT_IVDFM_MAX_EPOCHS,
+            DEFAULT_IVDFM_AUX_VARIABLE_TYPE,
+            DEFAULT_IVDFM_OPTIMIZER_WEIGHT_DECAY,
+            DEFAULT_IVDFM_OPTIMIZER_MOMENTUM,
+            DEFAULT_IVDFM_SCHEDULER_TYPE,
+            DEFAULT_IVDFM_SCHEDULER_STEP_SIZE,
+            DEFAULT_IVDFM_SCHEDULER_GAMMA,
+            DEFAULT_IVDFM_SCHEDULER_PATIENCE,
+            DEFAULT_IVDFM_SCHEDULER_FACTOR,
+            DEFAULT_IVDFM_SCHEDULER_MIN_LR,
+        )
+        
+        ivdfm_params = cls._extract_params(data, {
+            'num_factors': None,
+            'sequence_length': DEFAULT_IVDFM_SEQUENCE_LENGTH,
+            'context': None,
+            'context_dim': DEFAULT_IVDFM_AUX_DIM,
+            'encoder_hidden_dim': DEFAULT_IVDFM_ENCODER_HIDDEN_DIM,
+            'encoder_n_layers': DEFAULT_IVDFM_ENCODER_N_LAYERS,
+            'decoder_hidden_dim': DEFAULT_IVDFM_DECODER_HIDDEN_DIM,
+            'decoder_n_layers': DEFAULT_IVDFM_DECODER_N_LAYERS,
+            'prior_hidden_dim': DEFAULT_IVDFM_PRIOR_HIDDEN_DIM,
+            'prior_n_layers': DEFAULT_IVDFM_PRIOR_N_LAYERS,
+            'activation': DEFAULT_IVDFM_ACTIVATION,
+            'slope': DEFAULT_IVDFM_SLOPE,
+            'factor_order': DEFAULT_IVDFM_FACTOR_ORDER,
+            'innovation_distribution': DEFAULT_IVDFM_INNOVATION_DIST,
+            'decoder_var': DEFAULT_IVDFM_DECODER_VAR,
+            'learning_rate': DEFAULT_LEARNING_RATE,
+            'optimizer': 'Adam',
+            'optimizer_weight_decay': DEFAULT_IVDFM_OPTIMIZER_WEIGHT_DECAY,
+            'optimizer_momentum': DEFAULT_IVDFM_OPTIMIZER_MOMENTUM,
+            'batch_size': DEFAULT_IVDFM_BATCH_SIZE,
+            'max_epochs': DEFAULT_IVDFM_MAX_EPOCHS,
+            'tolerance': DEFAULT_TOLERANCE,
+            'seed': None,
+            'scheduler_type': DEFAULT_IVDFM_SCHEDULER_TYPE,
+            'scheduler_step_size': DEFAULT_IVDFM_SCHEDULER_STEP_SIZE,
+            'scheduler_gamma': DEFAULT_IVDFM_SCHEDULER_GAMMA,
+            'scheduler_patience': DEFAULT_IVDFM_SCHEDULER_PATIENCE,
+            'scheduler_factor': DEFAULT_IVDFM_SCHEDULER_FACTOR,
+            'scheduler_min_lr': DEFAULT_IVDFM_SCHEDULER_MIN_LR,
+            'scaler': None,  # Scaler string: 'standard', 'robust', 'minmax', 'maxabs', 'quantile', or null
+        })
+        
+        return ivdfm_params
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'iVDFMConfig':
+        """Create iVDFMConfig from dictionary.
+        
+        Parameters
+        ----------
+        data : Dict[str, Any]
+            Configuration dictionary
+            
+        Returns
+        -------
+        iVDFMConfig
+            iVDFM configuration instance
+        """
+        # Extract base params
+        base_params = cls._extract_base(data)
+        
+        # Extract iVDFM-specific params
+        ivdfm_params = cls._extract_ivdfm(data)
+        
+        # Combine and create config
+        return cls(**base_params, **ivdfm_params)
 
 
 # ============================================================================

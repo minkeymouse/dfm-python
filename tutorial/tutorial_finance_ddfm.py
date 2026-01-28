@@ -65,6 +65,8 @@ def main(cfg: DictConfig) -> None:
                 from datetime import datetime as dt
                 start_date = dt(1980, 1, 1)
                 df["date"] = pd.date_range(start=start_date, periods=len(df), freq="D")
+            # Drop unused columns (do not use for targets/covariates)
+            df = df.drop(columns=[c for c in ["forward_returns", "risk_free_rate"] if c in df.columns])
             print(f"   Data shape: {df.shape}")
         except Exception as e:
             context = {
@@ -78,19 +80,24 @@ def main(cfg: DictConfig) -> None:
             print("\n[Step 2] Creating Dataset...")
             config = DDFMConfig.from_dict(OmegaConf.to_container(cfg, resolve=True))
             
-            # Filter data to only include series specified in config
-            all_block_series = set()
-            if hasattr(config, 'blocks') and config.blocks:
-                for block_name, block_config in config.blocks.items():
-                    if isinstance(block_config, dict) and 'series' in block_config:
-                        all_block_series.update(block_config['series'])
-            
-            columns_to_keep = ['date'] + list(all_block_series) if all_block_series else list(df.columns)
-            columns_to_keep = [col for col in columns_to_keep if col in df.columns]
-            df_filtered = df[columns_to_keep].copy()
-            
-            target_col = "market_forward_excess_returns"
-            covariates = [col for col in df_filtered.columns if col != target_col and col != 'date']
+            # Finance DDFM: covariates are all columns except target_col
+            target_col = getattr(config, "target_col", "market_forward_excess_returns")
+            covariates_mode = getattr(config, "covariates", "all_except_target")
+
+            # Keep all columns; DDFMDataset deduces targets = all - covariates
+            df_filtered = df.copy()
+
+            all_series = [c for c in df_filtered.columns if c not in ("date",)]
+            if target_col not in all_series:
+                raise ValueError(f"Expected target column '{target_col}' not found in finance.csv")
+
+            if isinstance(covariates_mode, str) and covariates_mode.lower() == "all_except_target":
+                covariates = [c for c in all_series if c != target_col]
+            elif covariates_mode in (None, "none"):
+                covariates = []
+            else:
+                # Allow explicit list in config if user provides one
+                covariates = [c for c in (covariates_mode or []) if c in all_series and c != target_col]
             
             dataset = DDFMDataset(
                 data=df_filtered,
@@ -111,12 +118,13 @@ def main(cfg: DictConfig) -> None:
             print("\n[Step 3] Training DDFM model...")
             encoder_layers = getattr(config, 'encoder_layers', [32, 1])
             encoder_size = tuple(encoder_layers) if encoder_layers else (32, 1)
+            decoder_type = getattr(config, "decoder_type", "linear")
             
             model = DDFM(
                 dataset=dataset,
                 config=config,
                 encoder_size=encoder_size,
-                decoder_type="linear",
+                decoder_type=decoder_type,
                 activation=getattr(config, 'activation', 'relu'),
                 learning_rate=getattr(config, 'learning_rate', 0.001),
                 optimizer='Adam',
@@ -151,6 +159,22 @@ def main(cfg: DictConfig) -> None:
             
             if np.any(np.isnan(X_forecast)) or np.any(np.isinf(X_forecast)):
                 print(f"   WARNING: Forecast contains NaN or Inf!")
+
+            # Simple prediction quality check on the last 6 time steps (scaled targets)
+            try:
+                # For finance, target is a single series: target_col
+                y_scaled = dataset.y  # (T, 1) scaled targets
+                y_true = y_scaled[-6:, :]
+                y_pred = X_forecast  # DDFM.predict returns targets in scaled space when return_series=True
+                if y_pred.shape != y_true.shape:
+                    print(f"   WARNING: forecast shape {y_pred.shape} != y_true shape {y_true.shape}; skipping metric.")
+                else:
+                    mse = np.mean((y_pred - y_true) ** 2, axis=0)
+                    mae = np.mean(np.abs(y_pred - y_true), axis=0)
+                    print("   Prediction MSE (scaled):", mse)
+                    print("   Prediction MAE (scaled):", mae)
+            except Exception as eval_e:
+                print(f"   WARNING: prediction evaluation failed: {eval_e}")
         except Exception as e:
             context = {
                 "result_converged": result.converged if 'result' in locals() else None,

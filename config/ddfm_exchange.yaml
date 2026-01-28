@@ -9,16 +9,20 @@ encoder_layers: [16, 4]  # Hidden layers: [16] -> latent: 4 (matching original s
 activation: relu  # Matching original link='relu'
 use_batch_norm: true  # Matching original batch_norm=True
 
-# Training Parameters (matching original TensorFlow DDFM)
-learning_rate: 0.005  # Matching original learning_rate=0.005
-n_mc_samples: 10  # Number of MC samples per MCMC iteration (matching original epochs=10)
-window_size: 100  # Time-step batch size for training (matching original batch_size=100)
+# Training Parameters
+# NOTE: for fair comparison with iVDFM exchange tutorial/config, we align the
+# effective window length and training budget (see ivdfm_exchange.yaml).
+learning_rate: 0.005
+n_mc_samples: 10
+window_size: 200  # Align with iVDFM sequence_length=200
 
-# MCMC/Iterative Parameters (matching original TensorFlow DDFM)
-max_epoch: 200  # Maximum MCMC iterations (matching original max_iter=200)
-tolerance: 0.0005  # Convergence tolerance (matching original tolerance=0.0005)
-disp: 10  # Display frequency for training progress (matching original disp=10)
-seed: 3  # Random seed (matching original seed=3)
+# MCMC/Iterative Parameters
+# NOTE: DDFM uses max_epoch as an iteration budget; iVDFM uses max_epochs.
+# We set this to 10 here to make the tutorials comparable in runtime budget.
+max_epoch: 10
+tolerance: 0.0005
+disp: 10
+seed: 3
 
 # Interpolation Parameters
 interpolation_method: linear  # Interpolation method for missing values
@@ -28,16 +32,3 @@ interpolation_limit_direction: both  # Direction to fill ('forward', 'backward',
 # Data Handling (used by Dataset, not Model)
 clock: d  # Daily clock frequency (all series are daily)
 scaler: null  # No scaler - data should be pre-scaled before passing to Dataset
-
-# Frequency mapping (all series are daily)
-# If not specified, all series use clock frequency (d)
-# Format: {"series_name": "frequency_code"}
-# frequency:
-#   AUD_USD: d
-#   GBP_USD: d
-#   CAD_USD: d
-#   CHF_USD: d
-#   CNY_USD: d
-#   JPY_USD: d
-#   SGD_USD: d
-#   NZD_USD: d

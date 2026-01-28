@@ -1,0 +1,38 @@
+# iVDFM Configuration for Finance Dataset
+# Data: Finance data with market_forward_excess_returns as target variable
+# Clock: Monthly (m) - all series are monthly frequency
+
+# ===== Model Structure =====
+# Latent dimension
+num_factors: 5
+sequence_length: 200  # Sequence length for sliding windows
+context: null  # Column names (DataFrame) or indices (array) for context variables. If None, time-based context is generated.
+context_dim: 1  # Dimension of context. Used when context is None (generates time-based context) or when context is multivariate.
+
+# ===== Neural Network Architecture =====
+encoder_hidden_dim: 50  # Encoder hidden dimension
+encoder_n_layers: 2  # Number of encoder layers
+decoder_hidden_dim: 50  # Decoder hidden dimension
+decoder_n_layers: 2  # Number of decoder layers
+prior_hidden_dim: 100  # Prior network hidden dimension
+prior_n_layers: 2  # Number of prior network layers
+activation: lrelu  # Activation function: 'relu', 'lrelu', 'tanh', 'sigmoid'
+slope: 0.1  # Leaky ReLU slope
+
+# ===== Dynamics and Distribution Parameters =====
+factor_order: 2  # AR order for factors (p in AR(p))
+innovation_distribution: laplace  # Innovation distribution: 'laplace', 'gaussian', 'student_t'
+decoder_var: 0.01  # Decoder variance (observation noise)
+
+# ===== Training Parameters =====
+learning_rate: 0.001  # Learning rate for optimizer
+optimizer: Adam  # Optimizer type: 'Adam', 'AdamW', 'SGD'
+batch_size: 128  # Batch size for training (larger to reduce #batches/epoch)
+max_epochs: 10  # Maximum training epochs
+tolerance: 1.0e-5  # Convergence tolerance
+seed: null  # Random seed (None uses default)
+
+# ===== Base Model Config (inherited) =====
+frequency: null  # iVDFM doesn't use mixed-frequency structure
+clock: m  # Monthly clock frequency
+scaler: standard  # Scaler for targets: 'standard', 'robust', 'minmax', 'maxabs', 'quantile', or null. Applied to targets only (not context/auxiliary variables)

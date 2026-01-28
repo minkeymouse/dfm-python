@@ -5,6 +5,7 @@ This module defines dataclasses for storing state-space parameters and model str
 
 from dataclasses import dataclass
 import numpy as np
+import torch
 from typing import Optional, Any
 
 
@@ -326,6 +327,188 @@ class DDFMModelState:
 
 # Backward compatibility aliases
 DDFMTrainingState = DDFMModelState
+
+
+@dataclass
+class iVDFMModelState:
+    """iVDFM model state including training state and SSM parameters.
+    
+    Consolidates all iVDFM model state for checkpointing: training state (convergence,
+    loss, factors, innovations) and fitted state-space model parameters.
+    
+    Attributes
+    ----------
+    num_iter : int
+        Current training iteration/epoch.
+    loss_now : float, optional
+        Current training loss value.
+    elbo : float, optional
+        Final ELBO value.
+    converged : bool
+        Whether training has converged.
+    factors : np.ndarray, optional
+        Extracted factors (T x r) or (batch x T x r).
+    innovations : np.ndarray, optional
+        Innovations (T x r) or (batch x T x r).
+    factor_order : int
+        AR order for factor dynamics (p in AR(p)).
+    A : np.ndarray, optional
+        Transition matrix (r x r) for p=1, or AR coefficients (r x p) for p>1.
+    B : np.ndarray, optional
+        Innovation loading matrix (r x r).
+    f0 : np.ndarray, optional
+        Initial state (r,).
+    """
+    # Training state
+    num_iter: int = 0
+    loss_now: Optional[float] = None
+    elbo: Optional[float] = None
+    converged: bool = False
+    factors: Optional[np.ndarray] = None
+    innovations: Optional[np.ndarray] = None
+    full_state: Optional[np.ndarray] = None  # Augmented state for companion form (T x r*p) for p>1, (T x r) for p=1
+    
+    # SSM parameters
+    factor_order: int = 1
+    A: Optional[np.ndarray] = None  # Transition matrix or AR coefficients
+    B: Optional[np.ndarray] = None  # Innovation loading matrix
+    f0: Optional[np.ndarray] = None  # Initial state
+    
+    @classmethod
+    def from_model(cls, model: Any) -> 'iVDFMModelState':
+        """Create iVDFMModelState from iVDFM model instance.
+        
+        Parameters
+        ----------
+        model : iVDFM
+            iVDFM model instance
+            
+        Returns
+        -------
+        iVDFMModelState
+            Model state dataclass
+        """
+        # Get training state from model attributes
+        factors = getattr(model, 'factors', None)
+        innovations = getattr(model, 'innovations', None)
+        num_iter = getattr(model, '_num_iter', 0)
+        loss_now = getattr(model, 'loss_now', None)
+        elbo = getattr(model, '_elbo', None)
+        converged = getattr(model, '_converged', False)
+        
+        # Get SSM parameters
+        factor_order = getattr(model, 'factor_order', 1)
+        A = B = f0 = None
+        
+        # Extract from SSM if available
+        if hasattr(model, 'ssm') and model.ssm is not None:
+            ssm = model.ssm
+            if factor_order == 1:
+                # First-order: A is diagonal, stored as (r,)
+                if hasattr(ssm, 'A'):
+                    A = ssm.A.data.cpu().numpy() if hasattr(ssm.A, 'data') else ssm.A
+            else:
+                # Higher-order: AR coefficients stored as (r, p)
+                if hasattr(ssm, 'ar_coeffs'):
+                    A = ssm.ar_coeffs.data.cpu().numpy() if hasattr(ssm.ar_coeffs, 'data') else ssm.ar_coeffs
+            
+            if hasattr(ssm, 'B'):
+                B = ssm.B.data.cpu().numpy() if hasattr(ssm.B, 'data') else ssm.B
+            
+            if hasattr(ssm, 'f0'):
+                f0 = ssm.f0.data.cpu().numpy() if hasattr(ssm.f0, 'data') else ssm.f0
+        
+        # Fallback: get from model attributes directly
+        if A is None:
+            A = getattr(model, 'A', None)
+            if A is not None and hasattr(A, 'data'):
+                A = A.data.cpu().numpy()
+        if B is None:
+            B = getattr(model, 'B', None)
+            if B is not None and hasattr(B, 'data'):
+                B = B.data.cpu().numpy()
+        if f0 is None:
+            f0 = getattr(model, 'f0', None)
+            if f0 is not None and hasattr(f0, 'data'):
+                f0 = f0.data.cpu().numpy()
+        
+        # Compute full_state (augmented state for companion form)
+        full_state = None
+        if factors is not None:
+            factors_np = factors
+            if isinstance(factors_np, np.ndarray):
+                # Average over batch if needed
+                if factors_np.ndim == 3:
+                    factors_np = np.mean(factors_np, axis=0)  # (T, r)
+                
+                T, r = factors_np.shape
+                if factor_order == 1:
+                    # For p=1, full_state is just factors
+                    full_state = factors_np  # (T, r)
+                else:
+                    # For p>1, construct augmented state (T, r*p)
+                    # s_t[i*p : (i+1)*p] = [f_t[i], f_{t-1}[i], ..., f_{t-p+1}[i]]
+                    full_state = np.zeros((T, r * factor_order), dtype=factors_np.dtype)
+                    for t in range(T):
+                        for i in range(r):
+                            for lag in range(factor_order):
+                                idx = t - lag
+                                if idx >= 0:
+                                    full_state[t, i * factor_order + lag] = factors_np[idx, i]
+                                else:
+                                    # Use f0 for negative indices
+                                    if f0 is not None and i < len(f0):
+                                        full_state[t, i * factor_order + lag] = f0[i]
+        
+        return cls(
+            num_iter=num_iter,
+            loss_now=loss_now,
+            elbo=elbo,
+            converged=converged,
+            factors=factors,
+            innovations=innovations,
+            full_state=full_state,
+            factor_order=factor_order,
+            A=A,
+            B=B,
+            f0=f0
+        )
+    
+    def apply_to_model(self, model: Any) -> None:
+        """Apply this state to iVDFM model instance.
+        
+        Parameters
+        ----------
+        model : iVDFM
+            iVDFM model instance to update
+        """
+        # Apply training state
+        if self.factors is not None:
+            model.factors = self.factors
+        if self.innovations is not None:
+            model.innovations = self.innovations
+        model._num_iter = self.num_iter
+        model.loss_now = self.loss_now
+        if self.elbo is not None:
+            model._elbo = self.elbo
+        model._converged = self.converged
+        
+        # Apply SSM parameters if available
+        if self.A is not None and self.B is not None:
+            if hasattr(model, 'ssm') and model.ssm is not None:
+                ssm = model.ssm
+                if self.factor_order == 1:
+                    if hasattr(ssm, 'A'):
+                        ssm.A.data = torch.from_numpy(self.A).to(ssm.A.device)
+                else:
+                    if hasattr(ssm, 'ar_coeffs'):
+                        ssm.ar_coeffs.data = torch.from_numpy(self.A).to(ssm.ar_coeffs.device)
+                
+                if hasattr(ssm, 'B'):
+                    ssm.B.data = torch.from_numpy(self.B).to(ssm.B.device)
+                
+                if self.f0 is not None and hasattr(ssm, 'f0'):
+                    ssm.f0.data = torch.from_numpy(self.f0).to(ssm.f0.device)
 DDFMStateSpaceParams = DDFMModelState
 
 # Backward compatibility alias

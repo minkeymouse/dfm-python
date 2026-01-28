@@ -10,12 +10,14 @@ This module provides:
 
 from .ddfm_dataset import DDFMDataset
 from .dfm_dataset import DFMDataset
+from .ivdfm_dataset import iVDFMDataset
 from .time import TimeIndex
 
 __all__ = [
     # Datasets
     'DDFMDataset',
     'DFMDataset',
+    'iVDFMDataset',
     # Time utilities
     'TimeIndex',
 ]

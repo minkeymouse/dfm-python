@@ -3,17 +3,24 @@
 # Clock: Monthly (m) - all series are monthly frequency
 
 # Neural Network Architecture
-encoder_layers: [64, 32, 2]  # Hidden layers: [64, 32] -> latent: 2 factors
+# Match iVDFM depth/width more closely: 3 hidden layers of size ~200
+encoder_layers: [64, 32, 5]  # Hidden layers: [200, 200] -> latent: 5 factors (match iVDFM capacity)
 activation: relu  # Activation function: 'tanh', 'relu', 'sigmoid'
 use_batch_norm: true  # Use batch normalization
+decoder_type: mlp  # Use non-linear (MLP) decoder instead of linear
+
+# Target/covariate split
+# For DDFM finance: covariates are ALL columns except the target.
+target_col: market_forward_excess_returns
+covariates: all_except_target
 
 # Training Parameters
 learning_rate: 0.001  # Learning rate for optimizer
-n_mc_samples: 1  # Number of MC samples per MCMC iteration (reduced for faster execution)
-window_size: 100  # Time-step batch size for training
+n_mc_samples: 10  # Number of MC samples per MCMC iteration
+window_size: 200  # Align with iVDFM sequence_length=200
 
 # MCMC/Iterative Parameters
-max_epoch: 200  # Maximum MCMC iterations
+max_epoch: 10  # Align with iVDFM max_epochs=10
 tolerance: 0.0005  # Convergence tolerance
 disp: 10  # Display frequency for training progress
 seed: null  # Random seed (None uses default)
@@ -27,10 +34,4 @@ interpolation_limit_direction: both  # Direction to fill ('forward', 'backward',
 clock: m  # Monthly clock frequency
 scaler: standard  # Scaler for target series: 'standard', 'robust', 'minmax', 'maxabs', 'quantile', or null
 
-# Frequency mapping (optional)
-# If not specified, all series use clock frequency
-# Format: {"series_name": "frequency_code"}
-# frequency:
-#   gdp: q
-#   unemployment: m
-#   interest_rate: m
+

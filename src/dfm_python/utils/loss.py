@@ -7,7 +7,7 @@ variational inference losses (ELBO).
 
 import torch
 import numpy as np
-from typing import Literal, Dict, Tuple, Optional
+from typing import Literal, Dict, Tuple, Optional, Any
 from ..config.constants import DEFAULT_EPSILON, HUBER_QUADRATIC_COEFF
 
 
@@ -101,91 +101,50 @@ def compute_masked_loss(
     return loss
 
 
-def compute_kl_gaussian_laplace(
-    mu_q: torch.Tensor,
-    logvar_q: torch.Tensor,
-    location_p: torch.Tensor,
-    log_scale_p: torch.Tensor
-) -> torch.Tensor:
-    """Compute KL divergence between Gaussian q and Laplace p.
-    
-    KL(q || p) where:
-    - q ~ N(mu_q, exp(logvar_q)) is Gaussian variational posterior
-    - p ~ Laplace(location_p, exp(log_scale_p)) is Laplace prior
-    
-    Parameters
-    ----------
-    mu_q : torch.Tensor
-        Mean of Gaussian q, shape (batch, dim)
-    logvar_q : torch.Tensor
-        Log-variance of Gaussian q, shape (batch, dim)
-    location_p : torch.Tensor
-        Location parameter of Laplace p, shape (batch, dim)
-    log_scale_p : torch.Tensor
-        Log-scale parameter of Laplace p, shape (batch, dim)
-        
-    Returns
-    -------
-    kl : torch.Tensor
-        KL divergence, shape (batch,)
-    """
-    var_q = torch.exp(logvar_q)
-    scale_p = torch.exp(log_scale_p)
-    
-    # KL(q || p) = E_q[log q] - E_q[log p]
-    # For Gaussian q and Laplace p:
-    # KL = 0.5 * (log(2*pi*var_q) + 1) - log(2*scale_p) - |mu_q - location_p|/scale_p
-    #     + 0.5 * var_q / scale_p^2
-    
-    # Simplified version (more stable):
-    # KL ≈ 0.5 * (logvar_q - 2*log_scale_p + var_q/scale_p^2 + (mu_q - location_p)^2/scale_p^2 - 1)
-    kl = 0.5 * (
-        logvar_q - 2 * log_scale_p +
-        (var_q + (mu_q - location_p) ** 2) / (scale_p ** 2) - 1
-    ).sum(dim=-1)
-    
-    return kl
+# KL divergence functions moved to models.ivdfm.prior module
+# Import them lazily to avoid circular imports
+def _get_kl_functions():
+    """Lazy import of KL functions to avoid circular imports."""
+    from ..models.ivdfm.prior import (
+        compute_kl_gaussian_laplace,
+        compute_kl_gaussian_gaussian,
+        compute_kl_gaussian_gamma,
+        compute_kl_gaussian_beta,
+        compute_kl_gaussian_exponential,
+    )
+    return {
+        'compute_kl_gaussian_laplace': compute_kl_gaussian_laplace,
+        'compute_kl_gaussian_gaussian': compute_kl_gaussian_gaussian,
+        'compute_kl_gaussian_gamma': compute_kl_gaussian_gamma,
+        'compute_kl_gaussian_beta': compute_kl_gaussian_beta,
+        'compute_kl_gaussian_exponential': compute_kl_gaussian_exponential,
+    }
 
+# Create module-level aliases that will be populated on first use
+_kl_functions = None
 
-def compute_kl_gaussian_gaussian(
-    mu_q: torch.Tensor,
-    logvar_q: torch.Tensor,
-    mu_p: torch.Tensor,
-    logvar_p: torch.Tensor
-) -> torch.Tensor:
-    """Compute KL divergence between two Gaussians.
-    
-    KL(q || p) where:
-    - q ~ N(mu_q, exp(logvar_q))
-    - p ~ N(mu_p, exp(logvar_p))
-    
-    Parameters
-    ----------
-    mu_q : torch.Tensor
-        Mean of Gaussian q, shape (batch, dim)
-    logvar_q : torch.Tensor
-        Log-variance of Gaussian q, shape (batch, dim)
-    mu_p : torch.Tensor
-        Mean of Gaussian p, shape (batch, dim)
-    logvar_p : torch.Tensor
-        Log-variance of Gaussian p, shape (batch, dim)
-        
-    Returns
-    -------
-    kl : torch.Tensor
-        KL divergence, shape (batch,)
-    """
-    var_q = torch.exp(logvar_q)
-    var_p = torch.exp(logvar_p)
-    
-    # KL(q || p) = 0.5 * (logvar_p - logvar_q + var_q/var_p + (mu_q - mu_p)^2/var_p - 1)
-    kl = 0.5 * (
-        logvar_p - logvar_q +
-        var_q / var_p +
-        (mu_q - mu_p) ** 2 / var_p - 1
-    ).sum(dim=-1)
-    
-    return kl
+def _ensure_kl_functions():
+    """Ensure KL functions are loaded."""
+    global _kl_functions
+    if _kl_functions is None:
+        _kl_functions = _get_kl_functions()
+    return _kl_functions
+
+# Create function aliases that lazily load
+def compute_kl_gaussian_laplace(*args, **kwargs):
+    return _ensure_kl_functions()['compute_kl_gaussian_laplace'](*args, **kwargs)
+
+def compute_kl_gaussian_gaussian(*args, **kwargs):
+    return _ensure_kl_functions()['compute_kl_gaussian_gaussian'](*args, **kwargs)
+
+def compute_kl_gaussian_gamma(*args, **kwargs):
+    return _ensure_kl_functions()['compute_kl_gaussian_gamma'](*args, **kwargs)
+
+def compute_kl_gaussian_beta(*args, **kwargs):
+    return _ensure_kl_functions()['compute_kl_gaussian_beta'](*args, **kwargs)
+
+def compute_kl_gaussian_exponential(*args, **kwargs):
+    return _ensure_kl_functions()['compute_kl_gaussian_exponential'](*args, **kwargs)
 
 
 def compute_reconstruction_loss_gaussian(
@@ -258,8 +217,12 @@ def compute_elbo_loss(
         Format depends on innovation_distribution:
         - 'laplace': {'location', 'log_scale'}
         - 'gaussian': {'mu', 'logvar'}
+        - 'student_t': {'location', 'log_scale', 'log_df'}
+        - 'gamma': {'shape', 'log_rate'}
+        - 'beta': {'log_alpha', 'log_beta'}
+        - 'exponential': {'log_rate'}
     innovation_distribution : str, default 'laplace'
-        Distribution type for innovations: 'laplace' or 'gaussian'
+        Distribution type for innovations: 'laplace', 'gaussian', 'student_t', 'gamma', 'beta', 'exponential'
     decoder_variance : float, default 1.0
         Variance of Gaussian observation model
     reduction : str, default 'mean'
@@ -283,48 +246,147 @@ def compute_elbo_loss(
     )
     
     # KL divergence terms: Σ_t KL(q(η_t | y_{1:T}, u_t) || p(η_t | u_t))
-    kl_losses = []
-    for t in range(T):
-        mu_q = encoder_params[t]['mu']  # (batch, dim)
-        logvar_q = encoder_params[t]['logvar']  # (batch, dim)
-        prior_p = prior_params[t]
-        
-        if innovation_distribution == 'laplace':
-            location_p = prior_p['location']
-            log_scale_p = prior_p['log_scale']
-            kl_t = compute_kl_gaussian_laplace(
-                mu_q, logvar_q, location_p, log_scale_p
-            )
-        elif innovation_distribution == 'gaussian':
-            mu_p = prior_p['mu']
-            logvar_p = prior_p['logvar']
-            kl_t = compute_kl_gaussian_gaussian(
-                mu_q, logvar_q, mu_p, logvar_p
-            )
-        else:
-            raise NotImplementedError(
-                f"KL divergence for {innovation_distribution} not implemented"
-            )
-        
-        kl_losses.append(kl_t)
+    # Vectorize: stack all time steps and compute KL for all at once
+    mu_q_all = torch.stack([encoder_params[t]['mu'] for t in range(T)], dim=1)  # (batch, T, dim)
+    logvar_q_all = torch.stack([encoder_params[t]['logvar'] for t in range(T)], dim=1)  # (batch, T, dim)
     
-    # Stack and reduce over time
-    kl_loss = torch.stack(kl_losses, dim=1)  # (batch, T)
+    # Stack prior parameters
+    if innovation_distribution == 'laplace':
+        location_p_all = torch.stack([prior_params[t]['location'] for t in range(T)], dim=1)  # (batch, T, dim)
+        log_scale_p_all = torch.stack([prior_params[t]['log_scale'] for t in range(T)], dim=1)  # (batch, T, dim)
+        # Reshape for vectorized KL: (batch*T, dim)
+        mu_q_flat = mu_q_all.view(-1, mu_q_all.shape[-1])
+        logvar_q_flat = logvar_q_all.view(-1, logvar_q_all.shape[-1])
+        location_p_flat = location_p_all.view(-1, location_p_all.shape[-1])
+        log_scale_p_flat = log_scale_p_all.view(-1, log_scale_p_all.shape[-1])
+        kl_all = compute_kl_gaussian_laplace(mu_q_flat, logvar_q_flat, location_p_flat, log_scale_p_flat)
+        kl_loss = kl_all.view(batch_size, T)  # (batch, T)
+    elif innovation_distribution == 'gaussian':
+        mu_p_all = torch.stack([prior_params[t]['mu'] for t in range(T)], dim=1)  # (batch, T, dim)
+        logvar_p_all = torch.stack([prior_params[t]['logvar'] for t in range(T)], dim=1)  # (batch, T, dim)
+        mu_q_flat = mu_q_all.view(-1, mu_q_all.shape[-1])
+        logvar_q_flat = logvar_q_all.view(-1, logvar_q_all.shape[-1])
+        mu_p_flat = mu_p_all.view(-1, mu_p_all.shape[-1])
+        logvar_p_flat = logvar_p_all.view(-1, logvar_p_all.shape[-1])
+        kl_all = compute_kl_gaussian_gaussian(mu_q_flat, logvar_q_flat, mu_p_flat, logvar_p_flat)
+        kl_loss = kl_all.view(batch_size, T)  # (batch, T)
+    elif innovation_distribution == 'student_t':
+        location_p_all = torch.stack([prior_params[t]['location'] for t in range(T)], dim=1)
+        log_scale_p_all = torch.stack([prior_params[t]['log_scale'] for t in range(T)], dim=1)
+        mu_q_flat = mu_q_all.view(-1, mu_q_all.shape[-1])
+        logvar_q_flat = logvar_q_all.view(-1, logvar_q_all.shape[-1])
+        location_p_flat = location_p_all.view(-1, location_p_all.shape[-1])
+        log_scale_p_flat = log_scale_p_all.view(-1, log_scale_p_all.shape[-1])
+        kl_all = compute_kl_gaussian_laplace(mu_q_flat, logvar_q_flat, location_p_flat, log_scale_p_flat)
+        kl_loss = kl_all.view(batch_size, T)  # (batch, T)
+    elif innovation_distribution == 'gamma':
+        shape_p_all = torch.stack([prior_params[t]['shape'] for t in range(T)], dim=1)
+        log_rate_p_all = torch.stack([prior_params[t]['log_rate'] for t in range(T)], dim=1)
+        mu_q_flat = mu_q_all.view(-1, mu_q_all.shape[-1])
+        logvar_q_flat = logvar_q_all.view(-1, logvar_q_all.shape[-1])
+        shape_p_flat = shape_p_all.view(-1, shape_p_all.shape[-1])
+        log_rate_p_flat = log_rate_p_all.view(-1, log_rate_p_all.shape[-1])
+        kl_all = compute_kl_gaussian_gamma(mu_q_flat, logvar_q_flat, shape_p_flat, log_rate_p_flat)
+        kl_loss = kl_all.view(batch_size, T)  # (batch, T)
+    elif innovation_distribution == 'beta':
+        log_alpha_p_all = torch.stack([prior_params[t]['log_alpha'] for t in range(T)], dim=1)
+        log_beta_p_all = torch.stack([prior_params[t]['log_beta'] for t in range(T)], dim=1)
+        mu_q_flat = mu_q_all.view(-1, mu_q_all.shape[-1])
+        logvar_q_flat = logvar_q_all.view(-1, logvar_q_all.shape[-1])
+        log_alpha_p_flat = log_alpha_p_all.view(-1, log_alpha_p_all.shape[-1])
+        log_beta_p_flat = log_beta_p_all.view(-1, log_beta_p_all.shape[-1])
+        kl_all = compute_kl_gaussian_beta(mu_q_flat, logvar_q_flat, log_alpha_p_flat, log_beta_p_flat)
+        kl_loss = kl_all.view(batch_size, T)  # (batch, T)
+    elif innovation_distribution == 'exponential':
+        log_rate_p_all = torch.stack([prior_params[t]['log_rate'] for t in range(T)], dim=1)
+        mu_q_flat = mu_q_all.view(-1, mu_q_all.shape[-1])
+        logvar_q_flat = logvar_q_all.view(-1, logvar_q_all.shape[-1])
+        log_rate_p_flat = log_rate_p_all.view(-1, log_rate_p_all.shape[-1])
+        kl_all = compute_kl_gaussian_exponential(mu_q_flat, logvar_q_flat, log_rate_p_flat)
+        kl_loss = kl_all.view(batch_size, T)  # (batch, T)
+    else:
+        raise NotImplementedError(
+            f"KL divergence for {innovation_distribution} not implemented"
+        )
     
     if reduction == 'mean':
         kl_loss = kl_loss.mean()  # Mean over batch and time
     else:
         kl_loss = kl_loss.sum()  # Sum over batch and time
     
-    # ELBO = recon_loss - kl_loss (we want to maximize ELBO)
-    # Return negative ELBO for minimization
-    elbo = -(recon_loss - kl_loss)
+    # ELBO = E[log p(y|f)] - KL
+    # recon_loss = -E[log p(y|f)] (negative log-likelihood, positive value)
+    # So: ELBO = -recon_loss - KL
+    # For minimization, return -ELBO = recon_loss + KL
+    elbo = recon_loss + kl_loss
     
     loss_dict = {
         'elbo': elbo,
         'reconstruction': recon_loss,
         'kl': kl_loss,
     }
+    
+    return elbo, loss_dict
+
+
+def compute_ivdfm_elbo(
+    model: Any,
+    y_1T: torch.Tensor,
+    u_1T: torch.Tensor,
+    innovation_distribution: str = 'laplace',
+    decoder_variance: float = 1.0,
+    reduction: str = 'mean'
+) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+    """Compute ELBO for iVDFM model.
+    
+    This function abstracts the ELBO computation for iVDFM by:
+    1. Performing a forward pass through the model
+    2. Extracting predictions and variational parameters
+    3. Computing the ELBO loss using compute_elbo_loss
+    
+    ELBO = E[log p(y_t | f_t)] - Σ_t KL(q(η_t | y_t, u_t) || p(η_t | u_t))
+    
+    Parameters
+    ----------
+    model : Any
+        iVDFM model instance with forward() method
+    y_1T : torch.Tensor
+        Observation sequence, shape (batch, T, N)
+    u_1T : torch.Tensor
+        Auxiliary variable sequence, shape (batch, T, aux_dim)
+    innovation_distribution : str, default 'laplace'
+        Distribution type for innovations: 'laplace' or 'gaussian'
+    decoder_variance : float, default 1.0
+        Variance of Gaussian observation model
+    reduction : str, default 'mean'
+        Reduction method: 'mean' or 'sum'
+        
+    Returns
+    -------
+    Tuple[torch.Tensor, Dict[str, torch.Tensor]]
+        (elbo_loss, loss_dict) where:
+        - elbo_loss: Negative ELBO (to minimize)
+        - loss_dict: Dictionary with component losses:
+            - 'elbo': total ELBO loss
+            - 'reconstruction': reconstruction term
+            - 'kl': KL divergence term
+    """
+    # Forward pass through model
+    outputs = model.forward(y_1T, u_1T)
+    y_pred = outputs['y_pred']
+    encoder_params = outputs['encoder_params']
+    prior_params = outputs['prior_params']
+    
+    # Compute ELBO loss
+    elbo, loss_dict = compute_elbo_loss(
+        y_true=y_1T,
+        y_pred=y_pred,
+        encoder_params=encoder_params,
+        prior_params=prior_params,
+        innovation_distribution=innovation_distribution,
+        decoder_variance=decoder_variance,
+        reduction=reduction
+    )
     
     return elbo, loss_dict
 

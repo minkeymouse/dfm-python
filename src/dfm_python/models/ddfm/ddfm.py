@@ -347,20 +347,29 @@ class DDFM(BaseFactorModel, nn.Module):
         # Only target series (y) are imputed - features (X) are not imputed
         self._impute_missing_targets(y_pred_full)
         
-        # Compute eps: Match TensorFlow's self.eps = self.data_tmp[self.data.columns].values - prediction_iter
-        # For lags_input=0, full_input_data is self.data, so extract original columns directly
-        # For all-targets case, y_pred_full is already full shape
-        # eps = y_actual_full - y_pred_full (idiosyncratic residuals)
+        # Compute eps: idiosyncratic residuals on *targets only*.
+        # When covariates exist, the decoder predicts targets only (output_dim = num_target_series),
+        # so we must subtract predictions from the target slice, not from the full (X+y) matrix.
         if self.lags_input == 0:
             # IMPORTANT: use interpolated data for residuals so eps does not contain NaNs
             # Mixed-frequency data can have large missing blocks; eps NaNs propagate into AR-idio
             # estimation and can cause SVD failures when building the state space.
-            y_actual_full = to_numpy(self.data_denoised_interpolated)
+            if self._dataset.all_columns_are_targets:
+                y_actual_full = to_numpy(self.data_denoised_interpolated)
+            else:
+                y_actual_full = to_numpy(self.data_denoised_interpolated[self._dataset.target_series])
         else:
-            # If lags_input > 0, extract only original columns (matching TensorFlow's self.data.columns)
-            y_actual_full = full_input_data[self._dataset.data.columns].values
+            # If lags_input > 0, match target-only shape when covariates exist
+            if self._dataset.all_columns_are_targets:
+                y_actual_full = full_input_data[self._dataset.data.columns].values
+            else:
+                y_actual_full = full_input_data[self._dataset.target_series].values
         eps_full = y_actual_full - y_pred_full
-        self.eps = eps_full[:, self.target_indices]
+        if self._dataset.all_columns_are_targets:
+            self.eps = eps_full[:, self.target_indices]
+        else:
+            # eps_full is already target-only
+            self.eps = eps_full
         y_pred_prev, y_pred_prev_full = self._update_previous_predictions(
             y_pred, y_pred_full
         )

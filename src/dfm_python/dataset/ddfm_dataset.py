@@ -91,6 +91,27 @@ class DDFMDataset(Dataset):
         """Target shape (T, num_target_series)."""
         return self.y.shape
 
+    # Naming alignment with iVDFM dataset (target/covariate terminology)
+    @property
+    def target(self) -> np.ndarray:
+        """Target matrix (T, target_length)."""
+        return self.y
+
+    @property
+    def covariate(self) -> np.ndarray:
+        """Covariate/feature matrix (T, covariate_length)."""
+        return self.X
+
+    @property
+    def target_length(self) -> int:
+        """Number of target series."""
+        return int(self.target.shape[1]) if self.target.size > 0 else 0
+
+    @property
+    def covariate_length(self) -> int:
+        """Number of covariate series."""
+        return int(self.covariate.shape[1]) if self.covariate.size > 0 else 0
+
     @property
     def data_shape(self) -> Tuple[int, int]:
         """Data shape (T, num_features + num_target_series)."""

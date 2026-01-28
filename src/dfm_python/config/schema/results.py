@@ -9,7 +9,7 @@ import numpy as np
 import warnings
 from abc import ABC
 from dataclasses import dataclass
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, List, Dict, Any, Tuple, Union
 from datetime import datetime
 
 from .model import DFMConfig
@@ -23,93 +23,87 @@ from .params import DDFMModelState
 
 @dataclass
 class BaseResult(ABC):
-    """Base class for all factor model result structures.
+    """Base class for factor model result structures (linear + deep).
     
-    This abstract base class defines the core model outputs shared by all
-    factor model results (DFM, DDFM, KDFM, etc.). Only essential model parameters
-    and outputs are included - no user-specific metadata.
+    This is intentionally **minimal and model-agnostic**:
+    - Linear models (DFM) may populate state-space matrices A/C/Q/R, etc.
+    - Deep models (DDFM/iVDFM) may only populate factors and reconstructions.
     
-    Attributes
-    ----------
-    x_sm : np.ndarray
-        Standardized smoothed data matrix (T x N), where T is time periods
-        and N is number of series. Data is standardized (zero mean, unit variance).
-        This is the internal representation used by the model.
-        To get unstandardized data: use get_x_sm_original_scale(target_scaler) method.
-    Z : np.ndarray
-        Smoothed factor estimates (T x m), where m is the state dimension.
-        Columns represent different factors (common factors and idiosyncratic components).
-    C : np.ndarray
-        Observation/loading matrix (N x m). Each row corresponds to a series,
-        each column to a factor. C[i, j] gives the loading of series i on factor j.
-    R : np.ndarray
-        Covariance matrix for observation equation residuals (N x N).
-        Typically diagonal, representing idiosyncratic variances.
-    A : np.ndarray
-        Transition matrix (m x m) for the state equation. Describes how factors
-        evolve over time: Z_t = A @ Z_{t-1} + error.
-    Q : np.ndarray
-        Covariance matrix for transition equation residuals (m x m).
-        Describes the covariance of factor innovations.
-    target_scaler : Any, optional
-        Sklearn scaler instance (StandardScaler, RobustScaler, etc.) for target series only.
-        Used for unstandardization: X = scaler.inverse_transform(x).
-        If None, assumes data is already in original scale.
-    Z_0 : np.ndarray
-        Initial state vector (m,). Starting values for factors at t=0.
-    V_0 : np.ndarray
-        Initial covariance matrix (m x m) for factors. Uncertainty about Z_0.
-    r : np.ndarray
-        Number of factors per block (n_blocks,). Each element specifies
-        how many factors are in each block structure.
-    p : int
-        Number of lags in the autoregressive structure of factors. Typically p=1.
-    converged : bool
-        Whether estimation algorithm converged.
-    num_iter : int
-        Number of iterations performed.
-    loglik : float
-        Final log-likelihood value.
+    Common naming:
+    - `Z`: factors (T x r) or (T x m) depending on model
+    - `x_sm`: model-produced reconstruction/smoothed series in *model space*
     """
-    # Core state-space model parameters (required fields)
-    x_sm: np.ndarray      # Standardized smoothed data (T x N)
-    Z: np.ndarray         # Smoothed factors (T x m)
-    C: np.ndarray         # Observation matrix (N x m)
-    R: np.ndarray         # Covariance for observation residuals (N x N)
-    A: np.ndarray         # Transition matrix (m x m)
-    Q: np.ndarray         # Covariance for transition residuals (m x m)
-    Z_0: np.ndarray       # Initial state (m,)
-    V_0: np.ndarray       # Initial covariance (m x m)
-    r: np.ndarray         # Number of factors per block
-    p: int                # Number of lags
-    # Optional fields (must come after required fields)
-    target_scaler: Optional[Any] = None  # Sklearn scaler for target series unstandardization
-    # Training diagnostics
-    converged: bool = False  # Whether algorithm converged
-    num_iter: int = 0     # Number of iterations completed
-    loglik: float = -np.inf  # Final log-likelihood
+    # Minimal shared outputs
+    x_sm: Optional[np.ndarray] = None      # (T, N) reconstruction / smoothed series (model space)
+    Z: Optional[np.ndarray] = None         # (T, r) factors (or state) in model space
+    r: Optional[np.ndarray] = None         # factors per block (or [num_factors] for single-block models)
+    p: Optional[int] = None                # AR order / factor order (if applicable)
+    target_scaler: Optional[Any] = None    # scaler for targets (for inverse transform convenience)
+    converged: bool = False
+    num_iter: int = 0                      # epochs / iterations (model-specific meaning)
+    objective: Optional[float] = None      # loglik/ELBO/loss summary (model-specific)
+    # Backward-compat: older code uses `loglik` naming.
+    loglik: Optional[float] = None
+
+    # Optional linear state-space fields (present for DFM/DDFM, absent for pure deep results)
+    C: Optional[np.ndarray] = None
+    R: Optional[np.ndarray] = None
+    A: Optional[np.ndarray] = None
+    Q: Optional[np.ndarray] = None
+    Z_0: Optional[np.ndarray] = None
+    V_0: Optional[np.ndarray] = None
 
     # ----------------------------
     # Convenience methods (OOP)
     # ----------------------------
+    @property
+    def factors(self) -> Optional[np.ndarray]:
+        """Alias for factors/state in model space.
+        
+        Convention in this codebase:
+        - `Z` stores factors (or latent state) in model space
+        - Many callers naturally want `result.factors`
+        """
+        return self.Z
+
+    @property
+    def reconstructed(self) -> Optional[np.ndarray]:
+        """Alias for reconstruction/smoothed series in model space (`x_sm`)."""
+        return self.x_sm
+
+    @property
+    def x_hat(self) -> Optional[np.ndarray]:
+        """Alias for reconstruction/smoothed series in model space (`x_sm`)."""
+        return self.x_sm
+
     def num_series(self) -> int:
-        """Return number of series (rows in C)."""
-        return int(self.C.shape[0])
+        """Return number of series (columns in x_sm)."""
+        if self.x_sm is None:
+            raise ValueError("x_sm is not available in this result")
+        return int(self.x_sm.shape[1])
 
     def num_state(self) -> int:
-        """Return state dimension (columns in Z/C)."""
+        """Return factor/state dimension (columns in Z)."""
+        if self.Z is None:
+            raise ValueError("Z is not available in this result")
         return int(self.Z.shape[1])
 
     def num_periods(self) -> int:
         """Return number of time periods (rows in Z/x_sm)."""
-        return int(self.Z.shape[0])
+        if self.Z is not None:
+            return int(self.Z.shape[0])
+        if self.x_sm is not None:
+            return int(self.x_sm.shape[0])
+        raise ValueError("Neither Z nor x_sm is available in this result")
     
     def num_factors(self) -> int:
-        """Return number of primary factors (sum of r)."""
-        try:
-            return int(np.sum(self.r))
-        except (ValueError, AttributeError, TypeError):
-            return self.num_state()
+        """Return number of primary factors (sum of r), fallback to Z dim."""
+        if self.r is not None:
+            try:
+                return int(np.sum(self.r))
+            except Exception:
+                pass
+        return self.num_state()
     
     def get_x_sm_original_scale(self, target_scaler: Optional[Any] = None) -> np.ndarray:
         """Get smoothed data in original scale by inverse transforming target series.
@@ -128,8 +122,10 @@ class BaseResult(ABC):
         np.ndarray
             Smoothed data with target series in original scale (T x N)
         """
+        if self.x_sm is None:
+            raise ValueError("x_sm is not available in this result")
         scaler = target_scaler if target_scaler is not None else self.target_scaler
-        if scaler is not None and hasattr(scaler, 'inverse_transform'):
+        if scaler is not None and hasattr(scaler, "inverse_transform"):
             return scaler.inverse_transform(self.x_sm)
         return self.x_sm
     
@@ -138,6 +134,8 @@ class BaseResult(ABC):
         try:
             import pandas as pd
             cols = factor_names or [f"F{i+1}" for i in range(self.num_state())]
+            if self.Z is None:
+                raise ValueError("Z is not available in this result")
             df_dict = {col: self.Z[:, i] for i, col in enumerate(cols)}
             if time_index is not None:
                 if hasattr(time_index, '__iter__') and not isinstance(time_index, (str, bytes)):
@@ -184,28 +182,38 @@ class BaseResult(ABC):
         
         # Data dimensions
         lines.append("Data Dimensions:")
-        lines.append(f"  Series: {self.num_series()}")
-        lines.append(f"  Factors: {self.num_factors()} (total state dimension: {self.num_state()})")
-        lines.append(f"  Time periods: {self.num_periods()}")
+        try:
+            lines.append(f"  Series: {self.num_series()}")
+        except Exception:
+            lines.append("  Series: N/A")
+        try:
+            lines.append(f"  Factors: {self.num_factors()} (state dim: {self.num_state()})")
+        except Exception:
+            lines.append("  Factors: N/A")
+        try:
+            lines.append(f"  Time periods: {self.num_periods()}")
+        except Exception:
+            lines.append("  Time periods: N/A")
         lines.append("")
         
         # Factor structure
         lines.append("Factor Structure:")
-        if hasattr(self.r, '__len__') and len(self.r) > 0:
-            if len(self.r) == 1:
-                lines.append(f"  Factors per block: {self.r[0]}")
-            else:
-                lines.append(f"  Factors per block: {self.r}")
+        if self.r is not None and hasattr(self.r, "__len__") and len(self.r) > 0:
+            lines.append(f"  Factors per block: {self.r}")
         else:
-            lines.append(f"  Total factors: {self.num_factors()}")
-        lines.append(f"  AR order: {self.p}")
+            try:
+                lines.append(f"  Total factors: {self.num_factors()}")
+            except Exception:
+                lines.append("  Total factors: N/A")
+        lines.append(f"  AR order: {self.p if self.p is not None else 'N/A'}")
         lines.append("")
         
         # Training diagnostics
         lines.append("Training Diagnostics:")
         lines.append(f"  Converged: {self.converged}")
         lines.append(f"  Iterations: {self.num_iter}")
-        lines.append(f"  Log-likelihood: {self.loglik:.4f}")
+        if self.objective is not None:
+            lines.append(f"  Objective: {self.objective:.6f}")
         lines.append("")
         
         lines.append("=" * 80)
@@ -264,6 +272,14 @@ class DFMResult(BaseResult):
     training_max_iter: Optional[int] = None
     training_threshold: Optional[float] = None
     training_regularization_scale: Optional[float] = None
+
+    # Linear state-space outputs (DFM-specific)
+    C: Optional[np.ndarray] = None
+    R: Optional[np.ndarray] = None
+    A: Optional[np.ndarray] = None
+    Q: Optional[np.ndarray] = None
+    Z_0: Optional[np.ndarray] = None
+    V_0: Optional[np.ndarray] = None
     
     def summary(self) -> str:
         """Return a formatted summary of the DFM results."""
@@ -420,6 +436,79 @@ class DDFMResult(BaseResult):
             for info in ddfm_info:
                 lines.insert(insert_idx + 1, info)
         
+        return "\n".join(lines)
+
+
+@dataclass
+class iVDFMResult(BaseResult):
+    """iVDFM results (nonlinear, deep model).
+    
+    iVDFM is *not* a linear state-space model with identifiable loadings C/R/Q in
+    the classical sense. This result structure intentionally avoids forcing iVDFM
+    into BaseResult's linear-Kalman shape.
+    
+    The primary artifacts are:
+    - learned innovations and factors (as produced by the variational model)
+    - decoder reconstructions
+    - training diagnostics
+    - minimal checkpoint information for weights-only saving/loading
+    """
+    # Core learned representations
+    innovations: Optional[np.ndarray] = None          # (T, r) or (batch, T, r)
+    reconstructions: Optional[np.ndarray] = None      # decoded factors, (T, N) or (batch, T, N)
+    full_state: Optional[np.ndarray] = None           # Augmented state for companion form (T x r*p) for p>1, (T x r) for p=1
+
+    # Training diagnostics
+    training_elbo: Optional[float] = None
+    training_loss: Optional[float] = None
+    num_epochs: Optional[int] = None
+
+    # Minimal configuration snapshot (plain python)
+    config: Optional[Dict[str, Any]] = None
+
+    # Weights-only checkpoint payload (torch tensors)
+    model_state_dict: Optional[Dict[str, Any]] = None
+
+    # Backward/ergonomic aliases (keep codebase consistent with "factors")
+    @property
+    def factors(self) -> Optional[np.ndarray]:
+        return self.Z
+
+    @property
+    def reconstructed(self) -> Optional[np.ndarray]:
+        """Alias for reconstruction/smoothed series."""
+        return self.x_sm
+
+    @property
+    def x_hat(self) -> Optional[np.ndarray]:
+        """Alias for reconstruction/smoothed series."""
+        return self.x_sm
+
+    def summary(self) -> str:
+        lines = []
+        lines.append("=" * 80)
+        lines.append("iVDFM Result Summary")
+        lines.append("=" * 80)
+        lines.append("")
+        if self.factors is not None:
+            lines.append(f"Factors shape: {getattr(self.factors, 'shape', None)}")
+        if self.innovations is not None:
+            lines.append(f"Innovations shape: {getattr(self.innovations, 'shape', None)}")
+        if self.reconstructions is not None:
+            lines.append(f"Reconstructions shape: {getattr(self.reconstructions, 'shape', None)}")
+        if self.full_state is not None:
+            lines.append(f"Full state (augmented) shape: {getattr(self.full_state, 'shape', None)}")
+        lines.append("")
+        lines.append("Training:")
+        lines.append(f"  Converged: {self.converged}")
+        if self.num_epochs is not None:
+            lines.append(f"  Epochs: {self.num_epochs}")
+        if self.training_loss is not None:
+            lines.append(f"  Final loss: {self.training_loss:.6f}")
+        if self.training_elbo is not None:
+            lines.append(f"  Final ELBO: {self.training_elbo:.6f}")
+        lines.append("")
+        lines.append("=" * 80)
         return "\n".join(lines)
 
 # FitParams moved to config.schema.params as DFMParams

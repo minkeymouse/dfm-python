@@ -7,13 +7,13 @@ This package contains:
 Note: Series are specified via frequency dict mapping column names to frequencies.
 """
 
-from .model import BaseModelConfig, DFMConfig, DDFMConfig
-from .results import BaseResult, DFMResult, DDFMResult
-from .params import DFMStateSpaceParams, DDFMStateSpaceParams
+from .model import BaseModelConfig, DFMConfig, DDFMConfig, iVDFMConfig
+from .results import BaseResult, DFMResult, DDFMResult, iVDFMResult
+from .params import DFMStateSpaceParams, DDFMStateSpaceParams, iVDFMModelState
 
 __all__ = [
-    'BaseModelConfig', 'DFMConfig', 'DDFMConfig',
-    'BaseResult', 'DFMResult', 'DDFMResult',
-    'DFMStateSpaceParams', 'DDFMStateSpaceParams',
+    'BaseModelConfig', 'DFMConfig', 'DDFMConfig', 'iVDFMConfig',
+    'BaseResult', 'DFMResult', 'DDFMResult', 'iVDFMResult',
+    'DFMStateSpaceParams', 'DDFMStateSpaceParams', 'iVDFMModelState',
 ]
 

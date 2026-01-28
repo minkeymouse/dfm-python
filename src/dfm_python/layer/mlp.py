@@ -209,7 +209,8 @@ class MLP(nn.Module):
         original_shape = x.shape
         if x.dim() > 2:
             # Flatten all dimensions except last
-            x = x.view(-1, x.shape[-1])
+            # Use reshape instead of view: inputs may be non-contiguous
+            x = x.reshape(-1, x.shape[-1])
             needs_reshape = True
         else:
             needs_reshape = False
@@ -237,7 +238,8 @@ class MLP(nn.Module):
         # Reshape if needed
         if needs_reshape:
             output_shape = list(original_shape[:-1]) + [self.output_dim]
-            h = h.view(*output_shape)
+            # Use reshape for the same non-contiguity reason
+            h = h.reshape(*output_shape)
         
         return h
     
