@@ -369,7 +369,7 @@ def initialize_block_loadings(
     factors : np.ndarray
         Extracted factors (T x num_factors)
     """
-    from ...encoder.pca import compute_principal_components
+    from ...layer.pca import compute_principal_components
     from ...numeric.estimator import estimate_constrained_ols
     from ...config.constants import DEFAULT_REGULARIZATION, DEFAULT_TENT_KERNEL_REGULARIZATION_MULTIPLIER
     

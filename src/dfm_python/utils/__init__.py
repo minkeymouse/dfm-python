@@ -109,8 +109,8 @@ from .misc import (
     get_clock_frequency,
 )
 
-# Autoencoder functions should be imported directly from encoder.simple_autoencoder
-# Removed re-exports to avoid confusion - import from encoder module instead
+# Autoencoder functions should be imported directly from models.ddfm.encoder
+# Legacy encoder/decoder folders have been moved to trash - use models.ddfm instead
 
 __all__ = [
     # State-space utilities

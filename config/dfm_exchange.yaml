@@ -6,7 +6,7 @@
 # NOTE: Exchange tutorial is long daily data (T~7.6k). Full EM can take hours.
 # Keep tutorial runs short by capping iterations and loosening convergence.
 threshold: 1.0e-04  # EM convergence threshold (tutorial-friendly)
-max_iter: 50  # Maximum EM iterations (tutorial-friendly)
+max_iter: 10  # Maximum EM iterations (tutorial-friendly)
 
 # Data Handling
 clock: d  # Daily clock frequency (base frequency for latent factors)

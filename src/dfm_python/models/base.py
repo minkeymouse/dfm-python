@@ -1,9 +1,11 @@
-"""Abstract base class for factor models."""
+"""Abstract base class for factor models and model components."""
 
 from abc import ABC, abstractmethod
 from typing import Optional, Any, Union, Tuple
 from pathlib import Path
 import numpy as np
+import torch
+import torch.nn as nn
 
 from ..config import BaseResult
 from ..utils.errors import ModelNotTrainedError
@@ -71,3 +73,51 @@ class BaseFactorModel(ABC):
     def load(cls, path: Union[str, Path], *args, **kwargs) -> 'BaseFactorModel':
         """Load model from file."""
         raise NotImplementedError("Subclasses must implement load()")
+
+
+class BaseEncoder(nn.Module, ABC):
+    """Abstract base class for model encoders.
+    
+    Model-specific encoder base class. Encoders extract latent factors
+    from observed data. This is a PyTorch module for neural encoders.
+    """
+    
+    @abstractmethod
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass through encoder.
+        
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input data
+        
+        Returns
+        -------
+        torch.Tensor
+            Encoded representation (factors)
+        """
+        pass
+
+
+class BaseDecoder(nn.Module, ABC):
+    """Abstract base class for model decoders.
+    
+    Model-specific decoder base class. Decoders map latent factors
+    to observed data. This is a PyTorch module for neural decoders.
+    """
+    
+    @abstractmethod
+    def forward(self, f: torch.Tensor) -> torch.Tensor:
+        """Forward pass through decoder.
+        
+        Parameters
+        ----------
+        f : torch.Tensor
+            Latent factors
+        
+        Returns
+        -------
+        torch.Tensor
+            Reconstructed observations
+        """
+        pass

@@ -12,7 +12,7 @@ from dfm_python.models.ddfm.sampling import (
     run_mcmc_iteration
 )
 from dfm_python.dataset.ddfm_dataset import DDFMDataset, AutoencoderDataset
-from dfm_python.encoder.simple_autoencoder import SimpleAutoencoder
+from dfm_python.models.ddfm.encoder import SimpleAutoencoder
 from sklearn.preprocessing import StandardScaler
 
 

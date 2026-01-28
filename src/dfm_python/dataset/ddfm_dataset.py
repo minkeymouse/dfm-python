@@ -111,8 +111,10 @@ class DDFMDataset(Dataset):
     
     @property
     def target_indices(self) -> np.ndarray:
-        """Target series column indices in original data."""
-        return np.array([self.data_original.columns.get_loc(col) for col in self.target_series])
+        """Target series column indices in processed data (self.data, excluding time_idx)."""
+        # target_series are column names in the processed data (self.data)
+        # self.data contains X + y (or just y), but not time_idx
+        return np.array([self.data.columns.get_loc(col) for col in self.target_series])
     
     @classmethod
     def from_dataset(cls, new_data: Union[pd.DataFrame, PolarsDataFrame], dataset: 'DDFMDataset') -> 'DDFMDataset':

@@ -74,17 +74,34 @@ class TestDFM:
             model.get_result()
     
     def test_find_slower_frequency_from_tent_weights_dict(self):
-        """Test find_slower_frequency returns frequency from tent_weights_dict."""
+        """Test find_slower_frequency returns frequency from tent_weights_dict.
+        
+        Note: DFM supports only ONE slower frequency. This test uses a single
+        slower frequency pair.
+        """
+        # Single slower frequency (weekly on daily clock)
         tent_weights_dict = {
-            'd': np.array([1.0, 2.0]),
-            'w': np.array([3.0, 4.0]),
-            'm': np.array([5.0, 6.0])
+            'w': np.array([1.0, 2.0, 1.0])  # Weekly aggregation weights
         }
         
         slower_freq = find_slower_frequency('d', tent_weights_dict)
-        assert slower_freq is not None
-        assert slower_freq != 'd'
-        assert slower_freq in tent_weights_dict
+        assert slower_freq == 'w'
+    
+    def test_find_slower_frequency_rejects_multiple_slower_frequencies(self):
+        """Test find_slower_frequency raises error for multiple slower frequencies.
+        
+        DFM supports only ONE slower frequency in addition to the clock frequency.
+        """
+        from dfm_python.utils.errors import ConfigurationError
+        
+        # Multiple slower frequencies (should be rejected)
+        tent_weights_dict = {
+            'w': np.array([1.0, 2.0]),
+            'm': np.array([5.0, 6.0])
+        }
+        
+        with pytest.raises(ConfigurationError, match="Multiple slower frequencies"):
+            find_slower_frequency('d', tent_weights_dict)
     
     def test_find_slower_frequency_from_hierarchy(self):
         """Test find_slower_frequency returns frequency from hierarchy."""

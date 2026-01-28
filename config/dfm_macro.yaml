@@ -6,7 +6,7 @@
 
 # EM Algorithm Parameters
 threshold: 1.0e-05  # EM convergence threshold
-max_iter: 12  # Maximum EM iterations
+max_iter: 10  # Maximum EM iterations
 
 # Numerical Stability Parameters
 clip_ar_coefficients: true

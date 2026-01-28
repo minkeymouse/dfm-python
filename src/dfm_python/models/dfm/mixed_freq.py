@@ -28,17 +28,27 @@ def find_slower_frequency(
 ) -> Optional[str]:
     """Find slower frequency from tent_weights_dict or hierarchy.
     
+    Note: DFM supports only ONE slower frequency in addition to the clock frequency.
+    Multiple slower frequencies (e.g., both monthly and quarterly on a weekly clock)
+    are not supported. Only one slower frequency is allowed.
+    
     Parameters
     ----------
     clock : str
-        Clock frequency
+        Clock frequency (e.g., 'w' for weekly)
     tent_weights_dict : Optional[Dict[str, np.ndarray]]
-        Dictionary of tent weights by frequency
+        Dictionary of tent weights by frequency.
+        Must contain at most one slower frequency pair.
         
     Returns
     -------
     Optional[str]
         Slower frequency if found, None otherwise
+        
+    Raises
+    ------
+    ConfigurationError
+        If multiple slower frequencies are found in tent_weights_dict
     """
     # Bug fix 1.1: Validate that only one slower frequency exists in tent_weights_dict
     # Try tent_weights_dict first
@@ -79,12 +89,16 @@ def setup_mixed_frequency_params(
 ) -> Dict[str, Any]:
     """Extract and compute mixed-frequency parameters from config.
     
+    Note: DFM supports only ONE slower frequency in addition to the clock frequency.
+    For example, if clock is 'w' (weekly), only one slower frequency like 'm' (monthly)
+    is supported. Multiple slower frequencies (e.g., both 'm' and 'q') are not supported.
+    
     Parameters
     ----------
     config : Any
         DFMConfig instance with get_frequencies() method
     clock : str
-        Clock frequency
+        Clock frequency (e.g., 'w' for weekly)
     columns : Optional[List[str]]
         Column names from dataset
     N : int
@@ -95,6 +109,13 @@ def setup_mixed_frequency_params(
     Dict[str, Any]
         Dictionary with keys: R_mat, q, n_slower_freq, n_clock_freq, tent_weights_dict,
         frequencies_np, idio_indicator, mixed_freq, tent_kernel_size
+        
+    Raises
+    ------
+    ConfigurationError
+        If multiple slower frequencies are detected
+    DataValidationError
+        If column ordering violates [clock series | slower series] requirement
     """
     
     

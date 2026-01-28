@@ -25,77 +25,10 @@ from ...config.constants import (
 )
 from ...utils.errors import ModelNotTrainedError, ModelNotInitializedError, ConfigurationError
 from ...utils.validation import check_condition
+from ...utils.loss import compute_elbo_loss
+from ...layer.mlp import MLP
 
 _logger = get_logger(__name__)
-
-
-class MLP(nn.Module):
-    """Multi-layer perceptron for iVDFM components."""
-    
-    def __init__(
-        self,
-        input_dim: int,
-        output_dim: int,
-        hidden_dim: Union[int, list],
-        n_layers: int,
-        activation: str = 'lrelu',
-        slope: float = 0.1,
-        device: str = 'cpu'
-    ):
-        super().__init__()
-        self.input_dim = input_dim
-        self.output_dim = output_dim
-        self.n_layers = n_layers
-        self.device = device
-        
-        if isinstance(hidden_dim, int):
-            self.hidden_dim = [hidden_dim] * (self.n_layers - 1)
-        elif isinstance(hidden_dim, list):
-            self.hidden_dim = hidden_dim
-        else:
-            raise ValueError(f'Wrong argument type for hidden_dim: {type(hidden_dim)}')
-        
-        if isinstance(activation, str):
-            self.activation = [activation] * (self.n_layers - 1)
-        elif isinstance(activation, list):
-            self.activation = activation
-        else:
-            raise ValueError(f'Wrong argument type for activation: {type(activation)}')
-        
-        # Build activation functions
-        self._act_f = []
-        for act in self.activation:
-            if act == 'lrelu':
-                self._act_f.append(lambda x: F.leaky_relu(x, negative_slope=slope))
-            elif act == 'relu':
-                self._act_f.append(F.relu)
-            elif act == 'tanh':
-                self._act_f.append(torch.tanh)
-            elif act == 'none':
-                self._act_f.append(lambda x: x)
-            else:
-                raise ValueError(f'Incorrect activation: {act}')
-        
-        # Build layers
-        if self.n_layers == 1:
-            _fc_list = [nn.Linear(self.input_dim, self.output_dim)]
-        else:
-            _fc_list = [nn.Linear(self.input_dim, self.hidden_dim[0])]
-            for i in range(1, self.n_layers - 1):
-                _fc_list.append(nn.Linear(self.hidden_dim[i - 1], self.hidden_dim[i]))
-            _fc_list.append(nn.Linear(self.hidden_dim[-1], self.output_dim))
-        self.fc = nn.ModuleList(_fc_list)
-        self.to(self.device)
-    
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass through MLP."""
-        h = x
-        for c in range(self.n_layers):
-            if c == self.n_layers - 1:
-                h = self.fc[c](h)
-            else:
-                h = self._act_f[c](self.fc[c](h))
-        return h
 
 
 class iVDFM(BaseFactorModel, nn.Module):
@@ -265,14 +198,22 @@ class iVDFM(BaseFactorModel, nn.Module):
         # Takes full sequence and auxiliary variable, outputs variational params
         encoder_input_dim = self.data_dim * self.sequence_length + self.aux_dim
         self.innovation_encoder_mu = MLP(
-            encoder_input_dim, self.latent_dim,
-            self.encoder_hidden_dim, self.encoder_n_layers,
-            activation=self.activation, slope=self.slope, device=str(self.device)
+            input_dim=encoder_input_dim,
+            output_dim=self.latent_dim,
+            hidden_dim=self.encoder_hidden_dim,
+            n_layers=self.encoder_n_layers,
+            activation=self.activation,
+            slope=self.slope,
+            device=self.device
         )
         self.innovation_encoder_logvar = MLP(
-            encoder_input_dim, self.latent_dim,
-            self.encoder_hidden_dim, self.encoder_n_layers,
-            activation=self.activation, slope=self.slope, device=str(self.device)
+            input_dim=encoder_input_dim,
+            output_dim=self.latent_dim,
+            hidden_dim=self.encoder_hidden_dim,
+            n_layers=self.encoder_n_layers,
+            activation=self.activation,
+            slope=self.slope,
+            device=self.device
         )
         
         # Prior network: p(η_t | u_t) - outputs natural parameters λ(u_t)
@@ -280,16 +221,24 @@ class iVDFM(BaseFactorModel, nn.Module):
         # For Laplace: location and scale parameters
         # For now, output location and log-scale (can be extended for other distributions)
         self.prior_network = MLP(
-            self.aux_dim, self.latent_dim * 2,  # location and log-scale
-            self.prior_hidden_dim, self.prior_n_layers,
-            activation=self.activation, slope=self.slope, device=str(self.device)
+            input_dim=self.aux_dim,
+            output_dim=self.latent_dim * 2,  # location and log-scale
+            hidden_dim=self.prior_hidden_dim,
+            n_layers=self.prior_n_layers,
+            activation=self.activation,
+            slope=self.slope,
+            device=self.device
         )
         
         # Decoder: g(f_t) → y_t
         self.decoder = MLP(
-            self.latent_dim, self.data_dim,
-            self.decoder_hidden_dim, self.decoder_n_layers,
-            activation=self.activation, slope=self.slope, device=str(self.device)
+            input_dim=self.latent_dim,
+            output_dim=self.data_dim,
+            hidden_dim=self.decoder_hidden_dim,
+            n_layers=self.decoder_n_layers,
+            activation=self.activation,
+            slope=self.slope,
+            device=self.device
         )
         
         # Dynamics: diagonal transition matrices A and B
@@ -526,7 +475,7 @@ class iVDFM(BaseFactorModel, nn.Module):
         u_1T : torch.Tensor
             Auxiliary variable sequence, shape (batch, T, aux_dim)
         N : int
-            Total number of samples in dataset (for TC computation)
+            Total number of samples in dataset (for TC computation, currently unused)
         
         Returns
         -------
@@ -536,55 +485,19 @@ class iVDFM(BaseFactorModel, nn.Module):
         # Forward pass
         outputs = self.forward(y_1T, u_1T)
         y_pred = outputs['y_pred']
-        eta_1T = outputs['eta']
         encoder_params = outputs['encoder_params']
         prior_params = outputs['prior_params']
         
-        batch_size, T, _ = y_1T.shape
-        
-        # Reconstruction term: E[log p(y_t | f_t)]
-        # Assuming Gaussian observation model
-        recon_loss = -0.5 * (
-            np.log(2 * np.pi * self.decoder_var) +
-            ((y_1T - y_pred) ** 2) / self.decoder_var
-        ).sum(dim=-1).mean()  # Sum over data dim, mean over batch and time
-        
-        # KL divergence terms: Σ_t KL(q(η_t | y_{1:T}, u_t) || p(η_t | u_t))
-        kl_losses = []
-        for t in range(T):
-            mu = encoder_params[t]['mu']
-            logvar = encoder_params[t]['logvar']
-            prior_p = prior_params[t]
-            
-            if self.innovation_distribution == 'laplace':
-                # KL between Gaussian q and Laplace p
-                # TODO: Implement proper KL divergence
-                # For now, use simplified version
-                location = prior_p['location']
-                log_scale = prior_p['log_scale']
-                scale = torch.exp(log_scale)
-                
-                # Simplified KL (needs proper implementation)
-                kl_t = 0.5 * (
-                    logvar - log_scale * 2 +
-                    (torch.exp(logvar) + (mu - location) ** 2) / (scale ** 2) - 1
-                ).sum(dim=-1)
-                kl_losses.append(kl_t)
-            else:
-                raise NotImplementedError(
-                    f"KL for {self.innovation_distribution} not implemented"
-                )
-        
-        kl_loss = torch.stack(kl_losses, dim=1).mean()  # Mean over batch and time
-        
-        # Total ELBO (negative because we minimize)
-        elbo = -(recon_loss - kl_loss)
-        
-        loss_dict = {
-            'elbo': elbo,
-            'reconstruction': recon_loss,
-            'kl': kl_loss,
-        }
+        # Use ELBO loss function from utils
+        elbo, loss_dict = compute_elbo_loss(
+            y_true=y_1T,
+            y_pred=y_pred,
+            encoder_params=encoder_params,
+            prior_params=prior_params,
+            innovation_distribution=self.innovation_distribution,
+            decoder_variance=self.decoder_var,
+            reduction='mean'
+        )
         
         return elbo, loss_dict
     

@@ -147,7 +147,7 @@ def main(cfg: DictConfig) -> None:
         except Exception as e:
             context = {
                 "config_max_iter": cfg.get('max_iter', None),
-                "dataset_obs_dim": dataset.obs_dim if dataset is not None else None,
+                "dataset_obs_dim": len(dataset.variables.columns) if dataset is not None and hasattr(dataset, 'variables') else None,
                 "elapsed_time": str(datetime.now() - start_time),
             }
             diagnostics = check_model_state(model, "during_training")

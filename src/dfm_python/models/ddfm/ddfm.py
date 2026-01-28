@@ -21,7 +21,7 @@ from ...numeric.statistic import (
     average_3d_array
 )
 from ...numeric.builder import build_ddfm_optimizer
-from ...encoder.simple_autoencoder import SimpleAutoencoder
+from .encoder import SimpleAutoencoder
 from .sampling import run_mcmc_iteration
 from ...config.schema.params import DDFMModelState
 from ...config.schema.results import DDFMResult

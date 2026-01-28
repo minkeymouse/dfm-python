@@ -1,87 +1,55 @@
-"""Encoder and decoder utilities for DDFM.
+"""Encoder and autoencoder implementation for DDFM.
 
-This module contains DDFM-specific encoder networks and decoder parameter extraction utilities.
+This module provides the nonlinear encoder network and autoencoder
+specifically for the Deep Dynamic Factor Model (DDFM).
 """
 
 import numpy as np
 import torch
 import torch.nn as nn
-from typing import Tuple, List, Optional, TYPE_CHECKING
+from typing import List, Tuple, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from ..dataset.ddfm_dataset import AutoencoderDataset
+    from ...dataset.ddfm_dataset import AutoencoderDataset
 
-from ..logger import get_logger
-from ..utils.errors import ConfigurationError, DataValidationError
-from ..config.constants import (
-    DEFAULT_TORCH_DTYPE,
-    DEFAULT_ZERO_VALUE,
+from ..base import BaseEncoder, BaseDecoder
+from .decoder import DDFMLinearDecoder, DDFMMLPDecoder
+from ...utils.errors import ConfigurationError, DataValidationError
+from ...config.constants import (
     DEFAULT_XAVIER_GAIN,
-    DEFAULT_OUTPUT_LAYER_GAIN,
+    DEFAULT_ZERO_VALUE,
     DEFAULT_BATCH_NORM_MOMENTUM,
     DEFAULT_BATCH_NORM_EPS,
     DEFAULT_AUTOENCODER_FIT_EPOCHS,
     DEFAULT_DDFM_BATCH_SIZE,
     DEFAULT_DDFM_LEARNING_RATE,
+    DEFAULT_LR_DECAY_RATE,
+    DEFAULT_N_MC_SAMPLES,
     DEFAULT_CLEAN_NAN,
 )
+from ...logger import get_logger
 
 _logger = get_logger(__name__)
 
 
-class Encoder(nn.Module):
-    """Nonlinear encoder network for DDFM."""
-    
-    def __init__(
-        self,
-        input_dim: int,
-        encoder_dims: List[int],
-        activation: str = 'relu',
-    ):
-        super().__init__()
-        
-        if len(encoder_dims) == 0:
-            raise ValueError("encoder_dims must have at least one element")
-        
-        self.layers = nn.ModuleList()
-        self.batch_norms = nn.ModuleList()
-        
-        # Activation function
-        activations = {'tanh': nn.Tanh(), 'relu': nn.ReLU(), 'sigmoid': nn.Sigmoid()}
-        if activation not in activations:
-            raise ConfigurationError(f"Unknown activation: {activation}")
-        self.activation = activations[activation]
-        
-        prev_dim = input_dim
-        first_layer = nn.Linear(prev_dim, encoder_dims[0])
-        self._init_linear(first_layer)
-        self.layers.append(first_layer)
-        prev_dim = encoder_dims[0]
-        
-        for dim in encoder_dims[1:]:
-            self.batch_norms.append(nn.BatchNorm1d(prev_dim, momentum=DEFAULT_BATCH_NORM_MOMENTUM, eps=DEFAULT_BATCH_NORM_EPS))
-            layer = nn.Linear(prev_dim, dim)
-            self._init_linear(layer)
-            self.layers.append(layer)
-            prev_dim = dim
-    
-    @staticmethod
-    def _init_linear(layer: nn.Linear) -> None:
-        """Initialize linear layer weights and bias."""
-        nn.init.xavier_normal_(layer.weight, gain=DEFAULT_XAVIER_GAIN)
-        nn.init.constant_(layer.bias, DEFAULT_ZERO_VALUE)
-    
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.activation(self.layers[0](x))
-        for i in range(1, len(self.layers)):
-            x = self.batch_norms[i - 1](x)
-            x = self.activation(self.layers[i](x))
-        
-        return x
-
-
 def extract_decoder_params(decoder) -> Tuple[np.ndarray, np.ndarray]:
-    """Extract observation matrix C and bias from decoder."""
+    """Extract observation matrix C and bias from decoder.
+    
+    Parameters
+    ----------
+    decoder : BaseDecoder or nn.Linear
+        Decoder instance or Linear layer
+        
+    Returns
+    -------
+    Tuple[np.ndarray, np.ndarray]
+        (weight, bias) where weight is (output_dim, input_dim) and bias is (output_dim,)
+        
+    Raises
+    ------
+    DataValidationError
+        If decoder doesn't have extract_params method and is not a Linear layer
+    """
     if hasattr(decoder, 'extract_params'):
         return decoder.extract_params()
     
@@ -98,10 +66,111 @@ def extract_decoder_params(decoder) -> Tuple[np.ndarray, np.ndarray]:
     )
 
 
-class SimpleAutoencoder(nn.Module):
-    """Simple autoencoder for DDFM."""
+class DDFMEncoder(BaseEncoder):
+    """Nonlinear encoder network for DDFM.
     
-    def __init__(self, encoder: nn.Module, decoder: nn.Module):
+    This is the encoder component used in DDFM's SimpleAutoencoder.
+    """
+    
+    def __init__(
+        self,
+        input_dim: int,
+        encoder_dims: List[int],
+        activation: str = 'relu',
+    ):
+        """Initialize DDFM encoder.
+        
+        Parameters
+        ----------
+        input_dim : int
+            Input dimension (observation dimension)
+        encoder_dims : List[int]
+            Hidden layer dimensions. Must have at least one element.
+        activation : str
+            Activation function ('relu', 'tanh', 'sigmoid')
+        """
+        super().__init__()
+        
+        if len(encoder_dims) == 0:
+            raise ValueError("encoder_dims must have at least one element")
+        
+        self.layers = nn.ModuleList()
+        self.batch_norms = nn.ModuleList()
+        
+        # Activation function
+        activations = {'tanh': nn.Tanh(), 'relu': nn.ReLU(), 'sigmoid': nn.Sigmoid()}
+        if activation not in activations:
+            raise ConfigurationError(f"Unknown activation: {activation}")
+        self.activation = activations[activation]
+        
+        # Build layers
+        prev_dim = input_dim
+        first_layer = nn.Linear(prev_dim, encoder_dims[0])
+        self._init_linear(first_layer)
+        self.layers.append(first_layer)
+        prev_dim = encoder_dims[0]
+        
+        for dim in encoder_dims[1:]:
+            self.batch_norms.append(
+                nn.BatchNorm1d(prev_dim, momentum=DEFAULT_BATCH_NORM_MOMENTUM, eps=DEFAULT_BATCH_NORM_EPS)
+            )
+            layer = nn.Linear(prev_dim, dim)
+            self._init_linear(layer)
+            self.layers.append(layer)
+            prev_dim = dim
+    
+    @staticmethod
+    def _init_linear(layer: nn.Linear) -> None:
+        """Initialize linear layer weights and bias.
+        
+        Parameters
+        ----------
+        layer : nn.Linear
+            Linear layer to initialize
+        """
+        nn.init.xavier_normal_(layer.weight, gain=DEFAULT_XAVIER_GAIN)
+        nn.init.constant_(layer.bias, DEFAULT_ZERO_VALUE)
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass through encoder.
+        
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input data (T, input_dim) or (batch, T, input_dim)
+            
+        Returns
+        -------
+        torch.Tensor
+            Encoded factors (T, encoder_dims[-1]) or (batch, T, encoder_dims[-1])
+        """
+        x = self.activation(self.layers[0](x))
+        for i in range(1, len(self.layers)):
+            x = self.batch_norms[i - 1](x)
+            x = self.activation(self.layers[i](x))
+        
+        return x
+
+
+class SimpleAutoencoder(nn.Module):
+    """Simple autoencoder for DDFM.
+    
+    This is the DDFM autoencoder, combining DDFMEncoder and DDFM decoders
+    (DDFMLinearDecoder or DDFMMLPDecoder). The encoder component is equivalent
+    to DDFMEncoder, and together with a decoder forms the complete autoencoder
+    used in DDFM training.
+    """
+    
+    def __init__(self, encoder: BaseEncoder, decoder: BaseDecoder):
+        """Initialize autoencoder.
+        
+        Parameters
+        ----------
+        encoder : BaseEncoder
+            Encoder network
+        decoder : BaseDecoder
+            Decoder network
+        """
         super().__init__()
         self.encoder = encoder
         self.decoder = decoder
@@ -117,7 +186,30 @@ class SimpleAutoencoder(nn.Module):
         activation: str = 'relu',
         seed: Optional[int] = None
     ) -> "SimpleAutoencoder":
-        """Build autoencoder with encoder and decoder."""
+        """Build autoencoder with encoder and decoder.
+        
+        Parameters
+        ----------
+        input_dim : int
+            Input dimension
+        encoder_size : Tuple[int, ...]
+            Encoder hidden layer dimensions
+        decoder_size : Optional[Tuple[int, ...]]
+            Decoder hidden layer dimensions (required if decoder_type='mlp')
+        decoder_type : str
+            Decoder type ('linear' or 'mlp')
+        output_dim : Optional[int]
+            Output dimension (defaults to input_dim)
+        activation : str
+            Activation function
+        seed : Optional[int]
+            Random seed
+            
+        Returns
+        -------
+        SimpleAutoencoder
+            Constructed autoencoder
+        """
         if output_dim is None:
             output_dim = input_dim
         
@@ -127,17 +219,17 @@ class SimpleAutoencoder(nn.Module):
         if len(encoder_size) == 0:
             raise ValueError("encoder_size must have at least one element")
         
-        encoder = Encoder(input_dim, list(encoder_size), activation)
+        # Build encoder
+        encoder = DDFMEncoder(input_dim, list(encoder_size), activation)
         
-        from ..decoder import LinearDecoder, MLPDecoder
-        
+        # Build decoder
         latent_dim = encoder_size[-1]
         if decoder_type == "mlp":
             if decoder_size is None or len(decoder_size) == 0:
                 raise ValueError("decoder_size must be provided when decoder_type='mlp'")
-            decoder = MLPDecoder(latent_dim, output_dim, list(decoder_size), activation, seed)
+            decoder = DDFMMLPDecoder(latent_dim, output_dim, list(decoder_size), activation, seed=seed)
         else:
-            decoder = LinearDecoder(latent_dim, output_dim, seed=seed)
+            decoder = DDFMLinearDecoder(latent_dim, output_dim, seed=seed)
         
         return cls(encoder=encoder, decoder=decoder)
     
@@ -151,6 +243,28 @@ class SimpleAutoencoder(nn.Module):
         activation: str = 'relu',
         seed: Optional[int] = None
     ) -> "SimpleAutoencoder":
+        """Build autoencoder from dataset.
+        
+        Parameters
+        ----------
+        dataset : AutoencoderDataset
+            Dataset to build from
+        encoder_size : Tuple[int, ...]
+            Encoder hidden layer dimensions
+        decoder_size : Optional[Tuple[int, ...]]
+            Decoder hidden layer dimensions
+        decoder_type : str
+            Decoder type ('linear' or 'mlp')
+        activation : str
+            Activation function
+        seed : Optional[int]
+            Random seed
+            
+        Returns
+        -------
+        SimpleAutoencoder
+            Constructed autoencoder
+        """
         return cls.build(
             input_dim=dataset.full_input.shape[1],
             encoder_size=encoder_size,
@@ -162,10 +276,33 @@ class SimpleAutoencoder(nn.Module):
         )
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass through autoencoder.
+        
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input data
+            
+        Returns
+        -------
+        torch.Tensor
+            Reconstructed output
+        """
         return self.decoder(self.encoder(x))
     
     def predict(self, x: torch.Tensor) -> torch.Tensor:
-        """Predict using inference mode (matches TensorFlow's autoencoder.predict() behavior)."""
+        """Predict using inference mode (matches TensorFlow's autoencoder.predict() behavior).
+        
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input data
+            
+        Returns
+        -------
+        torch.Tensor
+            Predicted output
+        """
         self.eval()
         with torch.no_grad():
             return self.forward(x)
@@ -247,6 +384,29 @@ class SimpleAutoencoder(nn.Module):
         scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None,
         target_indices: Optional[torch.Tensor] = None
     ) -> None:
+        """Fit autoencoder on dataset.
+        
+        Parameters
+        ----------
+        dataset : AutoencoderDataset
+            Dataset to train on
+        epochs : Optional[int]
+            Number of training epochs
+        batch_size : Optional[int]
+            Batch size
+        learning_rate : Optional[float]
+            Learning rate
+        optimizer_type : str
+            Optimizer type ('Adam' or 'SGD')
+        decay_learning_rate : bool
+            Whether to decay learning rate
+        optimizer : Optional[torch.optim.Optimizer]
+            Pre-configured optimizer (if None, creates new one)
+        scheduler : Optional[torch.optim.lr_scheduler._LRScheduler]
+            Pre-configured scheduler (if None and decay_learning_rate=True, creates new one)
+        target_indices : Optional[torch.Tensor]
+            Target indices (not used, kept for compatibility)
+        """
         if epochs is None:
             epochs = DEFAULT_AUTOENCODER_FIT_EPOCHS
         if batch_size is None:
@@ -262,8 +422,9 @@ class SimpleAutoencoder(nn.Module):
             optimizer = optimizers.get(optimizer_type, optimizers['Adam'])()
         
         if scheduler is None and decay_learning_rate:
-            from ..config.constants import DEFAULT_LR_DECAY_RATE, DEFAULT_N_MC_SAMPLES
-            scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=DEFAULT_N_MC_SAMPLES, gamma=DEFAULT_LR_DECAY_RATE)
+            scheduler = torch.optim.lr_scheduler.StepLR(
+                optimizer, step_size=DEFAULT_N_MC_SAMPLES, gamma=DEFAULT_LR_DECAY_RATE
+            )
         
         self.train()
         full_input = dataset.full_input

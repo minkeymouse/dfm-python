@@ -8,7 +8,7 @@ from dfm_python.numeric.builder import (
     build_ddfm_optimizer, build_ddfm_state_space
 )
 from dfm_python.config import DFMConfig
-from dfm_python.encoder.simple_autoencoder import SimpleAutoencoder
+from dfm_python.models.ddfm.encoder import SimpleAutoencoder
 from dfm_python.utils.errors import ModelNotTrainedError
 
 
