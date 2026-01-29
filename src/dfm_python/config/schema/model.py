@@ -701,8 +701,6 @@ class iVDFMConfig(BaseModelConfig):
     decoder_var: float = DEFAULT_IVDFM_DECODER_VAR  # Decoder variance
     beta_kl: float = 1.0  # Weight for KL term in ELBO: ELBO = recon_loss + beta_kl * kl_loss. β<1 reduces KL pressure.
     use_layer_norm: bool = False  # Whether to use layer normalization in encoder/decoder networks
-    f0_init_method: Optional[str] = None  # f0 initialization method: 'single_window' (default, only supported method)
-    ar_init_method: Optional[str] = None  # AR coefficient initialization method: None (random), 'ols' (from data, recommended)
     
     # ========================================================================
     # Training Parameters
@@ -883,8 +881,6 @@ class iVDFMConfig(BaseModelConfig):
             'scheduler_factor': DEFAULT_IVDFM_SCHEDULER_FACTOR,
             'scheduler_min_lr': DEFAULT_IVDFM_SCHEDULER_MIN_LR,
             'scaler': None,  # Scaler string: 'standard', 'robust', 'minmax', 'maxabs', 'quantile', or null
-            'f0_init_method': None,  # f0 initialization method: 'single_window' (default), 'multi_window', 'rolling'
-            'ar_init_method': None,  # AR coefficient initialization method: None (random), 'ols' (from data)
         })
         
         return ivdfm_params

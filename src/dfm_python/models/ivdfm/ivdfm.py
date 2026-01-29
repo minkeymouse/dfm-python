@@ -289,10 +289,6 @@ class iVDFM(BaseFactorModel, nn.Module):
         self.scheduler_factor = self._config.scheduler_factor
         self.scheduler_min_lr = self._config.scheduler_min_lr
         
-        # Extract initialization method attributes (for use during fit)
-        self.f0_init_method = self._get_config_attr('f0_init_method', None)
-        self.ar_init_method = self._get_config_attr('ar_init_method', None)
-        
         # Device setup
         if device is None:
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -444,23 +440,14 @@ class iVDFM(BaseFactorModel, nn.Module):
             device=self.device,
         )
     
-    def _initialize_f0_from_data(self, dataset: 'iVDFMDataset', method: str = 'single_window') -> None:
-        """Initialize f_0 (initial factor state) using PCA on data.
-        
-        Uses single-window PCA on the most recent window (baseline method).
-        Other methods (multi_window, rolling) were tested in Phase 7 but did not improve performance.
+    def _initialize_f0_from_data(self, dataset: 'iVDFMDataset') -> None:
+        """Initialize f_0 (initial factor state) using single-window PCA on data.
         
         Parameters
         ----------
         dataset : iVDFMDataset
             Dataset containing training data
-        method : str, default 'single_window'
-            Initialization method (only 'single_window' is supported)
         """
-        if method != 'single_window':
-            _logger.warning(f"f0_init_method '{method}' is not supported. Using 'single_window'.")
-            method = 'single_window'
-        
         T_total = len(dataset.data)
         T_init = min(self.window, T_total) if self.window is not None else T_total
         if T_init < 2:
@@ -472,14 +459,14 @@ class iVDFM(BaseFactorModel, nn.Module):
         f0_mean = None
         
         try:
-            # Single window PCA (baseline method)
+            # Single window PCA
             y_win = dataset.data[T_total - T_init:T_total, :]  # (T_init, N)
             f_init, _ = extract_pca_factors(y_win, n_components=max_components)
             f0_mean = np.mean(f_init, axis=0)  # (max_components,)
                 
         except Exception as e:
             self._set_random_f0()
-            _logger.warning(f"PCA init ({method}) failed: {e}. Using random f_0.")
+            _logger.warning(f"PCA init failed: {e}. Using random f_0.")
             return
 
         # Normalize f0 (pad, sign convention)
@@ -492,7 +479,7 @@ class iVDFM(BaseFactorModel, nn.Module):
             self.ssm.f0.data = torch.tensor(f0_mean, dtype=DEFAULT_TORCH_DTYPE, device=self.device)
 
         _logger.info(
-            f"Initialized f_0 using {method} PCA. "
+            f"Initialized f_0 using PCA. "
             f"f_0 range: [{f0_mean.min():.4f}, {f0_mean.max():.4f}]"
         )
     
@@ -749,14 +736,10 @@ class iVDFM(BaseFactorModel, nn.Module):
             self._build_components()
         
         # Initialize f_0 (initial factor state) using PCA on initial data
-        # Get initialization method from instance attribute (set during __init__)
-        f0_init_method = self.f0_init_method if self.f0_init_method is not None else 'single_window'
-        self._initialize_f0_from_data(dataset, method=f0_init_method)
+        self._initialize_f0_from_data(dataset)
         
-        # Initialize AR coefficients from data if requested
-        ar_init_method = self.ar_init_method
-        if ar_init_method == 'ols':
-            self._initialize_ar_coeffs_from_data(dataset)
+        # Initialize AR coefficients using OLS from data (always enabled)
+        self._initialize_ar_coeffs_from_data(dataset)
         
         # Build optimizer
         self._build_optimizer()
