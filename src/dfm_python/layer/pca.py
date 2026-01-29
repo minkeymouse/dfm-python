@@ -235,6 +235,52 @@ def encode_pca(
     return factors
 
 
+def extract_pca_factors(
+    data: Union[np.ndarray, "torch.Tensor"],
+    n_components: int,
+    block_idx: Optional[int] = None
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Extract PCA factors from data (fit and encode in one step).
+    
+    This is a convenience function that centers the data, fits PCA, and extracts
+    factors. Useful for initialization routines that need PCA factors.
+    
+    Parameters
+    ----------
+    data : np.ndarray or torch.Tensor
+        Data matrix (T, N)
+    n_components : int
+        Number of PCA components to extract
+    block_idx : int, optional
+        Block index for error messages
+        
+    Returns
+    -------
+    Tuple[np.ndarray, np.ndarray]
+        (factors, eigenvectors) where:
+        - factors: (T, n_components) PCA factors
+        - eigenvectors: (N, n_components) PCA eigenvectors
+    """
+    # Convert to NumPy if needed
+    data = to_numpy(data)
+    
+    # Center the data
+    data_mean = np.mean(data, axis=0, keepdims=True)
+    data_centered = data - data_mean
+    
+    # Fit PCA
+    _, eigenvectors, _, _ = fit_pca(
+        X=data_centered,
+        n_components=n_components,
+        block_idx=block_idx
+    )
+    
+    # Extract factors
+    factors = data_centered @ eigenvectors  # (T, n_components)
+    
+    return factors, eigenvectors
+
+
 # Backward compatibility wrapper class (does not inherit from BaseEncoder)
 class PCAEncoder:
     """Principal Component Analysis encoder for factor extraction (backward compatibility wrapper).

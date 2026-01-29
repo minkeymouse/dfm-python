@@ -31,6 +31,7 @@ from ...config.constants import (
 from ...utils.errors import ModelNotTrainedError, ModelNotInitializedError, ConfigurationError, DataValidationError
 from ...utils.validation import check_condition
 from ...utils.loss import compute_elbo_loss
+from ...layer.pca import extract_pca_factors
 from .encoder import iVDFMInnovationEncoder
 from .decoder import iVDFMDecoder
 from .prior import iVDFMPriorNetwork
@@ -319,50 +320,6 @@ class iVDFM(BaseFactorModel, nn.Module):
         """Helper to safely get config attribute with default."""
         return getattr(self._config, attr, default) if self._config is not None else default
     
-    def _extract_pca_factors(
-        self, 
-        data: np.ndarray, 
-        n_components: Optional[int] = None
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        """Extract PCA factors from centered data.
-        
-        Helper method to reduce code duplication in initialization methods.
-        
-        Parameters
-        ----------
-        data : np.ndarray
-            Data matrix (T, N)
-        n_components : Optional[int]
-            Number of PCA components. If None, uses min(data_dim, T, latent_dim)
-            
-        Returns
-        -------
-        Tuple[np.ndarray, np.ndarray]
-            (factors, eigenvectors) where:
-            - factors: (T, n_components) PCA factors
-            - eigenvectors: (N, n_components) PCA eigenvectors
-        """
-        from ...layer.pca import fit_pca
-        
-        # Center the data
-        data_mean = np.mean(data, axis=0, keepdims=True)
-        data_centered = data - data_mean
-        
-        # Determine number of components
-        if n_components is None:
-            n_components = min(self.data_dim, data.shape[0], self.latent_dim)
-        
-        # Extract PCA
-        _, eigenvectors, _, _ = fit_pca(
-            X=data_centered,
-            n_components=n_components,
-            block_idx=None
-        )
-        
-        # Compute factors
-        factors = data_centered @ eigenvectors  # (T, n_components)
-        
-        return factors, eigenvectors
     
     def _set_random_f0(self) -> None:
         """Set f0 to random values (fallback for initialization failures)."""
@@ -506,7 +463,7 @@ class iVDFM(BaseFactorModel, nn.Module):
             if method == 'single_window':
                 # Baseline: single window PCA
                 y_win = dataset.data[T_total - T_init:T_total, :]  # (T_init, N)
-                f_init, _ = self._extract_pca_factors(y_win, n_components=max_components)
+                f_init, _ = extract_pca_factors(y_win, n_components=max_components)
                 f0_mean = np.mean(f_init, axis=0)  # (max_components,)
                 
             elif method == 'multi_window':
@@ -523,7 +480,7 @@ class iVDFM(BaseFactorModel, nn.Module):
                     
                     y_win = dataset.data[start_idx:end_idx, :]
                     try:
-                        f_init, _ = self._extract_pca_factors(y_win, n_components=max_components)
+                        f_init, _ = extract_pca_factors(y_win, n_components=max_components)
                         f0_w = np.mean(f_init, axis=0)
                         f0_list.append(f0_w)
                     except Exception:
@@ -538,7 +495,7 @@ class iVDFM(BaseFactorModel, nn.Module):
             elif method == 'rolling':
                 # Rolling: expanding window PCA (all data up to current)
                 y_win = dataset.data[:T_total, :]  # All data
-                f_init_all, eigenvectors = self._extract_pca_factors(y_win, n_components=max_components)
+                f_init_all, eigenvectors = extract_pca_factors(y_win, n_components=max_components)
                 # Use most recent window's factors for f0
                 f_init_recent = f_init_all[T_total - T_init:T_total, :]
                 f0_mean = np.mean(f_init_recent, axis=0)
@@ -588,7 +545,7 @@ class iVDFM(BaseFactorModel, nn.Module):
             # Extract data window and compute PCA factors
             y_win = dataset.data[T_total - T_init:T_total, :]  # (T_init, N)
             max_components = min(self.data_dim, T_init, self.latent_dim)
-            factors, _ = self._extract_pca_factors(y_win, n_components=max_components)
+            factors, _ = extract_pca_factors(y_win, n_components=max_components)
             
             # Pad if needed
             if factors.shape[1] < self.latent_dim:
