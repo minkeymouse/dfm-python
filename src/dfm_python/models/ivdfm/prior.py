@@ -30,7 +30,7 @@ class iVDFMPriorNetwork(nn.Module):
         aux_dim: int,
         latent_dim: int,
         hidden_dim: Union[int, List[int]] = 100,
-        n_layers: int = 2,
+        n_hidden_layers: int = 1,
         activation: str = 'lrelu',
         slope: float = 0.1,
         innovation_distribution: str = 'laplace',
@@ -47,8 +47,8 @@ class iVDFMPriorNetwork(nn.Module):
             Dimension of latent factors/innovations (r)
         hidden_dim : Union[int, List[int]]
             Hidden layer dimension(s) for MLP network
-        n_layers : int
-            Number of layers in MLP network
+        n_hidden_layers : int
+            Number of hidden layers in MLP network
         activation : str
             Activation function ('lrelu', 'relu', 'tanh', 'sigmoid')
         slope : float
@@ -96,7 +96,7 @@ class iVDFMPriorNetwork(nn.Module):
             input_dim=aux_dim,
             output_dim=output_dim,
             hidden_dim=hidden_dim,
-            n_layers=n_layers,
+            n_hidden_layers=n_hidden_layers,
             activation=activation,
             slope=slope,
             device=device,

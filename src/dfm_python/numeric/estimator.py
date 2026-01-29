@@ -1042,17 +1042,86 @@ def estimate_ar1(
         # Cap extreme values to prevent overflow in cast
         A_diag = np.clip(A_diag, -VAR_STABILITY_THRESHOLD, VAR_STABILITY_THRESHOLD)
         Q_diag = np.clip(Q_diag, min_variance, MAX_EIGENVALUE)
+    
+    return A_diag, Q_diag
 
-    # Final guard (applies to BOTH smoothed-mode and raw-mode):
-    # prevent "overflow encountered in cast" when dtype is float32 by clipping in float64 first.
-    A_diag = np.asarray(A_diag, dtype=np.float64)
-    Q_diag = np.asarray(Q_diag, dtype=np.float64)
-    A_diag = np.nan_to_num(A_diag, nan=default_ar_coef, posinf=VAR_STABILITY_THRESHOLD, neginf=-VAR_STABILITY_THRESHOLD)
-    Q_diag = np.nan_to_num(Q_diag, nan=default_noise, posinf=MAX_EIGENVALUE, neginf=min_variance)
-    A_diag = np.clip(A_diag, -VAR_STABILITY_THRESHOLD, VAR_STABILITY_THRESHOLD)
-    Q_diag = np.clip(Q_diag, min_variance, MAX_EIGENVALUE)
 
-    return A_diag.astype(dtype), Q_diag.astype(dtype)
+def estimate_arp_ols(
+    factors: np.ndarray,
+    order: int,
+    regularization: float = DEFAULT_REGULARIZATION,
+    dtype: type = np.float32
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Estimate AR(p) coefficients using OLS for each factor independently.
+    
+    For each factor i, estimates: f_i[t] = a_i[1]*f_i[t-1] + ... + a_i[p]*f_i[t-p] + e_i[t]
+    Returns diagonal AR coefficients (one AR(p) per factor).
+    
+    Parameters
+    ----------
+    factors : np.ndarray
+        Factor time series (T x r)
+    order : int
+        AR order (p)
+    regularization : float, default DEFAULT_REGULARIZATION
+        Regularization parameter for OLS
+    dtype : type, default np.float32
+        Data type
+        
+    Returns
+    -------
+    ar_coeffs : np.ndarray
+        AR coefficients (r x p) - one AR(p) per factor
+    B_diag : np.ndarray
+        Innovation standard deviations (r,) - diagonal elements of B
+    """
+    T, r = factors.shape
+    
+    if T < order + 1:
+        # Not enough data, return zeros
+        ar_coeffs = np.zeros((r, order), dtype=dtype)
+        B_diag = np.ones(r, dtype=dtype) * DEFAULT_PROCESS_NOISE
+        return ar_coeffs, B_diag
+    
+    ar_coeffs = np.zeros((r, order), dtype=dtype)
+    B_diag = np.zeros(r, dtype=dtype)
+    
+    for i in range(r):
+        f_i = factors[:, i]  # (T,)
+        
+        # Build design matrix: X[t] = [f_i[t-1], f_i[t-2], ..., f_i[t-p]]
+        # Target: y[t] = f_i[t]
+        X = np.zeros((T - order, order), dtype=dtype)
+        y = f_i[order:]  # (T-order,)
+        
+        for lag in range(order):
+            X[:, lag] = f_i[order - lag - 1:T - lag - 1]
+        
+        # OLS: ar_coeffs = (X'X + reg*I)^(-1) X'y
+        try:
+            ar_i = solve_regularized_ols(X, y, regularization=regularization, dtype=dtype)
+            
+            # Ensure stability: check if AR polynomial is stable
+            # For AR(p), roots of 1 - a[1]*z - ... - a[p]*z^p should be outside unit circle
+            # Simplified: check if sum of coefficients < 1 (rough stability check)
+            if np.sum(np.abs(ar_i)) >= VAR_STABILITY_THRESHOLD:
+                # Scale down to ensure stability
+                ar_i = ar_i * (VAR_STABILITY_THRESHOLD * 0.9 / np.sum(np.abs(ar_i)))
+            
+            ar_coeffs[i, :] = ar_i
+            
+            # Estimate innovation variance from residuals
+            residuals = y - X @ ar_i
+            B_diag[i] = np.maximum(
+                compute_var_safe(residuals, ddof=0, min_variance=MIN_DIAGONAL_VARIANCE),
+                MIN_DIAGONAL_VARIANCE
+            )
+        except Exception as e:
+            _logger.warning(f"AR({order}) estimation failed for factor {i}: {e}. Using zeros.")
+            ar_coeffs[i, :] = 0.0
+            B_diag[i] = DEFAULT_PROCESS_NOISE
+    
+    return ar_coeffs, B_diag
 
 
 def estimate_constrained_ols(

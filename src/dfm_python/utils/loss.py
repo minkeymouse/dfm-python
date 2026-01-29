@@ -195,13 +195,15 @@ def compute_elbo_loss(
     prior_params: list,
     innovation_distribution: str = 'laplace',
     decoder_variance: float = 1.0,
+    beta_kl: float = 1.0,
     reduction: str = 'mean'
 ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
     """Compute Evidence Lower Bound (ELBO) loss for variational inference.
     
-    ELBO = E[log p(y | f)] - Σ_t KL(q(η_t | y_{1:T}, u_t) || p(η_t | u_t))
+    ELBO = E[log p(y | f)] - β * Σ_t KL(q(η_t | y_{1:T}, u_t) || p(η_t | u_t))
     
     The ELBO is maximized, so we return the negative ELBO for minimization.
+    β (beta_kl) controls the weight of the KL term. β < 1 reduces KL pressure.
     
     Parameters
     ----------
@@ -225,6 +227,8 @@ def compute_elbo_loss(
         Distribution type for innovations: 'laplace', 'gaussian', 'student_t', 'gamma', 'beta', 'exponential'
     decoder_variance : float, default 1.0
         Variance of Gaussian observation model
+    beta_kl : float, default 1.0
+        Weight for KL term in ELBO. β < 1 reduces KL pressure, allowing better reconstruction.
     reduction : str, default 'mean'
         Reduction method: 'mean' or 'sum'
         
@@ -314,11 +318,11 @@ def compute_elbo_loss(
     else:
         kl_loss = kl_loss.sum()  # Sum over batch and time
     
-    # ELBO = E[log p(y|f)] - KL
+    # ELBO = E[log p(y|f)] - β * KL
     # recon_loss = -E[log p(y|f)] (negative log-likelihood, positive value)
-    # So: ELBO = -recon_loss - KL
-    # For minimization, return -ELBO = recon_loss + KL
-    elbo = recon_loss + kl_loss
+    # So: ELBO = -recon_loss - β * KL
+    # For minimization, return -ELBO = recon_loss + β * KL
+    elbo = recon_loss + beta_kl * kl_loss
     
     loss_dict = {
         'elbo': elbo,
@@ -328,65 +332,6 @@ def compute_elbo_loss(
     
     return elbo, loss_dict
 
-
-def compute_ivdfm_elbo(
-    model: Any,
-    y_1T: torch.Tensor,
-    u_1T: torch.Tensor,
-    innovation_distribution: str = 'laplace',
-    decoder_variance: float = 1.0,
-    reduction: str = 'mean'
-) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
-    """Compute ELBO for iVDFM model.
-    
-    This function abstracts the ELBO computation for iVDFM by:
-    1. Performing a forward pass through the model
-    2. Extracting predictions and variational parameters
-    3. Computing the ELBO loss using compute_elbo_loss
-    
-    ELBO = E[log p(y_t | f_t)] - Σ_t KL(q(η_t | y_t, u_t) || p(η_t | u_t))
-    
-    Parameters
-    ----------
-    model : Any
-        iVDFM model instance with forward() method
-    y_1T : torch.Tensor
-        Observation sequence, shape (batch, T, N)
-    u_1T : torch.Tensor
-        Auxiliary variable sequence, shape (batch, T, aux_dim)
-    innovation_distribution : str, default 'laplace'
-        Distribution type for innovations: 'laplace' or 'gaussian'
-    decoder_variance : float, default 1.0
-        Variance of Gaussian observation model
-    reduction : str, default 'mean'
-        Reduction method: 'mean' or 'sum'
-        
-    Returns
-    -------
-    Tuple[torch.Tensor, Dict[str, torch.Tensor]]
-        (elbo_loss, loss_dict) where:
-        - elbo_loss: Negative ELBO (to minimize)
-        - loss_dict: Dictionary with component losses:
-            - 'elbo': total ELBO loss
-            - 'reconstruction': reconstruction term
-            - 'kl': KL divergence term
-    """
-    # Forward pass through model
-    outputs = model.forward(y_1T, u_1T)
-    y_pred = outputs['y_pred']
-    encoder_params = outputs['encoder_params']
-    prior_params = outputs['prior_params']
-    
-    # Compute ELBO loss
-    elbo, loss_dict = compute_elbo_loss(
-        y_true=y_1T,
-        y_pred=y_pred,
-        encoder_params=encoder_params,
-        prior_params=prior_params,
-        innovation_distribution=innovation_distribution,
-        decoder_variance=decoder_variance,
-        reduction=reduction
-    )
-    
-    return elbo, loss_dict
+# Note: compute_ivdfm_elbo was removed as redundant.
+# The iVDFM model's elbo() method directly calls compute_elbo_loss() after forward pass.
 

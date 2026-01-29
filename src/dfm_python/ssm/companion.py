@@ -87,7 +87,21 @@ class iVDFMCompanionSSM(BaseSSM):
         # Initial state f_0
         self.f0 = nn.Parameter(torch.zeros(latent_dim))
         
+        # Cache for impulse response (keyed by length) to avoid recomputation
+        self._impulse_response_cache: dict[int, torch.Tensor] = {}
+        
         self.to(self.device)
+    
+    def clear_cache(self) -> None:
+        """Clear impulse response cache (call when parameters change during training)."""
+        self._impulse_response_cache.clear()
+    
+    def train(self, mode: bool = True):
+        """Override train() to clear cache when entering training mode."""
+        result = super().train(mode)
+        if mode:  # Entering training mode - parameters will change
+            self.clear_cache()
+        return result
     
     def norm(self, x: torch.Tensor, ord: int = None) -> torch.Tensor:
         """Normalize tensor for stability.
@@ -116,13 +130,16 @@ class iVDFMCompanionSSM(BaseSSM):
             x = x / x_norm
         return x
     
-    def get_impulse_response(self, length: int) -> torch.Tensor:
+    def get_impulse_response(self, length: int, use_cache: bool = True) -> torch.Tensor:
         """Compute impulse response kernel H_k = C A^k B.
         
         Parameters
         ----------
         length : int
             Length of impulse response sequence (T)
+        use_cache : bool, default True
+            If True, cache results for repeated calls with same length.
+            Set to False if parameters have changed (e.g., during training).
             
         Returns
         -------
@@ -130,6 +147,10 @@ class iVDFMCompanionSSM(BaseSSM):
             Impulse response kernel, shape (latent_dim, length)
             Each row corresponds to one factor's impulse response
         """
+        # Check cache first (only if parameters haven't changed)
+        if use_cache and length in self._impulse_response_cache:
+            return self._impulse_response_cache[length]
+        
         if self.factor_order == 1:
             # First-order: H_k = A^k * B (element-wise for diagonal A and B)
             # For diagonal A and B: H_k[i] = A[i]^k * B[i]
@@ -140,6 +161,11 @@ class iVDFMCompanionSSM(BaseSSM):
             k = torch.arange(length, device=A_diag.device, dtype=A_diag.dtype)  # (length,)
             A_powers = A_diag.unsqueeze(-1) ** k  # (r, length)
             H = B_diag.unsqueeze(-1) * A_powers  # (r, length)
+            
+            # Cache result (detach to avoid gradient issues, but keep on same device)
+            if use_cache:
+                self._impulse_response_cache[length] = H.detach().clone()
+            
             return H
         else:
             # AR(p): Use companion form + Krylov
@@ -177,8 +203,12 @@ class iVDFMCompanionSSM(BaseSSM):
             
             # Stack: (r, length)
             H = torch.stack(H_list, dim=0)  # (r, length)
-            
-            return H
+        
+        # Cache result (detach to avoid gradient issues, but keep on same device)
+        if use_cache:
+            self._impulse_response_cache[length] = H.detach().clone()
+        
+        return H
     
     def forward(
         self,
@@ -231,7 +261,7 @@ class iVDFMCompanionSSM(BaseSSM):
         A_diag = torch.sigmoid(self.A)  # Ensure stability: A in (0, 1)
         B_diag = self.norm(self.B, ord=self.norm_order) if self.norm_order > 0 else self.B
         
-        # Stable O(T) scan (T=sequence_length is typically ~100), avoids a^{-t} blowups.
+        # Stable O(T) scan (T=window is typically ~100), avoids a^{-t} blowups.
         # Still fully vectorized across batch and factors.
         factors = torch.empty(batch_size, T, r, device=eta_sequence.device, dtype=eta_sequence.dtype)
         f_t = f0  # (batch, r)

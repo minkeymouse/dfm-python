@@ -25,12 +25,12 @@ from ...config.constants import (
     DEFAULT_DTYPE,
     DEFAULT_TOLERANCE,
     DEFAULT_IVDFM_LATENT_DIM,
-    DEFAULT_IVDFM_SEQUENCE_LENGTH,
     DEFAULT_IVDFM_AUX_DIM,
+    DEFAULT_REGULARIZATION,
 )
 from ...utils.errors import ModelNotTrainedError, ModelNotInitializedError, ConfigurationError, DataValidationError
 from ...utils.validation import check_condition
-from ...utils.loss import compute_ivdfm_elbo
+from ...utils.loss import compute_elbo_loss
 from .encoder import iVDFMInnovationEncoder
 from .decoder import iVDFMDecoder
 from .prior import iVDFMPriorNetwork
@@ -57,15 +57,15 @@ class iVDFM(BaseFactorModel, nn.Module):
         data_dim: Optional[int] = None,
         num_factors: Optional[int] = None,  # Aligned with config: num_factors (not latent_dim)
         context_dim: Optional[int] = None,
-        sequence_length: Optional[int] = None,
+        window: Optional[int] = None,
         config: Optional[iVDFMConfig] = None,
         # Network architecture (used if config is None)
         encoder_hidden_dim: Union[int, list] = 200,
-        encoder_n_layers: int = 3,
+        encoder_n_hidden_layers: int = 2,
         decoder_hidden_dim: Union[int, list] = 200,
-        decoder_n_layers: int = 3,
+        decoder_n_hidden_layers: int = 2,
         prior_hidden_dim: Union[int, list] = 100,
-        prior_n_layers: int = 2,
+        prior_n_hidden_layers: int = 1,
         activation: str = 'lrelu',
         slope: float = 0.1,
         # Dynamics parameters
@@ -95,22 +95,22 @@ class iVDFM(BaseFactorModel, nn.Module):
             Number of latent factors (r in paper)
         context_dim : int
             Dimension of context variable u_t
-        sequence_length : int
-            Length of time series sequences (T in paper)
+        window : int
+            Length of sliding windows (T in paper)
         config : Optional[Any]
             Configuration object
         encoder_hidden_dim : Union[int, list]
             Hidden dimensions for innovation encoder
-        encoder_n_layers : int
-            Number of layers in innovation encoder
+        encoder_n_hidden_layers : int
+            Number of hidden layers in innovation encoder
         decoder_hidden_dim : Union[int, list]
             Hidden dimensions for decoder
-        decoder_n_layers : int
-            Number of layers in decoder
+        decoder_n_hidden_layers : int
+            Number of hidden layers in decoder
         prior_hidden_dim : Union[int, list]
             Hidden dimensions for prior network
-        prior_n_layers : int
-            Number of layers in prior network
+        prior_n_hidden_layers : int
+            Number of hidden layers in prior network
         activation : str
             Activation function ('lrelu', 'relu', 'tanh')
         slope : float
@@ -159,16 +159,16 @@ class iVDFM(BaseFactorModel, nn.Module):
             config_dict['num_factors'] = num_factors
         if encoder_hidden_dim is not None:
             config_dict['encoder_hidden_dim'] = encoder_hidden_dim
-        if encoder_n_layers is not None:
-            config_dict['encoder_n_layers'] = encoder_n_layers
+        if encoder_n_hidden_layers is not None:
+            config_dict['encoder_n_hidden_layers'] = encoder_n_hidden_layers
         if decoder_hidden_dim is not None:
             config_dict['decoder_hidden_dim'] = decoder_hidden_dim
-        if decoder_n_layers is not None:
-            config_dict['decoder_n_layers'] = decoder_n_layers
+        if decoder_n_hidden_layers is not None:
+            config_dict['decoder_n_hidden_layers'] = decoder_n_hidden_layers
         if prior_hidden_dim is not None:
             config_dict['prior_hidden_dim'] = prior_hidden_dim
-        if prior_n_layers is not None:
-            config_dict['prior_n_layers'] = prior_n_layers
+        if prior_n_hidden_layers is not None:
+            config_dict['prior_n_hidden_layers'] = prior_n_hidden_layers
         if activation is not None:
             config_dict['activation'] = activation
         if slope is not None:
@@ -199,8 +199,8 @@ class iVDFM(BaseFactorModel, nn.Module):
         if context_dim is not None:
             config_dict['context_dim'] = context_dim
         # Note: if context_dim is None, don't add to config_dict - will use None directly
-        if sequence_length is not None:
-            config_dict['sequence_length'] = sequence_length
+        if window is not None:
+            config_dict['window'] = window
         
         # Override with kwargs (highest precedence)
         # Backward compatibility: map latent_dim -> num_factors if provided in kwargs
@@ -229,22 +229,39 @@ class iVDFM(BaseFactorModel, nn.Module):
         self.data_dim = data_dim  # Can be None, inferred during fit
         # Keep latent_dim as internal attribute name (more intuitive), but use num_factors from config
         self.latent_dim = self._config.num_factors or DEFAULT_IVDFM_LATENT_DIM
-        # context_dim: preserve None if not provided, use config value only if explicitly set
-        self.context_dim = context_dim if context_dim is not None else (self._config.context_dim if 'context_dim' in config_dict else None)
+        # context_dim: preserve None if not provided
+        # Note: context_dim is NOT in iVDFMConfig schema (replaced by time_context + context columns).
+        # context_dim is inferred from dataset during fit() based on time_context + custom context columns.
+        # If user explicitly passes context_dim parameter, use it; otherwise None (will be inferred from dataset).
+        self.context_dim = context_dim
         # time_context: dimension of time-based features (separate from custom context columns)
-        self.time_context = getattr(self._config, 'time_context', 1) if self._config is not None else 1
-        self.sequence_length = self._config.sequence_length if sequence_length is None else sequence_length
+        self.time_context = self._get_config_attr('time_context', 1)
+        # window: if None, use full T (full series as one sequence)
+        # Priority: explicit parameter > config value > None (which dataset will convert to T)
+        if window is not None:
+            self.window = window
+        elif self._config is not None and hasattr(self._config, 'window'):
+            self.window = self._config.window
+        else:
+            self.window = None  # Will be converted to T by dataset
+        # Extract config attributes (network architecture)
         self.encoder_hidden_dim = self._config.encoder_hidden_dim
-        self.encoder_n_layers = self._config.encoder_n_layers
+        self.encoder_n_hidden_layers = self._config.encoder_n_hidden_layers
         self.decoder_hidden_dim = self._config.decoder_hidden_dim
-        self.decoder_n_layers = self._config.decoder_n_layers
+        self.decoder_n_hidden_layers = self._config.decoder_n_hidden_layers
         self.prior_hidden_dim = self._config.prior_hidden_dim
-        self.prior_n_layers = self._config.prior_n_layers
+        self.prior_n_hidden_layers = self._config.prior_n_hidden_layers
         self.activation = self._config.activation
         self.slope = self._config.slope
+        
+        # Extract config attributes (dynamics and distribution)
         self.factor_order = self._config.factor_order
         self.innovation_distribution = self._config.innovation_distribution
         self.decoder_var = self._config.decoder_var
+        self.beta_kl = self._get_config_attr('beta_kl', 1.0)
+        self.use_layer_norm = self._get_config_attr('use_layer_norm', False)
+        
+        # Extract config attributes (training)
         self.learning_rate = self._config.learning_rate
         self.optimizer_type = self._config.optimizer
         self.optimizer_weight_decay = self._config.optimizer_weight_decay
@@ -252,7 +269,9 @@ class iVDFM(BaseFactorModel, nn.Module):
         self.batch_size = self._config.batch_size
         self.max_epochs = self._config.max_epochs
         self.tolerance = self._config.tolerance
-        self.patience = getattr(self._config, 'patience', None)  # Early stopping patience (None = disabled)
+        self.patience = self._get_config_attr('patience', None)  # Early stopping patience (None = disabled)
+        
+        # Extract config attributes (scheduler)
         self.scheduler_type = self._config.scheduler_type
         self.scheduler_step_size = self._config.scheduler_step_size
         self.scheduler_gamma = self._config.scheduler_gamma
@@ -296,6 +315,109 @@ class iVDFM(BaseFactorModel, nn.Module):
         # Move to device
         self.to(self.device)
     
+    def _get_config_attr(self, attr: str, default: Any = None) -> Any:
+        """Helper to safely get config attribute with default."""
+        return getattr(self._config, attr, default) if self._config is not None else default
+    
+    def _extract_pca_factors(
+        self, 
+        data: np.ndarray, 
+        n_components: Optional[int] = None
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Extract PCA factors from centered data.
+        
+        Helper method to reduce code duplication in initialization methods.
+        
+        Parameters
+        ----------
+        data : np.ndarray
+            Data matrix (T, N)
+        n_components : Optional[int]
+            Number of PCA components. If None, uses min(data_dim, T, latent_dim)
+            
+        Returns
+        -------
+        Tuple[np.ndarray, np.ndarray]
+            (factors, eigenvectors) where:
+            - factors: (T, n_components) PCA factors
+            - eigenvectors: (N, n_components) PCA eigenvectors
+        """
+        from ...layer.pca import fit_pca
+        
+        # Center the data
+        data_mean = np.mean(data, axis=0, keepdims=True)
+        data_centered = data - data_mean
+        
+        # Determine number of components
+        if n_components is None:
+            n_components = min(self.data_dim, data.shape[0], self.latent_dim)
+        
+        # Extract PCA
+        _, eigenvectors, _, _ = fit_pca(
+            X=data_centered,
+            n_components=n_components,
+            block_idx=None
+        )
+        
+        # Compute factors
+        factors = data_centered @ eigenvectors  # (T, n_components)
+        
+        return factors, eigenvectors
+    
+    def _set_random_f0(self) -> None:
+        """Set f0 to random values (fallback for initialization failures)."""
+        with torch.no_grad():
+            self.ssm.f0.data = torch.randn(self.latent_dim, device=self.device) * 0.1
+    
+    def _normalize_f0(self, f0: np.ndarray) -> np.ndarray:
+        """Normalize f0 vector: pad if needed, apply sign convention.
+        
+        Parameters
+        ----------
+        f0 : np.ndarray
+            Raw f0 vector (may be shorter than latent_dim)
+            
+        Returns
+        -------
+        np.ndarray
+            Normalized f0 vector (latent_dim,)
+        """
+        # Pad if needed
+        if f0.shape[0] < self.latent_dim:
+            f0 = np.pad(f0, (0, self.latent_dim - f0.shape[0]))
+        
+        # Deterministic sign convention for reproducibility
+        if np.sum(f0) < 0:
+            f0 = -f0
+        
+        return f0
+    
+    def _set_ssm_ar_params(self, ar_coeffs: np.ndarray, B_diag: np.ndarray) -> None:
+        """Set SSM AR parameters from numpy arrays.
+        
+        Parameters
+        ----------
+        ar_coeffs : np.ndarray
+            AR coefficients (r, p) for AR(p) or (r,) for AR(1)
+        B_diag : np.ndarray
+            Innovation standard deviations (r,)
+        """
+        with torch.no_grad():
+            if self.factor_order == 1:
+                # AR(1): initialize A and B
+                self.ssm.A.data = torch.tensor(
+                    ar_coeffs[:, 0] if ar_coeffs.ndim > 1 else ar_coeffs,
+                    dtype=DEFAULT_TORCH_DTYPE,
+                    device=self.device
+                )
+                self.ssm.B.data = torch.tensor(B_diag, dtype=DEFAULT_TORCH_DTYPE, device=self.device)
+            else:
+                # AR(p): initialize ar_coeffs and B
+                self.ssm.ar_coeffs.data = torch.tensor(
+                    ar_coeffs, dtype=DEFAULT_TORCH_DTYPE, device=self.device
+                )
+                self.ssm.B.data = torch.tensor(B_diag, dtype=DEFAULT_TORCH_DTYPE, device=self.device)
+    
     def _build_components(self):
         """Build model components: encoder, decoder, prior, SSM."""
         # Validate dimensions are available
@@ -311,9 +433,10 @@ class iVDFM(BaseFactorModel, nn.Module):
             latent_dim=self.latent_dim,
             aux_dim=self.context_dim,
             hidden_dim=self.encoder_hidden_dim,
-            n_layers=self.encoder_n_layers,
+            n_hidden_layers=self.encoder_n_hidden_layers,
             activation=self.activation,
             slope=self.slope,
+            use_layer_norm=self.use_layer_norm,
             device=self.device,
             seed=self.seed,
         )
@@ -323,7 +446,7 @@ class iVDFM(BaseFactorModel, nn.Module):
             aux_dim=self.context_dim,  # Parameter name in encoder/prior (uses aux_dim internally)
             latent_dim=self.latent_dim,
             hidden_dim=self.prior_hidden_dim,
-            n_layers=self.prior_n_layers,
+            n_hidden_layers=self.prior_n_hidden_layers,
             activation=self.activation,
             slope=self.slope,
             innovation_distribution=self.innovation_distribution,
@@ -336,10 +459,11 @@ class iVDFM(BaseFactorModel, nn.Module):
             latent_dim=self.latent_dim,
             data_dim=self.data_dim,
             hidden_dim=self.decoder_hidden_dim,
-            n_layers=self.decoder_n_layers,
+            n_hidden_layers=self.decoder_n_hidden_layers,
             activation=self.activation,
             slope=self.slope,
             decoder_var=self.decoder_var,
+            use_layer_norm=self.use_layer_norm,
             device=self.device,
             seed=self.seed,
         )
@@ -351,65 +475,143 @@ class iVDFM(BaseFactorModel, nn.Module):
             device=self.device,
         )
     
-    def _initialize_f0_from_data(self, dataset: 'iVDFMDataset') -> None:
-        """Initialize f_0 (initial factor state) using PCA on recent data.
+    def _initialize_f0_from_data(self, dataset: 'iVDFMDataset', method: str = 'single_window') -> None:
+        """Initialize f_0 (initial factor state) using PCA on data.
         
-        Use the most recent `sequence_length` window, extract PCA factors, and
-        set f_0 to the mean factor vector from that window.
+        Supports three methods:
+        - 'single_window': PCA on most recent window (baseline)
+        - 'multi_window': Average PCA factors across multiple recent windows
+        - 'rolling': Expanding window PCA (all data up to current)
+        
+        Parameters
+        ----------
+        dataset : iVDFMDataset
+            Dataset containing training data
+        method : str, default 'single_window'
+            Initialization method: 'single_window', 'multi_window', or 'rolling'
+        """
+        from ...layer.pca import fit_pca
+        
+        T_total = len(dataset.data)
+        T_init = min(self.window, T_total) if self.window is not None else T_total
+        if T_init < 2:
+            self._set_random_f0()
+            _logger.warning(f"Insufficient data for PCA init (T={T_init}). Using random f_0.")
+            return
+
+        max_components = min(self.data_dim, T_init, self.latent_dim)
+        f0_mean = None
+        
+        try:
+            if method == 'single_window':
+                # Baseline: single window PCA
+                y_win = dataset.data[T_total - T_init:T_total, :]  # (T_init, N)
+                f_init, _ = self._extract_pca_factors(y_win, n_components=max_components)
+                f0_mean = np.mean(f_init, axis=0)  # (max_components,)
+                
+            elif method == 'multi_window':
+                # Multi-window: average PCA factors across multiple windows
+                n_windows = 3  # Use 3 recent windows
+                window_size = T_init
+                f0_list = []
+                
+                for w in range(n_windows):
+                    start_idx = max(0, T_total - window_size * (w + 1))
+                    end_idx = T_total - window_size * w
+                    if end_idx - start_idx < 2:
+                        continue
+                    
+                    y_win = dataset.data[start_idx:end_idx, :]
+                    try:
+                        f_init, _ = self._extract_pca_factors(y_win, n_components=max_components)
+                        f0_w = np.mean(f_init, axis=0)
+                        f0_list.append(f0_w)
+                    except Exception:
+                        continue
+                
+                if len(f0_list) > 0:
+                    # Average across windows
+                    f0_mean = np.mean(f0_list, axis=0)
+                else:
+                    raise ValueError("No valid windows for multi-window PCA")
+                    
+            elif method == 'rolling':
+                # Rolling: expanding window PCA (all data up to current)
+                y_win = dataset.data[:T_total, :]  # All data
+                f_init_all, eigenvectors = self._extract_pca_factors(y_win, n_components=max_components)
+                # Use most recent window's factors for f0
+                f_init_recent = f_init_all[T_total - T_init:T_total, :]
+                f0_mean = np.mean(f_init_recent, axis=0)
+            else:
+                raise ValueError(f"Unknown f0 initialization method: {method}")
+                
+        except Exception as e:
+            self._set_random_f0()
+            _logger.warning(f"PCA init ({method}) failed: {e}. Using random f_0.")
+            return
+
+        # Normalize f0 (pad, sign convention)
+        if f0_mean is None:
+            f0_mean = np.zeros(self.latent_dim, dtype=DEFAULT_DTYPE)
+        f0_mean = self._normalize_f0(f0_mean)
+
+        # Set f0
+        with torch.no_grad():
+            self.ssm.f0.data = torch.tensor(f0_mean, dtype=DEFAULT_TORCH_DTYPE, device=self.device)
+
+        _logger.info(
+            f"Initialized f_0 using {method} PCA. "
+            f"f_0 range: [{f0_mean.min():.4f}, {f0_mean.max():.4f}]"
+        )
+    
+    def _initialize_ar_coeffs_from_data(self, dataset: 'iVDFMDataset') -> None:
+        """Initialize AR coefficients using OLS estimation from PCA factors.
+        
+        Extracts PCA factors from data, estimates AR(p) coefficients for each factor,
+        and initializes SSM parameters.
         
         Parameters
         ----------
         dataset : iVDFMDataset
             Dataset containing training data
         """
-        from ...layer.pca import fit_pca
+        from ...numeric.estimator import estimate_arp_ols
         
         T_total = len(dataset.data)
-        T_init = min(self.sequence_length, T_total)
-        if T_init < 2:
-            with torch.no_grad():
-                self.ssm.f0.data = torch.randn(self.latent_dim, device=self.device) * 0.1
-            _logger.warning(f"Insufficient data for PCA init (T={T_init}). Using random f_0.")
+        T_init = min(self.window, T_total) if self.window is not None else T_total
+        
+        if T_init < self.factor_order + 1:
+            _logger.warning(f"Insufficient data for AR init (T={T_init}, order={self.factor_order}). Skipping.")
             return
-
-        # Extract most recent window
-        y_win = dataset.data[T_total - T_init:T_total, :]  # (T_init, N)
         
-        # Center the data
-        y_mean = np.mean(y_win, axis=0, keepdims=True)
-        y_centered = y_win - y_mean
-        
-        # PCA: extract up to min(data_dim, T_init, latent_dim) components, then pad if needed
-        max_components = min(self.data_dim, T_init, self.latent_dim)
         try:
-            _, eigenvectors, _, _ = fit_pca(
-                X=y_centered,
-                n_components=max_components,
-                block_idx=None
+            # Extract data window and compute PCA factors
+            y_win = dataset.data[T_total - T_init:T_total, :]  # (T_init, N)
+            max_components = min(self.data_dim, T_init, self.latent_dim)
+            factors, _ = self._extract_pca_factors(y_win, n_components=max_components)
+            
+            # Pad if needed
+            if factors.shape[1] < self.latent_dim:
+                factors = np.pad(factors, ((0, 0), (0, self.latent_dim - factors.shape[1])))
+            
+            # Estimate AR(p) coefficients using OLS
+            ar_coeffs, B_diag = estimate_arp_ols(
+                factors=factors,
+                order=self.factor_order,
+                regularization=DEFAULT_REGULARIZATION,
+                dtype=DEFAULT_DTYPE
             )
-
-            f_init = y_centered @ eigenvectors  # (T_init, max_components)
-            f0_mean = np.mean(f_init, axis=0)  # (max_components,)
+            
+            # Initialize SSM parameters
+            self._set_ssm_ar_params(ar_coeffs, B_diag)
+            
+            _logger.info(
+                f"Initialized AR({self.factor_order}) coefficients using OLS from PCA factors. "
+                f"AR coeffs range: [{ar_coeffs.min():.4f}, {ar_coeffs.max():.4f}], "
+                f"B range: [{B_diag.min():.4f}, {B_diag.max():.4f}]"
+            )
         except Exception as e:
-            with torch.no_grad():
-                self.ssm.f0.data = torch.randn(self.latent_dim, device=self.device) * 0.1
-            _logger.warning(f"PCA init failed: {e}. Using random f_0.")
-            return
-
-        if f0_mean.shape[0] < self.latent_dim:
-            f0_mean = np.pad(f0_mean, (0, self.latent_dim - f0_mean.shape[0]))
-
-        # (Optional) deterministic sign convention for reproducibility
-        if np.sum(f0_mean) < 0:
-            f0_mean = -f0_mean
-
-        with torch.no_grad():
-            self.ssm.f0.data = torch.tensor(f0_mean, dtype=DEFAULT_TORCH_DTYPE, device=self.device)
-
-        _logger.info(
-            f"Initialized f_0 using PCA on most recent {T_init} time steps. "
-            f"f_0 range: [{f0_mean.min():.4f}, {f0_mean.max():.4f}]"
-        )
+            _logger.warning(f"AR coefficient initialization failed: {e}. Using random initialization.")
     
     def _build_optimizer(self):
         """Build optimizer and scheduler using builder utility."""
@@ -470,18 +672,15 @@ class iVDFM(BaseFactorModel, nn.Module):
         prior_params_all = self.prior_network(u_1T)  # Dict with batched params (batch, T, r)
         
         # Build time-indexed parameter lists for ELBO computation
-        encoder_params_list = []
-        prior_params_list = []
-        for t in range(T):
-            encoder_params_list.append({
-                'mu': mu_all[:, t, :],      # (batch, r)
-                'logvar': logvar_all[:, t, :]  # (batch, r)
-            })
-            prior_params_t = {}
-            for key, value in prior_params_all.items():
-                # value shape: (batch, T, r) or (batch, T, ...)
-                prior_params_t[key] = value[:, t, :]  # (batch, r)
-            prior_params_list.append(prior_params_t)
+        # Use list comprehensions for efficiency (avoid repeated dict lookups)
+        encoder_params_list = [
+            {'mu': mu_all[:, t, :], 'logvar': logvar_all[:, t, :]}
+            for t in range(T)
+        ]
+        prior_params_list = [
+            {key: value[:, t, :] for key, value in prior_params_all.items()}
+            for t in range(T)
+        ]
         
         # Compute factors deterministically using SSM
         factors_1T = self.ssm.forward(eta_1T)  # (batch, T, r)
@@ -519,15 +718,23 @@ class iVDFM(BaseFactorModel, nn.Module):
         Returns
         -------
         Tuple[torch.Tensor, Dict[str, torch.Tensor]]
-            ELBO loss and dictionary of component losses
+            Total loss (ELBO) and dictionary of component losses
         """
-        # Use abstracted ELBO computation from utils
-        elbo, loss_dict = compute_ivdfm_elbo(
-            model=self,
-            y_1T=y_1T,
-            u_1T=u_1T,
+        # Single forward pass
+        outputs = self.forward(y_1T, u_1T)
+        y_pred = outputs['y_pred']
+        encoder_params = outputs['encoder_params']
+        prior_params = outputs['prior_params']
+        
+        # ELBO
+        elbo, loss_dict = compute_elbo_loss(
+            y_true=y_1T,
+            y_pred=y_pred,
+            encoder_params=encoder_params,
+            prior_params=prior_params,
             innovation_distribution=self.innovation_distribution,
             decoder_variance=self.decoder_var,
+            beta_kl=self.beta_kl,
             reduction='mean'
         )
         
@@ -561,19 +768,14 @@ class iVDFM(BaseFactorModel, nn.Module):
             dataset = data
         else:
             # Context is handled by iVDFMDataset (via config / embedded columns).
-            cfg_context = getattr(self._config, "context", None) if self._config is not None else None
-            cfg_scaler = getattr(self._config, "scaler", None) if self._config is not None else None
-
-            # Create dataset (handles DataFrame/array conversion and context extraction)
-            # Use time_context parameter (default 1: time step only)
-            time_context = getattr(self._config, "time_context", 1) if self._config is not None else 1
+            cfg_context = self._get_config_attr("context")
+            cfg_scaler = self._get_config_attr("scaler")
+            time_context = self._get_config_attr("time_context", 1)
+            stride = self._get_config_attr("stride", 1)
             dataset = iVDFMDataset(
-                data=data,
-                sequence_length=self.sequence_length,
-                context=cfg_context,
-                time_context=time_context,
-                scaler=cfg_scaler,
-                device=self.device,
+                data=data, window=self.window, stride=stride,
+                context=cfg_context, time_context=time_context,
+                scaler=cfg_scaler, device=self.device,
             )
         
         # Update data_dim and context_dim from dataset
@@ -582,7 +784,7 @@ class iVDFM(BaseFactorModel, nn.Module):
         
         # Update time_context from config if not already set
         if not hasattr(self, 'time_context') or self.time_context is None:
-            self.time_context = getattr(self._config, "time_context", 1) if self._config is not None else 1
+            self.time_context = self._get_config_attr("time_context", 1)
         
         # Update dimensions
         need_rebuild = False
@@ -614,7 +816,14 @@ class iVDFM(BaseFactorModel, nn.Module):
             self._build_components()
         
         # Initialize f_0 (initial factor state) using PCA on initial data
-        self._initialize_f0_from_data(dataset)
+        # Get initialization method from config (default: 'single_window')
+        f0_init_method = self._get_config_attr('f0_init_method', 'single_window')
+        self._initialize_f0_from_data(dataset, method=f0_init_method)
+        
+        # Initialize AR coefficients from data if requested
+        ar_init_method = self._get_config_attr('ar_init_method', None)
+        if ar_init_method == 'ols':
+            self._initialize_ar_coeffs_from_data(dataset)
         
         # Build optimizer
         self._build_optimizer()
@@ -658,10 +867,8 @@ class iVDFM(BaseFactorModel, nn.Module):
         best_model_state = None
         
         early_stop_enabled = self.patience is not None and self.patience > 0
-        if early_stop_enabled:
-            _logger.info(f"Starting training: {self.max_epochs} epochs, {len(dataloader)} batches/epoch, early stopping patience={self.patience}")
-        else:
-            _logger.info(f"Starting training: {self.max_epochs} epochs, {len(dataloader)} batches/epoch, early stopping disabled")
+        patience_str = f"early stopping patience={self.patience}" if early_stop_enabled else "early stopping disabled"
+        _logger.info(f"Starting training: {self.max_epochs} epochs, {len(dataloader)} batches/epoch, {patience_str}")
         
         import time
         start_time = time.time()
@@ -722,25 +929,29 @@ class iVDFM(BaseFactorModel, nn.Module):
             # Update scheduler (different schedulers need different inputs)
             if self.scheduler is not None:
                 if isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
-                    # ReduceLROnPlateau needs a metric (use ELBO as loss)
                     self.scheduler.step(self._elbo if self._elbo is not None else float('inf'))
                 else:
-                    # Other schedulers (StepLR, CosineAnnealingLR, ExponentialLR) step on epoch
                     self.scheduler.step()
             
             # Logging with detailed information
             elapsed_time = time.time() - start_time
+            # Prepare log kwargs
+            log_kwargs = {
+                'learning_rate': current_lr,
+                'time_elapsed': f"{elapsed_time:.2f}s"
+            }
+            
             train_logger.log_epoch(
                 epoch=epoch + 1,
                 elbo=self._elbo,
                 recon_loss=self.loss_now,
                 kl_loss=kl_loss_mean,
-                learning_rate=current_lr,
-                time_elapsed=f"{elapsed_time:.2f}s"
+                **log_kwargs
             )
             
-            # Progress indicator every epoch (if verbose) or every 10 epochs
-            if (epoch + 1) % max(1, self.max_epochs // 20) == 0 or epoch == 0:
+            # Progress indicator every 10 epochs (redundant with train_logger, but provides percentage)
+            # Only log if train_logger is not verbose or we want periodic progress updates
+            if (epoch + 1) % 10 == 0 or epoch == 0:
                 progress = 100 * (epoch + 1) / self.max_epochs
                 _logger.info(
                     f"Progress: {progress:.1f}% | "
@@ -1058,6 +1269,9 @@ class iVDFM(BaseFactorModel, nn.Module):
         self,
         data: Union[np.ndarray, torch.Tensor, pd.DataFrame],
         *args,
+        append: bool = True,
+        store_full_history: bool = True,
+        verbose: bool = False,
         **kwargs
     ) -> None:
         """Update model state with new observations (online learning).
@@ -1071,28 +1285,33 @@ class iVDFM(BaseFactorModel, nn.Module):
         data : Union[np.ndarray, torch.Tensor, pd.DataFrame]
             New observation data, shape (T_new, N) or (T_new, N_total) if context provided.
             If DataFrame, columns can include context variables.
+        append : bool, default True
+            If True, append newly inferred factors/innovations to existing state.
+            If False, overwrite the stored state with the newly inferred state.
+        store_full_history : bool, default True
+            If True, store the inferred full factor/innovation trajectories for the
+            provided data windows (legacy behavior). If False, store only the last
+            inferred factor/innovation state (shape (1, r)), which is sufficient for
+            forecasting and much faster/more memory-efficient.
+        verbose : bool, default False
+            If True, emit an info log after updating state.
         *args
-            Additional arguments
+            Additional arguments (unused).
         **kwargs
-            Additional keyword arguments
+            Additional keyword arguments (unused).
         """
         if self.training_state is None:
             raise ModelNotTrainedError("Model must be trained before update")
 
         # Context is handled by iVDFMDataset (via config / embedded columns).
-        cfg_context = getattr(self._config, "context", None) if self._config is not None else None
-        cfg_scaler = getattr(self._config, "scaler", None) if self._config is not None else None
-
-        # Create dataset for new data
-        # Use time_context parameter (default 1: time step only)
-        time_context = getattr(self._config, "time_context", 1) if self._config is not None else 1
+        cfg_context = self._get_config_attr("context")
+        cfg_scaler = self._get_config_attr("scaler")
+        time_context = self._get_config_attr("time_context", 1)
+        stride = self._get_config_attr("stride", 1)
         dataset = iVDFMDataset(
-            data=data,
-            sequence_length=self.sequence_length,
-            context=cfg_context,
-            time_context=time_context,
-            scaler=cfg_scaler,
-            device=self.device,
+            data=data, window=self.window, stride=stride,
+            context=cfg_context, time_context=time_context,
+            scaler=cfg_scaler, device=self.device,
         )
         
         # Validate dimensions match
@@ -1115,54 +1334,66 @@ class iVDFM(BaseFactorModel, nn.Module):
         # Forward pass to get new factors and innovations
         self.eval()
         with torch.no_grad():
-            all_factors = []
-            all_innovations = []
+            if store_full_history:
+                all_factors: list[np.ndarray] = []
+                all_innovations: list[np.ndarray] = []
+            else:
+                last_factor_state: Optional[np.ndarray] = None  # (r,)
+                last_innovation_state: Optional[np.ndarray] = None  # (r,)
             
             for y_batch, u_batch in dataloader:
                 outputs = self.forward(y_batch, u_batch)
-                all_factors.append(to_numpy(outputs['factors']))
-                all_innovations.append(to_numpy(outputs['eta']))
-            
-            # Concatenate all batches
-            if all_factors:
-                new_factors = np.concatenate(all_factors, axis=0)  # (batch*num_sequences, T, r) or (num_sequences, T, r)
-                new_innovations = np.concatenate(all_innovations, axis=0)
-                
-                # Average over batches if 3D to get (T_total, r)
-                if new_factors.ndim == 3:
-                    # Average over batch dimension: (batch, T, r) -> (T, r)
-                    new_factors = np.mean(new_factors, axis=0)
-                    new_innovations = np.mean(new_innovations, axis=0)
-                
-                # Update model state
-                # If factors already exist, append; otherwise replace
-                if self.factors is not None:
-                    # Normalize existing factors to 2D if needed
-                    factors_existing = self.factors
-                    innovations_existing = self.innovations
-                    
-                    if factors_existing.ndim == 3:
-                        # Average over batch dimension
-                        factors_existing = np.mean(factors_existing, axis=0)
-                        innovations_existing = np.mean(innovations_existing, axis=0)
-                    
-                    # Concatenate along time axis
-                    self.factors = np.concatenate([factors_existing, new_factors], axis=0)  # (T_old + T_new, r)
-                    self.innovations = np.concatenate([innovations_existing, new_innovations], axis=0)
+                if store_full_history:
+                    all_factors.append(to_numpy(outputs['factors']))
+                    all_innovations.append(to_numpy(outputs['eta']))
                 else:
-                    # No existing factors: use new data
-                    self.factors = new_factors
-                    self.innovations = new_innovations
-                
-                # Update training state
-                self.training_state = iVDFMModelState.from_model(self)
-                
+                    # Keep only the last state (batch, time step) for memory efficiency
+                    f_btr = to_numpy(outputs["factors"])
+                    e_btr = to_numpy(outputs["eta"])
+                    if f_btr.size > 0:
+                        last_factor_state = f_btr[-1, -1, :].copy()
+                    if e_btr.size > 0:
+                        last_innovation_state = e_btr[-1, -1, :].copy()
+            
+            if store_full_history:
+                # Concatenate all batches
+                if not all_factors:
+                    _logger.warning("No data processed in update")
+                    return
+
+                new_factors = np.concatenate(all_factors, axis=0)  # (num_windows, T, r)
+                new_innovations = np.concatenate(all_innovations, axis=0)
+
+                # Legacy behavior averaged over windows; keep for backward compatibility.
+                # NOTE: This is a heuristic aggregation and may not preserve full temporal order.
+                if new_factors.ndim == 3:
+                    new_factors = np.mean(new_factors, axis=0)  # (T, r)
+                    new_innovations = np.mean(new_innovations, axis=0)
+            else:
+                if last_factor_state is None or last_innovation_state is None:
+                    _logger.warning("No data processed in update")
+                    return
+                new_factors = last_factor_state.reshape(1, -1)
+                new_innovations = last_innovation_state.reshape(1, -1)
+
+            # Update model state: append or overwrite
+            if append and self.factors is not None and self.innovations is not None:
+                factors_existing = np.mean(self.factors, axis=0) if self.factors.ndim == 3 else self.factors
+                innovations_existing = np.mean(self.innovations, axis=0) if self.innovations.ndim == 3 else self.innovations
+                self.factors = np.concatenate([factors_existing, new_factors], axis=0)
+                self.innovations = np.concatenate([innovations_existing, new_innovations], axis=0)
+            else:
+                self.factors = new_factors
+                self.innovations = new_innovations
+
+            # Update training state
+            self.training_state = iVDFMModelState.from_model(self)
+
+            if verbose:
                 _logger.info(
                     f"Model state updated with {len(dataset)} new sequences. "
                     f"Factors shape: {self.factors.shape}, Innovations shape: {self.innovations.shape}"
                 )
-            else:
-                _logger.warning("No data processed in update")
     
     def get_result(self) -> iVDFMResult:
         """Extract result from trained model.
@@ -1287,17 +1518,17 @@ class iVDFM(BaseFactorModel, nn.Module):
                     "latent_dim": self.latent_dim,
                     "context_dim": self.context_dim,
                     "time_context": self.time_context,  # Time feature dimension
-                    "sequence_length": self.sequence_length,
+                    "window": self.window,
                     # Dynamics parameters
                     "factor_order": self.factor_order,
                     "innovation_distribution": self.innovation_distribution,
                     # Architecture parameters (needed for model reconstruction)
                     "encoder_hidden_dim": self.encoder_hidden_dim,
-                    "encoder_n_layers": self.encoder_n_layers,
+                    "encoder_n_hidden_layers": self.encoder_n_hidden_layers,
                     "decoder_hidden_dim": self.decoder_hidden_dim,
-                    "decoder_n_layers": self.decoder_n_layers,
+                    "decoder_n_hidden_layers": self.decoder_n_hidden_layers,
                     "prior_hidden_dim": self.prior_hidden_dim,
-                    "prior_n_layers": self.prior_n_layers,
+                    "prior_n_hidden_layers": self.prior_n_hidden_layers,
                     "activation": self.activation,
                     "slope": self.slope,
                 },

@@ -32,12 +32,13 @@ class MLP(nn.Module):
         input_dim: int,
         output_dim: int,
         hidden_dim: Union[int, List[int]] = 200,
-        n_layers: int = 3,
+        n_hidden_layers: int = 2,  # Number of hidden layers (clear and explicit)
         activation: Union[str, List[str]] = 'relu',
         slope: float = 0.1,
         use_bias: bool = True,
         dropout: float = 0.0,
         use_batch_norm: bool = False,
+        use_layer_norm: bool = False,
         device: Optional[Union[str, torch.device]] = None,
         seed: Optional[int] = None,
     ):
@@ -52,10 +53,10 @@ class MLP(nn.Module):
         hidden_dim : Union[int, List[int]]
             Hidden layer dimension(s). If int, all hidden layers use this dimension.
             If list, specifies dimension for each hidden layer.
-        n_layers : int
-            Total number of layers (including input and output)
+        n_hidden_layers : int
+            Number of hidden layers (e.g., 1 = input -> hidden -> output, 2 = input -> hidden1 -> hidden2 -> output)
         activation : Union[str, List[str]]
-            Activation function(s). Options: 'relu', 'lrelu', 'tanh', 'sigmoid', 'none'.
+            Activation function(s). Options: 'relu', 'lrelu', 'tanh', 'sigmoid', 'swish', 'silu', 'none'.
             If str, all layers use this activation. If list, specifies activation per layer.
         slope : float
             Slope for leaky ReLU (negative_slope parameter)
@@ -65,6 +66,8 @@ class MLP(nn.Module):
             Dropout probability (0.0 = no dropout)
         use_batch_norm : bool
             Whether to use batch normalization after each hidden layer
+        use_layer_norm : bool
+            Whether to use layer normalization after each hidden layer
         device : Optional[Union[str, torch.device]]
             Device to move model to (None = no move)
         seed : Optional[int]
@@ -74,20 +77,21 @@ class MLP(nn.Module):
         
         self.input_dim = input_dim
         self.output_dim = output_dim
-        self.n_layers = n_layers
+        self.n_hidden_layers = n_hidden_layers
         self.use_bias = use_bias
         self.dropout = dropout
         self.use_batch_norm = use_batch_norm
+        self.use_layer_norm = use_layer_norm
         
         # Validate and set hidden dimensions
         if isinstance(hidden_dim, Number):
-            if n_layers < 2:
-                raise ValueError(f"n_layers must be >= 2 when hidden_dim is int, got {n_layers}")
-            self.hidden_dim = [int(hidden_dim)] * (n_layers - 1)
+            if self.n_hidden_layers < 1:
+                raise ValueError(f"n_hidden_layers must be >= 1, got {self.n_hidden_layers}")
+            self.hidden_dim = [int(hidden_dim)] * self.n_hidden_layers
         elif isinstance(hidden_dim, list):
-            if len(hidden_dim) != n_layers - 1:
+            if len(hidden_dim) != self.n_hidden_layers:
                 raise ValueError(
-                    f"hidden_dim list length ({len(hidden_dim)}) must equal n_layers - 1 ({n_layers - 1})"
+                    f"hidden_dim list length ({len(hidden_dim)}) must equal n_hidden_layers ({self.n_hidden_layers})"
                 )
             self.hidden_dim = [int(d) for d in hidden_dim]
         else:
@@ -95,11 +99,11 @@ class MLP(nn.Module):
         
         # Validate and set activations
         if isinstance(activation, str):
-            self.activation = [activation] * (n_layers - 1)
+            self.activation = [activation] * self.n_hidden_layers
         elif isinstance(activation, list):
-            if len(activation) != n_layers - 1:
+            if len(activation) != self.n_hidden_layers:
                 raise ValueError(
-                    f"activation list length ({len(activation)}) must equal n_layers - 1 ({n_layers - 1})"
+                    f"activation list length ({len(activation)}) must equal n_hidden_layers ({self.n_hidden_layers})"
                 )
             self.activation = activation
         else:
@@ -120,17 +124,21 @@ class MLP(nn.Module):
                 self._act_f.append(torch.tanh)
             elif act == 'sigmoid':
                 self._act_f.append(torch.sigmoid)
+            elif act == 'swish' or act == 'silu':
+                # Swish/SiLU: x * sigmoid(x)
+                self._act_f.append(F.silu)
             elif act == 'none' or act is None:
                 self._act_f.append(lambda x: x)
             else:
-                raise ValueError(f'Incorrect activation: {act}. Options: relu, lrelu, tanh, sigmoid, none')
+                raise ValueError(f'Incorrect activation: {act}. Options: relu, lrelu, tanh, sigmoid, swish, silu, none')
         
         # Build layers
         self.layers = nn.ModuleList()
         self.batch_norms = nn.ModuleList() if use_batch_norm else None
+        self.layer_norms = nn.ModuleList() if use_layer_norm else None
         
-        if n_layers == 1:
-            # Single layer: input -> output
+        if self.n_hidden_layers == 0:
+            # Single layer: input -> output (no hidden layers)
             layer = nn.Linear(input_dim, output_dim, bias=use_bias)
             self._init_linear(layer)
             self.layers.append(layer)
@@ -142,6 +150,8 @@ class MLP(nn.Module):
             
             if use_batch_norm:
                 self.batch_norms.append(nn.BatchNorm1d(self.hidden_dim[0]))
+            if use_layer_norm:
+                self.layer_norms.append(nn.LayerNorm(self.hidden_dim[0]))
             
             # Hidden layers: hidden[i-1] -> hidden[i]
             for i in range(1, len(self.hidden_dim)):
@@ -151,6 +161,8 @@ class MLP(nn.Module):
                 
                 if use_batch_norm:
                     self.batch_norms.append(nn.BatchNorm1d(self.hidden_dim[i]))
+                if use_layer_norm:
+                    self.layer_norms.append(nn.LayerNorm(self.hidden_dim[i]))
             
             # Output layer: hidden[-1] -> output
             layer = nn.Linear(self.hidden_dim[-1], output_dim, bias=use_bias)
@@ -231,6 +243,10 @@ class MLP(nn.Module):
                 if self.use_batch_norm and self.batch_norms is not None:
                     h = self.batch_norms[i](h)
                 
+                # Layer normalization
+                if self.use_layer_norm and self.layer_norms is not None:
+                    h = self.layer_norms[i](h)
+                
                 # Dropout
                 if self.dropout_layer is not None:
                     h = self.dropout_layer(h)
@@ -265,10 +281,11 @@ class MLP(nn.Module):
             'input_dim': self.input_dim,
             'output_dim': self.output_dim,
             'hidden_dims': self.hidden_dim,
-            'n_layers': self.n_layers,
+            'n_hidden_layers': self.n_hidden_layers,
             'activations': self.activation,
             'use_bias': self.use_bias,
             'dropout': self.dropout,
             'use_batch_norm': self.use_batch_norm,
+            'use_layer_norm': self.use_layer_norm,
             'num_parameters': self.get_num_parameters(),
         }

@@ -27,10 +27,11 @@ class iVDFMDecoder(BaseDecoder):
         latent_dim: int,
         data_dim: int,
         hidden_dim: Union[int, List[int]] = 200,
-        n_layers: int = 3,
+        n_hidden_layers: int = 2,
         activation: str = 'lrelu',
         slope: float = 0.1,
         decoder_var: float = 0.01,
+        use_layer_norm: bool = False,
         device: Optional[Union[str, torch.device]] = None,
         seed: Optional[int] = None,
     ):
@@ -44,14 +45,16 @@ class iVDFMDecoder(BaseDecoder):
             Dimension of observed data (N)
         hidden_dim : Union[int, List[int]]
             Hidden layer dimension(s) for MLP network
-        n_layers : int
-            Number of layers in MLP network
+        n_hidden_layers : int
+            Number of hidden layers in MLP network
         activation : str
             Activation function ('lrelu', 'relu', 'tanh', 'sigmoid')
         slope : float
             Slope for leaky ReLU
         decoder_var : float
             Decoder variance (observation noise). Can be learnable or fixed.
+        use_layer_norm : bool
+            Whether to use layer normalization in MLP network
         device : Optional[Union[str, torch.device]]
             Device to move model to
         seed : Optional[int]
@@ -68,9 +71,10 @@ class iVDFMDecoder(BaseDecoder):
             input_dim=latent_dim,
             output_dim=data_dim,
             hidden_dim=hidden_dim,
-            n_layers=n_layers,
+            n_hidden_layers=n_hidden_layers,
             activation=activation,
             slope=slope,
+            use_layer_norm=use_layer_norm,
             device=device,
             seed=seed,
         )
@@ -128,10 +132,20 @@ class iVDFMDecoder(BaseDecoder):
         if isinstance(self.decoder_variance, torch.Tensor):
             var = self.decoder_variance
         else:
-            var = torch.tensor(self.decoder_var, device=mean.device, dtype=mean.dtype)
+            # Cache tensor creation - avoid repeated allocations
+            if not hasattr(self, '_decoder_var_tensor') or self._decoder_var_tensor.device != mean.device:
+                self._decoder_var_tensor = torch.tensor(
+                    self.decoder_var, 
+                    device=mean.device, 
+                    dtype=mean.dtype
+                )
+            var = self._decoder_var_tensor
         
-        # Broadcast variance to match mean shape
-        while var.dim() < mean.dim():
-            var = var.unsqueeze(0)
+        # Broadcast variance to match mean shape (optimized: use expand instead of unsqueeze loop)
+        if var.dim() < mean.dim():
+            # Add leading dimensions: (1, 1, ...) to match mean.ndim
+            # Use view + expand for efficient broadcasting without copying
+            shape = [1] * (mean.ndim - var.ndim) + list(var.shape)
+            var = var.view(*shape).expand_as(mean)
         
         return mean, var

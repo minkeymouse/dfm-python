@@ -13,7 +13,6 @@ from sklearn.preprocessing import StandardScaler, RobustScaler, MinMaxScaler, Ma
 
 from ..config.constants import (
     DEFAULT_TORCH_DTYPE,
-    DEFAULT_IVDFM_SEQUENCE_LENGTH,
     DEFAULT_IVDFM_AUX_DIM,
 )
 from ..logger import get_logger
@@ -36,8 +35,11 @@ class iVDFMDataset(Dataset):
         - covariates (excluded from targets)
         - context columns (optional; exogenous auxiliary variables u_t provided as columns)
         The time index column (if provided) is excluded from targets.
-    sequence_length : int
-        Length of sequences for sliding windows
+    window : Optional[int]
+        Length of sliding windows. If None, uses full T (full series as one sequence).
+        Default: None (uses full T)
+    stride : int, default 1
+        Step size for sliding windows. stride=1 means overlapping windows, stride=window means non-overlapping.
     time_idx : Optional[Union[str, int]]
         Time index column name (DataFrame) or column index (array). If provided, it is
         excluded from targets. If not provided, positional index is used to generate time context.
@@ -58,7 +60,8 @@ class iVDFMDataset(Dataset):
     def __init__(
         self,
         data: Union[np.ndarray, torch.Tensor, pd.DataFrame],
-        sequence_length: int = DEFAULT_IVDFM_SEQUENCE_LENGTH,
+        window: Optional[int] = None,
+        stride: int = 1,
         time_idx: Optional[Union[str, int]] = None,
         covariates: Optional[Union[List[str], List[int]]] = None,
         context: Optional[Union[List[str], List[int]]] = None,
@@ -111,7 +114,15 @@ class iVDFMDataset(Dataset):
         
         T, N_total = data_array.shape
         
-        self.sequence_length = sequence_length
+        # Default behavior: if window is None, use full T (full series as one sequence)
+        if window is None:
+            window = T
+        else:
+            # Clamp to valid range
+            window = max(2, min(window, T))
+        
+        self.window = window
+        self.stride = max(1, stride)  # Ensure stride >= 1
         self.total_time_steps = T
         
         if device is None:
@@ -193,8 +204,8 @@ class iVDFMDataset(Dataset):
         self._context = np.concatenate(blocks, axis=1) if len(blocks) > 1 else blocks[0]
         self._context_dim = int(self._context.shape[1])
         
-        # Number of sequences (sliding windows)
-        self.num_sequences = T - sequence_length + 1
+        # Number of sequences (sliding windows with stride)
+        self.num_sequences = (T - window) // self.stride + 1
 
         # Basic bookkeeping for user-facing clarity
         self.time_idx = time_idx
@@ -302,9 +313,10 @@ class iVDFMDataset(Dataset):
     
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
         """Get a sequence of observations and context."""
-        end_idx = idx + self.sequence_length
-        y_seq = self.target[idx:end_idx, :]
-        u_seq = self._context[idx:end_idx, :]
+        start_idx = idx * self.stride
+        end_idx = start_idx + self.window
+        y_seq = self.target[start_idx:end_idx, :]
+        u_seq = self._context[start_idx:end_idx, :]
         
         y_tensor = torch.from_numpy(y_seq).to(dtype=DEFAULT_TORCH_DTYPE, device=self.device)
         u_tensor = torch.from_numpy(u_seq).to(dtype=DEFAULT_TORCH_DTYPE, device=self.device)

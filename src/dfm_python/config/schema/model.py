@@ -79,15 +79,14 @@ from ..constants import (
     DEFAULT_KDFM_MA_ORDER,
     FREQUENCY_HIERARCHY,
     DEFAULT_HIERARCHY_VALUE,
-    DEFAULT_IVDFM_SEQUENCE_LENGTH,
     DEFAULT_IVDFM_LATENT_DIM,
     DEFAULT_IVDFM_AUX_DIM,
     DEFAULT_IVDFM_ENCODER_HIDDEN_DIM,
-    DEFAULT_IVDFM_ENCODER_N_LAYERS,
+    DEFAULT_IVDFM_ENCODER_N_HIDDEN_LAYERS,
     DEFAULT_IVDFM_DECODER_HIDDEN_DIM,
-    DEFAULT_IVDFM_DECODER_N_LAYERS,
+    DEFAULT_IVDFM_DECODER_N_HIDDEN_LAYERS,
     DEFAULT_IVDFM_PRIOR_HIDDEN_DIM,
-    DEFAULT_IVDFM_PRIOR_N_LAYERS,
+    DEFAULT_IVDFM_PRIOR_N_HIDDEN_LAYERS,
     DEFAULT_IVDFM_FACTOR_ORDER,
     DEFAULT_IVDFM_INNOVATION_DIST,
     DEFAULT_IVDFM_DECODER_VAR,
@@ -677,7 +676,8 @@ class iVDFMConfig(BaseModelConfig):
     # Model Structure
     # ========================================================================
     num_factors: Optional[int] = None  # Number of factors (inferred from config if None)
-    sequence_length: int = DEFAULT_IVDFM_SEQUENCE_LENGTH  # Sequence length for training
+    window: Optional[int] = None  # Sliding window length for training. If None, uses full T (full series as one sequence). Default: None.
+    stride: int = 1  # Step size for sliding windows. stride=1 means overlapping windows, stride=window means non-overlapping.
     context: Optional[Union[List[str], List[int]]] = None  # Column names (DataFrame) or indices (array) for exogenous context variables. These are concatenated with time features.
     time_context: int = 1  # Dimension of time-based context features. Always included. time_context=1: time step only, time_context>1: adds periodic sine features.
     
@@ -685,11 +685,11 @@ class iVDFMConfig(BaseModelConfig):
     # Neural Network Architecture
     # ========================================================================
     encoder_hidden_dim: Union[int, List[int]] = DEFAULT_IVDFM_ENCODER_HIDDEN_DIM  # Encoder architecture
-    encoder_n_layers: int = DEFAULT_IVDFM_ENCODER_N_LAYERS  # Number of encoder layers
+    encoder_n_hidden_layers: int = DEFAULT_IVDFM_ENCODER_N_HIDDEN_LAYERS  # Number of encoder hidden layers
     decoder_hidden_dim: Union[int, List[int]] = DEFAULT_IVDFM_DECODER_HIDDEN_DIM  # Decoder architecture
-    decoder_n_layers: int = DEFAULT_IVDFM_DECODER_N_LAYERS  # Number of decoder layers
+    decoder_n_hidden_layers: int = DEFAULT_IVDFM_DECODER_N_HIDDEN_LAYERS  # Number of decoder hidden layers
     prior_hidden_dim: Union[int, List[int]] = DEFAULT_IVDFM_PRIOR_HIDDEN_DIM  # Prior network architecture
-    prior_n_layers: int = DEFAULT_IVDFM_PRIOR_N_LAYERS  # Number of prior network layers
+    prior_n_hidden_layers: int = DEFAULT_IVDFM_PRIOR_N_HIDDEN_LAYERS  # Number of prior network hidden layers
     activation: str = DEFAULT_IVDFM_ACTIVATION  # Activation function
     slope: float = DEFAULT_IVDFM_SLOPE  # Leaky ReLU slope
     
@@ -699,6 +699,10 @@ class iVDFMConfig(BaseModelConfig):
     factor_order: int = DEFAULT_IVDFM_FACTOR_ORDER  # AR order for factors
     innovation_distribution: str = DEFAULT_IVDFM_INNOVATION_DIST  # Innovation distribution type
     decoder_var: float = DEFAULT_IVDFM_DECODER_VAR  # Decoder variance
+    beta_kl: float = 1.0  # Weight for KL term in ELBO: ELBO = recon_loss + beta_kl * kl_loss. β<1 reduces KL pressure.
+    use_layer_norm: bool = False  # Whether to use layer normalization in encoder/decoder networks
+    f0_init_method: Optional[str] = None  # f0 initialization method: 'single_window' (default), 'multi_window', 'rolling'
+    ar_init_method: Optional[str] = None  # AR coefficient initialization method: None (random), 'ols' (from data)
     
     # ========================================================================
     # Training Parameters
@@ -729,10 +733,10 @@ class iVDFMConfig(BaseModelConfig):
         
         from ...utils.errors import ConfigurationError
         
-        # Validate sequence_length
-        if self.sequence_length < 1:
+        # Validate window
+        if self.window is not None and self.window < 1:
             raise ConfigurationError(
-                f"sequence_length must be >= 1, got {self.sequence_length}"
+                f"window must be >= 1, got {self.window}"
             )
         
         # Validate time_context
@@ -771,6 +775,12 @@ class iVDFMConfig(BaseModelConfig):
         if self.activation not in valid_activations:
             raise ConfigurationError(
                 f"activation must be one of {valid_activations}, got '{self.activation}'"
+            )
+        
+        # Validate beta_kl
+        if self.beta_kl < 0:
+            raise ConfigurationError(
+                f"beta_kl must be >= 0, got {self.beta_kl}"
             )
         
         # Validate optimizer
@@ -812,15 +822,14 @@ class iVDFMConfig(BaseModelConfig):
     def _extract_ivdfm(cls, data: Dict[str, Any]) -> Dict[str, Any]:
         """Extract iVDFM-specific parameters from config dict."""
         from ..constants import (
-            DEFAULT_IVDFM_SEQUENCE_LENGTH,
             DEFAULT_IVDFM_LATENT_DIM,
             DEFAULT_IVDFM_AUX_DIM,
             DEFAULT_IVDFM_ENCODER_HIDDEN_DIM,
-            DEFAULT_IVDFM_ENCODER_N_LAYERS,
-            DEFAULT_IVDFM_DECODER_HIDDEN_DIM,
-            DEFAULT_IVDFM_DECODER_N_LAYERS,
-            DEFAULT_IVDFM_PRIOR_HIDDEN_DIM,
-            DEFAULT_IVDFM_PRIOR_N_LAYERS,
+    DEFAULT_IVDFM_ENCODER_N_HIDDEN_LAYERS,
+    DEFAULT_IVDFM_DECODER_HIDDEN_DIM,
+    DEFAULT_IVDFM_DECODER_N_HIDDEN_LAYERS,
+    DEFAULT_IVDFM_PRIOR_HIDDEN_DIM,
+    DEFAULT_IVDFM_PRIOR_N_HIDDEN_LAYERS,
             DEFAULT_IVDFM_FACTOR_ORDER,
             DEFAULT_IVDFM_INNOVATION_DIST,
             DEFAULT_IVDFM_DECODER_VAR,
@@ -841,20 +850,23 @@ class iVDFMConfig(BaseModelConfig):
         
         ivdfm_params = cls._extract_params(data, {
             'num_factors': None,
-            'sequence_length': DEFAULT_IVDFM_SEQUENCE_LENGTH,
+            'window': None,  # Default: None (uses full T - full series as one sequence)
+            'stride': 1,  # Default: stride=1 (overlapping windows)
             'context': None,
             'time_context': 1,  # Default: time step only
             'encoder_hidden_dim': DEFAULT_IVDFM_ENCODER_HIDDEN_DIM,
-            'encoder_n_layers': DEFAULT_IVDFM_ENCODER_N_LAYERS,
+            'encoder_n_hidden_layers': DEFAULT_IVDFM_ENCODER_N_HIDDEN_LAYERS,
             'decoder_hidden_dim': DEFAULT_IVDFM_DECODER_HIDDEN_DIM,
-            'decoder_n_layers': DEFAULT_IVDFM_DECODER_N_LAYERS,
+            'decoder_n_hidden_layers': DEFAULT_IVDFM_DECODER_N_HIDDEN_LAYERS,
             'prior_hidden_dim': DEFAULT_IVDFM_PRIOR_HIDDEN_DIM,
-            'prior_n_layers': DEFAULT_IVDFM_PRIOR_N_LAYERS,
+            'prior_n_hidden_layers': DEFAULT_IVDFM_PRIOR_N_HIDDEN_LAYERS,
             'activation': DEFAULT_IVDFM_ACTIVATION,
             'slope': DEFAULT_IVDFM_SLOPE,
             'factor_order': DEFAULT_IVDFM_FACTOR_ORDER,
             'innovation_distribution': DEFAULT_IVDFM_INNOVATION_DIST,
             'decoder_var': DEFAULT_IVDFM_DECODER_VAR,
+            'beta_kl': 1.0,
+            'use_layer_norm': False,
             'learning_rate': DEFAULT_LEARNING_RATE,
             'optimizer': 'Adam',
             'optimizer_weight_decay': DEFAULT_IVDFM_OPTIMIZER_WEIGHT_DECAY,

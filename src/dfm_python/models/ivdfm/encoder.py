@@ -33,9 +33,10 @@ class iVDFMInnovationEncoder(BaseEncoder):
         latent_dim: int,
         aux_dim: int,
         hidden_dim: Union[int, List[int]] = 200,
-        n_layers: int = 3,
+        n_hidden_layers: int = 2,
         activation: str = 'lrelu',
         slope: float = 0.1,
+        use_layer_norm: bool = False,
         device: Optional[Union[str, torch.device]] = None,
         seed: Optional[int] = None,
     ):
@@ -51,12 +52,14 @@ class iVDFMInnovationEncoder(BaseEncoder):
             Dimension of auxiliary variable u_t
         hidden_dim : Union[int, List[int]]
             Hidden layer dimension(s) for MLP networks
-        n_layers : int
-            Number of layers in MLP networks
+        n_hidden_layers : int
+            Number of hidden layers in MLP networks
         activation : str
             Activation function ('lrelu', 'relu', 'tanh', 'sigmoid')
         slope : float
             Slope for leaky ReLU
+        use_layer_norm : bool
+            Whether to use layer normalization in MLP networks
         device : Optional[Union[str, torch.device]]
             Device to move model to
         seed : Optional[int]
@@ -76,9 +79,10 @@ class iVDFMInnovationEncoder(BaseEncoder):
             input_dim=encoder_input_dim,
             output_dim=latent_dim,
             hidden_dim=hidden_dim,
-            n_layers=n_layers,
+            n_hidden_layers=n_hidden_layers,
             activation=activation,
             slope=slope,
+            use_layer_norm=use_layer_norm,
             device=device,
             seed=seed,
         )
@@ -90,9 +94,10 @@ class iVDFMInnovationEncoder(BaseEncoder):
             input_dim=encoder_input_dim,
             output_dim=latent_dim,
             hidden_dim=hidden_dim,
-            n_layers=n_layers,
+            n_hidden_layers=n_hidden_layers,
             activation=activation,
             slope=slope,
+            use_layer_norm=use_layer_norm,
             device=device,
             seed=logvar_seed,
         )
@@ -147,7 +152,7 @@ class iVDFMInnovationEncoder(BaseEncoder):
         mu = self.mu_network(xu)
         logvar = self.logvar_network(xu)
         
-        # Clamp log-variance for numerical stability
+        # Clamp log-variance for numerical stability (in-place when possible)
         logvar = torch.clamp(logvar, min=-10.0, max=10.0)
         
         # Reshape back if needed

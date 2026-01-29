@@ -348,18 +348,17 @@ DEFAULT_KDFM_MA_ORDER = 0  # Default MA order (MA lag order q) for KDFM (0 = pur
 # iVDFM Defaults
 # ============================================================================
 
-# iVDFM sequence and dimension defaults
-DEFAULT_IVDFM_SEQUENCE_LENGTH = 100  # Default sequence length for sliding windows
+# iVDFM dimension defaults
 DEFAULT_IVDFM_LATENT_DIM = 3  # Default number of factors
 DEFAULT_IVDFM_AUX_DIM = 1  # Default auxiliary variable dimension
 
 # iVDFM network architecture defaults
 DEFAULT_IVDFM_ENCODER_HIDDEN_DIM = 200  # Default encoder hidden dimension
-DEFAULT_IVDFM_ENCODER_N_LAYERS = 3  # Default encoder layers
+DEFAULT_IVDFM_ENCODER_N_HIDDEN_LAYERS = 2  # Default encoder hidden layers
 DEFAULT_IVDFM_DECODER_HIDDEN_DIM = 200  # Default decoder hidden dimension
-DEFAULT_IVDFM_DECODER_N_LAYERS = 3  # Default decoder layers
+DEFAULT_IVDFM_DECODER_N_HIDDEN_LAYERS = 2  # Default decoder hidden layers
 DEFAULT_IVDFM_PRIOR_HIDDEN_DIM = 100  # Default prior network hidden dimension
-DEFAULT_IVDFM_PRIOR_N_LAYERS = 2  # Default prior network layers
+DEFAULT_IVDFM_PRIOR_N_HIDDEN_LAYERS = 1  # Default prior network hidden layers
 
 # iVDFM dynamics and distribution defaults
 DEFAULT_IVDFM_FACTOR_ORDER = 1  # Default AR order for factors
@@ -607,15 +606,14 @@ __all__ = [
     'DEFAULT_KDFM_AR_ORDER',
     'DEFAULT_KDFM_MA_ORDER',
     # iVDFM defaults
-    'DEFAULT_IVDFM_SEQUENCE_LENGTH',
     'DEFAULT_IVDFM_LATENT_DIM',
     'DEFAULT_IVDFM_AUX_DIM',
     'DEFAULT_IVDFM_ENCODER_HIDDEN_DIM',
-    'DEFAULT_IVDFM_ENCODER_N_LAYERS',
+    'DEFAULT_IVDFM_ENCODER_N_HIDDEN_LAYERS',
     'DEFAULT_IVDFM_DECODER_HIDDEN_DIM',
-    'DEFAULT_IVDFM_DECODER_N_LAYERS',
+    'DEFAULT_IVDFM_DECODER_N_HIDDEN_LAYERS',
     'DEFAULT_IVDFM_PRIOR_HIDDEN_DIM',
-    'DEFAULT_IVDFM_PRIOR_N_LAYERS',
+    'DEFAULT_IVDFM_PRIOR_N_HIDDEN_LAYERS',
     'DEFAULT_IVDFM_FACTOR_ORDER',
     'DEFAULT_IVDFM_INNOVATION_DIST',
     'DEFAULT_IVDFM_DECODER_VAR',
