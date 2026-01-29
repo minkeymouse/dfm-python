@@ -12,13 +12,12 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from ..base import BaseFactorModel
 from ...logger import get_logger
 from ...logger.ivdfm_logger import iVDFMTrainLogger
 from ...config.constants import DEFAULT_LOSS_LOG_PRECISION
-from ...config.types import to_tensor, to_numpy
+from ...config.types import to_numpy
 from ...config.constants import (
     DEFAULT_TORCH_DTYPE,
     DEFAULT_SEED,
@@ -29,7 +28,6 @@ from ...config.constants import (
     DEFAULT_REGULARIZATION,
 )
 from ...utils.errors import ModelNotTrainedError, ModelNotInitializedError, ConfigurationError, DataValidationError
-from ...utils.validation import check_condition
 from ...utils.loss import compute_elbo_loss
 from ...layer.pca import extract_pca_factors
 from .encoder import iVDFMInnovationEncoder
@@ -204,13 +202,6 @@ class iVDFM(BaseFactorModel, nn.Module):
             config_dict['window'] = window
         
         # Override with kwargs (highest precedence)
-        # Backward compatibility: map latent_dim -> num_factors if provided in kwargs
-        if 'latent_dim' in kwargs and 'num_factors' not in kwargs:
-            kwargs['num_factors'] = kwargs.pop('latent_dim')
-            _logger.warning(
-                "Parameter 'latent_dim' is deprecated. Use 'num_factors' instead. "
-                "This mapping will be removed in a future version."
-            )
         config_dict.update(kwargs)
         
         # Remove None values to use defaults
@@ -347,6 +338,63 @@ class iVDFM(BaseFactorModel, nn.Module):
             f0 = -f0
         
         return f0
+    
+    def _normalize_factors_shape(self, factors: np.ndarray) -> np.ndarray:
+        """Normalize factors shape to 2D (T, r) by averaging over batch dimension if needed.
+        
+        Parameters
+        ----------
+        factors : np.ndarray
+            Factors array, shape (batch, T, r) or (T, r)
+            
+        Returns
+        -------
+        np.ndarray
+            Normalized factors, shape (T, r)
+        """
+        if factors.ndim == 3:
+            return np.mean(factors, axis=0)
+        return factors
+    
+    def _compute_full_state(self, z_np: Optional[np.ndarray]) -> Optional[np.ndarray]:
+        """Compute full augmented state for companion form.
+        
+        For p=1: full_state = factors (T, r)
+        For p>1: full_state = augmented state (T, r*p) with lags
+        
+        Parameters
+        ----------
+        z_np : Optional[np.ndarray]
+            Factors array, shape (T, r)
+            
+        Returns
+        -------
+        Optional[np.ndarray]
+            Full state array, shape (T, r) for p=1 or (T, r*p) for p>1
+        """
+        if z_np is None or not isinstance(z_np, np.ndarray):
+            return None
+        
+        T, r = z_np.shape
+        if self.factor_order == 1:
+            return z_np  # (T, r)
+        
+        # Construct augmented state: s_t[i*p : (i+1)*p] = [f_t[i], f_{t-1}[i], ..., f_{t-p+1}[i]]
+        full_state = np.zeros((T, r * self.factor_order), dtype=z_np.dtype)
+        f0_np = self.ssm.f0.data.cpu().numpy() if hasattr(self.ssm.f0, 'data') else self.ssm.f0
+        
+        for t in range(T):
+            for i in range(r):
+                for lag in range(self.factor_order):
+                    idx = t - lag
+                    if idx >= 0:
+                        full_state[t, i * self.factor_order + lag] = z_np[idx, i]
+                    else:
+                        # Use f0 for negative indices
+                        if f0_np is not None and i < len(f0_np):
+                            full_state[t, i * self.factor_order + lag] = f0_np[i]
+        
+        return full_state
     
     def _set_ssm_ar_params(self, ar_coeffs: np.ndarray, B_diag: np.ndarray) -> None:
         """Set SSM AR parameters from numpy arrays.
@@ -1271,8 +1319,8 @@ class iVDFM(BaseFactorModel, nn.Module):
                 new_factors = np.concatenate(all_factors, axis=0)  # (num_windows, T, r)
                 new_innovations = np.concatenate(all_innovations, axis=0)
 
-                # Legacy behavior averaged over windows; keep for backward compatibility.
-                # NOTE: This is a heuristic aggregation and may not preserve full temporal order.
+                # Average over windows to get single trajectory (T, r)
+                # This aggregates multiple overlapping windows into one sequence
                 if new_factors.ndim == 3:
                     new_factors = np.mean(new_factors, axis=0)  # (T, r)
                     new_innovations = np.mean(new_innovations, axis=0)
@@ -1285,8 +1333,9 @@ class iVDFM(BaseFactorModel, nn.Module):
 
             # Update model state: append or overwrite
             if append and self.factors is not None and self.innovations is not None:
-                factors_existing = np.mean(self.factors, axis=0) if self.factors.ndim == 3 else self.factors
-                innovations_existing = np.mean(self.innovations, axis=0) if self.innovations.ndim == 3 else self.innovations
+                # Normalize existing state to 2D if needed
+                factors_existing = self._normalize_factors_shape(self.factors)
+                innovations_existing = self._normalize_factors_shape(self.innovations)
                 self.factors = np.concatenate([factors_existing, new_factors], axis=0)
                 self.innovations = np.concatenate([innovations_existing, new_innovations], axis=0)
             else:
@@ -1353,27 +1402,7 @@ class iVDFM(BaseFactorModel, nn.Module):
             x_sm = np.mean(x_sm, axis=0)
 
         # Compute full_state (augmented state for companion form)
-        # For p=1: full_state = factors (T, r)
-        # For p>1: full_state = augmented state (T, r*p) with lags
-        full_state = None
-        if z_np is not None and isinstance(z_np, np.ndarray):
-            T, r = z_np.shape
-            if self.factor_order == 1:
-                full_state = z_np  # (T, r)
-            else:
-                # Construct augmented state: s_t[i*p : (i+1)*p] = [f_t[i], f_{t-1}[i], ..., f_{t-p+1}[i]]
-                full_state = np.zeros((T, r * self.factor_order), dtype=z_np.dtype)
-                f0_np = self.ssm.f0.data.cpu().numpy() if hasattr(self.ssm.f0, 'data') else self.ssm.f0
-                for t in range(T):
-                    for i in range(r):
-                        for lag in range(self.factor_order):
-                            idx = t - lag
-                            if idx >= 0:
-                                full_state[t, i * self.factor_order + lag] = z_np[idx, i]
-                            else:
-                                # Use f0 for negative indices
-                                if f0_np is not None and i < len(f0_np):
-                                    full_state[t, i * self.factor_order + lag] = f0_np[i]
+        full_state = self._compute_full_state(z_np)
 
         return iVDFMResult(
             innovations=self.innovations,
@@ -1414,8 +1443,7 @@ class iVDFM(BaseFactorModel, nn.Module):
             _logger.info(f"Model weights saved to {path}")
             return
 
-        # Backward-compatible checkpoint-style save (contains non-tensors).
-        # Save all parameters needed to reconstruct the model architecture
+        # Checkpoint-style save (contains non-tensors for model reconstruction)
         torch.save(
             {
                 "model_state_dict": self.state_dict(),
@@ -1465,20 +1493,20 @@ class iVDFM(BaseFactorModel, nn.Module):
         """
         path = Path(path)
 
-        # Try weights-only load first (safe for untrusted sources).
+        # Try weights-only load first (safe for untrusted sources)
         try:
             state_dict = torch.load(path, map_location="cpu", weights_only=True)
             if isinstance(state_dict, dict) and all(hasattr(v, "dtype") for v in state_dict.values()):
-                # weights-only file: caller must provide architecture args/kwargs.
+                # weights-only file: caller must provide architecture args/kwargs
                 model = cls(*args, **kwargs)
                 model.load_state_dict(state_dict)
                 _logger.info(f"Model weights loaded from {path}")
                 return model
         except Exception:
-            # Fall back to legacy checkpoint below.
+            # Fall back to checkpoint load below
             pass
 
-        # Legacy checkpoint load (contains non-tensors): requires weights_only=False.
+        # Checkpoint load (contains non-tensors for model reconstruction)
         checkpoint = torch.load(path, map_location="cpu", weights_only=False)
         if not isinstance(checkpoint, dict) or "model_state_dict" not in checkpoint:
             raise ValueError(f"Unrecognized checkpoint format at: {path}")
