@@ -288,6 +288,9 @@ class iVDFM(BaseFactorModel, nn.Module):
         self.scheduler_factor = self._config.scheduler_factor
         self.scheduler_min_lr = self._config.scheduler_min_lr
         
+        # Extract initialization method attributes (for use during fit)
+        self.f0_init_method = self._get_config_attr('f0_init_method', None)
+        self.ar_init_method = self._get_config_attr('ar_init_method', None)
         
         # Device setup
         if device is None:
@@ -780,15 +783,13 @@ class iVDFM(BaseFactorModel, nn.Module):
             self._build_components()
         
         # Initialize f_0 (initial factor state) using PCA on initial data
-        # Get initialization method from config (default: 'single_window')
-        f0_init_method = self._get_config_attr('f0_init_method', 'single_window')
-        if f0_init_method is None:
-            f0_init_method = 'single_window'
+        # Get initialization method from instance attribute (set during __init__)
+        f0_init_method = self.f0_init_method if self.f0_init_method is not None else 'single_window'
         _logger.info(f"Using f0_init_method: {f0_init_method} (from config: {getattr(self._config, 'f0_init_method', 'NOT_SET')})")
         self._initialize_f0_from_data(dataset, method=f0_init_method)
         
         # Initialize AR coefficients from data if requested
-        ar_init_method = self._get_config_attr('ar_init_method', None)
+        ar_init_method = self.ar_init_method
         if ar_init_method == 'ols':
             self._initialize_ar_coeffs_from_data(dataset)
         
