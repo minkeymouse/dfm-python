@@ -56,6 +56,7 @@ from ..constants import (
     DEFAULT_IVDFM_SCHEDULER_PATIENCE,
     DEFAULT_IVDFM_SCHEDULER_FACTOR,
     DEFAULT_IVDFM_SCHEDULER_MIN_LR,
+    DEFAULT_IVDFM_EARLY_STOP_PATIENCE,
     DEFAULT_REGULARIZATION_SCALE,
     DEFAULT_STRUCTURAL_REG_WEIGHT,
     DEFAULT_CONVERGENCE_THRESHOLD,
@@ -677,8 +678,8 @@ class iVDFMConfig(BaseModelConfig):
     # ========================================================================
     num_factors: Optional[int] = None  # Number of factors (inferred from config if None)
     sequence_length: int = DEFAULT_IVDFM_SEQUENCE_LENGTH  # Sequence length for training
-    context: Optional[Union[List[str], List[int]]] = None  # Column names (DataFrame) or indices (array) for context variables. If None, context_dim is used to generate time-based context.
-    context_dim: int = DEFAULT_IVDFM_AUX_DIM  # Dimension of context. Used when context is None (generates time-based context) or when context is multivariate.
+    context: Optional[Union[List[str], List[int]]] = None  # Column names (DataFrame) or indices (array) for exogenous context variables. These are concatenated with time features.
+    time_context: int = 1  # Dimension of time-based context features. Always included. time_context=1: time step only, time_context>1: adds periodic sine features.
     
     # ========================================================================
     # Neural Network Architecture
@@ -709,6 +710,7 @@ class iVDFMConfig(BaseModelConfig):
     batch_size: int = DEFAULT_IVDFM_BATCH_SIZE  # Batch size
     max_epochs: int = DEFAULT_IVDFM_MAX_EPOCHS  # Maximum epochs
     tolerance: float = DEFAULT_TOLERANCE  # Convergence tolerance
+    patience: Optional[int] = DEFAULT_IVDFM_EARLY_STOP_PATIENCE  # Early stopping patience (epochs without improvement). None to disable.
     seed: Optional[int] = None  # Random seed
     
     # ========================================================================
@@ -733,10 +735,16 @@ class iVDFMConfig(BaseModelConfig):
                 f"sequence_length must be >= 1, got {self.sequence_length}"
             )
         
-        # Validate context_dim
-        if self.context_dim < 1:
+        # Validate time_context
+        if self.time_context < 1:
             raise ConfigurationError(
-                f"context_dim must be >= 1, got {self.context_dim}"
+                f"time_context must be >= 1, got {self.time_context}"
+            )
+        
+        # Validate patience if provided
+        if self.patience is not None and self.patience < 1:
+            raise ConfigurationError(
+                f"patience must be >= 1 or None (to disable), got {self.patience}"
             )
         
         # Validate num_factors if provided
@@ -835,7 +843,7 @@ class iVDFMConfig(BaseModelConfig):
             'num_factors': None,
             'sequence_length': DEFAULT_IVDFM_SEQUENCE_LENGTH,
             'context': None,
-            'context_dim': DEFAULT_IVDFM_AUX_DIM,
+            'time_context': 1,  # Default: time step only
             'encoder_hidden_dim': DEFAULT_IVDFM_ENCODER_HIDDEN_DIM,
             'encoder_n_layers': DEFAULT_IVDFM_ENCODER_N_LAYERS,
             'decoder_hidden_dim': DEFAULT_IVDFM_DECODER_HIDDEN_DIM,
@@ -854,6 +862,7 @@ class iVDFMConfig(BaseModelConfig):
             'batch_size': DEFAULT_IVDFM_BATCH_SIZE,
             'max_epochs': DEFAULT_IVDFM_MAX_EPOCHS,
             'tolerance': DEFAULT_TOLERANCE,
+            'patience': DEFAULT_IVDFM_EARLY_STOP_PATIENCE,
             'seed': None,
             'scheduler_type': DEFAULT_IVDFM_SCHEDULER_TYPE,
             'scheduler_step_size': DEFAULT_IVDFM_SCHEDULER_STEP_SIZE,

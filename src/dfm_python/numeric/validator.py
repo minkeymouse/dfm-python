@@ -137,6 +137,11 @@ def _validate_integer_range(
 
 def validate_horizon(horizon: int, min_horizon: int = 1, max_horizon: int = 100) -> int:
     """Validate forecast horizon."""
+    # This warning is often noisy for long-horizon benchmarking (e.g., ETT 192/336/720).
+    # Allow silencing via env var without changing call sites.
+    import os
+    if os.environ.get("DFM_SUPPRESS_HORIZON_WARNING", "").strip().lower() in ("1", "true", "yes"):
+        return int(horizon)
     return _validate_integer_range(
         horizon,
         min_horizon,

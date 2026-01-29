@@ -231,6 +231,8 @@ class iVDFM(BaseFactorModel, nn.Module):
         self.latent_dim = self._config.num_factors or DEFAULT_IVDFM_LATENT_DIM
         # context_dim: preserve None if not provided, use config value only if explicitly set
         self.context_dim = context_dim if context_dim is not None else (self._config.context_dim if 'context_dim' in config_dict else None)
+        # time_context: dimension of time-based features (separate from custom context columns)
+        self.time_context = getattr(self._config, 'time_context', 1) if self._config is not None else 1
         self.sequence_length = self._config.sequence_length if sequence_length is None else sequence_length
         self.encoder_hidden_dim = self._config.encoder_hidden_dim
         self.encoder_n_layers = self._config.encoder_n_layers
@@ -250,6 +252,7 @@ class iVDFM(BaseFactorModel, nn.Module):
         self.batch_size = self._config.batch_size
         self.max_epochs = self._config.max_epochs
         self.tolerance = self._config.tolerance
+        self.patience = getattr(self._config, 'patience', None)  # Early stopping patience (None = disabled)
         self.scheduler_type = self._config.scheduler_type
         self.scheduler_step_size = self._config.scheduler_step_size
         self.scheduler_gamma = self._config.scheduler_gamma
@@ -562,11 +565,13 @@ class iVDFM(BaseFactorModel, nn.Module):
             cfg_scaler = getattr(self._config, "scaler", None) if self._config is not None else None
 
             # Create dataset (handles DataFrame/array conversion and context extraction)
+            # Use time_context parameter (default 1: time step only)
+            time_context = getattr(self._config, "time_context", 1) if self._config is not None else 1
             dataset = iVDFMDataset(
                 data=data,
                 sequence_length=self.sequence_length,
                 context=cfg_context,
-                context_dim=self.context_dim if self.context_dim is not None else DEFAULT_IVDFM_AUX_DIM,
+                time_context=time_context,
                 scaler=cfg_scaler,
                 device=self.device,
             )
@@ -574,6 +579,10 @@ class iVDFM(BaseFactorModel, nn.Module):
         # Update data_dim and context_dim from dataset
         actual_data_dim = dataset.target_length
         actual_context_dim = dataset.context_length
+        
+        # Update time_context from config if not already set
+        if not hasattr(self, 'time_context') or self.time_context is None:
+            self.time_context = getattr(self._config, "time_context", 1) if self._config is not None else 1
         
         # Update dimensions
         need_rebuild = False
@@ -587,7 +596,7 @@ class iVDFM(BaseFactorModel, nn.Module):
             )
         
         if self.context_dim is None:
-            # Infer from dataset
+            # Infer from dataset (this is the final dimension: time_context + custom context columns)
             self.context_dim = actual_context_dim
             need_rebuild = True
         elif self.context_dim != actual_context_dim:
@@ -643,7 +652,16 @@ class iVDFM(BaseFactorModel, nn.Module):
         self._elbo = None
         self._converged = False
         
-        _logger.info(f"Starting training: {self.max_epochs} epochs, {len(dataloader)} batches/epoch")
+        # Early stopping setup
+        best_elbo = float('inf')  # Track best ELBO (lower is better, since it's a loss to minimize)
+        epochs_without_improvement = 0
+        best_model_state = None
+        
+        early_stop_enabled = self.patience is not None and self.patience > 0
+        if early_stop_enabled:
+            _logger.info(f"Starting training: {self.max_epochs} epochs, {len(dataloader)} batches/epoch, early stopping patience={self.patience}")
+        else:
+            _logger.info(f"Starting training: {self.max_epochs} epochs, {len(dataloader)} batches/epoch, early stopping disabled")
         
         import time
         start_time = time.time()
@@ -732,7 +750,49 @@ class iVDFM(BaseFactorModel, nn.Module):
                     f"LR: {current_lr:.2e}"
                 )
             
-            # Check convergence
+            # Early stopping: track best ELBO and check for improvement
+            if early_stop_enabled and self._elbo is not None:
+                # ELBO is a loss to minimize, so lower is better
+                if self._elbo < best_elbo:
+                    best_elbo = self._elbo
+                    epochs_without_improvement = 0
+                    # Save best model state (deep copy)
+                    import copy
+                    best_model_state = {
+                        'model_state_dict': copy.deepcopy(self.state_dict()),
+                        'optimizer_state_dict': copy.deepcopy(self.optimizer.state_dict()) if self.optimizer else None,
+                        'epoch': epoch + 1,
+                        'elbo': self._elbo,
+                    }
+                    _logger.debug(f"New best ELBO: {best_elbo:.{DEFAULT_LOSS_LOG_PRECISION}f} at epoch {epoch + 1}")
+                else:
+                    epochs_without_improvement += 1
+                    if epochs_without_improvement >= self.patience:
+                        _logger.info(
+                            f"Early stopping triggered at epoch {epoch + 1}: "
+                            f"no improvement for {epochs_without_improvement} epochs "
+                            f"(best ELBO: {best_elbo:.{DEFAULT_LOSS_LOG_PRECISION}f}, "
+                            f"current ELBO: {self._elbo:.{DEFAULT_LOSS_LOG_PRECISION}f})"
+                        )
+                        # Restore best model state
+                        if best_model_state is not None:
+                            self.load_state_dict(best_model_state['model_state_dict'])
+                            if best_model_state['optimizer_state_dict'] is not None and self.optimizer is not None:
+                                self.optimizer.load_state_dict(best_model_state['optimizer_state_dict'])
+                            self._elbo = best_model_state['elbo']
+                            self._num_iter = best_model_state['epoch']
+                            _logger.info(f"Restored best model from epoch {best_model_state['epoch']}")
+                        
+                        self._converged = True
+                        train_logger.log_convergence(
+                            converged=True,
+                            num_epochs=epoch + 1,
+                            final_loss=best_elbo,
+                            reason="early_stopping"
+                        )
+                        break
+            
+            # Check convergence (tolerance-based)
             if epoch > 0 and self._check_convergence(epoch_elbos):
                 self._converged = True
                 train_logger.log_convergence(
@@ -875,16 +935,24 @@ class iVDFM(BaseFactorModel, nn.Module):
                 else:
                     time_indices = time_indices / T_train
                 
-                # Create time features
-                if self.context_dim == 1:
+                # Create time features using time_context (not full context_dim which may include custom context)
+                if self.time_context == 1:
                     u_future = time_indices.reshape(-1, 1)
                 else:
                     features = [time_indices.reshape(-1, 1)]
-                    for i in range(1, self.context_dim):
+                    for i in range(1, self.time_context):
                         freq = 2 * np.pi * (i + 1) / T_train if T_train > 1 else 2 * np.pi * (i + 1)
                         periodic = np.sin(freq * np.arange(T_train, T_train + horizon, dtype=np.float32))
                         features.append(periodic.reshape(-1, 1))
                     u_future = np.hstack(features)
+                
+                # If model has custom context columns, user must provide context_data for prediction
+                # (time features alone won't match full context_dim)
+                if self.context_dim > self.time_context:
+                    _logger.warning(
+                        f"Model has custom context columns (context_dim={self.context_dim} > time_context={self.time_context}). "
+                        f"Only time features generated. Provide context_data parameter for full context."
+                    )
             else:
                 # Use provided context_data
                 if isinstance(context_data, torch.Tensor):
@@ -1016,11 +1084,13 @@ class iVDFM(BaseFactorModel, nn.Module):
         cfg_scaler = getattr(self._config, "scaler", None) if self._config is not None else None
 
         # Create dataset for new data
+        # Use time_context parameter (default 1: time step only)
+        time_context = getattr(self._config, "time_context", 1) if self._config is not None else 1
         dataset = iVDFMDataset(
             data=data,
             sequence_length=self.sequence_length,
             context=cfg_context,
-            context_dim=self.context_dim if self.context_dim is not None else DEFAULT_IVDFM_AUX_DIM,
+            time_context=time_context,
             scaler=cfg_scaler,
             device=self.device,
         )
@@ -1207,16 +1277,29 @@ class iVDFM(BaseFactorModel, nn.Module):
             return
 
         # Backward-compatible checkpoint-style save (contains non-tensors).
+        # Save all parameters needed to reconstruct the model architecture
         torch.save(
             {
                 "model_state_dict": self.state_dict(),
                 "config": {
+                    # Core dimensions
                     "data_dim": self.data_dim,
                     "latent_dim": self.latent_dim,
                     "context_dim": self.context_dim,
+                    "time_context": self.time_context,  # Time feature dimension
                     "sequence_length": self.sequence_length,
+                    # Dynamics parameters
                     "factor_order": self.factor_order,
                     "innovation_distribution": self.innovation_distribution,
+                    # Architecture parameters (needed for model reconstruction)
+                    "encoder_hidden_dim": self.encoder_hidden_dim,
+                    "encoder_n_layers": self.encoder_n_layers,
+                    "decoder_hidden_dim": self.decoder_hidden_dim,
+                    "decoder_n_layers": self.decoder_n_layers,
+                    "prior_hidden_dim": self.prior_hidden_dim,
+                    "prior_n_layers": self.prior_n_layers,
+                    "activation": self.activation,
+                    "slope": self.slope,
                 },
                 "training_state": self.training_state,
             },
@@ -1266,6 +1349,13 @@ class iVDFM(BaseFactorModel, nn.Module):
         model = cls(**config, **kwargs)
         model.load_state_dict(checkpoint["model_state_dict"])
         model.training_state = checkpoint.get("training_state")
+        
+        # Restore factors and innovations from training_state if available
+        if model.training_state is not None:
+            if hasattr(model.training_state, 'factors') and model.training_state.factors is not None:
+                model.factors = model.training_state.factors
+            if hasattr(model.training_state, 'innovations') and model.training_state.innovations is not None:
+                model.innovations = model.training_state.innovations
         
         _logger.info(f"Model loaded from {path}")
         return model

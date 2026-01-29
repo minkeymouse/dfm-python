@@ -73,6 +73,21 @@ class BaseFactorModel(ABC):
     def load(cls, path: Union[str, Path], *args, **kwargs) -> 'BaseFactorModel':
         """Load model from file."""
         raise NotImplementedError("Subclasses must implement load()")
+    
+    def _restore_checkpoint_metadata(self, checkpoint: dict) -> None:
+        """Restore checkpoint metadata if needed.
+        
+        This is a no-op by default. Subclasses can override if they need
+        to restore additional metadata from checkpoints.
+        
+        Parameters
+        ----------
+        checkpoint : dict
+            Checkpoint dictionary
+        """
+        # Default implementation does nothing
+        # Subclasses can override if needed
+        pass
 
 
 class BaseEncoder(nn.Module, ABC):

@@ -34,7 +34,7 @@ class iVDFMDataset(Dataset):
         Time series data. Columns may include:
         - targets (default)
         - covariates (excluded from targets)
-        - context columns (optional; auxiliary variables u_t provided as columns)
+        - context columns (optional; exogenous auxiliary variables u_t provided as columns)
         The time index column (if provided) is excluded from targets.
     sequence_length : int
         Length of sequences for sliding windows
@@ -44,10 +44,13 @@ class iVDFMDataset(Dataset):
     covariates : Optional[Union[List[str], List[int]]]
         Columns excluded from targets (DDFM-style covariates). Not used as iVDFM context.
     context : Optional[Union[List[str], List[int]]]
-        Optional columns that represent *auxiliary variables* u_t. If provided, these columns are
-        concatenated with time features to form the iVDFM context.
-    context_dim : int
-        Dimension of time-based context features. Time context is always included by default.
+        Optional columns that represent *exogenous auxiliary variables* u_t. If provided, these columns are
+        concatenated with time features to form the iVDFM context. Context dimension is automatically
+        deduced from the number of context columns plus time_context dimension.
+    time_context : int, default 1
+        Dimension of time-based context features. Always included.
+        - time_context=1: Only normalized time step [0, 1]
+        - time_context>1: Normalized time step + periodic sine features (sin(2π * (i+1) / T * t) for i=1..time_context-1)
     device : Optional[torch.device]
         Device to move tensors to
     """
@@ -59,7 +62,7 @@ class iVDFMDataset(Dataset):
         time_idx: Optional[Union[str, int]] = None,
         covariates: Optional[Union[List[str], List[int]]] = None,
         context: Optional[Union[List[str], List[int]]] = None,
-        context_dim: int = DEFAULT_IVDFM_AUX_DIM,
+        time_context: int = 1,
         scaler: Optional[Union[str, StandardScaler, RobustScaler, MinMaxScaler, MaxAbsScaler, QuantileTransformer]] = None,
         device: Optional[torch.device] = None,
     ):
@@ -179,9 +182,10 @@ class iVDFMDataset(Dataset):
             self.covariate_data = data_array[:, covariate_cols] if len(covariate_cols) > 0 else None
             self.aux_context_data = data_array[:, context_cols_arr] if len(context_cols_arr) > 0 else None
         
-        # iVDFM context u_t = [time features] + [aux context columns]
+        # iVDFM context u_t = [time features] + [exogenous context columns]
         # Covariates are *not* part of u_t.
-        time_features = self._generate_time_context(time_idx=time_idx, data_df=data_df if is_dataframe else None, T=T, context_dim=context_dim)
+        # Time context is always included (at least normalized time step)
+        time_features = self._generate_time_context(time_idx=time_idx, data_df=data_df if is_dataframe else None, T=T, time_context=time_context)
         blocks: List[np.ndarray] = [time_features]
         if self.aux_context_data is not None and self.aux_context_data.size > 0:
             blocks.append(self.aux_context_data.astype(np.float32, copy=False))
@@ -236,9 +240,13 @@ class iVDFMDataset(Dataset):
         time_idx: Optional[Union[str, int]],
         data_df: Optional[pd.DataFrame],
         T: int,
-        context_dim: int,
+        time_context: int,
     ) -> np.ndarray:
-        """Generate time-based context features from time index (default context)."""
+        """Generate time-based context features from time index.
+        
+        Always generates at least normalized time step. If time_context > 1,
+        adds periodic sine features.
+        """
         if isinstance(time_idx, str) and data_df is not None and time_idx in data_df.columns:
             tcol = data_df[time_idx]
             if np.issubdtype(tcol.dtype, np.datetime64):
@@ -256,16 +264,26 @@ class iVDFMDataset(Dataset):
         t = t - float(np.nanmin(t))
         denom = float(np.nanmax(t)) if float(np.nanmax(t)) != 0.0 else 1.0
         t = t / denom
-        return self._create_time_features_from_base(t, context_dim)
+        return self._create_time_features_from_base(t, time_context)
     
-    def _create_time_features_from_base(self, t01: np.ndarray, context_dim: int) -> np.ndarray:
-        """Create time features from a normalized base time index (shape (T,))."""
+    def _create_time_features_from_base(self, t01: np.ndarray, time_context: int) -> np.ndarray:
+        """Create time features from a normalized base time index (shape (T,)).
+        
+        Parameters
+        ----------
+        t01 : np.ndarray
+            Normalized time index in [0, 1], shape (T,)
+        time_context : int
+            Dimension of time features:
+            - time_context=1: Only normalized time step
+            - time_context>1: Normalized time step + periodic sine features
+        """
         t01 = np.asarray(t01, dtype=np.float32).reshape(-1)
-        if context_dim <= 1:
+        if time_context <= 1:
             return t01.reshape(-1, 1)
-        features = [t01.reshape(-1, 1)]
+        features = [t01.reshape(-1, 1)]  # Always include normalized time step
         T = t01.shape[0]
-        for i in range(1, context_dim):
+        for i in range(1, time_context):
             freq = 2 * np.pi * (i + 1) / max(T, 2)
             periodic = np.sin(freq * np.arange(T, dtype=np.float32))
             features.append(periodic.reshape(-1, 1))

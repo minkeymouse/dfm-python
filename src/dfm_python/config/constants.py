@@ -384,6 +384,7 @@ DEFAULT_IVDFM_SCHEDULER_GAMMA = 0.5  # Default gamma for StepLR/ExponentialLR
 DEFAULT_IVDFM_SCHEDULER_PATIENCE = 10  # Default patience for ReduceLROnPlateau
 DEFAULT_IVDFM_SCHEDULER_FACTOR = 0.1  # Default factor for ReduceLROnPlateau
 DEFAULT_IVDFM_SCHEDULER_MIN_LR = 0.0  # Default min_lr for ReduceLROnPlateau
+DEFAULT_IVDFM_EARLY_STOP_PATIENCE = 20  # Default patience for early stopping (epochs without improvement)
 
 # ============================================================================
 # Tutorial Defaults
