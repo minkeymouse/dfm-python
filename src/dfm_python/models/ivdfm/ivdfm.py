@@ -213,10 +213,17 @@ class iVDFM(BaseFactorModel, nn.Module):
             )
         config_dict.update(kwargs)
         
+        # Debug: log if f0_init_method is in kwargs
+        if 'f0_init_method' in kwargs:
+            _logger.debug(f"f0_init_method found in kwargs: {kwargs['f0_init_method']}")
+        if 'ar_init_method' in kwargs:
+            _logger.debug(f"ar_init_method found in kwargs: {kwargs['ar_init_method']}")
+        
         # Preserve f0_init_method and ar_init_method (don't filter them out even if None)
         # These are optional parameters with defaults, but we want to preserve them if provided
         f0_init_method_val = config_dict.get('f0_init_method')
         ar_init_method_val = config_dict.get('ar_init_method')
+        _logger.debug(f"Before filtering - f0_init_method in config_dict: {f0_init_method_val}, ar_init_method: {ar_init_method_val}")
         # Remove None values to use defaults, but preserve initialization methods
         config_dict = {k: v for k, v in config_dict.items() if v is not None or k in ('f0_init_method', 'ar_init_method')}
         # Restore initialization methods if they were in kwargs (even if None, to use schema defaults)
@@ -224,6 +231,7 @@ class iVDFM(BaseFactorModel, nn.Module):
             config_dict['f0_init_method'] = f0_init_method_val
         if 'ar_init_method' in kwargs:
             config_dict['ar_init_method'] = ar_init_method_val
+        _logger.debug(f"After filtering - f0_init_method in config_dict: {config_dict.get('f0_init_method')}, ar_init_method: {config_dict.get('ar_init_method')}")
         
         # Create config object
         try:
