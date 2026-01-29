@@ -447,8 +447,6 @@ class iVDFM(BaseFactorModel, nn.Module):
         method : str, default 'single_window'
             Initialization method: 'single_window', 'multi_window', or 'rolling'
         """
-        from ...layer.pca import fit_pca
-        
         T_total = len(dataset.data)
         T_init = min(self.window, T_total) if self.window is not None else T_total
         if T_init < 2:
