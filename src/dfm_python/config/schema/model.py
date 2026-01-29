@@ -866,6 +866,7 @@ class iVDFMConfig(BaseModelConfig):
             'decoder_var': DEFAULT_IVDFM_DECODER_VAR,
             'beta_kl': 1.0,
             'use_layer_norm': False,
+            'use_revin': False,  # Reversible Instance Normalization
             'learning_rate': DEFAULT_LEARNING_RATE,
             'optimizer': 'Adam',
             'optimizer_weight_decay': DEFAULT_IVDFM_OPTIMIZER_WEIGHT_DECAY,
