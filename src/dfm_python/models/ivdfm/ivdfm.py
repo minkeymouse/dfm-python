@@ -672,13 +672,14 @@ class iVDFM(BaseFactorModel, nn.Module):
         prior_params_all = self.prior_network(u_1T)  # Dict with batched params (batch, T, r)
         
         # Build time-indexed parameter lists for ELBO computation
-        # Use list comprehensions for efficiency (avoid repeated dict lookups)
+        # Optimized: pre-extract keys to avoid repeated dict iteration
+        prior_keys = list(prior_params_all.keys())
         encoder_params_list = [
             {'mu': mu_all[:, t, :], 'logvar': logvar_all[:, t, :]}
             for t in range(T)
         ]
         prior_params_list = [
-            {key: value[:, t, :] for key, value in prior_params_all.items()}
+            {key: prior_params_all[key][:, t, :] for key in prior_keys}
             for t in range(T)
         ]
         
