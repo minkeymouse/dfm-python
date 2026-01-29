@@ -309,6 +309,7 @@ class iVDFM(BaseFactorModel, nn.Module):
         self.training_state: Optional[Dict] = None
         self.factors: Optional[np.ndarray] = None
         self.innovations: Optional[np.ndarray] = None
+        self._training_dataset: Optional['iVDFMDataset'] = None  # Store training dataset for scaler access
         
         # Move to device
         self.to(self.device)
@@ -748,6 +749,12 @@ class iVDFM(BaseFactorModel, nn.Module):
             cfg_scaler = self._get_config_attr("scaler")
             time_context = self._get_config_attr("time_context", 1)
             stride = self._get_config_attr("stride", 1)
+            
+            # If RevIN is enabled, disable StandardScaler (RevIN handles normalization)
+            # RevIN normalizes per instance, so we don't need per-variable scaling
+            if self.use_revin:
+                cfg_scaler = None  # Disable scaler when RevIN is enabled
+            
             dataset = iVDFMDataset(
                 data=data, window=self.window, stride=stride,
                 context=cfg_context, time_context=time_context,
@@ -805,6 +812,9 @@ class iVDFM(BaseFactorModel, nn.Module):
         
         # Build optimizer
         self._build_optimizer()
+        
+        # Store training dataset for scaler access in predict()
+        self._training_dataset = dataset
         
         # Create data loader using dataset's method
         dataloader = dataset.get_dataloader(
@@ -1199,16 +1209,17 @@ class iVDFM(BaseFactorModel, nn.Module):
             # For prediction, we need normalization stats from historical data
             # If data is provided, use it; otherwise, we can't denormalize properly
             if self.use_revin and self.revin is not None and data is not None:
-                # Convert data to tensor and extract target columns
+                # Use training dataset's scaler (or None if RevIN disabled scaler)
                 from ...dataset.ivdfm_dataset import iVDFMDataset
                 cfg_context = self._get_config_attr("context")
-                cfg_scaler = self._get_config_attr("scaler")
+                # Use training dataset's scaler (should be None if RevIN is enabled)
+                training_scaler = self._training_dataset.scaler if self._training_dataset is not None else None
                 time_context = self._get_config_attr("time_context", 1)
                 stride = self._get_config_attr("stride", 1)
                 temp_dataset = iVDFMDataset(
                     data=data, window=self.window, stride=stride,
                     context=cfg_context, time_context=time_context,
-                    scaler=cfg_scaler, device=self.device,
+                    scaler=training_scaler, device=self.device,  # Use training scaler (None when RevIN enabled)
                 )
                 # Get last window of data for normalization stats
                 if len(temp_dataset.data) > 0:
