@@ -776,6 +776,7 @@ class iVDFM(BaseFactorModel, nn.Module):
         f0_init_method = self._get_config_attr('f0_init_method', 'single_window')
         if f0_init_method is None:
             f0_init_method = 'single_window'
+        _logger.info(f"Using f0_init_method: {f0_init_method} (from config: {getattr(self._config, 'f0_init_method', 'NOT_SET')})")
         self._initialize_f0_from_data(dataset, method=f0_init_method)
         
         # Initialize AR coefficients from data if requested
