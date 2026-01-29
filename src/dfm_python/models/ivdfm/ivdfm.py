@@ -213,17 +213,10 @@ class iVDFM(BaseFactorModel, nn.Module):
             )
         config_dict.update(kwargs)
         
-        # Debug: log if f0_init_method is in kwargs
-        if 'f0_init_method' in kwargs:
-            _logger.debug(f"f0_init_method found in kwargs: {kwargs['f0_init_method']}")
-        if 'ar_init_method' in kwargs:
-            _logger.debug(f"ar_init_method found in kwargs: {kwargs['ar_init_method']}")
-        
         # Preserve f0_init_method and ar_init_method (don't filter them out even if None)
         # These are optional parameters with defaults, but we want to preserve them if provided
         f0_init_method_val = config_dict.get('f0_init_method')
         ar_init_method_val = config_dict.get('ar_init_method')
-        _logger.debug(f"Before filtering - f0_init_method in config_dict: {f0_init_method_val}, ar_init_method: {ar_init_method_val}")
         # Remove None values to use defaults, but preserve initialization methods
         config_dict = {k: v for k, v in config_dict.items() if v is not None or k in ('f0_init_method', 'ar_init_method')}
         # Restore initialization methods if they were in kwargs (even if None, to use schema defaults)
@@ -231,7 +224,6 @@ class iVDFM(BaseFactorModel, nn.Module):
             config_dict['f0_init_method'] = f0_init_method_val
         if 'ar_init_method' in kwargs:
             config_dict['ar_init_method'] = ar_init_method_val
-        _logger.debug(f"After filtering - f0_init_method in config_dict: {config_dict.get('f0_init_method')}, ar_init_method: {config_dict.get('ar_init_method')}")
         
         # Create config object
         try:
@@ -455,18 +447,20 @@ class iVDFM(BaseFactorModel, nn.Module):
     def _initialize_f0_from_data(self, dataset: 'iVDFMDataset', method: str = 'single_window') -> None:
         """Initialize f_0 (initial factor state) using PCA on data.
         
-        Supports three methods:
-        - 'single_window': PCA on most recent window (baseline)
-        - 'multi_window': Average PCA factors across multiple recent windows
-        - 'rolling': Expanding window PCA (all data up to current)
+        Uses single-window PCA on the most recent window (baseline method).
+        Other methods (multi_window, rolling) were tested in Phase 7 but did not improve performance.
         
         Parameters
         ----------
         dataset : iVDFMDataset
             Dataset containing training data
         method : str, default 'single_window'
-            Initialization method: 'single_window', 'multi_window', or 'rolling'
+            Initialization method (only 'single_window' is supported)
         """
+        if method != 'single_window':
+            _logger.warning(f"f0_init_method '{method}' is not supported. Using 'single_window'.")
+            method = 'single_window'
+        
         T_total = len(dataset.data)
         T_init = min(self.window, T_total) if self.window is not None else T_total
         if T_init < 2:
@@ -478,47 +472,10 @@ class iVDFM(BaseFactorModel, nn.Module):
         f0_mean = None
         
         try:
-            if method == 'single_window':
-                # Baseline: single window PCA
-                y_win = dataset.data[T_total - T_init:T_total, :]  # (T_init, N)
-                f_init, _ = extract_pca_factors(y_win, n_components=max_components)
-                f0_mean = np.mean(f_init, axis=0)  # (max_components,)
-                
-            elif method == 'multi_window':
-                # Multi-window: average PCA factors across multiple windows
-                n_windows = 3  # Use 3 recent windows
-                window_size = T_init
-                f0_list = []
-                
-                for w in range(n_windows):
-                    start_idx = max(0, T_total - window_size * (w + 1))
-                    end_idx = T_total - window_size * w
-                    if end_idx - start_idx < 2:
-                        continue
-                    
-                    y_win = dataset.data[start_idx:end_idx, :]
-                    try:
-                        f_init, _ = extract_pca_factors(y_win, n_components=max_components)
-                        f0_w = np.mean(f_init, axis=0)
-                        f0_list.append(f0_w)
-                    except Exception:
-                        continue
-                
-                if len(f0_list) > 0:
-                    # Average across windows
-                    f0_mean = np.mean(f0_list, axis=0)
-                else:
-                    raise ValueError("No valid windows for multi-window PCA")
-                    
-            elif method == 'rolling':
-                # Rolling: expanding window PCA (all data up to current)
-                y_win = dataset.data[:T_total, :]  # All data
-                f_init_all, eigenvectors = extract_pca_factors(y_win, n_components=max_components)
-                # Use most recent window's factors for f0
-                f_init_recent = f_init_all[T_total - T_init:T_total, :]
-                f0_mean = np.mean(f_init_recent, axis=0)
-            else:
-                raise ValueError(f"Unknown f0 initialization method: {method}")
+            # Single window PCA (baseline method)
+            y_win = dataset.data[T_total - T_init:T_total, :]  # (T_init, N)
+            f_init, _ = extract_pca_factors(y_win, n_components=max_components)
+            f0_mean = np.mean(f_init, axis=0)  # (max_components,)
                 
         except Exception as e:
             self._set_random_f0()
@@ -794,7 +751,6 @@ class iVDFM(BaseFactorModel, nn.Module):
         # Initialize f_0 (initial factor state) using PCA on initial data
         # Get initialization method from instance attribute (set during __init__)
         f0_init_method = self.f0_init_method if self.f0_init_method is not None else 'single_window'
-        _logger.info(f"Using f0_init_method: {f0_init_method} (from config: {getattr(self._config, 'f0_init_method', 'NOT_SET')})")
         self._initialize_f0_from_data(dataset, method=f0_init_method)
         
         # Initialize AR coefficients from data if requested
