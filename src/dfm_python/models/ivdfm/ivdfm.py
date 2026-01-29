@@ -774,6 +774,8 @@ class iVDFM(BaseFactorModel, nn.Module):
         # Initialize f_0 (initial factor state) using PCA on initial data
         # Get initialization method from config (default: 'single_window')
         f0_init_method = self._get_config_attr('f0_init_method', 'single_window')
+        if f0_init_method is None:
+            f0_init_method = 'single_window'
         self._initialize_f0_from_data(dataset, method=f0_init_method)
         
         # Initialize AR coefficients from data if requested
