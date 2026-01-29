@@ -252,6 +252,7 @@ class iVDFM(BaseFactorModel, nn.Module):
         self.decoder_var = self._config.decoder_var
         self.beta_kl = self._get_config_attr('beta_kl', 1.0)
         self.use_layer_norm = self._get_config_attr('use_layer_norm', False)
+        self.use_revin = self._get_config_attr('use_revin', False)
         
         # Extract config attributes (training)
         self.learning_rate = self._config.learning_rate
@@ -282,6 +283,12 @@ class iVDFM(BaseFactorModel, nn.Module):
         if seed is not None:
             torch.manual_seed(seed)
             np.random.seed(seed)
+        
+        # Initialize RevIN if enabled (will be built when data_dim is known)
+        self.revin = None
+        if self.use_revin and self.data_dim is not None:
+            from ...layer.revin import RevIN
+            self.revin = RevIN(num_features=self.data_dim, eps=1e-5, affine=True)
         
         # Initialize components (only if dimensions are available)
         # If data_dim or context_dim is None, components will be built during fit
@@ -615,6 +622,12 @@ class iVDFM(BaseFactorModel, nn.Module):
         """
         batch_size, T, _ = y_1T.shape
         
+        # Apply RevIN normalization if enabled
+        revin_mean = None
+        revin_std = None
+        if self.use_revin and self.revin is not None:
+            y_1T, revin_mean, revin_std = self.revin.normalize(y_1T)
+        
         # Encode innovations: q(η_t | y_t, u_t) for all time steps
         # Encoder processes (batch, T, N) and (batch, T, context_dim) directly
         mu_all, logvar_all = self.innovation_encoder.forward(y_1T, u_1T)
@@ -646,6 +659,10 @@ class iVDFM(BaseFactorModel, nn.Module):
         
         # Decode observations
         y_pred = self.decoder(factors_1T)  # (batch, T, N)
+        
+        # Apply RevIN denormalization if enabled
+        if self.use_revin and self.revin is not None and revin_mean is not None and revin_std is not None:
+            y_pred = self.revin.denormalize(y_pred, revin_mean, revin_std)
         
         return {
             'y_pred': y_pred,
@@ -773,6 +790,12 @@ class iVDFM(BaseFactorModel, nn.Module):
         # Rebuild components if dimensions were updated
         if need_rebuild:
             self._build_components()
+        
+        # Initialize RevIN if enabled and not already built
+        if self.use_revin and self.revin is None:
+            from ...layer.revin import RevIN
+            self.revin = RevIN(num_features=self.data_dim, eps=1e-5, affine=True)
+            self.revin.to(self.device)
         
         # Initialize f_0 (initial factor state) using PCA on initial data
         self._initialize_f0_from_data(dataset)
@@ -1032,6 +1055,7 @@ class iVDFM(BaseFactorModel, nn.Module):
         context: Optional[Union[List[str], List[int]]] = None,
         horizon: int = 1,
         deterministic: bool = True,
+        num_samples: int = 1,
         *args,
         **kwargs
     ) -> np.ndarray:
@@ -1053,6 +1077,10 @@ class iVDFM(BaseFactorModel, nn.Module):
         deterministic : bool, default True
             If True, uses zero innovations (deterministic forecast).
             If False, samples innovations from prior network using context variables.
+        num_samples : int, default 1
+            Number of Monte Carlo samples when deterministic=False.
+            Multiple samples are averaged to reduce variance and approximate E[p(y|u)].
+            Ignored when deterministic=True.
         *args
             Additional arguments
         **kwargs
@@ -1145,65 +1173,17 @@ class iVDFM(BaseFactorModel, nn.Module):
                 # Deterministic forecast: zero innovations
                 eta_future = torch.zeros(1, horizon, self.latent_dim, device=self.device, dtype=DEFAULT_TORCH_DTYPE)
             else:
-                # Sample innovations from prior network
-                eta_future_list = []
-                for h in range(horizon):
-                    u_h = u_future_tensor[:, h, :]  # (1, context_dim)
-                    prior_params_h = self.prior_network(u_h)  # Dict with distribution parameters
-                    
-                    # Sample from prior distribution
-                    if self.innovation_distribution == 'laplace':
-                        location = prior_params_h['location']
-                        log_scale = prior_params_h['log_scale']
-                        scale = torch.exp(log_scale)
-                        # Sample from Laplace
-                        u_uniform = torch.rand(1, self.latent_dim, device=self.device) - 0.5
-                        eta_h = location + scale * torch.sign(u_uniform) * torch.log(1 - 2 * torch.abs(u_uniform) + 1e-8)
-                    elif self.innovation_distribution == 'gaussian':
-                        mu = prior_params_h['mu']
-                        logvar = prior_params_h['logvar']
-                        scale = torch.exp(0.5 * logvar)
-                        eta_h = mu + scale * torch.randn(1, self.latent_dim, device=self.device)
-                    elif self.innovation_distribution == 'student_t':
-                        location = prior_params_h['location']
-                        log_scale = prior_params_h['log_scale']
-                        log_df = prior_params_h['log_df']
-                        scale = torch.exp(log_scale)
-                        df = torch.exp(log_df)
-                        # Sample from Student-t: location + scale * t(df)
-                        # Using normal / sqrt(chi2/df) approximation
-                        z = torch.randn(1, self.latent_dim, device=self.device)
-                        chi2 = torch.distributions.Gamma(df/2, 0.5).sample((1, self.latent_dim)).to(self.device)
-                        eta_h = location + scale * z * torch.sqrt(df / (chi2 + 1e-8))
-                    elif self.innovation_distribution == 'gamma':
-                        shape = prior_params_h['shape']
-                        log_rate = prior_params_h['log_rate']
-                        rate = torch.exp(log_rate)
-                        # Sample from Gamma
-                        eta_h = torch.distributions.Gamma(shape, rate).sample((1,)).to(self.device)
-                    elif self.innovation_distribution == 'beta':
-                        log_alpha = prior_params_h['log_alpha']
-                        log_beta = prior_params_h['log_beta']
-                        alpha = torch.exp(log_alpha)
-                        beta = torch.exp(log_beta)
-                        # Sample from Beta
-                        eta_h = torch.distributions.Beta(alpha, beta).sample((1,)).to(self.device)
-                    elif self.innovation_distribution == 'exponential':
-                        log_rate = prior_params_h['log_rate']
-                        rate = torch.exp(log_rate)
-                        # Sample from Exponential
-                        u = torch.rand(1, self.latent_dim, device=self.device)
-                        eta_h = -torch.log(u + 1e-8) / rate
-                    else:
-                        # Default: Gaussian
-                        mu = prior_params_h.get('mu', torch.zeros(1, self.latent_dim, device=self.device))
-                        logvar = prior_params_h.get('logvar', torch.zeros(1, self.latent_dim, device=self.device))
-                        scale = torch.exp(0.5 * logvar)
-                        eta_h = mu + scale * torch.randn(1, self.latent_dim, device=self.device)
-                    
-                    eta_future_list.append(eta_h)
-                
-                eta_future = torch.stack(eta_future_list, dim=1)  # (1, horizon, r)
+                # Sample innovations from prior: (1, horizon, context_dim) -> (1, horizon, r)
+                if num_samples == 1:
+                    eta_future = self.prior_network.sample(u_future_tensor)
+                else:
+                    # Monte Carlo averaging: sample multiple times and average
+                    # This reduces variance and approximates E[eta | u] when prior has non-zero mean
+                    samples = []
+                    for _ in range(num_samples):
+                        eta_sample = self.prior_network.sample(u_future_tensor)  # (1, horizon, r)
+                        samples.append(eta_sample)
+                    eta_future = torch.stack(samples, dim=0).mean(dim=0)  # Average over samples: (1, horizon, r)
             
             # Forecast factors using SSM
             factors_future = self.ssm.forward_closed_loop(
@@ -1214,6 +1194,34 @@ class iVDFM(BaseFactorModel, nn.Module):
             
             # Decode factors to observations
             y_pred = self.decoder(factors_future)  # (1, horizon, data_dim)
+            
+            # Apply RevIN denormalization if enabled
+            # For prediction, we need normalization stats from historical data
+            # If data is provided, use it; otherwise, we can't denormalize properly
+            if self.use_revin and self.revin is not None and data is not None:
+                # Convert data to tensor and extract target columns
+                from ...dataset.ivdfm_dataset import iVDFMDataset
+                cfg_context = self._get_config_attr("context")
+                cfg_scaler = self._get_config_attr("scaler")
+                time_context = self._get_config_attr("time_context", 1)
+                stride = self._get_config_attr("stride", 1)
+                temp_dataset = iVDFMDataset(
+                    data=data, window=self.window, stride=stride,
+                    context=cfg_context, time_context=time_context,
+                    scaler=cfg_scaler, device=self.device,
+                )
+                # Get last window of data for normalization stats
+                if len(temp_dataset.data) > 0:
+                    # Use last window (or all data if window is None)
+                    window_size = self.window if self.window is not None else len(temp_dataset.data)
+                    last_window = temp_dataset.data[-window_size:, :]  # (T_window, N)
+                    last_window_tensor = torch.from_numpy(last_window).to(
+                        dtype=DEFAULT_TORCH_DTYPE, device=self.device
+                    ).unsqueeze(0)  # (1, T_window, N)
+                    # Compute normalization stats from last window
+                    revin_mean, revin_std = self.revin._get_statistics(last_window_tensor)
+                    # Denormalize predictions
+                    y_pred = self.revin.denormalize(y_pred, revin_mean, revin_std)
             
             # Convert to numpy and remove batch dimension
             y_pred_np = to_numpy(y_pred.squeeze(0))  # (horizon, data_dim)

@@ -284,6 +284,79 @@ class iVDFMPriorNetwork(nn.Module):
                 f"Unsupported innovation_distribution: {self.innovation_distribution}"
             )
 
+    def sample(self, u_t: torch.Tensor) -> torch.Tensor:
+        """Sample innovations from the prior p(η_t | u_t).
+
+        Parameters
+        ----------
+        u_t : torch.Tensor
+            Auxiliary variable.
+            - (batch, aux_dim) or (aux_dim,) for a single time step
+            - (batch, T, aux_dim) for a full sequence (vectorized over time)
+
+        Returns
+        -------
+        torch.Tensor
+            Sampled innovations, same shape as prior params (batch, r) or (batch, T, r).
+        """
+        params = self.forward(u_t)
+        device = next(self.parameters()).device
+        dtype = next(self.parameters()).dtype
+
+        if self.innovation_distribution == 'laplace':
+            location = params['location']
+            log_scale = params['log_scale']
+            scale = torch.exp(log_scale)
+            u_uniform = torch.rand_like(location, device=device, dtype=dtype) - 0.5
+            return location + scale * torch.sign(u_uniform) * torch.log(
+                1 - 2 * torch.abs(u_uniform) + 1e-8
+            )
+
+        if self.innovation_distribution == 'gaussian':
+            mu = params['mu']
+            logvar = params['logvar']
+            scale = torch.exp(0.5 * logvar)
+            return mu + scale * torch.randn_like(mu, device=device, dtype=dtype)
+
+        if self.innovation_distribution == 'student_t':
+            location = params['location']
+            log_scale = params['log_scale']
+            log_df = params['log_df']
+            scale = torch.exp(log_scale)
+            df = torch.exp(log_df)
+            z = torch.randn_like(location, device=device, dtype=dtype)
+            chi2 = torch.distributions.Gamma(df / 2, 0.5).sample(location.shape).to(
+                device=device, dtype=dtype
+            )
+            return location + scale * z * torch.sqrt(df / (chi2 + 1e-8))
+
+        if self.innovation_distribution == 'gamma':
+            shape = params['shape']
+            log_rate = params['log_rate']
+            rate = torch.exp(log_rate)
+            return torch.distributions.Gamma(shape, rate).sample().to(
+                device=device, dtype=dtype
+            )
+
+        if self.innovation_distribution == 'beta':
+            log_alpha = params['log_alpha']
+            log_beta = params['log_beta']
+            alpha = torch.exp(log_alpha)
+            beta = torch.exp(log_beta)
+            return torch.distributions.Beta(alpha, beta).sample().to(
+                device=device, dtype=dtype
+            )
+
+        if self.innovation_distribution == 'exponential':
+            log_rate = params['log_rate']
+            rate = torch.exp(log_rate)
+            u = torch.rand_like(rate, device=device, dtype=dtype)
+            return -torch.log(u + 1e-8) / rate
+
+        raise ConfigurationError(
+            f"Unsupported innovation_distribution for sampling: {self.innovation_distribution}"
+        )
+
 
 # ============================================================================
 # KL Divergence Computations
