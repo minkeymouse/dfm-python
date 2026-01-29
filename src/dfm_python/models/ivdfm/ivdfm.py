@@ -213,12 +213,13 @@ class iVDFM(BaseFactorModel, nn.Module):
             )
         config_dict.update(kwargs)
         
-        # Preserve f0_init_method and ar_init_method even if None (they have defaults in schema)
-        # Remove None values to use defaults, but keep initialization methods
+        # Preserve f0_init_method and ar_init_method (don't filter them out even if None)
+        # These are optional parameters with defaults, but we want to preserve them if provided
         f0_init_method_val = config_dict.get('f0_init_method')
         ar_init_method_val = config_dict.get('ar_init_method')
-        config_dict = {k: v for k, v in config_dict.items() if v is not None}
-        # Restore initialization methods if they were explicitly provided (even if None)
+        # Remove None values to use defaults, but preserve initialization methods
+        config_dict = {k: v for k, v in config_dict.items() if v is not None or k in ('f0_init_method', 'ar_init_method')}
+        # Restore initialization methods if they were in kwargs (even if None, to use schema defaults)
         if 'f0_init_method' in kwargs:
             config_dict['f0_init_method'] = f0_init_method_val
         if 'ar_init_method' in kwargs:
