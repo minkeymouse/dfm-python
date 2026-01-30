@@ -701,7 +701,6 @@ class iVDFMConfig(BaseModelConfig):
     decoder_var: float = DEFAULT_IVDFM_DECODER_VAR  # Decoder variance
     beta_kl: float = 1.0  # Weight for KL term in ELBO: ELBO = recon_loss + beta_kl * kl_loss. β<1 reduces KL pressure.
     use_layer_norm: bool = False  # Whether to use layer normalization in encoder/decoder networks
-    use_revin: bool = False  # Whether to use Reversible Instance Normalization (RevIN) for handling distribution shift
     
     # ========================================================================
     # Training Parameters
@@ -866,7 +865,6 @@ class iVDFMConfig(BaseModelConfig):
             'decoder_var': DEFAULT_IVDFM_DECODER_VAR,
             'beta_kl': 1.0,
             'use_layer_norm': False,
-            'use_revin': False,  # Reversible Instance Normalization
             'learning_rate': DEFAULT_LEARNING_RATE,
             'optimizer': 'Adam',
             'optimizer_weight_decay': DEFAULT_IVDFM_OPTIMIZER_WEIGHT_DECAY,

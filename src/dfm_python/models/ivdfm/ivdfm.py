@@ -252,7 +252,6 @@ class iVDFM(BaseFactorModel, nn.Module):
         self.decoder_var = self._config.decoder_var
         self.beta_kl = self._get_config_attr('beta_kl', 1.0)
         self.use_layer_norm = self._get_config_attr('use_layer_norm', False)
-        self.use_revin = self._get_config_attr('use_revin', False)
         
         # Extract config attributes (training)
         self.learning_rate = self._config.learning_rate
@@ -284,12 +283,6 @@ class iVDFM(BaseFactorModel, nn.Module):
             torch.manual_seed(seed)
             np.random.seed(seed)
         
-        # Initialize RevIN if enabled (will be built when data_dim is known)
-        self.revin = None
-        if self.use_revin and self.data_dim is not None:
-            from ...layer.revin import RevIN
-            self.revin = RevIN(num_features=self.data_dim, eps=1e-5, affine=True)
-        
         # Initialize components (only if dimensions are available)
         # If data_dim or context_dim is None, components will be built during fit
         if self.data_dim is not None and self.context_dim is not None:
@@ -309,7 +302,6 @@ class iVDFM(BaseFactorModel, nn.Module):
         self.training_state: Optional[Dict] = None
         self.factors: Optional[np.ndarray] = None
         self.innovations: Optional[np.ndarray] = None
-        self._training_dataset: Optional['iVDFMDataset'] = None  # Store training dataset for scaler access
         
         # Move to device
         self.to(self.device)
@@ -623,12 +615,6 @@ class iVDFM(BaseFactorModel, nn.Module):
         """
         batch_size, T, _ = y_1T.shape
         
-        # Apply RevIN normalization if enabled
-        revin_mean = None
-        revin_std = None
-        if self.use_revin and self.revin is not None:
-            y_1T, revin_mean, revin_std = self.revin.normalize(y_1T)
-        
         # Encode innovations: q(η_t | y_t, u_t) for all time steps
         # Encoder processes (batch, T, N) and (batch, T, context_dim) directly
         mu_all, logvar_all = self.innovation_encoder.forward(y_1T, u_1T)
@@ -660,10 +646,6 @@ class iVDFM(BaseFactorModel, nn.Module):
         
         # Decode observations
         y_pred = self.decoder(factors_1T)  # (batch, T, N)
-        
-        # Apply RevIN denormalization if enabled
-        if self.use_revin and self.revin is not None and revin_mean is not None and revin_std is not None:
-            y_pred = self.revin.denormalize(y_pred, revin_mean, revin_std)
         
         return {
             'y_pred': y_pred,
@@ -749,12 +731,6 @@ class iVDFM(BaseFactorModel, nn.Module):
             cfg_scaler = self._get_config_attr("scaler")
             time_context = self._get_config_attr("time_context", 1)
             stride = self._get_config_attr("stride", 1)
-            
-            # If RevIN is enabled, disable StandardScaler (RevIN handles normalization)
-            # RevIN normalizes per instance, so we don't need per-variable scaling
-            if self.use_revin:
-                cfg_scaler = None  # Disable scaler when RevIN is enabled
-            
             dataset = iVDFMDataset(
                 data=data, window=self.window, stride=stride,
                 context=cfg_context, time_context=time_context,
@@ -798,12 +774,6 @@ class iVDFM(BaseFactorModel, nn.Module):
         if need_rebuild:
             self._build_components()
         
-        # Initialize RevIN if enabled and not already built
-        if self.use_revin and self.revin is None:
-            from ...layer.revin import RevIN
-            self.revin = RevIN(num_features=self.data_dim, eps=1e-5, affine=True)
-            self.revin.to(self.device)
-        
         # Initialize f_0 (initial factor state) using PCA on initial data
         self._initialize_f0_from_data(dataset)
         
@@ -812,9 +782,6 @@ class iVDFM(BaseFactorModel, nn.Module):
         
         # Build optimizer
         self._build_optimizer()
-        
-        # Store training dataset for scaler access in predict()
-        self._training_dataset = dataset
         
         # Create data loader using dataset's method
         dataloader = dataset.get_dataloader(
@@ -1204,35 +1171,6 @@ class iVDFM(BaseFactorModel, nn.Module):
             
             # Decode factors to observations
             y_pred = self.decoder(factors_future)  # (1, horizon, data_dim)
-            
-            # Apply RevIN denormalization if enabled
-            # For prediction, we need normalization stats from historical data
-            # If data is provided, use it; otherwise, we can't denormalize properly
-            if self.use_revin and self.revin is not None and data is not None:
-                # Use training dataset's scaler (or None if RevIN disabled scaler)
-                from ...dataset.ivdfm_dataset import iVDFMDataset
-                cfg_context = self._get_config_attr("context")
-                # Use training dataset's scaler (should be None if RevIN is enabled)
-                training_scaler = self._training_dataset.scaler if self._training_dataset is not None else None
-                time_context = self._get_config_attr("time_context", 1)
-                stride = self._get_config_attr("stride", 1)
-                temp_dataset = iVDFMDataset(
-                    data=data, window=self.window, stride=stride,
-                    context=cfg_context, time_context=time_context,
-                    scaler=training_scaler, device=self.device,  # Use training scaler (None when RevIN enabled)
-                )
-                # Get last window of data for normalization stats
-                if len(temp_dataset.data) > 0:
-                    # Use last window (or all data if window is None)
-                    window_size = self.window if self.window is not None else len(temp_dataset.data)
-                    last_window = temp_dataset.data[-window_size:, :]  # (T_window, N)
-                    last_window_tensor = torch.from_numpy(last_window).to(
-                        dtype=DEFAULT_TORCH_DTYPE, device=self.device
-                    ).unsqueeze(0)  # (1, T_window, N)
-                    # Compute normalization stats from last window
-                    revin_mean, revin_std = self.revin._get_statistics(last_window_tensor)
-                    # Denormalize predictions
-                    y_pred = self.revin.denormalize(y_pred, revin_mean, revin_std)
             
             # Convert to numpy and remove batch dimension
             y_pred_np = to_numpy(y_pred.squeeze(0))  # (horizon, data_dim)
