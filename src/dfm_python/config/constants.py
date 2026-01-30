@@ -355,6 +355,7 @@ DEFAULT_IVDFM_AUX_DIM = 1  # Default auxiliary variable dimension
 # iVDFM regime (K=1 = baseline iVDFM, no regime structure)
 DEFAULT_IVDFM_NUM_REGIMES = 1  # Number of discrete regimes; 1 = baseline iVDFM
 DEFAULT_IVDFM_REGIME_TEMPERATURE = 1.0  # Softmax temperature for π; τ < 1 sharpens (local commitment)
+DEFAULT_IVDFM_MIXING = False  # If True, apply global post-factor mixing f -> M f (identity init) before decode
 
 # iVDFM network architecture defaults
 DEFAULT_IVDFM_ENCODER_HIDDEN_DIM = 200  # Default encoder hidden dimension

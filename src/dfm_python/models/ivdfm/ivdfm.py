@@ -34,6 +34,7 @@ from .encoder import iVDFMInnovationEncoder
 from .decoder import iVDFMDecoder
 from .prior import iVDFMPriorNetwork
 from ...layer.regime import RegimeNet
+from .mixing import build_factor_mixing
 from ...ssm.companion import iVDFMCompanionSSM
 from ...dataset.ivdfm_dataset import iVDFMDataset
 from ...config.schema.model import iVDFMConfig
@@ -259,6 +260,7 @@ class iVDFM(BaseFactorModel, nn.Module):
         self.regime_temperature = self._get_config_attr('regime_temperature', 1.0)
         self.beta_kl = self._get_config_attr('beta_kl', 1.0)
         self.use_layer_norm = self._get_config_attr('use_layer_norm', False)
+        self.mixing = self._get_config_attr('mixing', False)
         
         # Extract config attributes (training)
         self.learning_rate = self._config.learning_rate
@@ -531,6 +533,13 @@ class iVDFM(BaseFactorModel, nn.Module):
                 for _ in range(K)
             ])
 
+        # Post-factor mixing: optional global only (mixing=True -> one M, identity init; mixing=False -> none).
+        self.factor_mixing = (
+            build_factor_mixing(self.latent_dim, device=self.device, dtype=DEFAULT_TORCH_DTYPE)
+            if self.mixing
+            else None
+        )
+
         # SSM: maps innovations to factors via deterministic dynamics
         self.ssm = iVDFMCompanionSSM(
             latent_dim=self.latent_dim,
@@ -565,34 +574,35 @@ class iVDFM(BaseFactorModel, nn.Module):
         factors: torch.Tensor,
         u_1T: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Decode factors to observations. K=1: single decoder; K>1: π-weighted mixture. No u → uniform π."""
+        """Decode factors to observations. Optional global mixing f -> M f when mixing=True; then K=1 single decoder or K>1 π-weighted decoders."""
         squeeze_out = factors.dim() == 2
         if squeeze_out:
             factors = factors.unsqueeze(0)
+        mixed = self.factor_mixing(factors) if self.factor_mixing is not None else factors
         if self.num_regimes == 1:
-            out = self.decoder(factors)
+            out = self.decoder(mixed)
         else:
             if u_1T is not None:
                 if u_1T.dim() == 2:
                     u_1T = u_1T.unsqueeze(0)
                 pi = self.regime_net(u_1T, temperature=self.regime_temperature)
             else:
-                batch, T, _ = factors.shape
+                batch, T, _ = mixed.shape
                 pi = torch.full(
                     (batch, T, self.num_regimes),
                     1.0 / self.num_regimes,
-                    device=factors.device,
-                    dtype=factors.dtype,
+                    device=mixed.device,
+                    dtype=mixed.dtype,
                 )
             out = torch.zeros(
-                factors.shape[0],
-                factors.shape[1],
+                mixed.shape[0],
+                mixed.shape[1],
                 self.data_dim,
-                device=factors.device,
-                dtype=factors.dtype,
+                device=mixed.device,
+                dtype=mixed.dtype,
             )
             for k in range(self.num_regimes):
-                out = out + pi[:, :, k : k + 1] * self.decoders[k](factors)
+                out = out + pi[:, :, k : k + 1] * self.decoders[k](mixed)
         if squeeze_out:
             out = out.squeeze(0)
         return out
@@ -1532,6 +1542,14 @@ class iVDFM(BaseFactorModel, nn.Module):
         # Compute full_state (augmented state for companion form)
         full_state = self._compute_full_state(z_np)
 
+        # Regime and mixing (for result summary and inspection)
+        num_regimes = getattr(self, "num_regimes", None)
+        regime_temperature = getattr(self, "regime_temperature", None)
+        mixing = getattr(self, "mixing", None)
+        mixing_matrix = None
+        if self.factor_mixing is not None and hasattr(self.factor_mixing, "M"):
+            mixing_matrix = to_numpy(self.factor_mixing.M.weight.detach())
+
         return iVDFMResult(
             innovations=self.innovations,
             reconstructions=recon,
@@ -1549,6 +1567,10 @@ class iVDFM(BaseFactorModel, nn.Module):
             converged=converged,
             config=cfg_snapshot,
             model_state_dict=weights,
+            num_regimes=num_regimes,
+            regime_temperature=regime_temperature,
+            mixing=mixing,
+            mixing_matrix=mixing_matrix,
         )
     
     def save(self, path: Union[str, Path], *, weights_only: bool = False) -> None:

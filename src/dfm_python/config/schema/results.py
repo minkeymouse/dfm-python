@@ -458,6 +458,12 @@ class iVDFMResult(BaseResult):
     reconstructions: Optional[np.ndarray] = None      # decoded factors, (T, N) or (batch, T, N)
     full_state: Optional[np.ndarray] = None           # Augmented state for companion form (T x r*p) for p>1, (T x r) for p=1
 
+    # Regime and mixing (when num_regimes > 1 or mixing=True)
+    num_regimes: Optional[int] = None                # K; 1 = baseline (no regime structure)
+    regime_temperature: Optional[float] = None        # Softmax τ for π (τ < 1 = sharper commitment)
+    mixing: Optional[bool] = None                    # Whether post-factor mixing f -> M f was used
+    mixing_matrix: Optional[np.ndarray] = None       # (r, r) learned M when mixing=True (for inspection)
+
     # Training diagnostics
     training_elbo: Optional[float] = None
     training_loss: Optional[float] = None
@@ -498,6 +504,14 @@ class iVDFMResult(BaseResult):
             lines.append(f"Reconstructions shape: {getattr(self.reconstructions, 'shape', None)}")
         if self.full_state is not None:
             lines.append(f"Full state (augmented) shape: {getattr(self.full_state, 'shape', None)}")
+        if self.num_regimes is not None:
+            lines.append(f"Num regimes: {self.num_regimes}")
+        if self.regime_temperature is not None:
+            lines.append(f"Regime temperature: {self.regime_temperature}")
+        if self.mixing is not None:
+            lines.append(f"Mixing: {self.mixing}")
+        if self.mixing_matrix is not None:
+            lines.append(f"Mixing matrix shape: {getattr(self.mixing_matrix, 'shape', None)}")
         lines.append("")
         lines.append("Training:")
         lines.append(f"  Converged: {self.converged}")

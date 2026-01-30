@@ -85,6 +85,7 @@ from ..constants import (
     DEFAULT_IVDFM_ENCODER_N_HIDDEN_LAYERS,
     DEFAULT_IVDFM_NUM_REGIMES,
     DEFAULT_IVDFM_REGIME_TEMPERATURE,
+    DEFAULT_IVDFM_MIXING,
     DEFAULT_IVDFM_DECODER_TYPE,
     DEFAULT_IVDFM_DECODER_HIDDEN_DIM,
     DEFAULT_IVDFM_DECODER_N_HIDDEN_LAYERS,
@@ -707,6 +708,7 @@ class iVDFMConfig(BaseModelConfig):
     decoder_var: float = DEFAULT_IVDFM_DECODER_VAR  # Decoder variance
     beta_kl: float = 1.0  # Weight for KL term in ELBO: ELBO = recon_loss + beta_kl * kl_loss. β<1 reduces KL pressure.
     use_layer_norm: bool = False  # Whether to use layer normalization in encoder/decoder networks
+    mixing: bool = DEFAULT_IVDFM_MIXING  # If True, global post-factor mixing f -> M f before decode (identity init)
     
     # ========================================================================
     # Training Parameters
@@ -848,6 +850,7 @@ class iVDFMConfig(BaseModelConfig):
             DEFAULT_IVDFM_ENCODER_N_HIDDEN_LAYERS,
             DEFAULT_IVDFM_NUM_REGIMES,
             DEFAULT_IVDFM_REGIME_TEMPERATURE,
+            DEFAULT_IVDFM_MIXING,
             DEFAULT_IVDFM_DECODER_TYPE,
             DEFAULT_IVDFM_DECODER_HIDDEN_DIM,
             DEFAULT_IVDFM_DECODER_N_HIDDEN_LAYERS,
@@ -893,6 +896,7 @@ class iVDFMConfig(BaseModelConfig):
             'decoder_var': DEFAULT_IVDFM_DECODER_VAR,
             'beta_kl': 1.0,
             'use_layer_norm': False,
+            'mixing': DEFAULT_IVDFM_MIXING,
             'learning_rate': DEFAULT_LEARNING_RATE,
             'optimizer': 'Adam',
             'optimizer_weight_decay': DEFAULT_IVDFM_OPTIMIZER_WEIGHT_DECAY,
