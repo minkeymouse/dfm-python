@@ -196,65 +196,69 @@ def compute_elbo_loss(
     innovation_distribution: str = 'laplace',
     decoder_variance: float = 1.0,
     beta_kl: float = 1.0,
-    reduction: str = 'mean'
+    reduction: str = 'mean',
+    regime_weights: Optional[torch.Tensor] = None,
+    prior_params_per_regime: Optional[list] = None,
 ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
     """Compute Evidence Lower Bound (ELBO) loss for variational inference.
     
     ELBO = E[log p(y | f)] - β * Σ_t KL(q(η_t | y_{1:T}, u_t) || p(η_t | u_t))
-    
-    The ELBO is maximized, so we return the negative ELBO for minimization.
-    β (beta_kl) controls the weight of the KL term. β < 1 reduces KL pressure.
+    With regime prior: KL_t = Σ_k π_{t,k} KL(q(η_t) || p_k(η_t | u_t)).
     
     Parameters
     ----------
-    y_true : torch.Tensor
-        True observations, shape (batch, T, N)
-    y_pred : torch.Tensor
-        Predicted observations, shape (batch, T, N)
-    encoder_params : list
-        List of dictionaries with encoder parameters for each time step.
-        Each dict should contain 'mu' and 'logvar' for variational posterior q.
-    prior_params : list
-        List of dictionaries with prior parameters for each time step.
-        Format depends on innovation_distribution:
-        - 'laplace': {'location', 'log_scale'}
-        - 'gaussian': {'mu', 'logvar'}
-        - 'student_t': {'location', 'log_scale', 'log_df'}
-        - 'gamma': {'shape', 'log_rate'}
-        - 'beta': {'log_alpha', 'log_beta'}
-        - 'exponential': {'log_rate'}
-    innovation_distribution : str, default 'laplace'
-        Distribution type for innovations: 'laplace', 'gaussian', 'student_t', 'gamma', 'beta', 'exponential'
-    decoder_variance : float, default 1.0
-        Variance of Gaussian observation model
-    beta_kl : float, default 1.0
-        Weight for KL term in ELBO. β < 1 reduces KL pressure, allowing better reconstruction.
-    reduction : str, default 'mean'
-        Reduction method: 'mean' or 'sum'
-        
-    Returns
-    -------
-    Tuple[torch.Tensor, Dict[str, torch.Tensor]]
-        (elbo_loss, loss_dict) where:
-        - elbo_loss: Negative ELBO (to minimize)
-        - loss_dict: Dictionary with component losses:
-            - 'elbo': total ELBO loss
-            - 'reconstruction': reconstruction term
-            - 'kl': KL divergence term
+    ... (same as before)
+    regime_weights : Optional[torch.Tensor], default None
+        Regime probabilities (batch, T, K). When set with prior_params_per_regime, KL is regime-weighted.
+    prior_params_per_regime : Optional[list], default None
+        List of K lists of T dicts (prior params per regime). Used when regime_weights is set.
     """
     batch_size, T, _ = y_true.shape
-    
+
     # Reconstruction term: E[log p(y_t | f_t)]
     recon_loss = compute_reconstruction_loss_gaussian(
         y_true, y_pred, variance=decoder_variance
     )
-    
-    # KL divergence terms: Σ_t KL(q(η_t | y_{1:T}, u_t) || p(η_t | u_t))
-    # Vectorize: stack all time steps and compute KL for all at once
+
     mu_q_all = torch.stack([encoder_params[t]['mu'] for t in range(T)], dim=1)  # (batch, T, dim)
     logvar_q_all = torch.stack([encoder_params[t]['logvar'] for t in range(T)], dim=1)  # (batch, T, dim)
-    
-    # Stack prior parameters
+
+    if regime_weights is not None and prior_params_per_regime is not None:
+        # Regime-weighted KL: Σ_k π_{t,k} KL(q_t || p_k_t)
+        K = len(prior_params_per_regime)
+        kl_per_k_list = []
+        for k in range(K):
+            prior_params_k = prior_params_per_regime[k]
+            kl_bt = _compute_kl_bt(
+                mu_q_all, logvar_q_all, prior_params_k, T, batch_size, innovation_distribution
+            )
+            kl_per_k_list.append(kl_bt)
+        kl_per_k = torch.stack(kl_per_k_list, dim=2)  # (batch, T, K)
+        kl_loss_bt = (regime_weights * kl_per_k).sum(dim=2)  # (batch, T)
+    else:
+        kl_loss_bt = _compute_kl_bt(
+            mu_q_all, logvar_q_all, prior_params, T, batch_size, innovation_distribution
+        )
+
+    if reduction == 'mean':
+        kl_loss = kl_loss_bt.mean()
+    else:
+        kl_loss = kl_loss_bt.sum()
+
+    elbo = recon_loss + beta_kl * kl_loss
+    loss_dict = {'elbo': elbo, 'reconstruction': recon_loss, 'kl': kl_loss}
+    return elbo, loss_dict
+
+
+def _compute_kl_bt(
+    mu_q_all: torch.Tensor,
+    logvar_q_all: torch.Tensor,
+    prior_params: list,
+    T: int,
+    batch_size: int,
+    innovation_distribution: str,
+) -> torch.Tensor:
+    """Compute KL(q || p) per (batch, time); return (batch, T)."""
     if innovation_distribution == 'laplace':
         location_p_all = torch.stack([prior_params[t]['location'] for t in range(T)], dim=1)  # (batch, T, dim)
         log_scale_p_all = torch.stack([prior_params[t]['log_scale'] for t in range(T)], dim=1)  # (batch, T, dim)
@@ -312,25 +316,8 @@ def compute_elbo_loss(
         raise NotImplementedError(
             f"KL divergence for {innovation_distribution} not implemented"
         )
-    
-    if reduction == 'mean':
-        kl_loss = kl_loss.mean()  # Mean over batch and time
-    else:
-        kl_loss = kl_loss.sum()  # Sum over batch and time
-    
-    # ELBO = E[log p(y|f)] - β * KL
-    # recon_loss = -E[log p(y|f)] (negative log-likelihood, positive value)
-    # So: ELBO = -recon_loss - β * KL
-    # For minimization, return -ELBO = recon_loss + β * KL
-    elbo = recon_loss + beta_kl * kl_loss
-    
-    loss_dict = {
-        'elbo': elbo,
-        'reconstruction': recon_loss,
-        'kl': kl_loss,
-    }
-    
-    return elbo, loss_dict
+    return kl_loss  # (batch, T)
+
 
 # Note: compute_ivdfm_elbo was removed as redundant.
 # The iVDFM model's elbo() method directly calls compute_elbo_loss() after forward pass.

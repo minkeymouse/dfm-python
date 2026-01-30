@@ -210,6 +210,184 @@ class iVDFMCompanionSSM(BaseSSM):
         
         return H
     
+    def get_impulse_response_with_coeffs(
+        self,
+        length: int,
+        ar_coeffs: torch.Tensor,
+        B_diag: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute impulse response H from given AR coefficients and B (no batch).
+        
+        Parameters
+        ----------
+        length : int
+            Length of impulse response
+        ar_coeffs : torch.Tensor
+            AR coefficients, shape (r, p)
+        B_diag : torch.Tensor
+            Innovation scale, shape (r,)
+            
+        Returns
+        -------
+        torch.Tensor
+            Impulse response, shape (r, length)
+        """
+        r, p = ar_coeffs.shape
+        assert r == self.latent_dim and p == self.factor_order
+        if self.factor_order == 1:
+            A_diag = torch.sigmoid(ar_coeffs[:, 0])
+            B_norm = self.norm(B_diag, ord=self.norm_order) if self.norm_order > 0 else B_diag
+            k = torch.arange(length, device=ar_coeffs.device, dtype=ar_coeffs.dtype)
+            A_powers = A_diag.unsqueeze(-1) ** k
+            H = B_norm.unsqueeze(-1) * A_powers
+            return H
+        ar_coeffs_norm = self.norm(ar_coeffs, ord=self.norm_order) if self.norm_order > 0 else ar_coeffs
+        A_block = build_ivdfm_diagonal_companion(ar_coeffs_norm)
+        B_block = torch.zeros(r * p, r, device=B_diag.device, dtype=B_diag.dtype)
+        B_norm = self.norm(B_diag, ord=self.norm_order) if self.norm_order > 0 else B_diag
+        for i in range(r):
+            B_block[i * p, i] = B_norm[i]
+        C_norm = self.C if self.C is not None else torch.eye(r, device=ar_coeffs.device)
+        H_list = []
+        for i in range(r):
+            b_i = B_block[:, i]
+            krylov_seq = krylov(length, A_block, b_i, c=None)
+            H_i = torch.einsum('j, jl -> l', C_norm[i, :], krylov_seq)
+            H_list.append(H_i)
+        return torch.stack(H_list, dim=0)
+    
+    def forward_with_coeffs(
+        self,
+        eta_sequence: torch.Tensor,
+        f0: Optional[torch.Tensor],
+        ar_coeffs: torch.Tensor,
+        B_diag: torch.Tensor,
+        group_id: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Forward with per-batch AR coefficients (for regime AR(p), window-frozen).
+        
+        When factor_order > 1 and group_id is provided, windows are grouped by dominant
+        regime; one companion/impulse response per group and batched Krylov/FFT within
+        group (fast path). Otherwise falls back to per-window loop.
+        
+        Parameters
+        ----------
+        eta_sequence : torch.Tensor
+            (batch, T, r)
+        f0 : Optional[torch.Tensor]
+            (batch, r) or None to use self.f0
+        ar_coeffs : torch.Tensor
+            (batch, r, p)
+        B_diag : torch.Tensor
+            (batch, r)
+        group_id : Optional[torch.Tensor]
+            (batch,) integer regime/group id per window. When provided with p>1, uses
+            grouped batched path. Typically pi_w.argmax(dim=-1).
+            
+        Returns
+        -------
+        torch.Tensor
+            (batch, T, r)
+        """
+        batch_size, T, r = eta_sequence.shape
+        if f0 is None:
+            f0 = self.f0.unsqueeze(0).expand(batch_size, -1)
+        elif f0.dim() == 1:
+            f0 = f0.unsqueeze(0).expand(batch_size, -1)
+        if self.factor_order == 1:
+            A = torch.sigmoid(ar_coeffs[:, :, 0])
+            B = self.norm(B_diag, ord=self.norm_order) if self.norm_order > 0 else B_diag
+            factors = torch.empty(batch_size, T, r, device=eta_sequence.device, dtype=eta_sequence.dtype)
+            f_t = f0
+            for t in range(T):
+                f_t = A * f_t + B * eta_sequence[:, t, :]
+                factors[:, t, :] = f_t
+            return factors
+        if group_id is not None:
+            return self._forward_with_coeffs_grouped(eta_sequence, f0, ar_coeffs, B_diag, group_id)
+        return self._forward_with_coeffs_loop(eta_sequence, f0, ar_coeffs, B_diag)
+
+    def _forward_with_coeffs_loop(
+        self,
+        eta_sequence: torch.Tensor,
+        f0: torch.Tensor,
+        ar_coeffs: torch.Tensor,
+        B_diag: torch.Tensor,
+    ) -> torch.Tensor:
+        """Per-window loop path (reference / fallback)."""
+        batch_size, T, r = eta_sequence.shape
+        factors_list = []
+        for b in range(batch_size):
+            H = self.get_impulse_response_with_coeffs(T, ar_coeffs[b], B_diag[b])
+            eta_b = eta_sequence[b : b + 1]
+            eta_T = rearrange(eta_b, 'b t r -> b r t')
+            factors_b = self.fft_conv(eta_T, H)
+            factors_b = rearrange(factors_b, 'b r t -> b t r')
+            s0 = torch.zeros(1, r * self.factor_order, device=f0.device, dtype=f0.dtype)
+            s0[:, ::self.factor_order] = f0[b : b + 1]
+            ar_norm = self.norm(ar_coeffs[b], ord=self.norm_order) if self.norm_order > 0 else ar_coeffs[b]
+            A_block = build_ivdfm_diagonal_companion(ar_norm)
+            A_block_b = A_block.unsqueeze(0)
+            s_seq = krylov(T, A_block_b, s0, c=None)
+            C_norm = self.C if self.C is not None else torch.eye(r, device=ar_coeffs.device)
+            f_init = torch.einsum('ij, bjt -> bit', C_norm, s_seq)
+            f_init = rearrange(f_init, 'b r t -> b t r')
+            factors_b = factors_b + f_init
+            factors_list.append(factors_b)
+        return torch.cat(factors_list, dim=0)
+
+    def _forward_with_coeffs_grouped(
+        self,
+        eta_sequence: torch.Tensor,
+        f0: torch.Tensor,
+        ar_coeffs: torch.Tensor,
+        B_diag: torch.Tensor,
+        group_id: torch.Tensor,
+    ) -> torch.Tensor:
+        """Grouped path: one companion/impulse response per group, batched Krylov/FFT within group."""
+        batch_size, T, r = eta_sequence.shape
+        p = self.factor_order
+        factors = torch.empty(batch_size, T, r, device=eta_sequence.device, dtype=eta_sequence.dtype)
+        C_norm = self.C if self.C is not None else torch.eye(r, device=ar_coeffs.device, dtype=ar_coeffs.dtype)
+        uniq = group_id.unique()
+        for g in uniq:
+            idx = (group_id == g).nonzero(as_tuple=True)[0]
+            ar_g = ar_coeffs[idx[0]]  # (r, p)
+            B_g = B_diag[idx[0]]      # (r,)
+            H_g = self.get_impulse_response_with_coeffs(T, ar_g, B_g)  # (r, T)
+            eta_g = eta_sequence[idx]  # (|g|, T, r)
+            eta_g_t = rearrange(eta_g, 'b t r -> b r t')
+            f_conv_g = self.fft_conv(eta_g_t, H_g)  # (|g|, r, T)
+            f_conv_g = rearrange(f_conv_g, 'b r t -> b t r')
+            s0_g = torch.zeros(idx.shape[0], r * p, device=f0.device, dtype=f0.dtype)
+            s0_g[:, ::p] = f0[idx]
+            ar_norm_g = self.norm(ar_g, ord=self.norm_order) if self.norm_order > 0 else ar_g
+            A_block_g = build_ivdfm_diagonal_companion(ar_norm_g)
+            A_block_batched = A_block_g.unsqueeze(0).expand(idx.shape[0], -1, -1)
+            s_seq_g = krylov(T, A_block_batched, s0_g, c=None)  # (|g|, r*p, T)
+            f_init_g = torch.einsum('ij, bjt -> bit', C_norm, s_seq_g)  # (|g|, r, T)
+            f_init_g = rearrange(f_init_g, 'b r t -> b t r')
+            factors[idx] = f_conv_g + f_init_g
+        return factors
+    
+    def forward_closed_loop_with_coeffs(
+        self,
+        f_current: torch.Tensor,
+        eta_future: torch.Tensor,
+        ar_coeffs: torch.Tensor,
+        B_diag: torch.Tensor,
+        group_id: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Closed-loop rollout with per-batch coefficients."""
+        batch_size = f_current.shape[0]
+        horizon = eta_future.shape[1]
+        eta_padded = torch.cat([
+            torch.zeros(batch_size, 1, self.latent_dim, device=eta_future.device, dtype=eta_future.dtype),
+            eta_future,
+        ], dim=1)
+        factors = self.forward_with_coeffs(eta_padded, f_current, ar_coeffs, B_diag, group_id=group_id)
+        return factors[:, 1:, :]
+    
     def forward(
         self,
         eta_sequence: torch.Tensor,
