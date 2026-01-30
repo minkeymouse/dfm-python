@@ -83,6 +83,9 @@ from ..constants import (
     DEFAULT_IVDFM_AUX_DIM,
     DEFAULT_IVDFM_ENCODER_HIDDEN_DIM,
     DEFAULT_IVDFM_ENCODER_N_HIDDEN_LAYERS,
+    DEFAULT_IVDFM_NUM_REGIMES,
+    DEFAULT_IVDFM_REGIME_TEMPERATURE,
+    DEFAULT_IVDFM_DECODER_TYPE,
     DEFAULT_IVDFM_DECODER_HIDDEN_DIM,
     DEFAULT_IVDFM_DECODER_N_HIDDEN_LAYERS,
     DEFAULT_IVDFM_PRIOR_HIDDEN_DIM,
@@ -686,8 +689,9 @@ class iVDFMConfig(BaseModelConfig):
     # ========================================================================
     encoder_hidden_dim: Union[int, List[int]] = DEFAULT_IVDFM_ENCODER_HIDDEN_DIM  # Encoder architecture
     encoder_n_hidden_layers: int = DEFAULT_IVDFM_ENCODER_N_HIDDEN_LAYERS  # Number of encoder hidden layers
-    decoder_hidden_dim: Union[int, List[int]] = DEFAULT_IVDFM_DECODER_HIDDEN_DIM  # Decoder architecture
-    decoder_n_hidden_layers: int = DEFAULT_IVDFM_DECODER_N_HIDDEN_LAYERS  # Number of decoder hidden layers
+    decoder_type: str = DEFAULT_IVDFM_DECODER_TYPE  # 'linear', 'residual', or 'mlp'
+    decoder_hidden_dim: Union[int, List[int]] = DEFAULT_IVDFM_DECODER_HIDDEN_DIM  # Decoder MLP (residual/mlp)
+    decoder_n_hidden_layers: int = DEFAULT_IVDFM_DECODER_N_HIDDEN_LAYERS  # Decoder hidden layers (residual/mlp)
     prior_hidden_dim: Union[int, List[int]] = DEFAULT_IVDFM_PRIOR_HIDDEN_DIM  # Prior network architecture
     prior_n_hidden_layers: int = DEFAULT_IVDFM_PRIOR_N_HIDDEN_LAYERS  # Number of prior network hidden layers
     activation: str = DEFAULT_IVDFM_ACTIVATION  # Activation function
@@ -696,6 +700,8 @@ class iVDFMConfig(BaseModelConfig):
     # ========================================================================
     # Dynamics and Distribution Parameters
     # ========================================================================
+    num_regimes: int = DEFAULT_IVDFM_NUM_REGIMES  # K; 1 = baseline iVDFM (one global dynamics, one decoder)
+    regime_temperature: float = DEFAULT_IVDFM_REGIME_TEMPERATURE  # Softmax τ for π; τ < 1 = sharper (local commitment)
     factor_order: int = DEFAULT_IVDFM_FACTOR_ORDER  # AR order for factors
     innovation_distribution: str = DEFAULT_IVDFM_INNOVATION_DIST  # Innovation distribution type
     decoder_var: float = DEFAULT_IVDFM_DECODER_VAR  # Decoder variance
@@ -768,6 +774,22 @@ class iVDFMConfig(BaseModelConfig):
                 f"innovation_distribution must be one of {valid_dists}, got '{self.innovation_distribution}'"
             )
         
+        # Validate num_regimes
+        if self.num_regimes < 1:
+            raise ConfigurationError(
+                f"num_regimes must be >= 1, got {self.num_regimes}"
+            )
+        # Validate regime_temperature
+        if self.regime_temperature <= 0.0:
+            raise ConfigurationError(
+                f"regime_temperature must be > 0, got {self.regime_temperature}"
+            )
+        # Validate decoder_type
+        if self.decoder_type not in ("linear", "residual", "mlp"):
+            raise ConfigurationError(
+                f"decoder_type must be 'linear', 'residual', or 'mlp', got '{self.decoder_type}'"
+            )
+        
         # Validate activation
         valid_activations = {'relu', 'lrelu', 'tanh', 'sigmoid'}
         if self.activation not in valid_activations:
@@ -823,10 +845,13 @@ class iVDFMConfig(BaseModelConfig):
             DEFAULT_IVDFM_LATENT_DIM,
             DEFAULT_IVDFM_AUX_DIM,
             DEFAULT_IVDFM_ENCODER_HIDDEN_DIM,
-    DEFAULT_IVDFM_ENCODER_N_HIDDEN_LAYERS,
-    DEFAULT_IVDFM_DECODER_HIDDEN_DIM,
-    DEFAULT_IVDFM_DECODER_N_HIDDEN_LAYERS,
-    DEFAULT_IVDFM_PRIOR_HIDDEN_DIM,
+            DEFAULT_IVDFM_ENCODER_N_HIDDEN_LAYERS,
+            DEFAULT_IVDFM_NUM_REGIMES,
+            DEFAULT_IVDFM_REGIME_TEMPERATURE,
+            DEFAULT_IVDFM_DECODER_TYPE,
+            DEFAULT_IVDFM_DECODER_HIDDEN_DIM,
+            DEFAULT_IVDFM_DECODER_N_HIDDEN_LAYERS,
+            DEFAULT_IVDFM_PRIOR_HIDDEN_DIM,
     DEFAULT_IVDFM_PRIOR_N_HIDDEN_LAYERS,
             DEFAULT_IVDFM_FACTOR_ORDER,
             DEFAULT_IVDFM_INNOVATION_DIST,
@@ -854,6 +879,9 @@ class iVDFMConfig(BaseModelConfig):
             'time_context': 1,  # Default: time step only
             'encoder_hidden_dim': DEFAULT_IVDFM_ENCODER_HIDDEN_DIM,
             'encoder_n_hidden_layers': DEFAULT_IVDFM_ENCODER_N_HIDDEN_LAYERS,
+            'num_regimes': DEFAULT_IVDFM_NUM_REGIMES,
+            'regime_temperature': DEFAULT_IVDFM_REGIME_TEMPERATURE,
+            'decoder_type': DEFAULT_IVDFM_DECODER_TYPE,
             'decoder_hidden_dim': DEFAULT_IVDFM_DECODER_HIDDEN_DIM,
             'decoder_n_hidden_layers': DEFAULT_IVDFM_DECODER_N_HIDDEN_LAYERS,
             'prior_hidden_dim': DEFAULT_IVDFM_PRIOR_HIDDEN_DIM,

@@ -33,6 +33,7 @@ from ...layer.pca import extract_pca_factors
 from .encoder import iVDFMInnovationEncoder
 from .decoder import iVDFMDecoder
 from .prior import iVDFMPriorNetwork
+from ...layer.regime import RegimeNet
 from ...ssm.companion import iVDFMCompanionSSM
 from ...dataset.ivdfm_dataset import iVDFMDataset
 from ...config.schema.model import iVDFMConfig
@@ -61,6 +62,7 @@ class iVDFM(BaseFactorModel, nn.Module):
         # Network architecture (used if config is None)
         encoder_hidden_dim: Union[int, list] = 200,
         encoder_n_hidden_layers: int = 2,
+        decoder_type: Optional[str] = None,
         decoder_hidden_dim: Union[int, list] = 200,
         decoder_n_hidden_layers: int = 2,
         prior_hidden_dim: Union[int, list] = 100,
@@ -160,6 +162,8 @@ class iVDFM(BaseFactorModel, nn.Module):
             config_dict['encoder_hidden_dim'] = encoder_hidden_dim
         if encoder_n_hidden_layers is not None:
             config_dict['encoder_n_hidden_layers'] = encoder_n_hidden_layers
+        if decoder_type is not None:
+            config_dict['decoder_type'] = decoder_type
         if decoder_hidden_dim is not None:
             config_dict['decoder_hidden_dim'] = decoder_hidden_dim
         if decoder_n_hidden_layers is not None:
@@ -239,6 +243,7 @@ class iVDFM(BaseFactorModel, nn.Module):
         # Extract config attributes (network architecture)
         self.encoder_hidden_dim = self._config.encoder_hidden_dim
         self.encoder_n_hidden_layers = self._config.encoder_n_hidden_layers
+        self.decoder_type = getattr(self._config, "decoder_type", "mlp")
         self.decoder_hidden_dim = self._config.decoder_hidden_dim
         self.decoder_n_hidden_layers = self._config.decoder_n_hidden_layers
         self.prior_hidden_dim = self._config.prior_hidden_dim
@@ -250,6 +255,8 @@ class iVDFM(BaseFactorModel, nn.Module):
         self.factor_order = self._config.factor_order
         self.innovation_distribution = self._config.innovation_distribution
         self.decoder_var = self._config.decoder_var
+        self.num_regimes = self._get_config_attr('num_regimes', 1)
+        self.regime_temperature = self._get_config_attr('regime_temperature', 1.0)
         self.beta_kl = self._get_config_attr('beta_kl', 1.0)
         self.use_layer_norm = self._get_config_attr('use_layer_norm', False)
         
@@ -291,6 +298,7 @@ class iVDFM(BaseFactorModel, nn.Module):
             # Components will be built during fit when dimensions are known
             self.innovation_encoder = None
             self.prior_network = None
+            self.prior_networks = None
             self.decoder = None
             self.ssm = None
         
@@ -397,30 +405,30 @@ class iVDFM(BaseFactorModel, nn.Module):
         return full_state
     
     def _set_ssm_ar_params(self, ar_coeffs: np.ndarray, B_diag: np.ndarray) -> None:
-        """Set SSM AR parameters from numpy arrays.
-        
-        Parameters
-        ----------
-        ar_coeffs : np.ndarray
-            AR coefficients (r, p) for AR(p) or (r,) for AR(1)
-        B_diag : np.ndarray
-            Innovation standard deviations (r,)
-        """
+        """Set SSM AR parameters from numpy arrays. When K>1, set A_diag (K,p,r), B_diag (K,r) from OLS (regime 0) and copy+noise for others."""
         with torch.no_grad():
             if self.factor_order == 1:
-                # AR(1): initialize A and B
-                self.ssm.A.data = torch.tensor(
-                    ar_coeffs[:, 0] if ar_coeffs.ndim > 1 else ar_coeffs,
-                    dtype=DEFAULT_TORCH_DTYPE,
-                    device=self.device
-                )
+                A_flat = ar_coeffs[:, 0] if ar_coeffs.ndim > 1 else ar_coeffs
+                self.ssm.A.data = torch.tensor(A_flat, dtype=DEFAULT_TORCH_DTYPE, device=self.device)
                 self.ssm.B.data = torch.tensor(B_diag, dtype=DEFAULT_TORCH_DTYPE, device=self.device)
             else:
-                # AR(p): initialize ar_coeffs and B
                 self.ssm.ar_coeffs.data = torch.tensor(
                     ar_coeffs, dtype=DEFAULT_TORCH_DTYPE, device=self.device
                 )
                 self.ssm.B.data = torch.tensor(B_diag, dtype=DEFAULT_TORCH_DTYPE, device=self.device)
+            if self.A_diag is not None and self.B_diag is not None:
+                K = self.A_diag.shape[0]
+                p, r = self.factor_order, self.latent_dim
+                # ar_coeffs from OLS: (r, p); B_diag (r,). Store regime 0 then copy+noise.
+                ar_t = torch.tensor(ar_coeffs, dtype=DEFAULT_TORCH_DTYPE, device=self.device)
+                if ar_t.dim() == 1:
+                    ar_t = ar_t.unsqueeze(0).expand(r, -1)
+                B_t = torch.tensor(B_diag, dtype=DEFAULT_TORCH_DTYPE, device=self.device)
+                self.A_diag.data[0] = ar_t.permute(1, 0)  # (p, r)
+                self.B_diag.data[0] = B_t
+                for k in range(1, K):
+                    self.A_diag.data[k] = self.A_diag.data[0].clone() + torch.randn_like(self.A_diag.data[0], device=self.device) * 0.02
+                    self.B_diag.data[k] = self.B_diag.data[0].clone() + torch.randn_like(self.B_diag.data[0], device=self.device) * 0.02
     
     def _build_components(self):
         """Build model components: encoder, decoder, prior, SSM."""
@@ -445,40 +453,170 @@ class iVDFM(BaseFactorModel, nn.Module):
             seed=self.seed,
         )
         
-        # Prior network: p(η_t | u_t)
-        self.prior_network = iVDFMPriorNetwork(
-            aux_dim=self.context_dim,  # Parameter name in encoder/prior (uses aux_dim internally)
-            latent_dim=self.latent_dim,
-            hidden_dim=self.prior_hidden_dim,
-            n_hidden_layers=self.prior_n_hidden_layers,
-            activation=self.activation,
-            slope=self.slope,
-            innovation_distribution=self.innovation_distribution,
-            device=self.device,
-            seed=self.seed,
-        )
-        
-        # Decoder: g(f_t) → y_t
-        self.decoder = iVDFMDecoder(
-            latent_dim=self.latent_dim,
-            data_dim=self.data_dim,
-            hidden_dim=self.decoder_hidden_dim,
-            n_hidden_layers=self.decoder_n_hidden_layers,
-            activation=self.activation,
-            slope=self.slope,
-            decoder_var=self.decoder_var,
-            use_layer_norm=self.use_layer_norm,
-            device=self.device,
-            seed=self.seed,
-        )
-        
+        K = self.num_regimes
+        # Prior: p(η_t | u_t). K=1 single network; K>1 regime-indexed priors p_k(η_t | u_t)
+        if K == 1:
+            self.prior_network = iVDFMPriorNetwork(
+                aux_dim=self.context_dim,
+                latent_dim=self.latent_dim,
+                hidden_dim=self.prior_hidden_dim,
+                n_hidden_layers=self.prior_n_hidden_layers,
+                activation=self.activation,
+                slope=self.slope,
+                innovation_distribution=self.innovation_distribution,
+                device=self.device,
+                seed=self.seed,
+            )
+            self.prior_networks = None
+        else:
+            self.prior_network = None
+            self.prior_networks = nn.ModuleList([
+                iVDFMPriorNetwork(
+                    aux_dim=self.context_dim,
+                    latent_dim=self.latent_dim,
+                    hidden_dim=self.prior_hidden_dim,
+                    n_hidden_layers=self.prior_n_hidden_layers,
+                    activation=self.activation,
+                    slope=self.slope,
+                    innovation_distribution=self.innovation_distribution,
+                    device=self.device,
+                    seed=self.seed,
+                )
+                for _ in range(K)
+            ])
+
+        # Decoder(s)
+        if K == 1:
+            self.regime_net = None
+            self.decoders = None
+            self.decoder = iVDFMDecoder(
+                latent_dim=self.latent_dim,
+                data_dim=self.data_dim,
+                decoder_type=self.decoder_type,
+                hidden_dim=self.decoder_hidden_dim,
+                n_hidden_layers=self.decoder_n_hidden_layers,
+                activation=self.activation,
+                slope=self.slope,
+                use_layer_norm=self.use_layer_norm,
+                decoder_var=self.decoder_var,
+                device=self.device,
+                seed=self.seed,
+            )
+        else:
+            self.regime_net = RegimeNet(
+                input_dim=self.context_dim,
+                num_regimes=K,
+                hidden_dim=32,
+                n_hidden_layers=1,
+                activation=self.activation,
+                slope=self.slope,
+                device=self.device,
+                seed=self.seed,
+            )
+            self.decoder = None
+            self.decoders = nn.ModuleList([
+                iVDFMDecoder(
+                    latent_dim=self.latent_dim,
+                    data_dim=self.data_dim,
+                    decoder_type=self.decoder_type,
+                    hidden_dim=self.decoder_hidden_dim,
+                    n_hidden_layers=self.decoder_n_hidden_layers,
+                    activation=self.activation,
+                    slope=self.slope,
+                    use_layer_norm=self.use_layer_norm,
+                    decoder_var=self.decoder_var,
+                    device=self.device,
+                    seed=self.seed,
+                )
+                for _ in range(K)
+            ])
+
         # SSM: maps innovations to factors via deterministic dynamics
         self.ssm = iVDFMCompanionSSM(
             latent_dim=self.latent_dim,
             factor_order=self.factor_order,
             device=self.device,
         )
-    
+
+        # Regime-indexed AR(p): A_diag (K, p, r), B_diag (K, r). Effective per window: A_eff = Σ_k π_k A_diag[k], B_eff = Σ_k π_k B_diag[k].
+        if K > 1:
+            p = self.factor_order
+            init_scale = 0.1
+            self.A_diag = nn.Parameter(torch.randn(K, p, self.latent_dim, device=self.device) * init_scale)
+            self.B_diag = nn.Parameter(torch.randn(K, self.latent_dim, device=self.device) * init_scale)
+        else:
+            self.A_diag = None
+            self.B_diag = None
+
+    def _effective_regime_coeffs(self, pi_w: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Effective AR(p) coefficients per window: A_eff = Σ_k π_k A_diag[k], B_eff = Σ_k π_k B_diag[k].
+        
+        pi_w : (batch, K)
+        Returns A_eff (batch, r, p), B_eff (batch, r).
+        """
+        # A_diag (K, p, r) -> (batch, K, p, r); pi_w (batch, K, 1, 1); sum over K -> (batch, p, r) -> (batch, r, p)
+        A_eff = (pi_w.unsqueeze(2).unsqueeze(3) * self.A_diag.unsqueeze(0)).sum(dim=1)  # (batch, p, r)
+        A_eff = A_eff.permute(0, 2, 1)  # (batch, r, p)
+        B_eff = (pi_w.unsqueeze(2) * self.B_diag.unsqueeze(0)).sum(dim=1)  # (batch, r)
+        return A_eff, B_eff
+
+    def _decode(
+        self,
+        factors: torch.Tensor,
+        u_1T: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Decode factors to observations. K=1: single decoder; K>1: π-weighted mixture. No u → uniform π."""
+        squeeze_out = factors.dim() == 2
+        if squeeze_out:
+            factors = factors.unsqueeze(0)
+        if self.num_regimes == 1:
+            out = self.decoder(factors)
+        else:
+            if u_1T is not None:
+                if u_1T.dim() == 2:
+                    u_1T = u_1T.unsqueeze(0)
+                pi = self.regime_net(u_1T, temperature=self.regime_temperature)
+            else:
+                batch, T, _ = factors.shape
+                pi = torch.full(
+                    (batch, T, self.num_regimes),
+                    1.0 / self.num_regimes,
+                    device=factors.device,
+                    dtype=factors.dtype,
+                )
+            out = torch.zeros(
+                factors.shape[0],
+                factors.shape[1],
+                self.data_dim,
+                device=factors.device,
+                dtype=factors.dtype,
+            )
+            for k in range(self.num_regimes):
+                out = out + pi[:, :, k : k + 1] * self.decoders[k](factors)
+        if squeeze_out:
+            out = out.squeeze(0)
+        return out
+
+    def _sample_prior(self, u: torch.Tensor) -> torch.Tensor:
+        """Sample innovations from prior p(η|u). K=1: single prior; K>1: sample r~π then η~p_r(·|u)."""
+        if self.num_regimes == 1:
+            return self.prior_network.sample(u)
+        # K>1: π = regime_net(u), for each t sample r_t ~ Cat(π_t), η_t ~ p_{r_t}(u_t)
+        pi = self.regime_net(u, temperature=self.regime_temperature)  # (batch, T, K)
+        batch, T, _ = u.shape
+        eta_list = []
+        for t in range(T):
+            pi_t = pi[:, t, :]  # (batch, K)
+            r = torch.multinomial(pi_t + 1e-8, 1).squeeze(-1)  # (batch,)
+            eta_t = torch.zeros(batch, self.latent_dim, device=u.device, dtype=u.dtype)
+            for k in range(self.num_regimes):
+                mask = r == k
+                if mask.any():
+                    u_t = u[mask, t : t + 1, :]  # (n, 1, context_dim)
+                    eta_t[mask] = self.prior_networks[k].sample(u_t).squeeze(1)
+            eta_list.append(eta_t)
+        return torch.stack(eta_list, dim=1)  # (batch, T, r)
+
     def _initialize_f0_from_data(self, dataset: 'iVDFMDataset') -> None:
         """Initialize f_0 (initial factor state) using single-window PCA on data.
         
@@ -625,35 +763,54 @@ class iVDFM(BaseFactorModel, nn.Module):
         eps = torch.randn_like(mu_all)
         eta_1T = mu_all + eps * std_all  # (batch, T, r)
         
-        # Get prior parameters for all time steps: p(η_t | u_t)
-        # Prior network processes (batch, T, context_dim) and returns (batch, T, r) per param
-        prior_params_all = self.prior_network(u_1T)  # Dict with batched params (batch, T, r)
-        
-        # Build time-indexed parameter lists for ELBO computation
-        # Optimized: pre-extract keys to avoid repeated dict iteration
-        prior_keys = list(prior_params_all.keys())
+        # Prior parameters: p(η_t | u_t) or mixture Σ_k π_{t,k} p_k(η_t | u_t)
         encoder_params_list = [
             {'mu': mu_all[:, t, :], 'logvar': logvar_all[:, t, :]}
             for t in range(T)
         ]
-        prior_params_list = [
-            {key: prior_params_all[key][:, t, :] for key in prior_keys}
-            for t in range(T)
-        ]
+        if self.num_regimes == 1:
+            prior_params_all = self.prior_network(u_1T)
+            prior_keys = list(prior_params_all.keys())
+            prior_params_list = [
+                {key: prior_params_all[key][:, t, :] for key in prior_keys}
+                for t in range(T)
+            ]
+            regime_weights = None
+            prior_params_per_regime = None
+        else:
+            pi = self.regime_net(u_1T, temperature=self.regime_temperature)  # (batch, T, K)
+            prior_params_per_k = [self.prior_networks[k](u_1T) for k in range(self.num_regimes)]
+            prior_keys = list(prior_params_per_k[0].keys())
+            prior_params_per_regime = [
+                [{key: prior_params_per_k[k][key][:, t, :] for key in prior_keys} for t in range(T)]
+                for k in range(self.num_regimes)
+            ]
+            prior_params_list = prior_params_per_regime[0]  # fallback for any path that only reads prior_params
+            regime_weights = pi
+
+        # Compute factors: K=1 use global SSM; K>1 use effective AR(p) per window (π at origin)
+        if self.num_regimes > 1 and self.A_diag is not None:
+            pi_w = regime_weights[:, 0, :]  # (batch, K) at window origin
+            A_eff, B_eff = self._effective_regime_coeffs(pi_w)  # (batch, r, p), (batch, r)
+            group_id = pi_w.argmax(dim=-1)  # (batch,) dominant regime per window for grouped Krylov
+            factors_1T = self.ssm.forward_with_coeffs(eta_1T, None, A_eff, B_eff, group_id=group_id)
+        else:
+            factors_1T = self.ssm.forward(eta_1T)  # (batch, T, r)
+
+        # Decode observations (mixture of decoders when K > 1)
+        y_pred = self._decode(factors_1T, u_1T)
         
-        # Compute factors deterministically using SSM
-        factors_1T = self.ssm.forward(eta_1T)  # (batch, T, r)
-        
-        # Decode observations
-        y_pred = self.decoder(factors_1T)  # (batch, T, N)
-        
-        return {
+        out = {
             'y_pred': y_pred,
             'eta': eta_1T,
             'factors': factors_1T,
             'encoder_params': encoder_params_list,
             'prior_params': prior_params_list,
         }
+        if regime_weights is not None:
+            out['regime_weights'] = regime_weights
+            out['prior_params_per_regime'] = prior_params_per_regime
+        return out
     
     def elbo(
         self,
@@ -684,8 +841,10 @@ class iVDFM(BaseFactorModel, nn.Module):
         y_pred = outputs['y_pred']
         encoder_params = outputs['encoder_params']
         prior_params = outputs['prior_params']
-        
-        # ELBO
+        regime_weights = outputs.get('regime_weights')
+        prior_params_per_regime = outputs.get('prior_params_per_regime')
+
+        # ELBO: KL = Σ_t Σ_k π_{t,k} KL(q(η_t) || p_k(η_t|u_t)) when K>1
         elbo, loss_dict = compute_elbo_loss(
             y_true=y_1T,
             y_pred=y_pred,
@@ -694,9 +853,11 @@ class iVDFM(BaseFactorModel, nn.Module):
             innovation_distribution=self.innovation_distribution,
             decoder_variance=self.decoder_var,
             beta_kl=self.beta_kl,
-            reduction='mean'
+            reduction='mean',
+            regime_weights=regime_weights,
+            prior_params_per_regime=prior_params_per_regime,
         )
-        
+
         return elbo, loss_dict
     
     def fit(
@@ -1150,27 +1311,37 @@ class iVDFM(BaseFactorModel, nn.Module):
                 # Deterministic forecast: zero innovations
                 eta_future = torch.zeros(1, horizon, self.latent_dim, device=self.device, dtype=DEFAULT_TORCH_DTYPE)
             else:
-                # Sample innovations from prior: (1, horizon, context_dim) -> (1, horizon, r)
+                # Sample innovations from prior p(η|u); regime-weighted when K>1
                 if num_samples == 1:
-                    eta_future = self.prior_network.sample(u_future_tensor)
+                    eta_future = self._sample_prior(u_future_tensor)
                 else:
-                    # Monte Carlo averaging: sample multiple times and average
-                    # This reduces variance and approximates E[eta | u] when prior has non-zero mean
                     samples = []
                     for _ in range(num_samples):
-                        eta_sample = self.prior_network.sample(u_future_tensor)  # (1, horizon, r)
+                        eta_sample = self._sample_prior(u_future_tensor)  # (1, horizon, r)
                         samples.append(eta_sample)
-                    eta_future = torch.stack(samples, dim=0).mean(dim=0)  # Average over samples: (1, horizon, r)
+                    eta_future = torch.stack(samples, dim=0).mean(dim=0)  # (1, horizon, r)
             
-            # Forecast factors using SSM
-            factors_future = self.ssm.forward_closed_loop(
-                f_current=f_last_tensor,  # (1, r)
-                eta_future=eta_future,  # (1, horizon, r)
-                horizon=horizon
-            )  # (1, horizon, r)
-            
-            # Decode factors to observations
-            y_pred = self.decoder(factors_future)  # (1, horizon, data_dim)
+            # Forecast factors: K>1 use effective AR(p) per window (π at first future step); K=1 use global SSM
+            if self.num_regimes > 1 and self.A_diag is not None:
+                pi_w = self.regime_net(u_future_tensor[:, 0:1, :], temperature=self.regime_temperature).squeeze(1)  # (1, K)
+                A_eff, B_eff = self._effective_regime_coeffs(pi_w)  # (1, r, p), (1, r)
+                group_id = pi_w.argmax(dim=-1)  # (1,) for grouped path
+                factors_future = self.ssm.forward_closed_loop_with_coeffs(
+                    f_current=f_last_tensor,
+                    eta_future=eta_future,
+                    ar_coeffs=A_eff,
+                    B_diag=B_eff,
+                    group_id=group_id,
+                )
+            else:
+                factors_future = self.ssm.forward_closed_loop(
+                    f_current=f_last_tensor,
+                    eta_future=eta_future,
+                    horizon=horizon,
+                )
+
+            # Decode factors to observations (u_future_tensor always available in predict)
+            y_pred = self._decode(factors_future, u_future_tensor)
             
             # Convert to numpy and remove batch dimension
             y_pred_np = to_numpy(y_pred.squeeze(0))  # (horizon, data_dim)
@@ -1323,10 +1494,10 @@ class iVDFM(BaseFactorModel, nn.Module):
         if self.factors is None or self.innovations is None:
             raise ModelNotTrainedError("Factors and innovations not available")
 
-        # Decode factors to reconstructions (nonlinear decoder)
+        # Decode factors to reconstructions (no u at result time: use uniform π when K > 1)
         with torch.no_grad():
             z_tensor = torch.from_numpy(self.factors).to(dtype=DEFAULT_TORCH_DTYPE, device=self.device)
-            y_hat = self.decoder(z_tensor)
+            y_hat = self._decode(z_tensor, u_1T=None)
             recon = to_numpy(y_hat)
 
         # Minimal config snapshot for reproducibility (plain python)
@@ -1417,12 +1588,14 @@ class iVDFM(BaseFactorModel, nn.Module):
                     # Architecture parameters (needed for model reconstruction)
                     "encoder_hidden_dim": self.encoder_hidden_dim,
                     "encoder_n_hidden_layers": self.encoder_n_hidden_layers,
+                    "decoder_type": self.decoder_type,
                     "decoder_hidden_dim": self.decoder_hidden_dim,
                     "decoder_n_hidden_layers": self.decoder_n_hidden_layers,
                     "prior_hidden_dim": self.prior_hidden_dim,
                     "prior_n_hidden_layers": self.prior_n_hidden_layers,
                     "activation": self.activation,
                     "slope": self.slope,
+                    "num_regimes": self.num_regimes,
                 },
                 "training_state": self.training_state,
             },

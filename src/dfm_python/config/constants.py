@@ -352,9 +352,14 @@ DEFAULT_KDFM_MA_ORDER = 0  # Default MA order (MA lag order q) for KDFM (0 = pur
 DEFAULT_IVDFM_LATENT_DIM = 3  # Default number of factors
 DEFAULT_IVDFM_AUX_DIM = 1  # Default auxiliary variable dimension
 
+# iVDFM regime (K=1 = baseline iVDFM, no regime structure)
+DEFAULT_IVDFM_NUM_REGIMES = 1  # Number of discrete regimes; 1 = baseline iVDFM
+DEFAULT_IVDFM_REGIME_TEMPERATURE = 1.0  # Softmax temperature for π; τ < 1 sharpens (local commitment)
+
 # iVDFM network architecture defaults
 DEFAULT_IVDFM_ENCODER_HIDDEN_DIM = 200  # Default encoder hidden dimension
 DEFAULT_IVDFM_ENCODER_N_HIDDEN_LAYERS = 2  # Default encoder hidden layers
+DEFAULT_IVDFM_DECODER_TYPE = "mlp"  # Default: 'linear', 'residual', or 'mlp' (mlp = current behavior)
 DEFAULT_IVDFM_DECODER_HIDDEN_DIM = 200  # Default decoder hidden dimension
 DEFAULT_IVDFM_DECODER_N_HIDDEN_LAYERS = 2  # Default decoder hidden layers
 DEFAULT_IVDFM_PRIOR_HIDDEN_DIM = 100  # Default prior network hidden dimension
@@ -610,6 +615,8 @@ __all__ = [
     'DEFAULT_IVDFM_AUX_DIM',
     'DEFAULT_IVDFM_ENCODER_HIDDEN_DIM',
     'DEFAULT_IVDFM_ENCODER_N_HIDDEN_LAYERS',
+    'DEFAULT_IVDFM_NUM_REGIMES',
+    'DEFAULT_IVDFM_DECODER_TYPE',
     'DEFAULT_IVDFM_DECODER_HIDDEN_DIM',
     'DEFAULT_IVDFM_DECODER_N_HIDDEN_LAYERS',
     'DEFAULT_IVDFM_PRIOR_HIDDEN_DIM',
