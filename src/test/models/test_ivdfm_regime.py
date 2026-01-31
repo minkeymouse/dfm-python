@@ -4,6 +4,7 @@ import pytest
 import numpy as np
 import torch
 from dfm_python.models.ivdfm import iVDFM
+from dfm_python.dataset.ivdfm_dataset import iVDFMDataset
 from dfm_python.config.schema.model import iVDFMConfig
 
 
@@ -51,6 +52,7 @@ class TestIVDFMRegimeK1:
     def test_k1_fit_predict_p4(self):
         """K=1, p=4: fit and predict run without error; no NaNs."""
         data = _make_data(T=60, N=4)
+        dataset = iVDFMDataset(data=data, window=24, stride=1, time_context=1)
         model = iVDFM(
             data_dim=4,
             num_factors=3,
@@ -61,7 +63,8 @@ class TestIVDFMRegimeK1:
             max_epochs=2,
             batch_size=16,
         )
-        model.fit(data)
+        model.set_dataset(dataset)
+        model.fit()
         pred = model.predict(horizon=5)
         assert pred.shape == (5, 4)
         assert not np.isnan(pred).any()
@@ -145,6 +148,7 @@ class TestIVDFMRegimeKGreaterThan1:
     def test_k2_fit_predict_p4(self):
         """K=2, p=4: fit and predict run; no NaNs."""
         data = _make_data(T=60, N=4)
+        dataset = iVDFMDataset(data=data, window=24, stride=1, time_context=1)
         model = iVDFM(
             data_dim=4,
             num_factors=3,
@@ -155,7 +159,8 @@ class TestIVDFMRegimeKGreaterThan1:
             max_epochs=2,
             batch_size=16,
         )
-        model.fit(data)
+        model.set_dataset(dataset)
+        model.fit()
         pred = model.predict(horizon=5)
         assert pred.shape == (5, 4)
         assert not np.isnan(pred).any()

@@ -34,7 +34,7 @@ from .encoder import iVDFMInnovationEncoder
 from .decoder import iVDFMDecoder
 from .prior import iVDFMPriorNetwork
 from ...layer.regime import RegimeNet
-from .mixing import build_factor_mixing
+from ...layer.mixing import build_factor_mixing
 from ...ssm.companion import iVDFMCompanionSSM
 from ...dataset.ivdfm_dataset import iVDFMDataset
 from ...config.schema.model import iVDFMConfig
@@ -312,7 +312,9 @@ class iVDFM(BaseFactorModel, nn.Module):
         self.training_state: Optional[Dict] = None
         self.factors: Optional[np.ndarray] = None
         self.innovations: Optional[np.ndarray] = None
-        
+        # Dataset from last fit (used by hyperparameter_optimization)
+        self._dataset: Optional["iVDFMDataset"] = None
+
         # Move to device
         self.to(self.device)
     
@@ -869,52 +871,23 @@ class iVDFM(BaseFactorModel, nn.Module):
         )
 
         return elbo, loss_dict
-    
-    def fit(
-        self,
-        data: Union[np.ndarray, torch.Tensor, pd.DataFrame, iVDFMDataset],
-        *args,
-        **kwargs
-    ) -> 'iVDFM':
-        """Fit iVDFM model.
-        
-        Parameters
-        ----------
-        data : Union[np.ndarray, torch.Tensor, pd.DataFrame, iVDFMDataset]
-            Time series data, or a pre-built `iVDFMDataset`.
-            Prefer passing `iVDFMDataset` when you need explicit control over
-            `time_idx`, `variables`, `covariates`, and `context` splitting.
-        *args
-            Additional arguments
-        **kwargs
-            Additional keyword arguments
-        
-        Returns
-        -------
-        iVDFM
-            Fitted model
-        """
-        if isinstance(data, iVDFMDataset):
-            dataset = data
-        else:
-            # Context is handled by iVDFMDataset (via config / embedded columns).
-            cfg_context = self._get_config_attr("context")
-            cfg_scaler = self._get_config_attr("scaler")
-            time_context = self._get_config_attr("time_context", 1)
-            stride = self._get_config_attr("stride", 1)
-            dataset = iVDFMDataset(
-                data=data, window=self.window, stride=stride,
-                context=cfg_context, time_context=time_context,
-                scaler=cfg_scaler, device=self.device,
+
+    def set_dataset(self, dataset: "iVDFMDataset") -> "iVDFM":
+        """Set the dataset used by fit() and hyperparameter_optimization(). Call before fit()."""
+        self._dataset = dataset
+        return self
+
+    def fit(self, *args, **kwargs) -> 'iVDFM':
+        """Fit on the dataset set via set_dataset(dataset). Call set_dataset(dataset) before fit()."""
+        dataset = self._dataset
+        if dataset is None or not isinstance(dataset, iVDFMDataset):
+            raise ModelNotTrainedError(
+                "fit() requires a dataset. Call model.set_dataset(dataset) first with an iVDFMDataset."
             )
-        
-        # Update data_dim and context_dim from dataset
+
         actual_data_dim = dataset.target_length
         actual_context_dim = dataset.context_length
-        
-        # Update time_context from config if not already set
-        if not hasattr(self, 'time_context') or self.time_context is None:
-            self.time_context = self._get_config_attr("time_context", 1)
+        self.time_context = actual_context_dim
         
         # Update dimensions
         need_rebuild = False
@@ -954,12 +927,22 @@ class iVDFM(BaseFactorModel, nn.Module):
         # Build optimizer
         self._build_optimizer()
         
-        # Create data loader using dataset's method
-        dataloader = dataset.get_dataloader(
-            batch_size=self.batch_size,
-            shuffle=True,
-            num_workers=0,
+        # When dataset is pre-loaded to GPU and fits in one batch, train on single batch (no DataLoader)
+        # This matches the old "raw data" path: one bulk tensor, one batch per epoch, minimal overhead.
+        all_tensors = dataset.get_all_tensors_on_device() if hasattr(dataset, "get_all_tensors_on_device") else None
+        use_single_batch = (
+            all_tensors is not None
+            and len(dataset) <= self.batch_size
         )
+        if use_single_batch:
+            y_all, u_all = all_tensors
+            dataloader = None
+        else:
+            dataloader = dataset.get_dataloader(
+                batch_size=self.batch_size,
+                shuffle=True,
+                num_workers=0,
+            )
         
         # Initialize training logger
         train_logger = iVDFMTrainLogger(verbose=True)
@@ -994,21 +977,37 @@ class iVDFM(BaseFactorModel, nn.Module):
         
         early_stop_enabled = self.patience is not None and self.patience > 0
         patience_str = f"early stopping patience={self.patience}" if early_stop_enabled else "early stopping disabled"
-        _logger.info(f"Starting training: {self.max_epochs} epochs, {len(dataloader)} batches/epoch, {patience_str}")
+        batches_per_epoch = 1 if use_single_batch else len(dataloader)
+        _logger.info(f"Starting training: {self.max_epochs} epochs, {batches_per_epoch} batches/epoch, {patience_str}")
         
-        import time
         start_time = time.time()
+        t_fwd, t_bwd, t_clip, t_step, t_data = 0.0, 0.0, 0.0, 0.0, 0.0
+        _device = next(self.parameters()).device
+        _sync = lambda: torch.cuda.synchronize() if _device.type == "cuda" else None
+        t_data_start = time.perf_counter()
         
         for epoch in range(self.max_epochs):
             epoch_recon_losses = []
             epoch_kl_losses = []
             epoch_elbos = []
             
-            for batch_idx, (y_batch, u_batch) in enumerate(dataloader):
+            if use_single_batch:
+                batch_iter = [(y_all, u_all)]
+            else:
+                batch_iter = dataloader
+            
+            for batch_idx, (y_batch, u_batch) in enumerate(batch_iter):
+                _sync()
+                t_data += time.perf_counter() - t_data_start
                 self.optimizer.zero_grad()
                 
                 # Forward pass
+                if y_batch.is_cuda:
+                    torch.cuda.synchronize()
+                t0 = time.perf_counter()
                 elbo, loss_dict = self.elbo(y_batch, u_batch, N_total)
+                _sync()
+                t_fwd += time.perf_counter() - t0
                 
                 # Check for NaN/Inf
                 if torch.isnan(elbo) or torch.isinf(elbo):
@@ -1020,12 +1019,21 @@ class iVDFM(BaseFactorModel, nn.Module):
                     raise ValueError("Training failed: NaN/Inf in loss")
                 
                 # Backward pass
+                t0 = time.perf_counter()
                 elbo.backward()
+                _sync()
+                t_bwd += time.perf_counter() - t0
                 
                 # Gradient clipping for stability
+                t0 = time.perf_counter()
                 torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=10.0)
+                _sync()
+                t_clip += time.perf_counter() - t0
                 
+                t0 = time.perf_counter()
                 self.optimizer.step()
+                _sync()
+                t_step += time.perf_counter() - t0
                 
                 # Store losses (ensure KL is non-negative)
                 recon_val = loss_dict['reconstruction'].item()
@@ -1042,6 +1050,7 @@ class iVDFM(BaseFactorModel, nn.Module):
                 epoch_recon_losses.append(recon_val)
                 epoch_kl_losses.append(kl_val)
                 epoch_elbos.append(elbo_val)
+                t_data_start = time.perf_counter() if not use_single_batch else time.perf_counter()
             
             # Update state
             self._num_iter = epoch + 1
@@ -1141,6 +1150,18 @@ class iVDFM(BaseFactorModel, nn.Module):
                 _logger.info(f"Converged at epoch {epoch + 1}")
                 break
         
+        total_step = t_fwd + t_bwd + t_clip + t_step + t_data
+        if total_step > 0:
+            _logger.info(
+                "Training time breakdown: data_load=%.2fs (%.0f%%), forward=%.2fs (%.0f%%), backward=%.2fs (%.0f%%), "
+                "clip_grad=%.2fs (%.0f%%), optimizer_step=%.2fs (%.0f%%)",
+                t_data, 100 * t_data / total_step,
+                t_fwd, 100 * t_fwd / total_step,
+                t_bwd, 100 * t_bwd / total_step,
+                t_clip, 100 * t_clip / total_step,
+                t_step, 100 * t_step / total_step,
+            )
+        
         # Final logging
         if not self._converged:
             train_logger.log_convergence(
@@ -1156,7 +1177,8 @@ class iVDFM(BaseFactorModel, nn.Module):
             # Use full dataset for final extraction
             all_factors = []
             all_innovations = []
-            for y_batch, u_batch in dataloader:
+            iter_extract = [(y_all, u_all)] if use_single_batch else dataloader
+            for y_batch, u_batch in iter_extract:
                 outputs = self.forward(y_batch, u_batch)
                 all_factors.append(to_numpy(outputs['factors']))
                 all_innovations.append(to_numpy(outputs['eta']))
@@ -1360,53 +1382,36 @@ class iVDFM(BaseFactorModel, nn.Module):
     
     def update(
         self,
-        data: Union[np.ndarray, torch.Tensor, pd.DataFrame],
-        *args,
+        data_or_dataset: Union[np.ndarray, pd.DataFrame, iVDFMDataset],
+        *,
         append: bool = True,
         store_full_history: bool = True,
         verbose: bool = False,
-        **kwargs
+        **kwargs: Any,
     ) -> None:
         """Update model state with new observations (online learning).
-        
-        This method performs a forward pass on new data to update the model's
-        internal state (factors and innovations). It does NOT retrain the model
-        parameters - for that, call fit() again.
-        
-        Parameters
-        ----------
-        data : Union[np.ndarray, torch.Tensor, pd.DataFrame]
-            New observation data, shape (T_new, N) or (T_new, N_total) if context provided.
-            If DataFrame, columns can include context variables.
-        append : bool, default True
-            If True, append newly inferred factors/innovations to existing state.
-            If False, overwrite the stored state with the newly inferred state.
-        store_full_history : bool, default True
-            If True, store the inferred full factor/innovation trajectories for the
-            provided data windows (legacy behavior). If False, store only the last
-            inferred factor/innovation state (shape (1, r)), which is sufficient for
-            forecasting and much faster/more memory-efficient.
-        verbose : bool, default False
-            If True, emit an info log after updating state.
-        *args
-            Additional arguments (unused).
-        **kwargs
-            Additional keyword arguments (unused).
+        Accepts raw data (ndarray/DataFrame) or an iVDFMDataset; raw data is converted using the model's window/stride/time_context.
         """
         if self.training_state is None:
             raise ModelNotTrainedError("Model must be trained before update")
+        if isinstance(data_or_dataset, iVDFMDataset):
+            dataset = data_or_dataset
+        else:
+            if self._dataset is None:
+                raise ModelNotTrainedError("update() with raw data requires set_dataset() to have been called (to infer window/stride/time_context)")
+            T = data_or_dataset.shape[0] if hasattr(data_or_dataset, "shape") else len(data_or_dataset)
+            window = min(self.window, T) if self.window is not None else T
+            window = max(2, window)
+            stride = getattr(self._dataset, "stride", 1)
+            time_context = getattr(self, "time_context", 1)
+            dataset = iVDFMDataset(
+                data=data_or_dataset,
+                window=window,
+                stride=stride,
+                time_context=time_context,
+                device=self.device,
+            )
 
-        # Context is handled by iVDFMDataset (via config / embedded columns).
-        cfg_context = self._get_config_attr("context")
-        cfg_scaler = self._get_config_attr("scaler")
-        time_context = self._get_config_attr("time_context", 1)
-        stride = self._get_config_attr("stride", 1)
-        dataset = iVDFMDataset(
-            data=data, window=self.window, stride=stride,
-            context=cfg_context, time_context=time_context,
-            scaler=cfg_scaler, device=self.device,
-        )
-        
         # Validate dimensions match
         if dataset.target_length != self.data_dim:
             raise DataValidationError(
@@ -1488,7 +1493,7 @@ class iVDFM(BaseFactorModel, nn.Module):
                     f"Model state updated with {len(dataset)} new sequences. "
                     f"Factors shape: {self.factors.shape}, Innovations shape: {self.innovations.shape}"
                 )
-    
+
     def get_result(self) -> iVDFMResult:
         """Extract result from trained model.
         
@@ -1677,3 +1682,104 @@ class iVDFM(BaseFactorModel, nn.Module):
         
         _logger.info(f"Model loaded from {path}")
         return model
+
+    def hyperparameter_optimization(
+        self,
+        n_trials: int = 30,
+        timeout: Optional[float] = None,
+        max_window: int = 500,
+        max_regimes: int = 7,
+        n_windows_min: int = 22,
+        min_stride: int = 1,
+        horizon: int = 96,
+        metric: str = "sMSE",
+        max_epochs_per_trial: Optional[int] = None,
+        study_name: Optional[str] = None,
+        storage: Optional[str] = None,
+        load_if_exists: bool = False,
+        fixed: Optional[Dict[str, Any]] = None,
+        subset_ratio: Optional[float] = None,
+        subset_max_steps: Optional[int] = None,
+        min_batch_size: Optional[int] = None,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        """Hyperparameter optimization using Optuna on a subset of latest windows.
+
+        Uses the dataset from set_dataset(). Subset size can be expanded with subset_ratio or subset_max_steps
+        so trials use more data (slower but may transfer better). Default: small subset (max_window + (n_windows_min-1)*min_stride + horizon)
+        to keep trials fast; objective is forecast metric (sMSE or sMAE) on the held-out last `horizon` steps.
+        Does not refit this model on full data; returns best params for the caller to use (e.g. refit with full data).
+
+        Parameters
+        ----------
+        n_trials : int
+            Number of Optuna trials.
+        timeout : float, optional
+            Total time budget in seconds.
+        max_window : int
+            Upper bound on window (and subset sizing).
+        max_regimes : int
+            Upper bound on num_regimes to suggest.
+        n_windows_min : int
+            Minimum number of training windows in subset (e.g. 22 for stable metric).
+        min_stride : int
+            Minimum stride for subset sizing.
+        horizon : int
+            Forecast horizon for holdout metric.
+        metric : str
+            'sMSE' or 'sMAE' (minimize).
+        max_epochs_per_trial : int, optional
+            Cap epochs per trial.
+        study_name : str, optional
+            Optuna study name.
+        storage : str, optional
+            Optuna storage URL.
+        load_if_exists : bool
+            Load existing study if name/storage match.
+        fixed : dict, optional
+            Fixed hyperparameters (not suggested).
+        subset_ratio : float, optional
+            If in (0, 1], use at least this fraction of train length for the subset (larger = slower, may transfer better).
+        subset_max_steps : int, optional
+            If set, use at least this many time steps for the subset (capped by data length).
+        min_batch_size : int, optional
+            If set, use this as batch_size for all trials (faster epochs than default 32).
+        **kwargs
+            Passed to run_hyperparameter_optimization (e.g. pruner).
+
+        Returns
+        -------
+        best_params : dict
+            Best hyperparameters; use with iVDFM(**best_params) and refit on full data.
+        """
+        from .optuna import run_hyperparameter_optimization
+        from ...utils.errors import ModelNotTrainedError
+
+        if self._dataset is None:
+            raise ModelNotTrainedError(
+                "hyperparameter_optimization requires a dataset. "
+                "Call model.set_dataset(dataset) then model.fit() first with an iVDFMDataset."
+            )
+        best_params, _ = run_hyperparameter_optimization(
+            dataset=self._dataset,
+            n_trials=n_trials,
+            timeout=timeout,
+            max_window=max_window,
+            max_regimes=max_regimes,
+            n_windows_min=n_windows_min,
+            min_stride=min_stride,
+            horizon=horizon,
+            metric=metric,
+            max_epochs_per_trial=max_epochs_per_trial,
+            device=self.device,
+            seed=self.seed,
+            study_name=study_name,
+            storage=storage,
+            load_if_exists=load_if_exists,
+            fixed=fixed,
+            subset_ratio=subset_ratio,
+            subset_max_steps=subset_max_steps,
+            min_batch_size=min_batch_size,
+            **kwargs,
+        )
+        return best_params

@@ -31,4 +31,7 @@ def build_factor_mixing(
     dtype: Optional[torch.dtype] = None,
 ) -> FactorMixer:
     """Build global mixing module (single M, identity init). Used when config mixing=True."""
-    return FactorMixer(r=r, init="identity", device=device)
+    module = FactorMixer(r=r, init="identity", device=device)
+    if dtype is not None:
+        module = module.to(dtype=dtype)
+    return module

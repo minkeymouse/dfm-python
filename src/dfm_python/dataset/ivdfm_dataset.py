@@ -55,6 +55,9 @@ class iVDFMDataset(Dataset):
         - time_context>1: Normalized time step + periodic sine features (sin(2π * (i+1) / T * t) for i=1..time_context-1)
     device : Optional[torch.device]
         Device to move tensors to
+    preload_to_device : bool, default True when device is cuda
+        If True and device is cuda, pre-load all sequences to GPU once so __getitem__ returns
+        slices instead of doing numpy->torch->device per sample (avoids per-batch transfer overhead).
     """
     
     def __init__(
@@ -68,6 +71,7 @@ class iVDFMDataset(Dataset):
         time_context: int = 1,
         scaler: Optional[Union[str, StandardScaler, RobustScaler, MinMaxScaler, MaxAbsScaler, QuantileTransformer]] = None,
         device: Optional[torch.device] = None,
+        preload_to_device: Optional[bool] = None,
     ):
         """Initialize iVDFM dataset."""
         # Handle DataFrame input
@@ -207,6 +211,23 @@ class iVDFMDataset(Dataset):
         # Number of sequences (sliding windows with stride)
         self.num_sequences = (T - window) // self.stride + 1
 
+        # Pre-load all sequences to GPU once when on cuda (avoids per-sample numpy->torch->device in __getitem__)
+        do_preload = preload_to_device if preload_to_device is not None else (self.device.type == "cuda")
+        self._y_gpu = None
+        self._u_gpu = None
+        if do_preload and self.device.type == "cuda" and self.num_sequences > 0:
+            N_y = int(self.data.shape[1])
+            N_u = int(self._context.shape[1])
+            y_all = np.zeros((self.num_sequences, self.window, N_y), dtype=np.float32)
+            u_all = np.zeros((self.num_sequences, self.window, N_u), dtype=np.float32)
+            for i in range(self.num_sequences):
+                start = i * self.stride
+                end = start + self.window
+                y_all[i] = self.data[start:end, :]
+                u_all[i] = self._context[start:end, :]
+            self._y_gpu = torch.from_numpy(y_all).to(dtype=DEFAULT_TORCH_DTYPE, device=self.device)
+            self._u_gpu = torch.from_numpy(u_all).to(dtype=DEFAULT_TORCH_DTYPE, device=self.device)
+
         # Basic bookkeeping for user-facing clarity
         self.time_idx = time_idx
         self.all_columns = all_cols
@@ -313,14 +334,14 @@ class iVDFMDataset(Dataset):
     
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
         """Get a sequence of observations and context."""
+        if self._y_gpu is not None:
+            return self._y_gpu[idx], self._u_gpu[idx]
         start_idx = idx * self.stride
         end_idx = start_idx + self.window
         y_seq = self.target[start_idx:end_idx, :]
         u_seq = self._context[start_idx:end_idx, :]
-        
         y_tensor = torch.from_numpy(y_seq).to(dtype=DEFAULT_TORCH_DTYPE, device=self.device)
         u_tensor = torch.from_numpy(u_seq).to(dtype=DEFAULT_TORCH_DTYPE, device=self.device)
-        
         return y_tensor, u_tensor
     
     @property
@@ -363,6 +384,14 @@ class iVDFMDataset(Dataset):
     @property
     def context_dim(self) -> int:
         return self.context_length
+
+    def get_all_tensors_on_device(self) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
+        """Return (y_all, u_all) as single batch when pre-loaded to GPU; else None.
+        Use this to train with one batch per epoch and skip DataLoader when data fits in memory.
+        """
+        if self._y_gpu is not None and self._u_gpu is not None:
+            return self._y_gpu, self._u_gpu
+        return None
     
     def get_dataloader(
         self,
