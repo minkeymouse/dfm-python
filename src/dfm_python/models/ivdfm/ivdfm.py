@@ -55,6 +55,7 @@ class iVDFM(BaseFactorModel, nn.Module):
     
     def __init__(
         self,
+        dataset: Optional["iVDFMDataset"] = None,
         data_dim: Optional[int] = None,
         num_factors: Optional[int] = None,  # Aligned with config: num_factors (not latent_dim)
         context_dim: Optional[int] = None,
@@ -91,6 +92,9 @@ class iVDFM(BaseFactorModel, nn.Module):
         
         Parameters
         ----------
+        dataset : Optional[iVDFMDataset]
+            If provided, data_dim, context_dim, and window are inferred from it
+            and fit() will use this dataset (no need to call set_dataset).
         data_dim : int
             Dimension of observed data (N in paper)
         num_factors : int
@@ -206,21 +210,26 @@ class iVDFM(BaseFactorModel, nn.Module):
         if window is not None:
             config_dict['window'] = window
         
-        # Override with kwargs (highest precedence)
+        #         # Override with kwargs (highest precedence)
         config_dict.update(kwargs)
+        
+        # If dataset is provided, infer dimensions and store for fit()
+        if dataset is not None:
+            self._dataset = dataset
+            if data_dim is None:
+                data_dim = dataset.data_dim
+            if context_dim is None:
+                context_dim = dataset.context_dim
+            if window is None:
+                window = dataset.window
+        else:
+            self._dataset = None
         
         # Remove None values to use defaults
         config_dict = {k: v for k, v in config_dict.items() if v is not None}
         
-        # Create config object
-        try:
-            self._config = iVDFMConfig.from_dict(config_dict) if config_dict else iVDFMConfig()
-        except Exception:
-            # Fallback: create with defaults and update
-            self._config = iVDFMConfig()
-            for key, value in config_dict.items():
-                if hasattr(self._config, key):
-                    setattr(self._config, key, value)
+        # Create config object (structural params: num_factors, factor_order, num_regimes, etc. are model selection, not tuning)
+        self._config = iVDFMConfig.from_dict(config_dict) if config_dict else iVDFMConfig()
         
         # Extract all parameters from config (simplified, unified approach)
         self.data_dim = data_dim  # Can be None, inferred during fit
@@ -312,8 +321,7 @@ class iVDFM(BaseFactorModel, nn.Module):
         self.training_state: Optional[Dict] = None
         self.factors: Optional[np.ndarray] = None
         self.innovations: Optional[np.ndarray] = None
-        # Dataset from last fit (used by hyperparameter_optimization)
-        self._dataset: Optional["iVDFMDataset"] = None
+        # _dataset set above when dataset= is passed; otherwise None (call set_dataset before fit)
 
         # Move to device
         self.to(self.device)
@@ -1171,22 +1179,33 @@ class iVDFM(BaseFactorModel, nn.Module):
                 reason="max_epochs"
             )
         
-        # Extract factors and innovations
+        # Extract factors and innovations (and regime_weights when K > 1)
         self.eval()
         with torch.no_grad():
             # Use full dataset for final extraction
             all_factors = []
             all_innovations = []
+            all_regime_weights = []
             iter_extract = [(y_all, u_all)] if use_single_batch else dataloader
             for y_batch, u_batch in iter_extract:
                 outputs = self.forward(y_batch, u_batch)
                 all_factors.append(to_numpy(outputs['factors']))
                 all_innovations.append(to_numpy(outputs['eta']))
+                if outputs.get('regime_weights') is not None:
+                    all_regime_weights.append(to_numpy(outputs['regime_weights']))
             
             # Concatenate all batches
             if all_factors:
                 self.factors = np.concatenate(all_factors, axis=0)
                 self.innovations = np.concatenate(all_innovations, axis=0)
+                if all_regime_weights:
+                    rw = np.concatenate(all_regime_weights, axis=0)  # (batch, T, K)
+                    if rw.ndim == 3:
+                        self.regime_weights = rw[:, -1, :]  # (batch, K) one per window-end
+                    else:
+                        self.regime_weights = rw
+                else:
+                    self.regime_weights = None
         
         # Store training state
         self.training_state = iVDFMModelState.from_model(self)
@@ -1435,6 +1454,7 @@ class iVDFM(BaseFactorModel, nn.Module):
             if store_full_history:
                 all_factors: list[np.ndarray] = []
                 all_innovations: list[np.ndarray] = []
+                all_regime_weights: list[np.ndarray] = []
             else:
                 last_factor_state: Optional[np.ndarray] = None  # (r,)
                 last_innovation_state: Optional[np.ndarray] = None  # (r,)
@@ -1444,6 +1464,8 @@ class iVDFM(BaseFactorModel, nn.Module):
                 if store_full_history:
                     all_factors.append(to_numpy(outputs['factors']))
                     all_innovations.append(to_numpy(outputs['eta']))
+                    if outputs.get('regime_weights') is not None:
+                        all_regime_weights.append(to_numpy(outputs['regime_weights']))
                 else:
                     # Keep only the last state (batch, time step) for memory efficiency
                     f_btr = to_numpy(outputs["factors"])
@@ -1461,18 +1483,22 @@ class iVDFM(BaseFactorModel, nn.Module):
 
                 new_factors = np.concatenate(all_factors, axis=0)  # (num_windows, T, r)
                 new_innovations = np.concatenate(all_innovations, axis=0)
+                new_regime_weights = np.concatenate(all_regime_weights, axis=0) if all_regime_weights else None  # (num_windows, T, K) or empty
 
-                # Average over windows to get single trajectory (T, r)
-                # This aggregates multiple overlapping windows into one sequence
+                # One factor per window-end timestep (num_windows, r): each window has dynamics (T steps),
+                # we keep the state at the end of each window for alignment with full-series models (e.g. DDFM).
                 if new_factors.ndim == 3:
-                    new_factors = np.mean(new_factors, axis=0)  # (T, r)
-                    new_innovations = np.mean(new_innovations, axis=0)
+                    new_factors = new_factors[:, -1, :]   # (num_windows, r)
+                    new_innovations = new_innovations[:, -1, :]
+                    if new_regime_weights is not None and new_regime_weights.ndim == 3:
+                        new_regime_weights = new_regime_weights[:, -1, :]  # (num_windows, K)
             else:
                 if last_factor_state is None or last_innovation_state is None:
                     _logger.warning("No data processed in update")
                     return
                 new_factors = last_factor_state.reshape(1, -1)
                 new_innovations = last_innovation_state.reshape(1, -1)
+                new_regime_weights = None
 
             # Update model state: append or overwrite
             if append and self.factors is not None and self.innovations is not None:
@@ -1481,9 +1507,15 @@ class iVDFM(BaseFactorModel, nn.Module):
                 innovations_existing = self._normalize_factors_shape(self.innovations)
                 self.factors = np.concatenate([factors_existing, new_factors], axis=0)
                 self.innovations = np.concatenate([innovations_existing, new_innovations], axis=0)
+                if new_regime_weights is not None and getattr(self, 'regime_weights', None) is not None:
+                    self.regime_weights = np.concatenate([self.regime_weights, new_regime_weights], axis=0)
+                elif new_regime_weights is not None:
+                    self.regime_weights = new_regime_weights
             else:
                 self.factors = new_factors
                 self.innovations = new_innovations
+                if new_regime_weights is not None:
+                    self.regime_weights = new_regime_weights
 
             # Update training state
             self.training_state = iVDFMModelState.from_model(self)
@@ -1555,6 +1587,7 @@ class iVDFM(BaseFactorModel, nn.Module):
         if self.factor_mixing is not None and hasattr(self.factor_mixing, "M"):
             mixing_matrix = to_numpy(self.factor_mixing.M.weight.detach())
 
+        regime_weights_out = getattr(self, "regime_weights", None)
         return iVDFMResult(
             innovations=self.innovations,
             reconstructions=recon,
@@ -1572,6 +1605,7 @@ class iVDFM(BaseFactorModel, nn.Module):
             converged=converged,
             config=cfg_snapshot,
             model_state_dict=weights,
+            regime_weights=regime_weights_out,
             num_regimes=num_regimes,
             regime_temperature=regime_temperature,
             mixing=mixing,
@@ -1687,10 +1721,11 @@ class iVDFM(BaseFactorModel, nn.Module):
         self,
         n_trials: int = 30,
         timeout: Optional[float] = None,
-        max_window: int = 500,
+        max_window: Optional[int] = None,
+        min_window: int = 500,
         max_regimes: int = 7,
-        n_windows_min: int = 22,
-        min_stride: int = 1,
+        train_window_ratio: float = 1.0,
+        min_stride: int = 10,
         horizon: int = 96,
         metric: str = "sMSE",
         max_epochs_per_trial: Optional[int] = None,
@@ -1701,14 +1736,18 @@ class iVDFM(BaseFactorModel, nn.Module):
         subset_ratio: Optional[float] = None,
         subset_max_steps: Optional[int] = None,
         min_batch_size: Optional[int] = None,
+        initial_params: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
-        """Hyperparameter optimization using Optuna on a subset of latest windows.
+        """Optuna hyperparameter optimization for forecasting: minimizes holdout sMSE/sMAE.
 
-        Uses the dataset from set_dataset(). Subset size can be expanded with subset_ratio or subset_max_steps
-        so trials use more data (slower but may transfer better). Default: small subset (max_window + (n_windows_min-1)*min_stride + horizon)
-        to keep trials fast; objective is forecast metric (sMSE or sMAE) on the held-out last `horizon` steps.
-        Does not refit this model on full data; returns best params for the caller to use (e.g. refit with full data).
+        Suggests structural and training params (window, stride, num_regimes, factor_order, capacity, etc.)
+        via suggest_ivdfm_hyperparameters. Use this only for forecast-based structural tuning.
+        For causal/IRF experiments, do not tune structural params: use
+        suggest_ivdfm_hyperparameters_causal from .optuna and fix num_factors, factor_order,
+        num_regimes, innovation_distribution, time_context, window, stride to match the SCM.
+
+        Uses the dataset from set_dataset(). Returns best params; caller may refit on full data.
 
         Parameters
         ----------
@@ -1716,12 +1755,14 @@ class iVDFM(BaseFactorModel, nn.Module):
             Number of Optuna trials.
         timeout : float, optional
             Total time budget in seconds.
-        max_window : int
-            Upper bound on window (and subset sizing).
+        max_window : int, optional
+            Upper bound on window (and subset sizing). If None, uses full series length.
+        min_window : int
+            Lower bound on window to suggest (default 500).
         max_regimes : int
             Upper bound on num_regimes to suggest.
-        n_windows_min : int
-            Minimum number of training windows in subset (e.g. 22 for stable metric).
+        train_window_ratio : float, default 1.0
+            Proportion of available windows to use (0 < ratio <= 1). 1.0 = full data.
         min_stride : int
             Minimum stride for subset sizing.
         horizon : int
@@ -1739,11 +1780,13 @@ class iVDFM(BaseFactorModel, nn.Module):
         fixed : dict, optional
             Fixed hyperparameters (not suggested).
         subset_ratio : float, optional
-            If in (0, 1], use at least this fraction of train length for the subset (larger = slower, may transfer better).
+            If in (0, 1], use at least this fraction of train length for the subset.
         subset_max_steps : int, optional
             If set, use at least this many time steps for the subset (capped by data length).
         min_batch_size : int, optional
-            If set, use this as batch_size for all trials (faster epochs than default 32).
+            Batch size for all trials (default 1024 if not set).
+        initial_params : dict, optional
+            If provided, enqueued as first trial (e.g. hand-tuned params from config).
         **kwargs
             Passed to run_hyperparameter_optimization (e.g. pruner).
 
@@ -1765,8 +1808,9 @@ class iVDFM(BaseFactorModel, nn.Module):
             n_trials=n_trials,
             timeout=timeout,
             max_window=max_window,
+            min_window=min_window,
             max_regimes=max_regimes,
-            n_windows_min=n_windows_min,
+            train_window_ratio=train_window_ratio,
             min_stride=min_stride,
             horizon=horizon,
             metric=metric,
@@ -1780,6 +1824,7 @@ class iVDFM(BaseFactorModel, nn.Module):
             subset_ratio=subset_ratio,
             subset_max_steps=subset_max_steps,
             min_batch_size=min_batch_size,
+            initial_params=initial_params,
             **kwargs,
         )
         return best_params

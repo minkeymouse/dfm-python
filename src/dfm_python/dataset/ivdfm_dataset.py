@@ -38,8 +38,9 @@ class iVDFMDataset(Dataset):
     window : Optional[int]
         Length of sliding windows. If None, uses full T (full series as one sequence).
         Default: None (uses full T)
-    stride : int, default 1
-        Step size for sliding windows. stride=1 means overlapping windows, stride=window means non-overlapping.
+    stride : Optional[int], default None
+        Step size for sliding windows. If None, defaults to half the window size (window // 2).
+        stride=window means non-overlapping windows.
     time_idx : Optional[Union[str, int]]
         Time index column name (DataFrame) or column index (array). If provided, it is
         excluded from targets. If not provided, positional index is used to generate time context.
@@ -55,23 +56,19 @@ class iVDFMDataset(Dataset):
         - time_context>1: Normalized time step + periodic sine features (sin(2π * (i+1) / T * t) for i=1..time_context-1)
     device : Optional[torch.device]
         Device to move tensors to
-    preload_to_device : bool, default True when device is cuda
-        If True and device is cuda, pre-load all sequences to GPU once so __getitem__ returns
-        slices instead of doing numpy->torch->device per sample (avoids per-batch transfer overhead).
     """
     
     def __init__(
         self,
         data: Union[np.ndarray, torch.Tensor, pd.DataFrame],
         window: Optional[int] = None,
-        stride: int = 1,
+        stride: Optional[int] = None,
         time_idx: Optional[Union[str, int]] = None,
         covariates: Optional[Union[List[str], List[int]]] = None,
         context: Optional[Union[List[str], List[int]]] = None,
         time_context: int = 1,
         scaler: Optional[Union[str, StandardScaler, RobustScaler, MinMaxScaler, MaxAbsScaler, QuantileTransformer]] = None,
         device: Optional[torch.device] = None,
-        preload_to_device: Optional[bool] = None,
     ):
         """Initialize iVDFM dataset."""
         # Handle DataFrame input
@@ -126,7 +123,10 @@ class iVDFMDataset(Dataset):
             window = max(2, min(window, T))
         
         self.window = window
-        self.stride = max(1, stride)  # Ensure stride >= 1
+        # Default stride = half window when not provided
+        if stride is None:
+            stride = max(1, window // 2)
+        self.stride = max(1, stride)
         self.total_time_steps = T
         
         if device is None:
@@ -211,8 +211,8 @@ class iVDFMDataset(Dataset):
         # Number of sequences (sliding windows with stride)
         self.num_sequences = (T - window) // self.stride + 1
 
-        # Pre-load all sequences to GPU once when on cuda (avoids per-sample numpy->torch->device in __getitem__)
-        do_preload = preload_to_device if preload_to_device is not None else (self.device.type == "cuda")
+        # Pre-load all sequences to GPU when on cuda (avoids per-sample numpy->torch->device in __getitem__)
+        do_preload = self.device.type == "cuda"
         self._y_gpu = None
         self._u_gpu = None
         if do_preload and self.device.type == "cuda" and self.num_sequences > 0:

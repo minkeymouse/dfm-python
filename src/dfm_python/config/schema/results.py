@@ -461,6 +461,7 @@ class iVDFMResult(BaseResult):
     # Regime and mixing (when num_regimes > 1 or mixing=True)
     num_regimes: Optional[int] = None                # K; 1 = baseline (no regime structure)
     regime_temperature: Optional[float] = None        # Softmax τ for π (τ < 1 = sharper commitment)
+    regime_weights: Optional[np.ndarray] = None      # (T, K) or (num_windows, K) π_t from regime_net; for Z = [factors, regime] in stability
     mixing: Optional[bool] = None                    # Whether post-factor mixing f -> M f was used
     mixing_matrix: Optional[np.ndarray] = None       # (r, r) learned M when mixing=True (for inspection)
 
