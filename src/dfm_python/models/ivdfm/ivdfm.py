@@ -1657,6 +1657,7 @@ class iVDFM(BaseFactorModel, nn.Module):
                     "activation": self.activation,
                     "slope": self.slope,
                     "num_regimes": self.num_regimes,
+                    "mixing": getattr(self, "mixing", False),
                 },
                 "training_state": self.training_state,
             },
@@ -1702,7 +1703,14 @@ class iVDFM(BaseFactorModel, nn.Module):
         if not isinstance(checkpoint, dict) or "model_state_dict" not in checkpoint:
             raise ValueError(f"Unrecognized checkpoint format at: {path}")
 
-        config = checkpoint.get("config", {})
+        config = dict(checkpoint.get("config", {}))
+        # Save uses "latent_dim"; constructor expects "num_factors"
+        if "latent_dim" in config and "num_factors" not in config:
+            config["num_factors"] = config["latent_dim"]
+        # Older checkpoints may omit "mixing"; infer from state_dict so factor_mixing loads
+        state_dict = checkpoint.get("model_state_dict", {})
+        if "mixing" not in config and any(k.startswith("factor_mixing.") for k in state_dict):
+            config["mixing"] = True
         model = cls(**config, **kwargs)
         model.load_state_dict(checkpoint["model_state_dict"])
         model.training_state = checkpoint.get("training_state")

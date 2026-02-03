@@ -120,8 +120,10 @@ def compute_forecast_metric(
     trues: np.ndarray,
     metric: str = "sMSE",
 ) -> float:
-    """Compute multivariate sMSE or sMAE (per-variable normalized then averaged).
+    """Compute multivariate forecast metric: MSE, sMSE, or sMAE.
 
+    MSE: mean squared error over all (pred, true) pairs (one scalar).
+    sMSE/sMAE: per-variable normalized then averaged (scale-invariant).
     preds, trues: (horizon, N) or (n_origins, horizon, N); flattened to (n_points, N).
     """
     preds = np.asarray(preds, dtype=np.float64)
@@ -132,26 +134,30 @@ def compute_forecast_metric(
     if n == 0:
         return float("nan")
 
+    metric_upper = metric.upper()
+    if metric_upper == "MSE":
+        return float(np.mean((preds_flat - trues_flat) ** 2))
+
     out_per_var: List[float] = []
     for j in range(n):
         p_j = preds_flat[:, j]
         t_j = trues_flat[:, j]
         var_j = float(np.var(t_j))
         std_j = float(np.std(t_j)) if var_j >= 1e-20 else float("nan")
-        if metric.upper() == "SMSE":
+        if metric_upper == "SMSE":
             if np.isfinite(var_j) and var_j >= 1e-10:
                 mse_j = float(np.mean((p_j - t_j) ** 2))
                 out_per_var.append(mse_j / var_j)
             else:
                 out_per_var.append(float("nan"))
-        elif metric.upper() == "SMAE":
+        elif metric_upper == "SMAE":
             if np.isfinite(std_j) and std_j >= 1e-10:
                 mae_j = float(np.mean(np.abs(p_j - t_j)))
                 out_per_var.append(mae_j / std_j)
             else:
                 out_per_var.append(float("nan"))
         else:
-            raise ValueError(f"Unknown metric: {metric}. Use 'sMSE' or 'sMAE'.")
+            raise ValueError(f"Unknown metric: {metric}. Use 'MSE', 'sMSE', or 'sMAE'.")
 
     return float(np.nanmean(out_per_var)) if out_per_var else float("nan")
 
