@@ -241,12 +241,12 @@ class DFMKalmanFilter:
     
     def filter(self, observations: FloatArray) -> Tuple[FloatArray, FloatArray]:
         """Run Kalman filter (forward pass).
-        
+
         Parameters
         ----------
         observations : np.ndarray
             Observations (T x N) or masked array
-            
+
         Returns
         -------
         filtered_state_means : np.ndarray
@@ -259,8 +259,105 @@ class DFMKalmanFilter:
                 "DFMKalmanFilter parameters not initialized. "
                 "Call update_parameters() first."
             )
-        
+
         return self._pykalman.filter(observations)
+
+    # ------------------------------------------------------------------
+    # Streaming single-step Kalman filter
+    # ------------------------------------------------------------------
+
+    def init_streaming(self) -> None:
+        """Initialize streaming state from the stored initial conditions.
+
+        Call once before the first filter_step(). Resets the internal
+        state to (Z_0, V_0).
+        """
+        if self._pykalman is None:
+            raise ModelNotInitializedError(
+                "DFMKalmanFilter parameters not initialized. "
+                "Call update_parameters() first."
+            )
+        self._stream_state = np.asarray(
+            self._pykalman.initial_state_mean, dtype=np.float64
+        ).copy()
+        self._stream_cov = np.asarray(
+            self._pykalman.initial_state_covariance, dtype=np.float64
+        ).copy()
+
+    def filter_step(
+        self, y_t: FloatArray, *, reencode: bool = True
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Incremental Kalman predict + update for a single observation.
+
+        By default (reencode=True), the state is re-derived from the
+        observation via the full predict→update cycle. This ensures the
+        streaming state never drifts from the data.
+
+        Set reencode=False to run predict-only (no observation update),
+        which produces a pure forecast from the dynamics.
+
+        Parameters
+        ----------
+        y_t : np.ndarray
+            Single observation vector, shape (N,). Ignored when
+            reencode=False.
+        reencode : bool, default True
+            If True (default), incorporate y_t into the state via the
+            Kalman update step. If False, only advance the state via
+            the transition (predict-only, no observation correction).
+
+        Returns
+        -------
+        state : np.ndarray
+            Updated (or predicted) state mean, shape (m,)
+        cov : np.ndarray
+            Updated (or predicted) state covariance, shape (m, m)
+        """
+        if not hasattr(self, '_stream_state'):
+            raise ModelNotInitializedError(
+                "Streaming state not initialized. Call init_streaming() first."
+            )
+        kf = self._pykalman
+        A = np.asarray(kf.transition_matrices, dtype=np.float64)
+        C = np.asarray(kf.observation_matrices, dtype=np.float64)
+        Q = np.asarray(kf.transition_covariance, dtype=np.float64)
+        R = np.asarray(kf.observation_covariance, dtype=np.float64)
+
+        # Predict
+        f_pred = A @ self._stream_state
+        P_pred = A @ self._stream_cov @ A.T + Q
+
+        if not reencode:
+            self._stream_state = f_pred
+            self._stream_cov = ensure_symmetric(P_pred)
+            return self._stream_state.copy(), self._stream_cov.copy()
+
+        y_t = np.asarray(y_t, dtype=np.float64).ravel()
+
+        # Innovation
+        innov = y_t - C @ f_pred
+        S = C @ P_pred @ C.T + R
+
+        # Kalman gain (use solve instead of inv for stability)
+        K = np.linalg.solve(S.T, (P_pred @ C.T).T).T
+
+        # Update (Joseph form for numerical stability)
+        self._stream_state = f_pred + K @ innov
+        IKC = np.eye(A.shape[0]) - K @ C
+        self._stream_cov = IKC @ P_pred @ IKC.T + K @ R @ K.T
+        self._stream_cov = ensure_symmetric(self._stream_cov)
+
+        return self._stream_state.copy(), self._stream_cov.copy()
+
+    @property
+    def streaming_state(self) -> Optional[np.ndarray]:
+        """Current streaming state mean, or None if not initialized."""
+        return getattr(self, '_stream_state', None)
+
+    @property
+    def streaming_cov(self) -> Optional[np.ndarray]:
+        """Current streaming state covariance, or None if not initialized."""
+        return getattr(self, '_stream_cov', None)
     
     def _stabilize_covariance_matrices(
         self,
