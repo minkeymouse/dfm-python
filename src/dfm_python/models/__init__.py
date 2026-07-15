@@ -25,3 +25,13 @@ except ImportError:
     # DDFM not available (missing torch or other dependencies)
     pass
 
+# AFM implementation (Attention Factor Model for statistical arbitrage)
+try:
+    from .afm.afm import AFM
+    __all__.extend([
+        'AFM',  # High-level API
+    ])
+except ImportError:
+    # AFM not available (missing torch or other dependencies)
+    pass
+

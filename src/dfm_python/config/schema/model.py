@@ -977,6 +977,66 @@ def validate_frequency(frequency: str) -> str:
             f"Common frequencies: 'd' (daily), 'w' (weekly), 'm' (monthly), "
             f"'q' (quarterly), 'sa' (semi-annual), 'a' (annual)."
         )
-    
+
     return frequency
+
+
+@dataclass
+class AFMConfig(BaseModelConfig):
+    """Attention Factor Model configuration (Epstein et al., 2025).
+
+    Cross-sectional conditional factor model + residual trading policy. Like
+    iVDFM, AFM does not use block structure and is constructed directly via
+    ``AFMConfig.from_dict(OmegaConf.to_container(cfg))`` rather than through the
+    block-requiring YAML adapter.
+    """
+    num_factors: Optional[int] = None      # K latent factors
+    factor_model: str = 'attention'        # 'attention' (learned) | 'pca' (benchmark)
+    trading: str = 'longconv'              # 'longconv' (learned) | 'ou' (Avellaneda-Lee)
+    embed_dim: int = 32                    # characteristic embedding dim d
+    hist_len: int = 20                     # residual-history length s for the filter
+    n_kernels: int = 32                    # number of long convolutions
+    ridge: float = 1e-2                    # ridge penalty for closed-form loadings
+    lambda_var: float = 0.1               # explained-variance regularizer weight
+    turnover_cost: float = 5e-4           # 5bps per unit turnover (paper)
+    short_cost: float = 1e-4              # 1bp shorting cost (paper)
+    risk_free: float = 0.0
+    learning_rate: float = DEFAULT_LEARNING_RATE
+    max_epochs: int = 50
+    patience: Optional[int] = None
+    seed: Optional[int] = None
+
+    def __post_init__(self):
+        super().__post_init__()
+        from ...utils.errors import ConfigurationError
+        if self.num_factors is not None and self.num_factors < 1:
+            raise ConfigurationError(f"num_factors must be >= 1, got {self.num_factors}")
+        if self.factor_model not in ('attention', 'pca'):
+            raise ConfigurationError(
+                f"factor_model must be 'attention' or 'pca', got '{self.factor_model}'")
+        if self.trading not in ('longconv', 'ou'):
+            raise ConfigurationError(
+                f"trading must be 'longconv' or 'ou', got '{self.trading}'")
+        if self.hist_len < 1:
+            raise ConfigurationError(f"hist_len must be >= 1, got {self.hist_len}")
+        if self.embed_dim < 1:
+            raise ConfigurationError(f"embed_dim must be >= 1, got {self.embed_dim}")
+
+    @classmethod
+    def _extract_afm(cls, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract AFM-specific parameters from a config dict."""
+        return cls._extract_params(data, {
+            'num_factors': None, 'factor_model': 'attention', 'trading': 'longconv',
+            'embed_dim': 32, 'hist_len': 20, 'n_kernels': 32, 'ridge': 1e-2,
+            'lambda_var': 0.1, 'turnover_cost': 5e-4, 'short_cost': 1e-4,
+            'risk_free': 0.0, 'learning_rate': DEFAULT_LEARNING_RATE,
+            'max_epochs': 50, 'patience': None, 'seed': None,
+        })
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'AFMConfig':
+        """Create AFMConfig from a dictionary."""
+        base_params = cls._extract_base(data)
+        afm_params = cls._extract_afm(data)
+        return cls(**base_params, **afm_params)
 

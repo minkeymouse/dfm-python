@@ -11,6 +11,7 @@ This module provides:
 from .ddfm_dataset import DDFMDataset
 from .dfm_dataset import DFMDataset
 from .ivdfm_dataset import iVDFMDataset
+from .afm_dataset import AFMDataset
 from .time import TimeIndex
 
 __all__ = [
@@ -18,6 +19,7 @@ __all__ = [
     'DDFMDataset',
     'DFMDataset',
     'iVDFMDataset',
+    'AFMDataset',
     # Time utilities
     'TimeIndex',
 ]

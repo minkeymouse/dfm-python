@@ -1,0 +1,27 @@
+# Attention Factor Model (Epstein et al., 2025) — finance / statistical arbitrage.
+# Flat AFMConfig keys; loaded via AFMConfig.from_dict(OmegaConf.to_container(cfg)).
+clock: d
+scaler: null
+
+# Factor / trading structure
+num_factors: 5
+factor_model: attention      # 'attention' (learned) | 'pca' (benchmark)
+trading: longconv            # 'longconv' (learned) | 'ou' (Avellaneda-Lee)
+
+# Architecture
+embed_dim: 32                # characteristic embedding dimension d
+hist_len: 20                 # residual-history length s for the trading filter
+n_kernels: 32                # number of long convolutions
+ridge: 0.01                  # ridge penalty for the closed-form loadings
+
+# Objective and costs (paper values: 5bps turnover, 1bp shorting)
+lambda_var: 0.1
+turnover_cost: 0.0005
+short_cost: 0.0001
+risk_free: 0.0
+
+# Training
+learning_rate: 0.001
+max_epochs: 50
+patience: 10
+seed: 0

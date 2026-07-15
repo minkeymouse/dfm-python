@@ -528,3 +528,46 @@ class iVDFMResult(BaseResult):
 
 # FitParams moved to config.schema.params as DFMParams
 
+
+@dataclass
+class AFMResult(BaseResult):
+    """Attention Factor Model results (statistical-arbitrage residual trading).
+
+    AFM is not a linear state-space model; its primary artifacts are the traded
+    residual portfolios, the after-cost book returns, and the objective values.
+    ``Z``/``x_sm`` alias the residuals so the common accessors still work.
+    """
+    residual_portfolios: Optional[np.ndarray] = None   # (B, T, N) traded residuals
+    book_returns: Optional[np.ndarray] = None          # (B, n_eval) after-cost returns
+    sharpe: Optional[float] = None                     # after-cost Sharpe (objective)
+    explained_variance: Optional[float] = None         # EV regularizer value
+    factor_model: Optional[str] = None                 # 'attention' | 'pca'
+    trading: Optional[str] = None                      # 'longconv' | 'ou'
+    num_factors: Optional[int] = None
+
+    @property
+    def factors(self) -> Optional[np.ndarray]:
+        return self.Z
+
+    @property
+    def reconstructed(self) -> Optional[np.ndarray]:
+        return self.x_sm
+
+    @property
+    def x_hat(self) -> Optional[np.ndarray]:
+        return self.x_sm
+
+    def summary(self) -> str:
+        lines = ["=" * 80, "AFM Result Summary", "=" * 80, ""]
+        lines.append(f"Factor model: {self.factor_model}, trading: {self.trading}")
+        if self.num_factors is not None:
+            lines.append(f"Num factors: {self.num_factors}")
+        if self.sharpe is not None:
+            lines.append(f"After-cost Sharpe (objective): {self.sharpe:.4f}")
+        if self.explained_variance is not None:
+            lines.append(f"Explained variance: {self.explained_variance:.4f}")
+        if self.book_returns is not None:
+            lines.append(f"Book returns shape: {getattr(self.book_returns, 'shape', None)}")
+        lines += ["", "=" * 80]
+        return "\n".join(lines)
+

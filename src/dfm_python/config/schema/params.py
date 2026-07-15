@@ -514,3 +514,38 @@ DDFMStateSpaceParams = DDFMModelState
 # Backward compatibility alias
 DFMStateSpaceParams = DFMModelState
 
+
+@dataclass
+class AFMModelState:
+    """Attention Factor Model training state for checkpointing."""
+    num_iter: int = 0
+    converged: bool = False
+    loss_now: Optional[float] = None
+    sharpe: Optional[float] = None
+    explained_variance: Optional[float] = None
+    residuals: Optional[np.ndarray] = None       # (B, T, N) traded residual portfolios
+    book_returns: Optional[np.ndarray] = None    # (B, n_eval) after-cost book returns
+
+    @classmethod
+    def from_model(cls, model: Any) -> 'AFMModelState':
+        """Create state from a trained AFM instance."""
+        return cls(
+            num_iter=getattr(model, '_num_iter', 0),
+            converged=getattr(model, '_converged', False),
+            loss_now=getattr(model, 'loss_now', None),
+            sharpe=getattr(model, '_sharpe', None),
+            explained_variance=getattr(model, '_ev', None),
+            residuals=getattr(model, '_residuals', None),
+            book_returns=getattr(model, '_book_returns', None),
+        )
+
+    def apply_to_model(self, model: Any) -> None:
+        """Restore training diagnostics onto a model instance."""
+        model._num_iter = self.num_iter
+        model._converged = self.converged
+        model.loss_now = self.loss_now
+        model._sharpe = self.sharpe
+        model._ev = self.explained_variance
+        model._residuals = self.residuals
+        model._book_returns = self.book_returns
+

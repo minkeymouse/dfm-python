@@ -98,6 +98,7 @@ from .utils.metric import calculate_rmse
 # Users can import these directly from dfm_python
 from .dataset.dfm_dataset import DFMDataset
 from .dataset.ddfm_dataset import DDFMDataset
+from .dataset.afm_dataset import AFMDataset
 
 # Model implementations
 from .models.base import BaseFactorModel
@@ -108,6 +109,12 @@ try:
     from .models.ddfm.ddfm import DDFM
 except ImportError:
     DDFM = None
+
+# AFM high-level API (Attention Factor Model; PyTorch is mandatory)
+try:
+    from .models.afm.afm import AFM
+except ImportError:
+    AFM = None
 
 __all__ = [
     # Core classes
@@ -121,14 +128,16 @@ __all__ = [
     'BaseResult', 'DFMResult', 'DDFMResult', 'calculate_rmse',
 ]
 
-# DDFM high-level API (PyTorch is mandatory)
+# DDFM / AFM high-level API (PyTorch is mandatory)
 __all__.extend([
     'DDFM',  # High-level API class
+    'AFM',   # Attention Factor Model
 ])
 
 # Dataset classes
 __all__.extend([
     'DFMDataset',  # DFM Dataset class
     'DDFMDataset',  # DDFM Dataset class
+    'AFMDataset',  # AFM Dataset class
 ])
 
