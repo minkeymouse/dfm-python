@@ -598,8 +598,45 @@ def build_ivdfm_diagonal_companion(
         
         # Place in block-diagonal position
         A_block[start_idx:end_idx, start_idx:end_idx] = A_i
-    
+
     return A_block
+
+
+def build_afm_optimizer(
+    params: List[Any],
+    learning_rate: float,
+    optimizer_type: str = 'Adam',
+    weight_decay: float = 0.0,
+) -> Any:
+    """Build the optimizer for AFM training.
+
+    AFM is trained end-to-end on an after-cost Sharpe objective with a plain
+    first-order optimizer (no scheduler by default). Kept as a builder for
+    parity with ``build_ddfm_optimizer`` / ``build_ivdfm_optimizer``.
+
+    Parameters
+    ----------
+    params : List[Any]
+        Learnable parameters (the query/embedding/LongConv tensors).
+    learning_rate : float
+        Learning rate.
+    optimizer_type : str, default 'Adam'
+        One of 'Adam', 'AdamW', 'SGD'.
+    weight_decay : float, default 0.0
+        L2 regularization.
+
+    Returns
+    -------
+    torch.optim.Optimizer
+    """
+    import torch
+
+    opt = optimizer_type.lower()
+    if opt == 'adamw':
+        return torch.optim.AdamW(params, lr=learning_rate, weight_decay=weight_decay)
+    if opt == 'sgd':
+        return torch.optim.SGD(params, lr=learning_rate, weight_decay=weight_decay)
+    return torch.optim.Adam(params, lr=learning_rate, weight_decay=weight_decay)
 
 
 __all__ = [
@@ -609,6 +646,7 @@ __all__ = [
     'build_lag_matrix',
     'build_ddfm_optimizer',
     'build_ivdfm_optimizer',
+    'build_afm_optimizer',
     'build_ddfm_state_space',
     'ivdfm_companion_from_p',
     'build_ivdfm_diagonal_companion',

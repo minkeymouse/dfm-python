@@ -32,7 +32,7 @@ from ...config.schema.results import AFMResult
 from ...config.schema.params import AFMModelState
 from ...utils.errors import (ConfigurationError, ModelNotTrainedError,
                              DataValidationError)
-from .factors import AttentionFactors, PCAFactors, residuals
+from .factors import AttentionFactors, PCAFactors, residuals, rolling_pca_weights
 from .longconv import LongConv1d
 from .baselines import avellaneda_lee_weights
 
@@ -63,6 +63,8 @@ class AFM(BaseFactorModel, nn.Module):
                  *, n_char: Optional[int] = None, n_factors: Optional[int] = None,
                  embed_dim: Optional[int] = None, hist_len: Optional[int] = None,
                  n_kernels: Optional[int] = None, ridge: Optional[float] = None,
+                 squash_lambda: Optional[float] = None, pca_window: Optional[int] = None,
+                 reestim: Optional[int] = None,
                  factor_model: Optional[str] = None, trading: Optional[str] = None,
                  lambda_var: Optional[float] = None, turnover_cost: Optional[float] = None,
                  short_cost: Optional[float] = None, risk_free: Optional[float] = None,
@@ -91,6 +93,9 @@ class AFM(BaseFactorModel, nn.Module):
         self.hist_len = pick(hist_len, "hist_len", 20)
         self.n_kernels = pick(n_kernels, "n_kernels", 32)
         self.ridge = pick(ridge, "ridge", 1e-2)
+        self.squash_lambda = pick(squash_lambda, "squash_lambda", 1e-3)
+        self.pca_window = pick(pca_window, "pca_window", 252)
+        self.reestim = pick(reestim, "reestim", 21)
         self.lambda_var = pick(lambda_var, "lambda_var", 0.1)
         self.turnover_cost = pick(turnover_cost, "turnover_cost", 5e-4)
         self.short_cost = pick(short_cost, "short_cost", 1e-4)
@@ -145,7 +150,8 @@ class AFM(BaseFactorModel, nn.Module):
         else:
             self.factor_block = PCAFactors(self.n_factors, self.ridge)
         if self.trading == "longconv":
-            self.filter: Optional[nn.Module] = LongConv1d(self.hist_len, self.n_kernels)
+            self.filter: Optional[nn.Module] = LongConv1d(
+                self.hist_len, self.n_kernels, self.squash_lambda)
         else:
             self.filter = None
         self.to(self.device)
@@ -170,10 +176,9 @@ class AFM(BaseFactorModel, nn.Module):
             if characteristics is None:
                 raise DataValidationError("attention factors require characteristics")
             return self.factor_block(characteristics)
-        omega_f, beta_t = self.factor_block(returns)               # (B,K,N),(B,N,K)
-        W = returns.shape[-2]
-        return (omega_f.unsqueeze(1).expand(-1, W, -1, -1),
-                beta_t.unsqueeze(1).expand(-1, W, -1, -1))
+        # PCA: re-estimated on a rolling trailing window (not one static covariance).
+        return rolling_pca_weights(returns, self.n_factors, self.pca_window,
+                                   self.reestim, self.ridge)
 
     def forward(self, returns: torch.Tensor,
                 characteristics: Optional[torch.Tensor] = None) -> dict:
@@ -250,10 +255,8 @@ class AFM(BaseFactorModel, nn.Module):
             self._build_components()
         returns, characteristics = self._batch_from_dataset()
         params = [p for p in self.parameters() if p.requires_grad]
-        if params:
-            optimizer = torch.optim.Adam(params, lr=self.learning_rate)
-        else:
-            optimizer = None                                       # e.g. PCA + OU (no params)
+        from ...numeric.builder import build_afm_optimizer
+        optimizer = build_afm_optimizer(params, self.learning_rate) if params else None
 
         best = float("inf")
         no_improve = 0
@@ -363,6 +366,8 @@ class AFM(BaseFactorModel, nn.Module):
             "arch": {"n_char": self.n_char, "n_factors": self.n_factors,
                      "embed_dim": self.embed_dim, "hist_len": self.hist_len,
                      "n_kernels": self.n_kernels, "ridge": self.ridge,
+                     "squash_lambda": self.squash_lambda,
+                     "pca_window": self.pca_window, "reestim": self.reestim,
                      "factor_model": self.factor_model, "trading": self.trading,
                      "lambda_var": self.lambda_var,
                      "turnover_cost": self.turnover_cost,

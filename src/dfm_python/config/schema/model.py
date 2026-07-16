@@ -77,6 +77,20 @@ from ..constants import (
     DEFAULT_CLOCK_FREQUENCY,
     DEFAULT_KDFM_AR_ORDER,
     DEFAULT_KDFM_MA_ORDER,
+    DEFAULT_AFM_NUM_FACTORS,
+    DEFAULT_AFM_FACTOR_MODEL,
+    DEFAULT_AFM_TRADING,
+    DEFAULT_AFM_EMBED_DIM,
+    DEFAULT_AFM_HIST_LEN,
+    DEFAULT_AFM_N_KERNELS,
+    DEFAULT_AFM_RIDGE,
+    DEFAULT_AFM_SQUASH_LAMBDA,
+    DEFAULT_AFM_PCA_WINDOW,
+    DEFAULT_AFM_REESTIM,
+    DEFAULT_AFM_LAMBDA_VAR,
+    DEFAULT_AFM_TURNOVER_COST,
+    DEFAULT_AFM_SHORT_COST,
+    DEFAULT_AFM_MAX_EPOCHS,
     FREQUENCY_HIERARCHY,
     DEFAULT_HIERARCHY_VALUE,
     DEFAULT_IVDFM_LATENT_DIM,
@@ -991,18 +1005,21 @@ class AFMConfig(BaseModelConfig):
     block-requiring YAML adapter.
     """
     num_factors: Optional[int] = None      # K latent factors
-    factor_model: str = 'attention'        # 'attention' (learned) | 'pca' (benchmark)
-    trading: str = 'longconv'              # 'longconv' (learned) | 'ou' (Avellaneda-Lee)
-    embed_dim: int = 32                    # characteristic embedding dim d
-    hist_len: int = 20                     # residual-history length s for the filter
-    n_kernels: int = 32                    # number of long convolutions
-    ridge: float = 1e-2                    # ridge penalty for closed-form loadings
-    lambda_var: float = 0.1               # explained-variance regularizer weight
-    turnover_cost: float = 5e-4           # 5bps per unit turnover (paper)
-    short_cost: float = 1e-4              # 1bp shorting cost (paper)
+    factor_model: str = DEFAULT_AFM_FACTOR_MODEL  # 'attention' (learned) | 'pca'
+    trading: str = DEFAULT_AFM_TRADING     # 'longconv' (learned) | 'ou' (Avellaneda-Lee)
+    embed_dim: int = DEFAULT_AFM_EMBED_DIM  # characteristic embedding dim d
+    hist_len: int = DEFAULT_AFM_HIST_LEN   # residual-history length s for the filter
+    n_kernels: int = DEFAULT_AFM_N_KERNELS  # number of long convolutions
+    ridge: float = DEFAULT_AFM_RIDGE       # ridge penalty for closed-form loadings
+    squash_lambda: float = DEFAULT_AFM_SQUASH_LAMBDA  # LongConv Squash regularizer
+    pca_window: int = DEFAULT_AFM_PCA_WINDOW  # trailing window for the PCA benchmark
+    reestim: int = DEFAULT_AFM_REESTIM     # PCA re-estimation stride
+    lambda_var: float = DEFAULT_AFM_LAMBDA_VAR  # explained-variance regularizer weight
+    turnover_cost: float = DEFAULT_AFM_TURNOVER_COST  # 5bps per unit turnover (paper)
+    short_cost: float = DEFAULT_AFM_SHORT_COST  # 1bp shorting cost (paper)
     risk_free: float = 0.0
     learning_rate: float = DEFAULT_LEARNING_RATE
-    max_epochs: int = 50
+    max_epochs: int = DEFAULT_AFM_MAX_EPOCHS
     patience: Optional[int] = None
     seed: Optional[int] = None
 
@@ -1026,11 +1043,21 @@ class AFMConfig(BaseModelConfig):
     def _extract_afm(cls, data: Dict[str, Any]) -> Dict[str, Any]:
         """Extract AFM-specific parameters from a config dict."""
         return cls._extract_params(data, {
-            'num_factors': None, 'factor_model': 'attention', 'trading': 'longconv',
-            'embed_dim': 32, 'hist_len': 20, 'n_kernels': 32, 'ridge': 1e-2,
-            'lambda_var': 0.1, 'turnover_cost': 5e-4, 'short_cost': 1e-4,
+            'num_factors': None,
+            'factor_model': DEFAULT_AFM_FACTOR_MODEL,
+            'trading': DEFAULT_AFM_TRADING,
+            'embed_dim': DEFAULT_AFM_EMBED_DIM,
+            'hist_len': DEFAULT_AFM_HIST_LEN,
+            'n_kernels': DEFAULT_AFM_N_KERNELS,
+            'ridge': DEFAULT_AFM_RIDGE,
+            'squash_lambda': DEFAULT_AFM_SQUASH_LAMBDA,
+            'pca_window': DEFAULT_AFM_PCA_WINDOW,
+            'reestim': DEFAULT_AFM_REESTIM,
+            'lambda_var': DEFAULT_AFM_LAMBDA_VAR,
+            'turnover_cost': DEFAULT_AFM_TURNOVER_COST,
+            'short_cost': DEFAULT_AFM_SHORT_COST,
             'risk_free': 0.0, 'learning_rate': DEFAULT_LEARNING_RATE,
-            'max_epochs': 50, 'patience': None, 'seed': None,
+            'max_epochs': DEFAULT_AFM_MAX_EPOCHS, 'patience': None, 'seed': None,
         })
 
     @classmethod

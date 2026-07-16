@@ -149,3 +149,44 @@ class PCAFactors:
         omega_f = vecs[..., -self.n_factors:].transpose(-1, -2)     # (..., K, N)
         beta_t = ridge_loadings(omega_f, self.ridge)
         return omega_f, beta_t
+
+
+def rolling_pca_weights(returns: torch.Tensor, n_factors: int, pca_window: int,
+                        reestim: int, ridge: float):
+    """Per-date PCA factor weights, re-estimated on a rolling trailing window.
+
+    Faithful to the paper's benchmark, which re-estimates PCA on a trailing
+    window rather than once over the whole sample. Weights are recomputed every
+    ``reestim`` steps on the trailing ``pca_window`` and held constant between
+    re-estimations (so static PCA does not see the future and can track drift).
+
+    Parameters
+    ----------
+    returns : torch.Tensor
+        Returns ``(B, W, N)``.
+    n_factors, pca_window, reestim, ridge
+        Number of factors, trailing window length, re-estimation stride, ridge.
+
+    Returns
+    -------
+    tuple of torch.Tensor
+        ``omega_F`` ``(B, W, K, N)`` and ``beta^T`` ``(B, W, N, K)``.
+    """
+    B, W, N = returns.shape
+    K = n_factors
+    pca = PCAFactors(K, ridge)
+    min_len = min(pca_window, max(2 * K + 1, 30))
+    est_dates = [w for w in range(W) if w % reestim == 0 and w + 1 >= min_len]
+    if not est_dates:
+        est_dates = [W - 1]
+    ests = {}
+    for w in est_dates:
+        lo = max(0, w + 1 - pca_window)
+        ests[w] = pca(returns[:, lo:w + 1])                        # (B,K,N),(B,N,K)
+    of = returns.new_zeros(B, W, K, N)
+    bt = returns.new_zeros(B, W, N, K)
+    for w in range(W):
+        prior = [e for e in est_dates if e <= w]
+        key = prior[-1] if prior else est_dates[0]
+        of[:, w], bt[:, w] = ests[key]
+    return of, bt

@@ -458,10 +458,34 @@ FREQUENCY_HIERARCHY: Dict[str, int] = {
 MAX_TENT_SIZE: int = 12
 
 # ============================================================================
+# AFM (Attention Factor Model) defaults
+# ============================================================================
+DEFAULT_AFM_NUM_FACTORS = 5          # K latent factors
+DEFAULT_AFM_FACTOR_MODEL = 'attention'  # 'attention' | 'pca'
+DEFAULT_AFM_TRADING = 'longconv'     # 'longconv' | 'ou'
+DEFAULT_AFM_EMBED_DIM = 32           # characteristic embedding dimension d
+DEFAULT_AFM_HIST_LEN = 20            # residual-history length s for the filter
+DEFAULT_AFM_N_KERNELS = 32           # number of long convolutions
+DEFAULT_AFM_RIDGE = 1e-2             # ridge penalty for closed-form loadings
+DEFAULT_AFM_SQUASH_LAMBDA = 1e-3     # LongConv Squash kernel regularizer strength
+DEFAULT_AFM_PCA_WINDOW = 252         # trailing window for the PCA benchmark
+DEFAULT_AFM_REESTIM = 21             # PCA re-estimation stride
+DEFAULT_AFM_LAMBDA_VAR = 0.1         # explained-variance regularizer weight
+DEFAULT_AFM_TURNOVER_COST = 5e-4     # 5bps per unit turnover (paper)
+DEFAULT_AFM_SHORT_COST = 1e-4        # 1bp shorting cost (paper)
+DEFAULT_AFM_MAX_EPOCHS = 50          # training epochs
+
+# ============================================================================
 # Export all constants
 # ============================================================================
 
 __all__ = [
+    # AFM
+    'DEFAULT_AFM_NUM_FACTORS', 'DEFAULT_AFM_FACTOR_MODEL', 'DEFAULT_AFM_TRADING',
+    'DEFAULT_AFM_EMBED_DIM', 'DEFAULT_AFM_HIST_LEN', 'DEFAULT_AFM_N_KERNELS',
+    'DEFAULT_AFM_RIDGE', 'DEFAULT_AFM_SQUASH_LAMBDA', 'DEFAULT_AFM_PCA_WINDOW',
+    'DEFAULT_AFM_REESTIM', 'DEFAULT_AFM_LAMBDA_VAR', 'DEFAULT_AFM_TURNOVER_COST',
+    'DEFAULT_AFM_SHORT_COST', 'DEFAULT_AFM_MAX_EPOCHS',
     # Convergence
     'DEFAULT_CONVERGENCE_THRESHOLD',
     'DEFAULT_EM_THRESHOLD',

@@ -94,3 +94,26 @@ class AFMDataset(Dataset):
             r = r.to(device)
             c = None if c is None else c.to(device)
         return r, c
+
+    def get_all_tensors_on_device(self, device: Optional[Any] = None
+                                  ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """Full-panel fast path (parity with ``iVDFMDataset``)."""
+        return self.get_tensors(device)
+
+    def get_dataloader(self, batch_size: int = 32, shuffle: bool = True,
+                       num_workers: int = 0):
+        """DataLoader over sliding windows (parity with ``iVDFMDataset``).
+
+        Each batch is ``(returns, characteristics)`` of shape ``(B, W, N)`` and
+        ``(B, W, N, M)`` (characteristics is ``None`` when absent).
+        """
+        from torch.utils.data import DataLoader
+
+        def collate(batch):
+            rs = torch.stack([b[0] for b in batch])
+            cs = (None if batch[0][1] is None
+                  else torch.stack([b[1] for b in batch]))
+            return rs, cs
+
+        return DataLoader(self, batch_size=batch_size, shuffle=shuffle,
+                          num_workers=num_workers, collate_fn=collate)

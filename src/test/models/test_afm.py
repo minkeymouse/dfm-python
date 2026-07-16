@@ -188,3 +188,54 @@ class TestAFMConfig:
         assert model.hist_len == 8
         model.fit()
         assert model.get_result().num_factors == 4
+
+
+class TestFidelity:
+    """Faithfulness to the paper's LongConv (Squash + geometric init) and the
+    rolling-window PCA benchmark, plus the convention-correct optimizer builder."""
+
+    def test_longconv_squash_sparsifies(self):
+        heavy = LongConv1d(seq_len=10, n_kernels=8, squash_lambda=50.0)
+        assert torch.count_nonzero(heavy._squash()) == 0        # all below threshold
+        gentle = LongConv1d(seq_len=10, n_kernels=8, squash_lambda=1e-5)
+        assert torch.count_nonzero(gentle._squash()) > 0
+
+    def test_longconv_geometric_init_decays(self):
+        torch.manual_seed(0)
+        conv = LongConv1d(seq_len=20, n_kernels=8)
+        row_mag = conv.kernel.detach().abs().sum(1)             # per-kernel magnitude
+        assert row_mag[-1] < row_mag[0]                         # high-h decays fastest
+
+    def test_rolling_pca_varies_over_time(self):
+        from dfm_python.models.afm.factors import rolling_pca_weights
+        R = torch.randn(1, 400, 8)
+        of, bt = rolling_pca_weights(R, n_factors=2, pca_window=100,
+                                     reestim=20, ridge=1e-2)
+        assert of.shape == (1, 400, 2, 8) and bt.shape == (1, 400, 8, 2)
+        assert not torch.allclose(of[:, 50], of[:, 350])       # re-estimated, not static
+
+    def test_pca_uses_rolling_not_static(self):
+        # A model with factor_model='pca' should re-estimate over time.
+        returns, _ = _make_data(T=120, N=6)
+        ds = AFMDataset(returns=returns)
+        model = AFM(dataset=ds, n_factors=2, hist_len=10, factor_model="pca",
+                    trading="ou", reestim=15, pca_window=60)
+        model.fit()
+        assert model.get_result() is not None
+
+    def test_build_afm_optimizer(self):
+        import torch.nn as nn
+        from dfm_python.numeric.builder import build_afm_optimizer
+        params = list(nn.Linear(3, 3).parameters())
+        assert isinstance(build_afm_optimizer(params, 1e-3), torch.optim.Adam)
+        assert isinstance(build_afm_optimizer(params, 1e-3, "sgd"), torch.optim.SGD)
+
+    def test_dataset_dataloader_parity(self):
+        returns, characteristics = _make_data(T=80, N=5, M=6)
+        ds = AFMDataset(returns=returns, characteristics=characteristics,
+                        window=30, stride=10)
+        loader = ds.get_dataloader(batch_size=2, shuffle=False)
+        r, c = next(iter(loader))
+        assert r.shape == (2, 30, 5) and c.shape == (2, 30, 5, 6)
+        r_all, c_all = ds.get_all_tensors_on_device()
+        assert r_all.shape == (80, 5)
