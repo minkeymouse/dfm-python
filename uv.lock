@@ -1858,11 +1858,11 @@ wheels = [
 
 [[package]]
 name = "scikit-base"
-version = "0.13.0"
+version = "1.1.1"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/6b/4d/53b477e05ba7897026133543114c48c9e67646180b85a9e3bd6edb6e5223/scikit_base-0.13.0.tar.gz", hash = "sha256:436c26067173a7235c465c64ac105008f6f889f09308c5e4e4a16e21c38c3ddc", size = 127431, upload-time = "2025-10-08T20:39:35.509Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/0d/15/e13b4848f0b6bf2693005c57b6c8325279b4b435d745d5c1fa638f0d5383/scikit_base-1.1.1.tar.gz", hash = "sha256:7313827cb7d77c39010d2150c6a5b5e6b544de719c10ae7c08e9f7a22da0cc5f", size = 135661, upload-time = "2026-08-25T16:35:26.093Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/94/1c/7c00d3823bef4ef2e5a95507475bc5cf3bdabf00c8577f8bb5ff406e9f2e/scikit_base-0.13.0-py3-none-any.whl", hash = "sha256:efe7df0f09854b9f28e9532f6be87ef433dd8f1358cabd24ebf168aa4ccca1fc", size = 151529, upload-time = "2025-10-08T20:39:33.951Z" },
+    { url = "https://files.pythonhosted.org/packages/61/5c/a5147bb42b30d1c24362c342349656c5df20aa07479652313a17643e2bde/scikit_base-1.1.1-py3-none-any.whl", hash = "sha256:5cc1a95d341753bc967c026752d6a9cc2fa32d0e69b7e86cbcbd06d16570c2f5", size = 162569, upload-time = "2026-08-25T16:35:24.591Z" },
 ]
 
 [[package]]
@@ -2000,7 +2000,7 @@ wheels = [
 
 [[package]]
 name = "sktime"
-version = "0.40.1"
+version = "1.2.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "joblib" },
@@ -2012,9 +2012,9 @@ dependencies = [
     { name = "scikit-learn" },
     { name = "scipy" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/84/7a/22b99a00a7cabaa34c350f78f33ae89711cfc08deef06043daee3835dbb3/sktime-0.40.1.tar.gz", hash = "sha256:bbf3c2971c7ad388fbebc1d1fb573e20f730e6486c00935b336d8edf13bca04d", size = 35197759, upload-time = "2025-11-25T00:03:38.744Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/46/a0/6ea64121398a8d3e23deb6db2c1dc7012afc65c23a28eda6cc06f6fb81bb/sktime-1.2.0.tar.gz", hash = "sha256:641425178b3215a0a8dbcf4e6948a8b589e46def39c91989f71d9fa297bc3709", size = 36398732, upload-time = "2026-09-22T22:11:15.066Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/7e/0d/3b2e5b51593009f72fb7fb6956e6c652da1450c8c5484c40a276113c2114/sktime-0.40.1-py3-none-any.whl", hash = "sha256:130bb0c39ca4377e491c4dfa64c8ac67c3de2660dd406dd7690db6a8ac349c4e", size = 36265753, upload-time = "2025-11-25T00:03:34.522Z" },
+    { url = "https://files.pythonhosted.org/packages/eb/67/98c89e7a17691ca473b7cc7200f74e43e47ad61680db59bfe791f341b056/sktime-1.2.0-py3-none-any.whl", hash = "sha256:dbffc6731d2d683b668dceb5e2bbc5804bebc8446b4c580803a281684d90e4ae", size = 8201107, upload-time = "2026-09-22T22:11:11.09Z" },
 ]
 
 [[package]]
