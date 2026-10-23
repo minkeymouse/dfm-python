@@ -1058,7 +1058,8 @@ class DFM(BaseFactorModel):
         for step in range(len(point)):
             P = A @ P @ A.T + Q
             variance[step] = np.einsum("ij,ij->i", C @ P, C) + np.diag(R)
-        half = NormalDist().inv_cdf(0.5 + coverage / 2) * np.sqrt(variance) * np.abs(scale)
+        # z = -Phi^-1((1 - coverage) / 2): (1 + coverage) / 2 rounds to 1 for the floats just below 1.
+        half = -NormalDist().inv_cdf((1 - coverage) / 2) * np.sqrt(variance) * np.abs(scale)
         centre = point.to_numpy()
         half = half[:, self._user_positions()]
         values = np.stack([centre - half, centre + half], axis=2).reshape(len(point), -1)

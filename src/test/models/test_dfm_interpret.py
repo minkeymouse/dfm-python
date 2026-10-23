@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from scipy.stats import norm
-from sklearn.preprocessing import QuantileTransformer
+from sklearn.preprocessing import QuantileTransformer, StandardScaler
 
 from dfm_python import DFM, PanelData
 from dfm_python.functional.state_layout import DFMStateLayout
@@ -188,6 +188,15 @@ def test_loadings(fitted):
     assert (loadings.loc[["m0", "m1", "gdp"], "real_0"] != 0).all()
 
 
+def test_slower_loadings_divide_by_the_first_tent_weight():
+    tent = [2, 4, 6, 4, 2]
+    model = DFM(**{**PARAMS, "tent_weights": {"q:m": tent}, "max_iter": 2}).fit(_panel(_frame()))
+    i = list(model.internal_feature_names_).index("gdp")
+    lag0 = model.result_.C[i, _current(model)]
+    np.testing.assert_array_equal(model.loadings_.loc["gdp"].to_numpy(), lag0 / tent[0], strict=True)
+    assert (lag0 != 0).all()
+
+
 def test_explained_variance(fitted):
     model, df, _ = fitted
     x = _scaled(model, df.iloc[:N_FIT])
@@ -303,6 +312,11 @@ def test_predict_interval_frame(fitted):
     narrow = _bounds(frame)
     assert ((wide[1] - wide[0]) > (narrow[1] - narrow[0])).all()
     assert (np.diff(narrow[1] - narrow[0], axis=0) > 0).all()
+    # The largest float below 1 (where (1 + coverage) / 2 rounds to 1): z = 8.29.
+    top = np.nextafter(1.0, 0.0)
+    widest = _bounds(model.predict_interval(4, coverage=top))
+    np.testing.assert_allclose((widest[1] - widest[0]) / (narrow[1] - narrow[0]), norm.isf((1 - top) / 2) / norm.ppf(0.9),
+                               rtol=1e-12)
 
 
 def test_predict_interval_matches_the_propagated_moments(fitted):
@@ -365,8 +379,8 @@ def test_predict_interval_coverage_on_a_simulated_dfm():
     assert 0.8 <= np.mean(hits) <= 0.97
 
 
-@pytest.mark.parametrize("scaler", [None, "robust", "minmax", "maxabs"])
-def test_predict_interval_converts_with_the_affine_scaler(scaler):
+@pytest.mark.parametrize("scaler", [None, "robust", "minmax", "maxabs", StandardScaler(with_std=False)])
+def test_affine_scalers_convert_intervals_and_factor_parts(scaler):
     df = _frame()
     model = DFM(**{**PARAMS, "max_iter": 3, "scaler": scaler}).fit(_panel(df))
     lower, upper = _bounds(model.predict_interval(3))
@@ -374,7 +388,8 @@ def test_predict_interval_converts_with_the_affine_scaler(scaler):
     X = _internal(model, df)
     Y = X if s is None else s.transform(X)
     zeros, ones = np.zeros((1, X.shape[1])), np.ones((1, X.shape[1]))
-    slope = np.ones(X.shape[1]) if s is None else (s.inverse_transform(ones) - s.inverse_transform(zeros))[0]
+    offset = np.zeros(X.shape[1]) if s is None else s.inverse_transform(zeros)[0]
+    slope = np.ones(X.shape[1]) if s is None else s.inverse_transform(ones)[0] - offset
     engine = model.engine_
     P = _filtered_cov(model, Y)
     sd = []
@@ -383,6 +398,15 @@ def test_predict_interval_converts_with_the_affine_scaler(scaler):
         sd.append(np.sqrt(np.diag(engine.C @ P @ engine.C.T + engine.R)) * np.abs(slope))
     np.testing.assert_allclose((upper - lower) / 2, _user(model, norm.ppf(0.95) * np.array(sd)), rtol=1e-8)
     np.testing.assert_allclose((lower + upper) / 2, model.predict(3).to_numpy(), rtol=1e-13, atol=1e-13)
+    # decompose(by="factor"): a factor's states through C times the slope, and the offset as "mean".
+    parts = model.decompose(by="factor")
+    _assert_adds_up(parts, df)
+    np.testing.assert_allclose(parts["mean"].to_numpy(), np.broadcast_to(_user(model, offset[None])[0], df.shape),
+                               rtol=1e-15)
+    states = _layout(model).r[0] * np.arange(_layout(model).L)  # global_0 and its lags
+    Z, C = model.result_.Z, model.result_.C
+    np.testing.assert_allclose(parts["global_0"].to_numpy(), _user(model, Z[:, states] @ C[:, states].T * slope),
+                               rtol=1e-12, atol=1e-14)
 
 
 def test_predict_interval_rejects_bad_input(fitted):
@@ -418,6 +442,10 @@ def test_update_keeps_and_refit_refreshes_the_attributes(fitted):
     parts = refitted.decompose(by="factor")
     assert parts.index.equals(refitted.conditioning_index_)
     _assert_adds_up(parts, df)
+    # The intervals use the refitted parameters, filtered over all rows.
+    lower, upper = _bounds(refitted.predict_interval(2))
+    np.testing.assert_allclose((upper - lower) / 2, _half_widths(refitted, _scaled(refitted, df), 2, 0.9), rtol=1e-8)
+    np.testing.assert_allclose((lower + upper) / 2, refitted.predict(2).to_numpy(), rtol=1e-14, atol=1e-14)
 
 
 def test_set_output_polars(fitted):
