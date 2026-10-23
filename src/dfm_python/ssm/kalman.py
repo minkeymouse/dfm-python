@@ -41,23 +41,24 @@ Two implementations of these recursions, equal up to rounding:
 
 - **Structured**, used when :meth:`DFMKalmanFilter.update_parameters` finds
   the DFM sparsity (:class:`_Transition`, :class:`_ObsStructure`): ``A`` is a
-  diagonal (AR(1) coefficients) plus a few rows with off-diagonal entries
-  (factor VAR, lag shifts, tent chains) and ``C`` a few dense columns (the
-  loadings) plus columns with one nonzero (the idiosyncratic states).
-  Products with ``A`` and ``C_o`` are scalings, gathers and small dense
-  products, and ``A P A'`` costs no ``m x m`` product. The update uses the
-  triangular inverse of ``L``: ``W = L^-1 C_o P``, ``P_f = P - W'W`` (a
+  diagonal (AR(1) coefficients), shift rows with one nonzero (factor lags,
+  tent chains) and a few dense rows (the factor VAR), and ``C`` a few dense
+  columns (the loadings) plus columns with one nonzero (the idiosyncratic
+  states). Products with ``A`` and ``C_o`` are scalings, gathers and small
+  dense products, and ``A P A'`` costs no ``m x m`` product. The update uses
+  the triangular inverse of ``L``: ``W = L^-1 C_o P``, ``P_f = P - W'W`` (a
   symmetric rank-``p_t`` product, no Joseph form) and
   ``a_f = a + W' L^-1 e``. The smoother works from the filtered moments: with
   ``G = A P_f`` and ``H = N_t G``, ``E[x_t | Y] = a_f + P_f A' r_t``,
   ``Var[x_t | Y] = P_f - G'H`` and ``Cov(x_{t+1}, x_t | Y) = G - P_{t+1} H``;
-  ``N_{t-1} = C_o' S^-1 C_o + B' A'N_tA B`` with ``B = I - K C_o`` is expanded
+  ``N_{t-1} = C_o' S^-1 C_o + (I - K C_o)' A'N_tA (I - K C_o)`` is expanded
   so that only products with ``K`` are dense. A row then costs three dense
   products in the filter (``L^-1 C_o P``, ``W'W``, ``L^-1``) and five in the
   smoother, against about twenty in the dense path. ``P_f - G'H`` subtracts
   terms of the size of ``P_f``, where ``P - P N P`` subtracts terms of the
-  size of ``P``, so the structured smoothed variances are at least as
-  accurate when ``R`` is small.
+  size of ``P``, so the structured smoothed variances lose no accuracy when
+  ``R`` is small; the filtered ones can (``P - W'W`` cancels in the
+  directions the data pin down, which the Joseph form avoids).
 - **Dense** (any other matrices): the products as written above, the gain
   ``K_t = P_t C_o' S_t^-1`` by ``cho_solve`` and the Joseph-form covariance
   ``(I - K C_o) P (I - K C_o)' + K R_oo K'``, symmetrized.
@@ -120,63 +121,90 @@ def _observed_mask(observations) -> Tuple[np.ndarray, np.ndarray]:
 def _index(idx: np.ndarray) -> Tuple[object, object]:
     """``(rows, block)``: indexers of the rows ``idx`` and of the block ``idx x idx``.
 
-    Slices (indexing then makes views) when ``idx`` is a contiguous range.
+    Slices (indexing then makes views) when ``idx`` is an increasing contiguous range.
     """
-    if idx.size and idx[-1] - idx[0] == idx.size - 1:
+    if idx.size and np.all(np.diff(idx) == 1):
         s = slice(int(idx[0]), int(idx[-1]) + 1)
         return s, (s, s)
     return idx, np.ix_(idx, idx)
 
 
 class _Transition:
-    """``A`` as a diagonal plus a few special rows: ``A = diag(d) + E_S' B E_T``.
+    """``A`` as a diagonal plus a few special rows: ``A = diag(d) + E_S' A[S]``.
 
     The special rows ``S`` are the rows of ``A`` with a nonzero off the
-    diagonal (factor VAR rows, lag shifts, tent chains); ``d`` is the diagonal
-    of the other rows (AR(1) coefficients) and zero on ``S``; ``B = A[S, T]``
-    with ``T`` the columns the rows ``S`` touch. A product with ``A`` costs a
-    scaling pass and a ``|S| x |T|`` product. :meth:`sandwich` and
-    :meth:`sandwich_t` are ``(d d') * X`` outside the rows and columns ``S``
-    (``T``), so they are exactly symmetric when ``X`` is.
+    diagonal; ``d`` is the diagonal of the other rows (AR(1) coefficients) and
+    zero on ``S``. A special row with one nonzero (a factor lag or tent-chain
+    shift) whose column no earlier such row holds is a gather: its row of
+    ``A X`` is ``g * X[c]``. The other special rows ``S_B`` (factor VAR rows)
+    come first in ``S`` and give ``B = A[S_B, T]``, ``T`` the columns they
+    touch, so a product with ``A`` costs a scaling pass, a gather and a
+    ``|S_B| x |T|`` product. ``U`` are the columns the special rows touch
+    (``T`` and ``c``); :meth:`sandwich` and :meth:`sandwich_t` are
+    ``(d d') * X`` outside the rows ``S`` (``U``), so they are exactly
+    symmetric when ``X`` is.
     """
 
-    __slots__ = ("d", "dd", "B", "S", "SS", "T", "TT")
+    __slots__ = ("d", "dd", "B", "n_B", "T", "g", "c", "S", "SS", "U", "UU", "T_U", "c_U")
 
-    def __init__(self, A: np.ndarray, S: np.ndarray, T: np.ndarray) -> None:
+    def __init__(self, A: np.ndarray, S: np.ndarray) -> None:
+        nz = A[S] != 0
+        c = np.argmax(nz, axis=1)
+        single = np.flatnonzero(np.count_nonzero(nz, axis=1) == 1)
+        gather = np.zeros(S.size, dtype=bool)
+        gather[single[np.unique(c[single], return_index=True)[1]]] = True  # one row per column
         d = np.diag(A).copy()
         d[S] = 0.0
         self.d = d[:, None]
         self.dd = np.outer(d, d)
-        self.B = A[np.ix_(S, T)]
-        self.S, self.SS = _index(S)
-        self.T, self.TT = _index(T)
+        T = np.flatnonzero(nz[~gather].any(axis=0))
+        self.B = A[np.ix_(S[~gather], T)]
+        self.n_B = self.B.shape[0]
+        self.g = A[S[gather], c[gather]][:, None]
+        U = np.union1d(T, c[gather])
+        self.T, self.T_U = _index(T)[0], _index(np.searchsorted(U, T))[0]
+        self.c, self.c_U = _index(c[gather])[0], _index(np.searchsorted(U, c[gather]))[0]
+        self.S, self.SS = _index(np.concatenate([S[~gather], S[gather]]))
+        self.U, self.UU = _index(U)
 
     @classmethod
     def detect(cls, A: np.ndarray) -> Optional[_Transition]:
         """The representation of ``A``, or None when ``B`` is over half the size of ``A``."""
         off = A != 0
         np.fill_diagonal(off, False)
-        S = np.flatnonzero(off.any(axis=1))
-        T = np.flatnonzero((A[S] != 0).any(axis=0))
-        if 2 * S.size * T.size > A.size:
-            return None
-        return cls(A, S, T)
+        op = cls(A, np.flatnonzero(off.any(axis=1)))
+        return None if 2 * op.B.size > A.size else op
+
+    def _rows(self, X: np.ndarray) -> np.ndarray:
+        """``A[S] @ X`` for a 2-D ``X`` (rows in the order of ``S``)."""
+        out = np.empty((self.n_B + self.g.shape[0], X.shape[1]))
+        np.matmul(self.B, X[self.T], out=out[: self.n_B])
+        np.multiply(self.g, X[self.c], out=out[self.n_B:])
+        return out
 
     def left(self, X: np.ndarray) -> np.ndarray:
         """``A @ X`` for a 2-D ``X``."""
         out = self.d * X
-        out[self.S] = self.B @ X[self.T]
+        out[self.S] = self._rows(X)
         return out
+
+    def _add_rows_t(self, out: np.ndarray, Y: np.ndarray, T, c) -> None:
+        """``out += A[S]' @ Y`` for ``Y`` with one row per special row.
+
+        ``T`` and ``c`` index the rows of ``out`` that stand for the columns ``T`` and ``c`` of ``A``.
+        """
+        out[T] += self.B.T @ Y[: self.n_B]
+        out[c] += self.g * Y[self.n_B:]
 
     def left_t(self, X: np.ndarray) -> np.ndarray:
         """``A' @ X`` for a 2-D ``X``."""
         out = self.d * X
-        out[self.T] += self.B.T @ X[self.S]
+        self._add_rows_t(out, X[self.S], self.T, self.c)
         return out
 
     def sandwich(self, P: np.ndarray) -> np.ndarray:
         """``A P A'`` for a symmetric ``P``."""
-        Z = self.left((self.B @ P[self.T]).T).T  # rows S of A P A'
+        Z = self.left(self._rows(P).T).T  # rows S of A P A'
         out = self.dd * P
         out[self.S] = Z
         out[:, self.S] = Z.T
@@ -185,13 +213,13 @@ class _Transition:
 
     def sandwich_t(self, N: np.ndarray) -> np.ndarray:
         """``A' N A`` for a symmetric ``N``."""
-        Y = self.d[self.T] * N[self.T]
-        Y += self.B.T @ N[self.S]
-        Z = self.left_t(Y.T).T  # rows T of A' N A
+        Y = self.d[self.U] * N[self.U]  # rows U of A' N
+        self._add_rows_t(Y, N[self.S], self.T_U, self.c_U)
+        Z = self.left_t(Y.T).T  # rows U of A' N A
         out = self.dd * N
-        out[self.T] = Z
-        out[:, self.T] = Z.T
-        out[self.TT] = _sym(Z[:, self.T])
+        out[self.U] = Z
+        out[:, self.U] = Z.T
+        out[self.UU] = _sym(Z[:, self.U])
         return out
 
 
@@ -717,7 +745,7 @@ class DFMKalmanFilter:
         pP, fm, fP, gains = fwd["pP"], fwd["fm"], fwd["fP"], fwd["gains"]
         T, m = fm.shape
         sm = np.empty((T, m))
-        w = np.empty(C.shape[0])  # C_o' S^-1 (e - C_o P r) scattered to all series
+        w = np.empty(C.shape[0])  # S^-1 (e - C_o P A' r_t) scattered to all series; r_{t-1} = A' r_t + C' w
         r = np.zeros(m)
         N = np.zeros((m, m))
         sP_next = None  # Var[x_{t+1} | Y], written to pP[t + 1] once P_{t+1} is used
@@ -734,6 +762,7 @@ class DFMKalmanFilter:
             r_A = A.T @ r
             sm[t] = fm[t] + Pf @ r_A
             if t == 0:
+                pP[0], fP[0] = sP_next, 0.0
                 break
             N = st.A.sandwich_t(N)
             step = gains[t]
@@ -751,8 +780,6 @@ class DFMKalmanFilter:
             V -= U
             Z = plan.left_t(V)
             N += Z + Z.T
-        pP[0] = sP_next
-        fP[0] = 0.0
         return sm, pP, fP
 
     def init_streaming(self) -> None:

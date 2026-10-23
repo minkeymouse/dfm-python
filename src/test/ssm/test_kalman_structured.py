@@ -2,11 +2,11 @@
 
 Random DFM-shaped models (a factor companion block, AR(1) idiosyncratic
 states of clock series and a tent chain per slower-frequency series; missing
-values, all-NaN rows and a ragged edge) go through the structured path; the
-log-likelihood, the smoothed means, covariances and lag-one covariances, the
-filter and ``filter_step`` must equal the dense implementation to 1e-9
-relative (1e-12 absolute near zero). Generic dense matrices take the dense
-path and give the oracle's numbers exactly.
+values, all-NaN rows and a ragged edge) and other sparse ``A`` and ``C`` go
+through the structured path; the log-likelihood, the smoothed means,
+covariances and lag-one covariances, the filter and ``filter_step`` must equal
+the dense implementation to 1e-9 relative (1e-12 absolute near zero). Generic
+dense matrices take the dense path and give the oracle's numbers exactly.
 """
 
 from __future__ import annotations
@@ -79,6 +79,40 @@ def _structured_model(seed: int, *, r: int = 2, p: int = 2, n_clock: int = 7, n_
     Y[-3:, : n_clock // 2] = np.nan
     Y[-1, n_clock:] = np.nan
     return (A, C, Q, R, Z0, V0), Y
+
+
+def _sparse_model(seed: int, m: int = 12, N: int = 6, T: int = 30):
+    """Sparsity patterns beyond the DFM layout that the structured path represents exactly.
+
+    ``A``: a zero diagonal entry, a dense special row, two shift rows on the
+    same column and random extra entries in the last rows. ``C``: two dense
+    columns, single-entry columns (series 0 has none, the last series three),
+    zero columns. ``R`` is diagonal for even seeds, full for odd ones.
+    """
+    rng = np.random.default_rng(seed)
+    A = np.diag(rng.uniform(-0.9, 0.9, m))
+    extra = rng.random((m, m)) < 0.1
+    extra[:8] = False
+    A[extra] = rng.uniform(-0.3, 0.3, extra.sum())
+    A[0, 0] = 0.0
+    A[1, :4] = rng.uniform(-0.3, 0.3, 4)
+    A[2, 2], A[2, 5] = 0.0, 1.0
+    A[3, 3], A[3, 5] = 0.0, 0.5
+    A *= 0.9 / max(0.9, np.max(np.abs(np.linalg.eigvals(A))))
+    C = np.zeros((N, m))
+    C[:, :2] = rng.standard_normal((N, 2))
+    for i in range(1, N):
+        C[i, 1 + i] = rng.choice([1.0, 2.5])
+    C[N - 1, N + 1:N + 3] = rng.uniform(0.5, 2.0, 2)
+    B = rng.standard_normal((m, m))
+    Q = B @ B.T / m + 0.1 * np.eye(m)
+    D = 0.3 * rng.standard_normal((N, N))
+    R = np.diag(rng.uniform(1e-4, 0.5, N)) if seed % 2 == 0 else D @ D.T + 1e-3 * np.eye(N)
+    Y = rng.standard_normal((T, N))
+    Y[rng.random((T, N)) < 0.3] = np.nan
+    Y[5] = np.nan
+    Y[-2:, :3] = np.nan
+    return (A, C, Q, R, rng.standard_normal(m), np.eye(m)), Y
 
 
 def _dense_model(seed: int, m: int = 6, N: int = 5, T: int = 40):
@@ -195,10 +229,35 @@ def test_diagonal_transition_and_full_R():
     _compare_all((A, C, Q, R, rng.standard_normal(m), np.eye(m)), Y)
 
 
-@pytest.mark.parametrize("rows", ["one", "all-nan", "first-nan"])
+@pytest.mark.parametrize("seed", range(4))
+def test_other_sparsity_patterns_match_dense(seed):
+    params, Y = _sparse_model(seed)
+    _compare_all(params, Y)
+    kf, dense = DFMKalmanFilter(*params), DenseKalmanFilter(*params)
+    for a, b in zip(kf.filter(Y), dense.filter(Y)):
+        _assert_close(a, b)
+    kf.init_streaming()
+    dense.init_streaming()
+    for t in range(Y.shape[0]):
+        for a, b in zip(kf.filter_step(Y[t]), dense.filter_step(Y[t])):
+            _assert_close(a, b)
+
+
+def test_shift_rows_are_gathers():
+    """Lag and tent-chain shift rows stay out of the dense block, so a quarterly-heavy model is structured."""
+    r, p = 2, 2
+    params, Y = _structured_model(12, r=r, p=p, n_clock=2, n_slow=6)
+    kf = DFMKalmanFilter(*params)
+    assert kf._structure is not None and kf._structure.A.B.shape == (r, r * p)
+    _compare_all(params, Y)
+
+
+@pytest.mark.parametrize("rows", ["none", "one", "all-nan", "first-nan"])
 def test_edge_samples(rows):
     params, Y = _structured_model(9)
-    if rows == "one":
+    if rows == "none":
+        Y = Y[:0]
+    elif rows == "one":
         Y = Y[2:3]
     elif rows == "all-nan":
         Y = np.full((5, Y.shape[1]), np.nan)
