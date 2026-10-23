@@ -436,7 +436,8 @@ class AFM(BaseFactorModel):
             float64 weights, index ``data.index[hist_len:]`` (row *i* holds the
             weights applied to the returns at that timestamp), one column per
             asset; ``attrs`` holds ``model``, ``kind="weights"`` and ``origin``
-            (the last timestamp of ``data``).
+            (the last timestamp of ``data``). A ``polars.DataFrame`` after
+            ``set_output(output="polars")``.
         """
         self._check_is_fitted("allocate")
         if data is None:
@@ -455,7 +456,7 @@ class AFM(BaseFactorModel):
             columns=list(self.feature_names_in_),
         )
         frame.attrs = {"model": type(self).__name__, "kind": "weights", "origin": panel.index[-1]}
-        return frame
+        return self._emit(frame)
 
     def backtest(self, data: Any) -> AFMResult:
         """Evaluate the fitted policy on ``data`` without training.

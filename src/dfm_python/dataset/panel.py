@@ -13,10 +13,10 @@ Slot                Type and shape
 ``freq``            ``dict`` series -> frequency code, or None
 ==================  ==========================================================
 
-The container is frozen and validated. It uses only numpy and pandas (polars
-frames are converted with ``.to_pandas()``), holds no device or scaler, and
-never imputes, scales or reorders values: NaN stays NaN and every value is cast
-to float64.
+The container is frozen and validated. It holds numpy and pandas data only
+(polars frames are converted with ``.to_pandas()``; :meth:`PanelData.to_polars`
+converts back), holds no device or scaler, and never imputes, scales or
+reorders values: NaN stays NaN and every value is cast to float64.
 
 Index rules: unique, strictly increasing, and a ``DatetimeIndex``,
 ``PeriodIndex`` or ``RangeIndex``. An evenly spaced, increasing integer index is
@@ -35,7 +35,8 @@ import numpy as np
 import pandas as pd
 
 from ..config.constants import VALID_FREQUENCIES
-from ..utils.errors import DataValidationError
+from ..utils.errors import ConfigurationError, DataValidationError, UnsupportedInputError
+from ..utils.output import require_polars, to_polars as _frame_to_polars
 
 __all__ = ["PanelData"]
 
@@ -57,6 +58,24 @@ def _to_pandas(obj: Any) -> Any:
     if pl is not None and isinstance(obj, pl.DataFrame):
         return obj.to_pandas()
     return obj
+
+
+def _polars_time_col(obj: Any) -> Optional[str]:
+    """The one ``Date`` or ``Datetime`` column of a polars DataFrame.
+
+    None when ``obj`` is not a polars frame or has no such column. Several
+    such columns raise :class:`DataValidationError`.
+    """
+    pl = sys.modules.get("polars")
+    if pl is None or not isinstance(obj, pl.DataFrame):
+        return None
+    temporal = [name for name, dtype in obj.schema.items() if isinstance(dtype, (pl.Date, pl.Datetime))]
+    if len(temporal) > 1:
+        raise DataValidationError(
+            f"The polars frame has several Date/Datetime columns {temporal}; name the time index with "
+            "PanelData.from_wide(df, time_col=...)."
+        )
+    return temporal[0] if temporal else None
 
 
 def _require_frame(obj: Any, what: str) -> pd.DataFrame:
@@ -520,12 +539,18 @@ class PanelData:
     def _coerce(cls, obj: Any) -> PanelData:
         """Turn what ``fit``, ``predict`` and ``update`` accept into a ``PanelData``.
 
-        A ``PanelData`` is returned as is, a (pandas or polars) DataFrame means
-        ``PanelData(y=df)`` and a 2-D ndarray means ``from_arrays(arr)``.
-        Anything else raises ``TypeError``.
+        A ``PanelData`` is returned as is, a pandas DataFrame means
+        ``PanelData(y=df)`` and a 2-D ndarray means ``from_arrays(arr)``. A
+        polars DataFrame with one ``Date`` or ``Datetime`` column means
+        ``from_wide(df, time_col=<that column>)``; without one it means
+        ``PanelData(y=df)`` (a ``RangeIndex``); with several it raises
+        :class:`DataValidationError`. Anything else raises ``TypeError``.
         """
         if isinstance(obj, PanelData):
             return obj
+        time_col = _polars_time_col(obj)
+        if time_col is not None:
+            return cls.from_wide(obj, time_col=time_col)
         obj = _to_pandas(obj)
         if isinstance(obj, pd.DataFrame):
             return cls(obj)
@@ -676,6 +701,38 @@ class PanelData:
             for j, name in enumerate(self._exog_names):
                 out[name] = tiled[:, j]
         return out
+
+    def to_polars(self, *, layout: str = "long") -> Any:
+        """The panel as a ``polars.DataFrame``.
+
+        ``layout="long"`` is :meth:`to_long` (``PanelData.from_long`` rebuilds
+        the panel). ``layout="wide"`` holds the time column (named after the
+        index, or ``"time"``), the ``y`` columns, then the ``exog`` columns
+        (``PanelData.from_wide(df, time_col=..., exog_cols=...)`` rebuilds the
+        panel). A ``PeriodIndex`` becomes its start timestamps and the wide
+        column names become strings, as in :func:`dfm_python.utils.output.to_polars`.
+        Needs the ``polars`` extra.
+
+        Raises
+        ------
+        ConfigurationError
+            For a ``layout`` other than ``"long"`` or ``"wide"``.
+        UnsupportedInputError
+            For ``layout="wide"`` with ``series_exog``, which has no wide form.
+        """
+        if layout == "long":
+            pl = require_polars()
+            long = self.to_long()
+            if isinstance(self._y.index, pd.PeriodIndex):
+                long[_LONG_TIME] = long[_LONG_TIME].dt.to_timestamp()
+            return pl.from_pandas(long)
+        if layout == "wide":
+            if self._series_exog is not None:
+                raise UnsupportedInputError(
+                    "series_exog has no wide layout (one column per variable); use to_polars(layout='long')."
+                )
+            return _frame_to_polars(self._y if self._exog is None else pd.concat([self._y, self._exog], axis=1))
+        raise ConfigurationError(f"layout must be 'long' or 'wide', got {layout!r}.")
 
     def loc(self, start: Any = None, stop: Any = None) -> PanelData:
         """Select rows by label, both ends included (pandas ``.loc`` semantics); None leaves an end open."""

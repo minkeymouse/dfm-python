@@ -11,7 +11,7 @@ import dfm_python
 from dfm_python import PanelData
 from dfm_python.config.constants import VALID_FREQUENCIES
 from dfm_python.dataset.panel import _normalize_freq
-from dfm_python.utils.errors import DataValidationError
+from dfm_python.utils.errors import ConfigurationError, DataValidationError, UnsupportedInputError
 
 T, N, M, K = 8, 3, 2, 2
 SERIES = ["gdp", "cpi", "ip"]
@@ -291,6 +291,83 @@ def test_polars_from_arrays_and_coerce(pl):
     np.testing.assert_array_equal(data.y.to_numpy(), _y().to_numpy())
     coerced = PanelData._coerce(frame)
     assert coerced.series_names == tuple(SERIES)
+
+
+def test_polars_coerce_uses_date_column_as_index(pl):
+    frame = pl.from_pandas(_y().reset_index()).with_columns(pl.col("date").cast(pl.Date))
+    data = PanelData._coerce(frame)
+    assert isinstance(data.index, pd.DatetimeIndex) and data.index.name == "date"
+    assert data.index.as_unit("ns").equals(_index())
+    assert data.series_names == tuple(SERIES)
+    np.testing.assert_array_equal(data.y.to_numpy(), _y().to_numpy())
+
+
+def test_polars_coerce_keeps_datetime_time_zone(pl):
+    frame = pl.from_pandas(_y().reset_index()).with_columns(pl.col("date").dt.replace_time_zone("America/New_York"))
+    data = PanelData._coerce(frame)
+    assert str(data.index.tz) == "America/New_York"
+    assert data.index.equals(_index().tz_localize("America/New_York"))
+    np.testing.assert_array_equal(data.y.to_numpy(), _y().to_numpy())
+
+
+def test_polars_coerce_without_temporal_column_uses_range_index(pl):
+    data = PanelData._coerce(pl.from_pandas(_y().reset_index(drop=True)))
+    assert isinstance(data.index, pd.RangeIndex) and data.index.equals(pd.RangeIndex(T))
+    assert data.series_names == tuple(SERIES)
+
+
+def test_polars_coerce_rejects_two_temporal_columns(pl):
+    frame = pl.from_pandas(_y().reset_index()).with_columns(pl.col("date").cast(pl.Date).alias("released"))
+    with pytest.raises(DataValidationError, match=r"\['date', 'released'\].*from_wide\(df, time_col=\.\.\.\)"):
+        PanelData._coerce(frame)
+
+
+# ---------------------------------------------------------------------------
+# polars output
+# ---------------------------------------------------------------------------
+
+
+def test_to_polars_long_is_to_long(pl):
+    data = _full()
+    out = data.to_polars()
+    assert isinstance(out, pl.DataFrame)
+    pd.testing.assert_frame_equal(out.to_pandas(), data.to_long())
+    back = PanelData.from_long(out, series_exog_cols=FEATURES, exog_cols=["oil", "fx"], freq=data.freq)
+    assert back.equals(data)
+
+
+def test_to_polars_wide_layout_and_round_trip(pl):
+    data = PanelData(_y(), exog=_exog(), freq={"gdp": "q"})
+    wide = data.to_polars(layout="wide")
+    assert wide.columns == ["date", *SERIES, "oil", "fx"]
+    np.testing.assert_array_equal(wide.select(SERIES).to_numpy(), _y().to_numpy())
+    back = PanelData.from_wide(wide, time_col="date", exog_cols=["oil", "fx"], freq=data.freq)
+    assert back.equals(data)
+    y_only = PanelData(_y())
+    assert PanelData._coerce(y_only.to_polars(layout="wide")).equals(y_only)
+
+
+def test_to_polars_range_and_period_index(pl):
+    ranged = PanelData(_y(index=pd.RangeIndex(10, 10 + 3 * T, 3)))
+    assert ranged.to_polars(layout="wide").columns[0] == "time"  # unnamed index
+    assert PanelData.from_wide(ranged.to_polars(layout="wide"), time_col="time").equals(ranged)
+    assert PanelData.from_long(ranged.to_polars()).equals(ranged)
+    periods = pd.period_range("2001Q1", periods=T, freq="Q")
+    quarterly = PanelData(_y(index=periods))
+    # a PeriodIndex is written as its start timestamps
+    for back in (
+        PanelData.from_long(quarterly.to_polars()),
+        PanelData.from_wide(quarterly.to_polars(layout="wide"), time_col="time"),
+    ):
+        assert back.index.equals(periods.to_timestamp())
+        np.testing.assert_array_equal(back.y.to_numpy(), quarterly.y.to_numpy())
+
+
+def test_to_polars_errors(pl):
+    with pytest.raises(UnsupportedInputError, match="series_exog"):
+        _full().to_polars(layout="wide")
+    with pytest.raises(ConfigurationError, match="layout"):
+        _full().to_polars(layout="tall")
 
 
 # ---------------------------------------------------------------------------
