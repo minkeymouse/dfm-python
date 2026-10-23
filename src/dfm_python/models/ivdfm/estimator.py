@@ -121,9 +121,13 @@ def _mean_decoder_jacobian(engine: iVDFMEngine, path: np.ndarray) -> np.ndarray:
 
 
 def _explained_variance(data: np.ndarray, common: np.ndarray) -> np.ndarray:
-    """``1 - var(data - common) / var(data)`` per column, over the entries where ``data`` is not NaN."""
-    data = np.asarray(data, dtype=np.float64)
-    with np.errstate(divide="ignore", invalid="ignore"):
+    """``1 - var(data - common) / var(data)`` per column, over the entries where ``data`` is not NaN.
+
+    An all-NaN column gives NaN and a constant one -inf (NaN if ``common``
+    matches it), without warnings.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)  # nanvar of an all-NaN column; division by zero
         return 1.0 - np.nanvar(data - common, axis=0) / np.nanvar(data, axis=0)
 
 
@@ -291,7 +295,7 @@ class iVDFM(BaseFactorModel):
         Per series, the share of the variance of the scaled training targets
         explained by the common component (the decoded factor path,
         ``result_.x_sm``): ``1 - var(y - common) / var(y)`` over the observed
-        entries. Named ``"explained_variance"``, indexed by
+        (finite) entries. Named ``"explained_variance"``, indexed by
         ``feature_names_in_``. Not set for a run saved by 0.8.x, which holds
         no training targets.
     network_ : torch.nn.Module
@@ -724,7 +728,8 @@ class iVDFM(BaseFactorModel):
         self.conditioning_index_ = data.index
         self.window_factors_ = self._window_factors_frame(engine.factors, dataset.accessed, data.index)
         targets = data.y.to_numpy(dtype=np.float64)
-        scaled = np.where(np.isnan(targets), np.nan, dataset.target)
+        # The dataset fills non-finite targets like missing ones; they do not count as observed.
+        scaled = np.where(np.isfinite(targets), dataset.target, np.nan)
         self._set_interpretation(targets, _explained_variance(scaled, self.result_.x_sm))
 
     def _set_interpretation(self, targets: Optional[np.ndarray], explained: Optional[np.ndarray]) -> None:
@@ -746,6 +751,11 @@ class iVDFM(BaseFactorModel):
         self._targets_ = targets
         if explained is not None:
             self.explained_variance_ = pd.Series(explained, index=series, name="explained_variance")
+
+    def _clear_fitted(self) -> None:
+        """Remove the fitted attributes and the private training targets ``_targets_``."""
+        super()._clear_fitted()
+        vars(self).pop("_targets_", None)
 
     def _window_factors_frame(self, factors: np.ndarray, accessed: list, index: pd.Index) -> pd.DataFrame:
         """``window_factors_``: the engine's window factors in chronological order on a ``(window, time)`` MultiIndex.

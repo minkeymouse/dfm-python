@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -136,6 +137,24 @@ def test_explained_variance_matches_a_direct_computation(case):
     np.testing.assert_allclose(ev.to_numpy(), expected, rtol=1e-12)
 
 
+def test_non_finite_targets_count_as_missing():
+    """An all-NaN series has NaN explained variance (fit does not warn); inf entries count as missing."""
+    y = _panel().y
+    y["s1"] = np.nan
+    y.iloc[[4, 9], 2] = np.inf
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        est = iVDFM(**TINY, scaler="standard").fit(PanelData(y=y))
+    ev = est.explained_variance_.to_numpy()
+    assert np.isnan(ev[1]) and np.isfinite(ev[[0, 2]]).all()
+    observed = np.delete(np.arange(40), [4, 9])
+    scaled = est.scaler_.transform(y.to_numpy()[observed])[:, 2]
+    residual = scaled - est.result_.x_sm[observed, 2].astype(np.float64)
+    assert ev[2] == pytest.approx(1.0 - np.var(residual) / np.var(scaled), rel=1e-12)
+    parts = est.decompose()
+    assert np.isfinite(parts["common"].to_numpy()).all() and parts[("idiosyncratic", "s1")].isna().all()
+
+
 def test_decompose_by():
     with pytest.raises(NotFittedError, match="decompose"):
         iVDFM(**TINY).decompose()
@@ -144,6 +163,10 @@ def test_decompose_by():
         est.decompose(by="factor")
     with pytest.raises(ConfigurationError, match="by must be"):
         est.decompose(by="series")
+    # A failed refit removes the training targets with the fitted attributes.
+    with pytest.raises(ConfigurationError):
+        est.set_params(n_factors=0).fit(_panel())
+    assert "_targets_" not in vars(est) and not hasattr(est, "factors_")
 
 
 def test_update_leaves_the_interpretation_unchanged():
