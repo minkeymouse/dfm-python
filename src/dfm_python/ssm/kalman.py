@@ -17,10 +17,8 @@ prediction step. A row is never dropped because one of its entries is missing.
 Forward pass (one multivariate update per row, which works for any ``R``):
 
 - innovation ``e_t = y_o - C_o a_t`` and ``S_t = C_o P_t C_o' + R_oo``,
-  factored by Cholesky (a failed factorization raises :class:`NumericalError`);
-- gain ``K_t = P_t C_o' S_t^-1`` by ``cho_solve``;
-- Joseph-form covariance ``(I - K C_o) P (I - K C_o)' + K R_oo K'``,
-  symmetrized;
+  factored by Cholesky ``S_t = L L'`` (a failed factorization raises
+  :class:`NumericalError`);
 - the exact Gaussian log-likelihood of the observed entries, accumulated in the
   same pass: ``-0.5 (p_t log 2 pi + log|S_t| + e' S_t^-1 e)`` per row, 0 for
   an empty row.
@@ -39,6 +37,31 @@ never inverts the predicted covariance and so also works when it is singular
 The lag-one covariances are returned in the layout the M-step reads:
 ``VVsmooth[t] = Cov(x_t, x_{t-1} | Y)`` for ``t >= 1`` and ``VVsmooth[0] = 0``.
 
+Two implementations of these recursions, equal up to rounding:
+
+- **Structured**, used when :meth:`DFMKalmanFilter.update_parameters` finds
+  the DFM sparsity (:class:`_Transition`, :class:`_ObsStructure`): ``A`` is a
+  diagonal (AR(1) coefficients) plus a few rows with off-diagonal entries
+  (factor VAR, lag shifts, tent chains) and ``C`` a few dense columns (the
+  loadings) plus columns with one nonzero (the idiosyncratic states).
+  Products with ``A`` and ``C_o`` are scalings, gathers and small dense
+  products, and ``A P A'`` costs no ``m x m`` product. The update uses the
+  triangular inverse of ``L``: ``W = L^-1 C_o P``, ``P_f = P - W'W`` (a
+  symmetric rank-``p_t`` product, no Joseph form) and
+  ``a_f = a + W' L^-1 e``. The smoother works from the filtered moments: with
+  ``G = A P_f`` and ``H = N_t G``, ``E[x_t | Y] = a_f + P_f A' r_t``,
+  ``Var[x_t | Y] = P_f - G'H`` and ``Cov(x_{t+1}, x_t | Y) = G - P_{t+1} H``;
+  ``N_{t-1} = C_o' S^-1 C_o + B' A'N_tA B`` with ``B = I - K C_o`` is expanded
+  so that only products with ``K`` are dense. A row then costs three dense
+  products in the filter (``L^-1 C_o P``, ``W'W``, ``L^-1``) and five in the
+  smoother, against about twenty in the dense path. ``P_f - G'H`` subtracts
+  terms of the size of ``P_f``, where ``P - P N P`` subtracts terms of the
+  size of ``P``, so the structured smoothed variances are at least as
+  accurate when ``R`` is small.
+- **Dense** (any other matrices): the products as written above, the gain
+  ``K_t = P_t C_o' S_t^-1`` by ``cho_solve`` and the Joseph-form covariance
+  ``(I - K C_o) P (I - K C_o)' + K R_oo K'``, symmetrized.
+
 There is no covariance regularization, eigenvalue capping or state clipping:
 the moments and the log-likelihood describe exactly the model given to
 :meth:`DFMKalmanFilter.update_parameters`. Non-finite results raise
@@ -51,6 +74,7 @@ from typing import Optional, Tuple
 
 import numpy as np
 from scipy import linalg
+from scipy.linalg import lapack
 from threadpoolctl import threadpool_limits
 
 from ..config.types import FloatArray
@@ -66,7 +90,11 @@ _PSD_RTOL = 1e-8
 
 
 def _sym(M: np.ndarray) -> np.ndarray:
-    return 0.5 * (M + M.T)
+    """``(M + M') / 2``."""
+    out = M.T.copy()
+    out += M
+    out *= 0.5
+    return out
 
 
 def _observed_mask(observations) -> Tuple[np.ndarray, np.ndarray]:
@@ -87,6 +115,252 @@ def _observed_mask(observations) -> Tuple[np.ndarray, np.ndarray]:
         raise ValueError(f"observations must be a (T x N) array, got shape {values.shape}")
     observed = ~(mask | np.isnan(values))
     return values, observed
+
+
+def _index(idx: np.ndarray) -> Tuple[object, object]:
+    """``(rows, block)``: indexers of the rows ``idx`` and of the block ``idx x idx``.
+
+    Slices (indexing then makes views) when ``idx`` is a contiguous range.
+    """
+    if idx.size and idx[-1] - idx[0] == idx.size - 1:
+        s = slice(int(idx[0]), int(idx[-1]) + 1)
+        return s, (s, s)
+    return idx, np.ix_(idx, idx)
+
+
+class _Transition:
+    """``A`` as a diagonal plus a few special rows: ``A = diag(d) + E_S' B E_T``.
+
+    The special rows ``S`` are the rows of ``A`` with a nonzero off the
+    diagonal (factor VAR rows, lag shifts, tent chains); ``d`` is the diagonal
+    of the other rows (AR(1) coefficients) and zero on ``S``; ``B = A[S, T]``
+    with ``T`` the columns the rows ``S`` touch. A product with ``A`` costs a
+    scaling pass and a ``|S| x |T|`` product. :meth:`sandwich` and
+    :meth:`sandwich_t` are ``(d d') * X`` outside the rows and columns ``S``
+    (``T``), so they are exactly symmetric when ``X`` is.
+    """
+
+    __slots__ = ("d", "dd", "B", "S", "SS", "T", "TT")
+
+    def __init__(self, A: np.ndarray, S: np.ndarray, T: np.ndarray) -> None:
+        d = np.diag(A).copy()
+        d[S] = 0.0
+        self.d = d[:, None]
+        self.dd = np.outer(d, d)
+        self.B = A[np.ix_(S, T)]
+        self.S, self.SS = _index(S)
+        self.T, self.TT = _index(T)
+
+    @classmethod
+    def detect(cls, A: np.ndarray) -> Optional[_Transition]:
+        """The representation of ``A``, or None when ``B`` is over half the size of ``A``."""
+        off = A != 0
+        np.fill_diagonal(off, False)
+        S = np.flatnonzero(off.any(axis=1))
+        T = np.flatnonzero((A[S] != 0).any(axis=0))
+        if 2 * S.size * T.size > A.size:
+            return None
+        return cls(A, S, T)
+
+    def left(self, X: np.ndarray) -> np.ndarray:
+        """``A @ X`` for a 2-D ``X``."""
+        out = self.d * X
+        out[self.S] = self.B @ X[self.T]
+        return out
+
+    def left_t(self, X: np.ndarray) -> np.ndarray:
+        """``A' @ X`` for a 2-D ``X``."""
+        out = self.d * X
+        out[self.T] += self.B.T @ X[self.S]
+        return out
+
+    def sandwich(self, P: np.ndarray) -> np.ndarray:
+        """``A P A'`` for a symmetric ``P``."""
+        Z = self.left((self.B @ P[self.T]).T).T  # rows S of A P A'
+        out = self.dd * P
+        out[self.S] = Z
+        out[:, self.S] = Z.T
+        out[self.SS] = _sym(Z[:, self.S])
+        return out
+
+    def sandwich_t(self, N: np.ndarray) -> np.ndarray:
+        """``A' N A`` for a symmetric ``N``."""
+        Y = self.d[self.T] * N[self.T]
+        Y += self.B.T @ N[self.S]
+        Z = self.left_t(Y.T).T  # rows T of A' N A
+        out = self.dd * N
+        out[self.T] = Z
+        out[:, self.T] = Z.T
+        out[self.TT] = _sym(Z[:, self.T])
+        return out
+
+
+class _ObsStructure:
+    """``C`` as dense columns ``cols`` plus entries ``(er, ec, ev)`` in columns with one nonzero.
+
+    The entries are sorted by row; each of their columns appears once.
+    ``unit`` says every entry is 1 (the idiosyncratic states of clock-frequency
+    series), so products skip the scaling.
+    """
+
+    __slots__ = ("m", "C_cols", "cols", "er", "ec", "ev", "unit", "one_each")
+
+    def __init__(self, C: np.ndarray, cols: np.ndarray, single: np.ndarray) -> None:
+        self.m = C.shape[1]
+        self.C_cols = C[:, cols]
+        self.cols = cols
+        self.er, self.ec = np.nonzero((C != 0) & single)
+        self.ev = C[self.er, self.ec]
+        self.unit = bool(np.all(self.ev == 1.0))
+        self.one_each = np.array_equal(self.er, np.arange(C.shape[0]))
+
+    @classmethod
+    def detect(cls, C: np.ndarray) -> Optional[_ObsStructure]:
+        """The representation of ``C``, or None when over half its columns have two or more nonzeros."""
+        count = np.count_nonzero(C, axis=0)
+        cols = np.flatnonzero(count > 1)
+        if 2 * cols.size > C.shape[1]:
+            return None
+        return cls(C, cols, count == 1)
+
+    def plan(self, observed: np.ndarray) -> _ObsPlan:
+        """The observed rows ``C_o`` of one data row (``observed`` is its boolean mask)."""
+        idx = np.flatnonzero(observed)
+        if self.one_each:  # every series has exactly one entry, so entry j is in row j of C_o
+            sel, er, starts = idx, slice(None), None
+        else:
+            sel = observed[self.er]
+            er = (np.cumsum(observed) - 1)[self.er[sel]]
+            first = np.ones(er.size, dtype=bool)
+            first[1:] = er[1:] != er[:-1]
+            starts = None if first.all() else np.flatnonzero(first)
+        return _ObsPlan(self, idx, er, starts, self.ec[sel], None if self.unit else self.ev[sel])
+
+
+class _ObsPlan:
+    """Products with ``C_o`` (the observed rows of ``C``) for one data row; see :class:`_ObsStructure`.
+
+    ``er`` are the entries' rows within ``C_o`` (``slice(None)`` when entry
+    ``j`` is in row ``j``), ``ec`` and ``ev`` their columns and values
+    (``ev`` None for unit entries). With rows holding several entries,
+    ``starts`` are the first entry of each row with entries and ``rows`` those
+    rows (``slice(None)`` when every row has entries).
+    """
+
+    __slots__ = ("idx", "C_dense", "cols", "er", "starts", "rows", "ec", "ev", "m")
+
+    def __init__(self, obs: _ObsStructure, idx, er, starts, ec, ev) -> None:
+        self.idx = idx
+        self.C_dense = obs.C_cols[idx]
+        self.cols = obs.cols
+        self.m = obs.m
+        self.er = er
+        self.starts = starts
+        rows = er if starts is None else er[starts]
+        self.rows = slice(None) if isinstance(rows, slice) or rows.size == idx.size else rows
+        if starts is None and not isinstance(er, slice) and isinstance(self.rows, slice):
+            self.er = slice(None)
+        self.ec = ec
+        self.ev = None if ev is None else ev[:, None]
+
+    def left(self, X: np.ndarray) -> np.ndarray:
+        """``C_o @ X`` for a 2-D ``X`` with ``m`` rows."""
+        out = self.C_dense @ X[self.cols]
+        part = X[self.ec]
+        if self.ev is not None:
+            part *= self.ev
+        if self.starts is not None:
+            part = np.add.reduceat(part, self.starts, axis=0)
+        out[self.rows] += part
+        return out
+
+    def right(self, X: np.ndarray) -> np.ndarray:
+        """``X @ C_o'`` for a 2-D ``X`` with ``m`` columns."""
+        out = X[:, self.cols] @ self.C_dense.T
+        part = X[:, self.ec]
+        if self.ev is not None:
+            part *= self.ev.T
+        if self.starts is not None:
+            part = np.add.reduceat(part, self.starts, axis=1)
+        out[:, self.rows] += part
+        return out
+
+    def left_t(self, X: np.ndarray) -> np.ndarray:
+        """``C_o' @ X`` for a 2-D ``X`` with one row per observed series."""
+        out = np.zeros((self.m, X.shape[1]))
+        out[self.ec] = X[self.er] if self.ev is None else self.ev * X[self.er]
+        out[self.cols] += self.C_dense.T @ X
+        return out
+
+
+class _Structure:
+    """The DFM sparsity of ``(A, C, R)`` used by the structured path, or None from :meth:`detect`."""
+
+    __slots__ = ("A", "C", "R_diag")
+
+    def __init__(self, A: _Transition, C: _ObsStructure, R_diag: Optional[np.ndarray]) -> None:
+        self.A = A
+        self.C = C
+        self.R_diag = R_diag
+
+    @classmethod
+    def detect(cls, A, C, R) -> Optional[_Structure]:
+        A_op = _Transition.detect(A)
+        C_op = _ObsStructure.detect(C)
+        if A_op is None or C_op is None:
+            return None
+        R_diag = np.diag(R).copy() if np.count_nonzero(R - np.diag(np.diag(R))) == 0 else None
+        return cls(A_op, C_op, R_diag)
+
+    def predict(self, P: np.ndarray, Q: np.ndarray) -> np.ndarray:
+        """``A P A' + Q`` (exactly symmetric when ``P`` is)."""
+        out = self.A.sandwich(P)
+        out += Q
+        return out
+
+    def innovation(self, plan: _ObsPlan, P: np.ndarray, R: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """``(C_o P, S)`` with ``S = C_o P C_o' + R_oo``; only the lower triangle of ``S`` is used."""
+        CP = plan.left(P)
+        S = plan.right(CP)
+        if self.R_diag is not None:
+            S.flat[:: plan.idx.size + 1] += self.R_diag[plan.idx]
+        else:
+            S += R[np.ix_(plan.idx, plan.idx)]
+        return CP, S
+
+
+def _cholesky_inverse(S: np.ndarray, t: int) -> Tuple[np.ndarray, np.ndarray]:
+    """``(L, L^-1)`` for ``S = L L'`` from the lower triangle of ``S`` (both lower triangular).
+
+    Raises NumericalError (the messages of the dense path) when ``S`` is not
+    finite or not positive definite.
+    """
+    if not np.all(np.isfinite(S)):
+        raise NumericalError(
+            f"Kalman filter: the innovation covariance is not finite at row {t}.",
+            details="The predicted state covariance overflowed; the parameters are not usable.",
+        )
+    L, info = lapack.dpotrf(S, lower=1, clean=1)
+    if info != 0:
+        raise NumericalError(
+            f"Kalman filter: the innovation covariance is not positive definite at row {t}.",
+            details=f"Cholesky of S_t failed: LAPACK potrf info={info}",
+        )
+    L_inv, _ = lapack.dtrtri(L, lower=1)
+    return L, L_inv
+
+
+def _structured_update(a, P, CP, e, L_inv) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """``(a_f, P_f, W, u)``: ``W = L^-1 C_o P``, ``u = L^-1 e``, ``a_f = a + W'u``, ``P_f = P - W'W``.
+
+    ``W'W`` is computed as a symmetric rank-k product, so ``P_f`` is exactly
+    symmetric when ``P`` is.
+    """
+    W = L_inv @ CP
+    u = L_inv @ e
+    P_f = W.T @ W
+    np.subtract(P, P_f, out=P_f)
+    return a + W.T @ u, P_f, W, u
 
 
 class DFMKalmanFilter:
@@ -131,10 +405,12 @@ class DFMKalmanFilter:
         initial_state_mean: FloatArray,
         initial_state_covariance: FloatArray,
     ) -> None:
-        """Set ``(A, C, Q, R, Z_0, V_0)``.
+        """Set ``(A, C, Q, R, Z_0, V_0)`` and detect their structure.
 
         The arrays are copied to float64. ``Q``, ``R`` and ``V_0`` are
-        symmetrized; nothing else is changed.
+        symmetrized; nothing else is changed. The structured path is used when
+        ``A`` and ``C`` have the DFM sparsity (module docstring), the
+        dense path otherwise.
 
         Raises
         ------
@@ -188,6 +464,7 @@ class DFMKalmanFilter:
         self.observation_covariance = R
         self.initial_state_mean = Z_0
         self.initial_state_covariance = V_0
+        self._structure = _Structure.detect(A, C, R) if m > 0 else None
         self._initialized = True
         self._cached_smoothed_factors = None
 
@@ -200,16 +477,51 @@ class DFMKalmanFilter:
     def _forward(self, observations, *, keep_filtered: bool, keep_gains: bool) -> dict:
         """Filter every row: predicted (and filtered) moments, loglik, smoother inputs."""
         self._require_parameters()
+        Y, observed = _observed_mask(observations)
+        if Y.shape[1] != self.observation_matrices.shape[0]:
+            raise ValueError(
+                f"observations have {Y.shape[1]} columns, the model has {self.observation_matrices.shape[0]} series"
+            )
+        # The per-row matrices are small (m x m); multithreaded BLAS spends
+        # its time synchronizing on them (a 4-core run was 28x slower than
+        # a single-threaded one at m = 106), so the loops run on one thread.
+        with threadpool_limits(limits=1, user_api="blas"), np.errstate(over="ignore", invalid="ignore"):
+            if self._structure is None:
+                return self._forward_dense(Y, observed, keep_filtered=keep_filtered, keep_gains=keep_gains)
+            return self._forward_structured(Y, observed, keep_filtered=keep_filtered, keep_gains=keep_gains)
+
+    @staticmethod
+    def _check_innovation(S: np.ndarray, t: int) -> tuple:
+        """Cholesky factor ``cho_factor(S, lower=True)``; raises NumericalError if ``S`` is unusable."""
+        if not np.all(np.isfinite(S)):
+            raise NumericalError(
+                f"Kalman filter: the innovation covariance is not finite at row {t}.",
+                details="The predicted state covariance overflowed; the parameters are not usable.",
+            )
+        try:
+            return linalg.cho_factor(S, lower=True, check_finite=False)
+        except linalg.LinAlgError as exc:
+            raise NumericalError(
+                f"Kalman filter: the innovation covariance is not positive definite at row {t}.",
+                details=f"Cholesky of S_t failed: {exc}",
+            ) from exc
+
+    @staticmethod
+    def _check_filtered(loglik: float, a: np.ndarray, P: np.ndarray) -> None:
+        if not (np.isfinite(loglik) and np.all(np.isfinite(a)) and np.all(np.isfinite(P))):
+            raise NumericalError(
+                "Kalman filter: the filtered moments or the log-likelihood are not finite.",
+                details=f"loglik={loglik!r}; the parameters make the filter diverge.",
+            )
+
+    def _forward_dense(self, Y, observed, *, keep_filtered: bool, keep_gains: bool) -> dict:
+        """Dense forward pass with the Joseph-form update; ``gains[t] = (idx, e, chol, K)``."""
         A = self.transition_matrices
         C = self.observation_matrices
         Q = self.transition_covariance
         R = self.observation_covariance
-        Y, observed = _observed_mask(observations)
-        T, N_y = Y.shape
+        T = Y.shape[0]
         m = A.shape[0]
-        if N_y != C.shape[0]:
-            raise ValueError(f"observations have {N_y} columns, the model has {C.shape[0]} series")
-
         pm = np.empty((T, m))
         pP = np.empty((T, m, m))
         fm = np.empty((T, m)) if keep_filtered else None
@@ -219,53 +531,75 @@ class DFMKalmanFilter:
         I_m = np.eye(m)
         a = self.initial_state_mean.copy()
         P = self.initial_state_covariance.copy()
-        # The per-row matrices are small (m x m); multithreaded BLAS spends
-        # its time synchronizing on them (a 4-core run was 28x slower than
-        # a single-threaded one at m = 106), so the loops run on one thread.
-        with threadpool_limits(limits=1, user_api="blas"), np.errstate(over="ignore", invalid="ignore"):
-            for t in range(T):
-                if t > 0:
-                    a = A @ a
-                    P = _sym(A @ P @ A.T + Q)
-                pm[t] = a
-                pP[t] = P
-                o = observed[t]
-                if o.any():
-                    idx = np.flatnonzero(o)
-                    Co = C[idx]
-                    Ro = R[np.ix_(idx, idx)]
-                    e = Y[t, idx] - Co @ a
-                    PCt = P @ Co.T
-                    S = _sym(Co @ PCt + Ro)
-                    if not np.all(np.isfinite(S)):
-                        raise NumericalError(
-                            f"Kalman filter: the innovation covariance is not finite at row {t}.",
-                            details="The predicted state covariance overflowed; the parameters are not usable.",
-                        )
-                    try:
-                        chol = linalg.cho_factor(S, lower=True, check_finite=False)
-                    except linalg.LinAlgError as exc:
-                        raise NumericalError(
-                            f"Kalman filter: the innovation covariance is not positive definite at row {t}.",
-                            details=f"Cholesky of S_t failed: {exc}",
-                        ) from exc
-                    u = linalg.solve_triangular(chol[0], e, lower=True, check_finite=False)
-                    loglik += -0.5 * (idx.size * _LOG2PI + 2.0 * float(np.sum(np.log(np.diag(chol[0])))) + float(u @ u))
-                    K = linalg.cho_solve(chol, PCt.T, check_finite=False).T  # P C_o' S^-1
-                    a = a + K @ e
-                    IKC = I_m - K @ Co
-                    P = _sym(IKC @ P @ IKC.T + K @ Ro @ K.T)
-                    if keep_gains:
-                        gains[t] = (idx, e, chol, K)
-                if keep_filtered:
-                    fm[t] = a
-                    fP[t] = P
-        if not (np.isfinite(loglik) and np.all(np.isfinite(a)) and np.all(np.isfinite(P))):
-            raise NumericalError(
-                "Kalman filter: the filtered moments or the log-likelihood are not finite.",
-                details=f"loglik={loglik!r}; the parameters make the filter diverge.",
-            )
+        for t in range(T):
+            if t > 0:
+                a = A @ a
+                P = _sym(A @ P @ A.T + Q)
+            pm[t] = a
+            pP[t] = P
+            o = observed[t]
+            if o.any():
+                idx = np.flatnonzero(o)
+                Co = C[idx]
+                Ro = R[np.ix_(idx, idx)]
+                e = Y[t, idx] - Co @ a
+                PCt = P @ Co.T
+                chol = self._check_innovation(_sym(Co @ PCt + Ro), t)
+                u = linalg.solve_triangular(chol[0], e, lower=True, check_finite=False)
+                loglik += -0.5 * (idx.size * _LOG2PI + 2.0 * float(np.sum(np.log(np.diag(chol[0])))) + float(u @ u))
+                K = linalg.cho_solve(chol, PCt.T, check_finite=False).T  # P C_o' S^-1
+                a = a + K @ e
+                IKC = I_m - K @ Co
+                P = _sym(IKC @ P @ IKC.T + K @ Ro @ K.T)
+                if keep_gains:
+                    gains[t] = (idx, e, chol, K)
+            if keep_filtered:
+                fm[t] = a
+                fP[t] = P
+        self._check_filtered(loglik, a, P)
         return dict(pm=pm, pP=pP, fm=fm, fP=fP, gains=gains, loglik=float(loglik))
+
+    def _forward_structured(self, Y, observed, *, keep_filtered: bool, keep_gains: bool) -> dict:
+        """Structured forward pass (``P_f = P - W'W``).
+
+        ``gains[t] = (plan, S^-1 e, S^-1, K')`` with ``K' = S^-1 C_o P``, from
+        ``L^-1`` (``S = L L'``): ``S^-1 = L^-T L^-1`` and ``K' = L^-T W``.
+        """
+        st = self._structure
+        A = self.transition_matrices
+        Q = self.transition_covariance
+        R = self.observation_covariance
+        C = self.observation_matrices
+        T = Y.shape[0]
+        m = A.shape[0]
+        pP = np.empty((T, m, m)) if keep_gains else None
+        fm = np.empty((T, m)) if keep_filtered else None
+        fP = np.empty((T, m, m)) if keep_filtered else None
+        gains = [None] * T if keep_gains else None
+        loglik = 0.0
+        a = self.initial_state_mean.copy()
+        P = self.initial_state_covariance.copy()
+        for t in range(T):
+            if t > 0:
+                a = A @ a
+                P = st.predict(P, Q)
+            if keep_gains:
+                pP[t] = P
+            o = observed[t]
+            if o.any():
+                plan = st.C.plan(o)
+                e = Y[t, plan.idx] - (C @ a)[plan.idx]
+                CP, S = st.innovation(plan, P, R)
+                L, L_inv = _cholesky_inverse(S, t)
+                a, P, W, u = _structured_update(a, P, CP, e, L_inv)
+                loglik += -0.5 * (plan.idx.size * _LOG2PI + 2.0 * float(np.sum(np.log(np.diag(L)))) + float(u @ u))
+                if keep_gains:
+                    gains[t] = (plan, L_inv.T @ u, L_inv.T @ L_inv, L_inv.T @ W)
+            if keep_filtered:
+                fm[t] = a
+                fP[t] = P
+        self._check_filtered(loglik, a, P)
+        return dict(pm=None, pP=pP, fm=fm, fP=fP, gains=gains, loglik=float(loglik))
 
     def filter(self, observations: FloatArray) -> Tuple[FloatArray, FloatArray]:
         """Run the Kalman filter.
@@ -322,7 +656,19 @@ class DFMKalmanFilter:
             innovation covariance is not positive definite.
         """
         del compute_loglik  # always computed
-        fwd = self._forward(observations, keep_filtered=False, keep_gains=True)
+        structured = self._structure is not None
+        fwd = self._forward(observations, keep_filtered=structured, keep_gains=True)
+        with threadpool_limits(limits=1, user_api="blas"), np.errstate(over="ignore", invalid="ignore"):
+            sm, sP, pair = self._smooth_structured(fwd) if structured else self._smooth_dense(fwd)
+        if not (np.all(np.isfinite(sm)) and np.all(np.isfinite(sP)) and np.all(np.isfinite(pair))):
+            raise NumericalError(
+                "Kalman smoother: the smoothed moments are not finite.",
+                details="The parameters make the smoother diverge.",
+            )
+        return sm, sP, pair, fwd["loglik"]
+
+    def _smooth_dense(self, fwd: dict) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Dense DK backward pass over the output of :meth:`_forward_dense`."""
         A = self.transition_matrices
         C = self.observation_matrices
         pm, pP, gains = fwd["pm"], fwd["pP"], fwd["gains"]
@@ -333,32 +679,81 @@ class DFMKalmanFilter:
         pair = np.zeros((T, m, m))
         r = np.zeros(m)
         N = np.zeros((m, m))
-        with threadpool_limits(limits=1, user_api="blas"), np.errstate(over="ignore", invalid="ignore"):
-            for t in range(T - 1, -1, -1):
-                N_next = N  # N_t: information from rows t+1 .. T-1
-                step = gains[t]
-                if step is None:
-                    Lt = A
-                    r = A.T @ r
-                    N = _sym(A.T @ N @ A)
-                else:
-                    idx, e, chol, K = step
-                    Co = C[idx]
-                    Lt = A - (A @ K) @ Co
-                    W = linalg.solve_triangular(chol[0], Co, lower=True, check_finite=False)  # chol^-1 C_o
-                    r = Co.T @ linalg.cho_solve(chol, e, check_finite=False) + Lt.T @ r
-                    N = _sym(W.T @ W + Lt.T @ N @ Lt)
-                P = pP[t]
-                sm[t] = pm[t] + P @ r
-                sP[t] = _sym(P - P @ N @ P)
-                if t < T - 1:
-                    pair[t + 1] = (P @ Lt.T @ (I_m - N_next @ pP[t + 1])).T
-        if not (np.all(np.isfinite(sm)) and np.all(np.isfinite(sP)) and np.all(np.isfinite(pair))):
-            raise NumericalError(
-                "Kalman smoother: the smoothed moments are not finite.",
-                details="The parameters make the smoother diverge.",
-            )
-        return sm, sP, pair, fwd["loglik"]
+        for t in range(T - 1, -1, -1):
+            N_next = N  # N_t: information from rows t+1 .. T-1
+            step = gains[t]
+            if step is None:
+                Lt = A
+                r = A.T @ r
+                N = _sym(A.T @ N @ A)
+            else:
+                idx, e, chol, K = step
+                Co = C[idx]
+                Lt = A - (A @ K) @ Co
+                W = linalg.solve_triangular(chol[0], Co, lower=True, check_finite=False)  # chol^-1 C_o
+                r = Co.T @ linalg.cho_solve(chol, e, check_finite=False) + Lt.T @ r
+                N = _sym(W.T @ W + Lt.T @ N @ Lt)
+            P = pP[t]
+            sm[t] = pm[t] + P @ r
+            sP[t] = _sym(P - P @ N @ P)
+            if t < T - 1:
+                pair[t + 1] = (P @ Lt.T @ (I_m - N_next @ pP[t + 1])).T
+        return sm, sP, pair
+
+    def _smooth_structured(self, fwd: dict) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Structured DK backward pass over the output of :meth:`_forward_structured`.
+
+        At row ``t`` (``N``, ``r`` are ``N_t``, ``r_t``), with ``G = A P_f`` and
+        ``H = N_t G``: ``E[x_t | Y] = a_f + P_f A' r_t``,
+        ``Var[x_t | Y] = P_f - G' H``, ``Cov(x_{t+1}, x_t | Y) = G - P_{t+1} H``
+        and ``N_{t-1} = A'N_tA + (Z + Z')`` with ``U = K' A'N_tA`` and
+        ``Z = C_o' ((S^-1 + U K) C_o / 2 - U)``, which keeps ``N`` exactly
+        symmetric. The smoothed and lag-one covariances overwrite ``pP`` and
+        ``fP`` once those are no longer read.
+        """
+        st = self._structure
+        A = self.transition_matrices
+        C = self.observation_matrices
+        pP, fm, fP, gains = fwd["pP"], fwd["fm"], fwd["fP"], fwd["gains"]
+        T, m = fm.shape
+        sm = np.empty((T, m))
+        w = np.empty(C.shape[0])  # C_o' S^-1 (e - C_o P r) scattered to all series
+        r = np.zeros(m)
+        N = np.zeros((m, m))
+        sP_next = None  # Var[x_{t+1} | Y], written to pP[t + 1] once P_{t+1} is used
+        for t in range(T - 1, -1, -1):
+            Pf = fP[t]
+            G = st.A.left(Pf)
+            H = N @ G
+            if t < T - 1:
+                np.subtract(G, pP[t + 1] @ H, out=fP[t + 1])  # Cov(x_{t+1}, x_t | Y)
+                pP[t + 1] = sP_next
+            GH = G.T @ H
+            np.subtract(Pf, GH, out=GH)
+            sP_next = _sym(GH)
+            r_A = A.T @ r
+            sm[t] = fm[t] + Pf @ r_A
+            if t == 0:
+                break
+            N = st.A.sandwich_t(N)
+            step = gains[t]
+            if step is None:
+                r = r_A
+                continue
+            plan, v, S_inv, Kt = step
+            w[:] = 0.0
+            w[plan.idx] = v - Kt @ r_A
+            r = r_A + C.T @ w
+            U = Kt @ N
+            M = U @ Kt.T
+            M += S_inv
+            V = np.multiply(plan.left_t(M).T, 0.5, out=np.empty(U.shape))  # (S^-1 + U K) C_o / 2
+            V -= U
+            Z = plan.left_t(V)
+            N += Z + Z.T
+        pP[0] = sP_next
+        fP[0] = 0.0
+        return sm, pP, fP
 
     def init_streaming(self) -> None:
         """Initialize the streaming state to ``(Z_0, V_0)``.
@@ -382,8 +777,8 @@ class DFMKalmanFilter:
             One observation vector, shape (N,); NaN entries are missing and
             skipped. Ignored when ``reencode=False``.
         reencode : bool, default True
-            If True, update the predicted state with ``y_t`` (Joseph form). If
-            False, only apply the transition.
+            If True, update the predicted state with ``y_t``. If False, only
+            apply the transition.
 
         Returns
         -------
@@ -396,15 +791,20 @@ class DFMKalmanFilter:
             raise ModelNotInitializedError(
                 "Streaming state not initialized. Call init_streaming() first."
             )
+        st = self._structure
         A = self.transition_matrices
         C = self.observation_matrices
         R = self.observation_covariance
         a = A @ self._stream_state
-        P = _sym(A @ self._stream_cov @ A.T + self.transition_covariance)
+        if st is None:
+            P = _sym(A @ self._stream_cov @ A.T + self.transition_covariance)
+        else:
+            P = st.predict(self._stream_cov, self.transition_covariance)
         if reencode:
             y = np.asarray(y_t, dtype=np.float64).ravel()
-            idx = np.flatnonzero(~np.isnan(y))
-            if idx.size:
+            o = ~np.isnan(y)
+            if o.any() and st is None:
+                idx = np.flatnonzero(o)
                 Co = C[idx]
                 Ro = R[np.ix_(idx, idx)]
                 PCt = P @ Co.T
@@ -417,6 +817,15 @@ class DFMKalmanFilter:
                 a = a + K @ (y[idx] - Co @ a)
                 IKC = np.eye(A.shape[0]) - K @ Co
                 P = _sym(IKC @ P @ IKC.T + K @ Ro @ K.T)
+            elif o.any():
+                plan = st.C.plan(o)
+                CP, S = st.innovation(plan, P, R)
+                try:
+                    L_inv = _cholesky_inverse(S, 0)[1]
+                except NumericalError as exc:
+                    raise NumericalError("Kalman filter_step: the innovation covariance is not positive definite.",
+                                         details=exc.details) from exc
+                a, P = _structured_update(a, P, CP, y[plan.idx] - (C @ a)[plan.idx], L_inv)[:2]
         self._stream_state = a
         self._stream_cov = P
         return a.copy(), P.copy()
