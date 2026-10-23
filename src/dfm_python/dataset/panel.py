@@ -719,6 +719,11 @@ class PanelData:
             For a ``layout`` other than ``"long"`` or ``"wide"``.
         UnsupportedInputError
             For ``layout="wide"`` with ``series_exog``, which has no wide form.
+        DataValidationError
+            For ``layout="long"`` when a feature or exog name is ``unique_id``,
+            ``ds`` or ``y`` (as in :meth:`to_long`).
+        ValueError
+            For ``layout="wide"`` when the time column's name is also a column name.
         """
         if layout == "long":
             pl = require_polars()

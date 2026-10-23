@@ -368,6 +368,10 @@ def test_to_polars_errors(pl):
         _full().to_polars(layout="wide")
     with pytest.raises(ConfigurationError, match="layout"):
         _full().to_polars(layout="tall")
+    with pytest.raises(ValueError, match="index name 'time'"):
+        PanelData(_y(index=pd.RangeIndex(T)).rename(columns={"gdp": "time"})).to_polars(layout="wide")
+    with pytest.raises(DataValidationError, match="clash"):
+        PanelData(_y(), exog=_exog().rename(columns={"oil": "ds"})).to_polars()
 
 
 # ---------------------------------------------------------------------------

@@ -83,23 +83,31 @@ def test_dfm_on_polars_frames_matches_pandas_bitwise(time_dtype):
     model = DFM(max_iter=5).fit(polars(train))
     assert model.index_.as_unit("ns").equals(expected.index_)  # a polars Date arrives in milliseconds
     _assert_bitwise(_result_arrays(model), _result_arrays(expected), "fit on a polars frame")
-    pd.testing.assert_frame_equal(model.predict(3, data=polars(new)), expected.predict(3, data=new))
+    forecast = expected.predict(3, data=new)
+    pd.testing.assert_frame_equal(model.predict(3, data=polars(new)), forecast, check_exact=True)
+    pd.testing.assert_frame_equal(expected.predict(3, data=polars(new)), forecast, check_exact=True)
     model.update(polars(new))
     expected.update(new)
     _assert_bitwise(_result_arrays(model), _result_arrays(expected), "update with a polars frame")
-    pd.testing.assert_frame_equal(model.predict(3), expected.predict(3))
+    pd.testing.assert_frame_equal(model.predict(3), expected.predict(3), check_exact=True)
 
 
 def test_afm_set_output_polars_allocate():
     params = AFM.get_test_params()[1]  # PCA factors: no characteristics, so a bare frame is enough
     frame = make_panel(AFM).y
-    expected = AFM(**params).fit(frame).allocate()
-    model = AFM(**params).fit(pl.from_pandas(frame.reset_index()))
+    polars_frame = pl.from_pandas(frame.reset_index()).with_columns(pl.col("date").cast(pl.Date))
+    fitted = AFM(**params).fit(frame)
+    expected = fitted.allocate()
+    model = AFM(**params).fit(polars_frame)
+    assert model.allocate(data=polars_frame).to_numpy().tobytes() == expected.to_numpy().tobytes()
+    backtest, expected_backtest = model.backtest(polars_frame), fitted.backtest(frame)
+    assert backtest.book_returns.tobytes() == expected_backtest.book_returns.tobytes()
+    assert backtest.sharpe == expected_backtest.sharpe
     assert model.set_output(output="polars") is model
     out = model.allocate()
     assert isinstance(out, pl.DataFrame)
     assert out.columns == ["date", *expected.columns]
-    np.testing.assert_array_equal(out["date"].to_numpy(), expected.index.to_numpy())
+    np.testing.assert_array_equal(out["date"].cast(pl.Datetime("ns")).to_numpy(), expected.index.to_numpy())
     assert out.drop("date").to_numpy().tobytes() == expected.to_numpy().tobytes()
     tags = model.get_tags()
     assert tags["task"] == "allocation" and not tags["capability:interpret"] and not tags["capability:pred_int"]
