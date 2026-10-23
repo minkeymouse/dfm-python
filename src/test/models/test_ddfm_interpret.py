@@ -101,11 +101,8 @@ def test_linear_loadings_are_the_decoder_weight(case):
     np.testing.assert_array_equal(model.loadings_.to_numpy(), np.asarray(model.result_.C, dtype=np.float64))
 
 
-@pytest.mark.parametrize("decoder_type, K", [("linear", 0), ("linear", 1), ("mlp", 0), ("mlp", 1)])
-def test_loadings_are_the_mean_finite_difference_jacobian(decoder_type, K):
-    # tanh: smooth everywhere. With relu, factors at exactly 0 can sit on a decoder kink, where
-    # central differences average the one-sided slopes but autograd takes relu'(0) = 0.
-    model = _fit(decoder_type, K, activation="tanh")
+def _finite_difference_loadings(model: DDFM) -> np.ndarray:
+    """Central-difference decoder Jacobian (targets x factors), averaged over the rows of ``factors_``."""
     decoder = _decoder64(model)
     Z = torch.tensor(model.factors_.to_numpy(), dtype=torch.float64)
     step = 1e-6
@@ -115,7 +112,25 @@ def test_loadings_are_the_mean_finite_difference_jacobian(decoder_type, K):
             shift = torch.zeros_like(Z)
             shift[:, j] = step
             columns.append(((decoder(Z + shift) - decoder(Z - shift)) / (2 * step)).mean(dim=0).numpy())
-    np.testing.assert_allclose(model.loadings_.to_numpy(), np.stack(columns, axis=1), rtol=1e-6, atol=1e-8)
+    return np.stack(columns, axis=1)
+
+
+@pytest.mark.parametrize("decoder_type, K", [("linear", 0), ("linear", 1), ("mlp", 0), ("mlp", 1)])
+def test_loadings_are_the_mean_finite_difference_jacobian(decoder_type, K):
+    # tanh: smooth everywhere. With relu, factors at exactly 0 can sit on a decoder kink, where
+    # central differences average the one-sided slopes but autograd takes relu'(0) = 0.
+    model = _fit(decoder_type, K, activation="tanh")
+    np.testing.assert_allclose(model.loadings_.to_numpy(), _finite_difference_loadings(model), rtol=1e-6, atol=1e-8)
+
+
+@pytest.mark.parametrize("activation", ["tanh", "sigmoid"])
+def test_mlp_loadings_with_one_factor_and_one_target(activation):
+    params = {**TINY, **DECODERS["mlp"], "n_factors": 1, "activation": activation, "scaler": "standard"}
+    with torch.random.fork_rng():
+        model = DDFM(**params).fit(_panel(1).y[["s1"]])
+    assert model.loadings_.shape == (1, 1) and model.loadings_kind_ == "mean_jacobian"
+    np.testing.assert_allclose(model.loadings_.to_numpy(), _finite_difference_loadings(model), rtol=1e-6, atol=1e-8)
+    assert np.isfinite(model.explained_variance_.to_numpy()).all()
 
 
 def test_explained_variance_matches_a_direct_computation(case):
@@ -130,6 +145,19 @@ def test_explained_variance_matches_a_direct_computation(case):
         data = scaled[observed[:, i], i]
         expected.append(1.0 - np.var(data - common[observed[:, i], i]) / np.var(data))
     np.testing.assert_allclose(model.explained_variance_.to_numpy(), expected, rtol=1e-5, atol=1e-6)
+
+
+@pytest.mark.filterwarnings("error::RuntimeWarning")
+def test_explained_variance_is_nan_for_a_target_without_variance():
+    y = _panel(0).y.assign(s2=7.0)
+    with torch.random.fork_rng():
+        model = DDFM(**{**TINY, **DECODERS["linear"], "scaler": "standard"}).fit(y)
+    ev = model.explained_variance_
+    assert np.isnan(ev["s2"]) and np.isfinite(ev[["s0", "s1"]].to_numpy()).all()
+    frame = model.decompose(by="factor")
+    total = sum(frame[part] for part in frame.columns.get_level_values("part").unique()).to_numpy()
+    observed = y.notna().to_numpy()
+    np.testing.assert_allclose(total[observed], y.to_numpy()[observed], rtol=1e-9)
 
 
 # -- decompose -------------------------------------------------------------------

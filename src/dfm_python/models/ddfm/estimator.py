@@ -266,7 +266,8 @@ class DDFM(BaseFactorModel):
         Per target (index ``feature_names_in_``, name ``"explained_variance"``):
         ``1 - var(data - common) / var(data)`` over the observed training
         entries of the scaled targets, where ``common`` is the decoder's
-        output on ``factors_``.
+        output on ``factors_``; NaN for a target without variance there
+        (constant, or observed once).
     network_ : torch.nn.Module
         The trained engine.
     device_ : torch.device
@@ -604,14 +605,19 @@ class DDFM(BaseFactorModel):
             loadings = decoder.get_last_linear_layer().weight.detach().numpy()
             self.loadings_kind_ = "exact"
         else:
-            jacobians = torch.func.vmap(torch.func.jacrev(decoder))(self._factor_path())
-            loadings = jacobians.mean(dim=0).detach().numpy()
+            # The output layer is linear, so the mean Jacobian is its weight times the mean Jacobian of
+            # the hidden layers. Reverse mode through the hidden layers alone costs memory in the last
+            # hidden width per row; through the whole decoder it costs T x N x N.
+            hidden = torch.func.vmap(torch.func.jacrev(decoder.get_intermediate()))(self._factor_path())
+            loadings = (decoder.get_last_linear_layer().weight @ hidden.mean(dim=0)).detach().numpy()
             self.loadings_kind_ = "mean_jacobian"
         series = pd.Index(self.feature_names_in_)
         self.loadings_ = pd.DataFrame(loadings, index=series, columns=names)
         data = self._training_targets()
         residual = data - self._common_scaled(decoder)  # NaN exactly where data is missing
-        explained = 1.0 - np.nanvar(residual, axis=0) / np.nanvar(data, axis=0)
+        total = np.nanvar(data, axis=0)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            explained = np.where(total > 0, 1.0 - np.nanvar(residual, axis=0) / total, np.nan)
         self.explained_variance_ = pd.Series(explained, index=series, name="explained_variance")
 
     def _to_data_units(self, values: np.ndarray) -> np.ndarray:
