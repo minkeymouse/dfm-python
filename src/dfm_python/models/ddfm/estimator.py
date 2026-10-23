@@ -13,6 +13,12 @@ rows after the conditioning data (overlap raises), scales them with the
 scalers fitted at fit time, interpolates them as fit does and appends their
 encoded factors; ``predict(h, data=...)`` does the same on a copy.
 
+``fit`` (and ``load``) also set the interpretation attributes
+(``factor_names_``, ``factors_``, ``loadings_``, ``loadings_kind_``,
+``explained_variance_``) from the trained decoder and the training factors;
+``decompose(by=...)`` splits the training targets into the decoder's
+reconstruction and the residual, in data units.
+
 ``save(path)`` writes the pickle-free save layout (``state.npz``/``state.json``
 with the engine's factors, residuals, state-space matrices and scaled
 conditioning frame, ``result.npz``/``result.json`` with ``result_`` and
@@ -141,6 +147,28 @@ def _decode_covariate_scaler(json_dict: Any, arrays: dict, allow_pickle: bool, p
     return decode_scaler(json_dict, {SCALER_PREFIX + k[len(prefix):]: v for k, v in arrays.items() if k.startswith(prefix)})
 
 
+def _affine_scaler_params(scaler: Any, n: int) -> Optional[tuple[np.ndarray, np.ndarray]]:
+    """``(offset, scale)`` with ``data = offset + scale * scaled`` per column, or None for a non-affine scaler.
+
+    None (no scaler) and the fitted ``StandardScaler``, ``RobustScaler``,
+    ``MinMaxScaler`` and ``MaxAbsScaler`` (exact classes) are affine; ``n``
+    is the number of columns.
+    """
+    zeros, ones = np.zeros(n), np.ones(n)
+    if scaler is None:
+        return zeros, ones
+    kind = type(scaler)
+    if kind is StandardScaler:
+        return (scaler.mean_ if scaler.with_mean else zeros), (scaler.scale_ if scaler.with_std else ones)
+    if kind is RobustScaler:
+        return (scaler.center_ if scaler.with_centering else zeros), (scaler.scale_ if scaler.with_scaling else ones)
+    if kind is MinMaxScaler:
+        return -scaler.min_ / scaler.scale_, 1.0 / scaler.scale_
+    if kind is MaxAbsScaler:
+        return zeros, scaler.scale_
+    return None
+
+
 def _is_int(value: Any) -> bool:
     return isinstance(value, (int, np.integer)) and not isinstance(value, (bool, np.bool_))
 
@@ -220,9 +248,25 @@ class DDFM(BaseFactorModel):
         reconstruction ``x_sm`` (T x N, model space) and the state space:
         ``A`` (the AR(1) transition F), ``C`` (the loadings H, N x r, the DFM
         orientation), ``Q``, ``R``, ``Z_0``, ``V_0``.
+    factor_names_ : numpy.ndarray of str
+        ``factor_0`` .. ``factor_{r-1}`` (object dtype).
     factors_ : pandas.DataFrame
-        ``result_.Z`` as float64 on ``index_``, columns ``factor_0`` ..
-        ``factor_{r-1}``.
+        The MC-averaged encoder factors ``result_.Z`` as float64 on
+        ``index_``, columns ``factor_names_``.
+    loadings_ : pandas.DataFrame
+        float64, index ``feature_names_in_`` (the targets; the exog columns
+        are not decoded), columns ``factor_names_``, in model (scaled) space.
+        The linear decoder's weight; for the MLP decoder, the decoder's
+        Jacobian with respect to the factors averaged over the rows of
+        ``factors_`` (a local linear summary of a nonlinear map; autograd
+        derivatives, so relu contributes slope 0 at its kink).
+    loadings_kind_ : str
+        ``"exact"`` (linear decoder) or ``"mean_jacobian"`` (MLP decoder).
+    explained_variance_ : pandas.Series
+        Per target (index ``feature_names_in_``, name ``"explained_variance"``):
+        ``1 - var(data - common) / var(data)`` over the observed training
+        entries of the scaled targets, where ``common`` is the decoder's
+        output on ``factors_``.
     network_ : torch.nn.Module
         The trained engine.
     device_ : torch.device
@@ -254,6 +298,7 @@ class DDFM(BaseFactorModel):
         "capability:update": True,
         "capability:factor_forecast": True,
         "capability:device": True,
+        "capability:interpret": True,
         "update_kind": "encoder_forward",
         "predict_data": "new_rows",
         # The class default (random_state=3); an instance reports random_state is None.
@@ -523,13 +568,128 @@ class DDFM(BaseFactorModel):
         self.n_factors_ = int(self.n_factors)
         self.random_state_ = self.random_state
         self.conditioning_index_ = data.index
-        self.factors_ = self._factors_frame(result.Z, data.index)
+        self._set_interpretation()
 
-    @staticmethod
-    def _factors_frame(Z: np.ndarray, index: pd.Index) -> pd.DataFrame:
-        """``result_.Z`` as a float64 frame on ``index``, columns ``factor_0`` .. ``factor_{r-1}``."""
-        values = np.asarray(Z, dtype=np.float64)
-        return pd.DataFrame(values, index=index, columns=[f"factor_{i}" for i in range(values.shape[1])])
+    # -- interpretation ------------------------------------------------------
+
+    def _decoder64(self) -> torch.nn.Module:
+        """A float64 CPU copy of the trained decoder."""
+        return copy.deepcopy(self.network_.decoder).to(device="cpu", dtype=torch.float64)
+
+    def _training_targets(self) -> np.ndarray:
+        """The scaled training targets (T x N, NaN where missing): the first ``len(index_)`` conditioning rows."""
+        engine = self.network_
+        return engine.data[engine.target_series].to_numpy(dtype=np.float64)[: len(self.index_)]
+
+    def _factor_path(self) -> torch.Tensor:
+        """``factors_`` as a float64 tensor (a copy: under pandas copy-on-write the frame's array is read-only)."""
+        return torch.tensor(self.factors_.to_numpy(), dtype=torch.float64)
+
+    def _common_scaled(self, decoder: torch.nn.Module) -> np.ndarray:
+        """``decoder`` (from :meth:`_decoder64`) applied to ``factors_``: the common component (T x N, model space)."""
+        with torch.no_grad():
+            return decoder(self._factor_path()).numpy()
+
+    def _set_interpretation(self) -> None:
+        """Set ``factor_names_``, ``factors_``, ``loadings_``, ``loadings_kind_`` and ``explained_variance_``.
+
+        Computed from ``result_.Z``, the decoder weights and the scaled
+        training targets, so ``load`` recomputes them exactly.
+        """
+        names = [f"factor_{j}" for j in range(self.n_factors_)]
+        self.factor_names_ = np.asarray(names, dtype=object)
+        self.factors_ = pd.DataFrame(np.asarray(self.result_.Z, dtype=np.float64), index=self.index_, columns=names)
+        decoder = self._decoder64()
+        if self.network_.decoder_type == "linear":
+            loadings = decoder.get_last_linear_layer().weight.detach().numpy()
+            self.loadings_kind_ = "exact"
+        else:
+            jacobians = torch.func.vmap(torch.func.jacrev(decoder))(self._factor_path())
+            loadings = jacobians.mean(dim=0).detach().numpy()
+            self.loadings_kind_ = "mean_jacobian"
+        series = pd.Index(self.feature_names_in_)
+        self.loadings_ = pd.DataFrame(loadings, index=series, columns=names)
+        data = self._training_targets()
+        residual = data - self._common_scaled(decoder)  # NaN exactly where data is missing
+        explained = 1.0 - np.nanvar(residual, axis=0) / np.nanvar(data, axis=0)
+        self.explained_variance_ = pd.Series(explained, index=series, name="explained_variance")
+
+    def _to_data_units(self, values: np.ndarray) -> np.ndarray:
+        """Scaled target values in data units (``scaler_.inverse_transform``; unchanged without a scaler)."""
+        if self.scaler_ is None:
+            return values
+        return np.asarray(self.scaler_.inverse_transform(values), dtype=np.float64)
+
+    def decompose(self, *, by: str = "component") -> pd.DataFrame:
+        """Split the training targets into the decoder's reconstruction and the residual, in data units.
+
+        Parameters
+        ----------
+        by : {"component", "factor"}, default "component"
+            ``"component"``: MultiIndex columns ``(component, series)`` with
+            ``"common"``, the decoder's output on ``factors_`` inverse-scaled
+            with ``scaler_`` (so it includes the series mean), and
+            ``"idiosyncratic"``, the data minus common (NaN where the data is
+            missing).
+            ``"factor"`` (linear decoder only): MultiIndex columns ``(part,
+            series)``. Writing the scaler as ``data = offset + scale *
+            scaled`` per target, factor ``j``'s part of target ``i`` is
+            ``scale_i * H_ij * f_jt`` (``H`` is ``loadings_``), ``"mean"`` is
+            ``offset_i + scale_i * b_i`` (``b`` the decoder bias) and
+            ``"idiosyncratic"`` is as for ``"component"``.
+            In both, the parts add up to the data.
+
+        Returns
+        -------
+        pandas.DataFrame
+            float64, indexed by ``index_``, one column per part and target
+            (targets in the user's order; the exog columns are not decoded).
+
+        Raises
+        ------
+        ConfigurationError
+            For another ``by``.
+        UnsupportedInputError
+            For ``by="factor"`` with the MLP decoder (``loadings_kind_`` is
+            ``"mean_jacobian"``), or with a scaler that is not affine (other
+            than None, ``StandardScaler``, ``RobustScaler``, ``MinMaxScaler``
+            and ``MaxAbsScaler``).
+        """
+        self._check_is_fitted("decompose")
+        if by not in ("component", "factor"):
+            raise ConfigurationError(f"DDFM.decompose: by must be 'component' or 'factor', got {by!r}.")
+        affine = _affine_scaler_params(self.scaler_, self.n_features_in_)
+        if by == "factor" and self.loadings_kind_ != "exact":
+            raise UnsupportedInputError(
+                "DDFM.decompose(by='factor') needs targets linear in the factors, but the MLP decoder is nonlinear "
+                "(loadings_kind_='mean_jacobian'). Use by='component', or decoder_type='linear'."
+            )
+        if by == "factor" and affine is None:
+            raise UnsupportedInputError(
+                f"DDFM.decompose(by='factor') needs an affine scaler (None, 'standard', 'robust', 'minmax' or "
+                f"'maxabs'), got {type(self.scaler_).__name__}: the factor parts do not add up in data units. "
+                "Use by='component'."
+            )
+        decoder = self._decoder64()
+        common = self._to_data_units(self._common_scaled(decoder))
+        idiosyncratic = self._to_data_units(self._training_targets()) - common
+        if by == "component":
+            parts, level = {"common": common, "idiosyncratic": idiosyncratic}, "component"
+        else:
+            offset, scale = affine
+            factors, loadings = self.factors_.to_numpy(), self.loadings_.to_numpy()
+            parts = {name: factors[:, [j]] * (scale * loadings[:, j]) for j, name in enumerate(self.factor_names_)}
+            bias = decoder.get_last_linear_layer().bias.detach().numpy()
+            parts["mean"] = np.tile(offset + scale * bias, (len(factors), 1))
+            parts["idiosyncratic"] = idiosyncratic
+            level = "part"
+        series = list(self.feature_names_in_)
+        frame = pd.concat(
+            {key: pd.DataFrame(values, index=self.index_, columns=series) for key, values in parts.items()},
+            axis=1,
+            names=[level, "series"],
+        )
+        return self._emit(frame)
 
     # -- conditioning on new data -------------------------------------------
 
@@ -594,8 +754,10 @@ class DDFM(BaseFactorModel):
         gaps the interpolation leaves carry the last value forward, so no NaN
         reaches the encoder.
 
-        The network parameters, ``scaler_``, ``result_`` and ``factors_`` are
-        unchanged; ``conditioning_index_`` is extended by ``data.index``.
+        The network parameters, ``scaler_``, ``result_`` and the
+        interpretation attributes (``factors_``, ``loadings_``,
+        ``explained_variance_``; :meth:`decompose` covers the training rows)
+        are unchanged; ``conditioning_index_`` is extended by ``data.index``.
         ``predict(h, data=new)`` forecasts from the same factors as
         ``update(new).predict(h)``, without changing the model.
 
@@ -681,7 +843,9 @@ class DDFM(BaseFactorModel):
         pandas.DataFrame
             float64, ``h`` rows after the last conditioning time stamp, one
             column per target in the user's order; ``attrs`` holds ``model``,
-            ``kind="forecast"`` and ``origin``.
+            ``kind="forecast"`` and ``origin``. A ``polars.DataFrame`` after
+            ``set_output(output="polars")`` (so are :meth:`predict_factors`
+            and :meth:`decompose`).
 
         Raises
         ------
@@ -690,7 +854,7 @@ class DDFM(BaseFactorModel):
             overlaps the conditioning data or is empty (see :meth:`update`).
         """
         y_forecast, _, h, origin = self._run_forecast("predict", h, data)
-        return self._frame(y_forecast, h, list(self.feature_names_in_), "forecast", origin)
+        return self._emit(self._frame(y_forecast, h, list(self.feature_names_in_), "forecast", origin))
 
     def predict_factors(self, h: int, data: Any = None) -> pd.DataFrame:
         """Forecast the factors ``h`` steps ahead (same arguments as :meth:`predict`).
@@ -698,11 +862,11 @@ class DDFM(BaseFactorModel):
         Returns
         -------
         pandas.DataFrame
-            float64, ``h`` rows, columns ``factor_0`` .. ``factor_{r-1}``;
-            ``attrs["kind"]`` is ``"factors"``.
+            float64, ``h`` rows, columns ``factor_names_``; ``attrs["kind"]``
+            is ``"factors"``.
         """
         _, z_forecast, h, origin = self._run_forecast("predict_factors", h, data)
-        return self._frame(z_forecast, h, [f"factor_{i}" for i in range(z_forecast.shape[1])], "factors", origin)
+        return self._emit(self._frame(z_forecast, h, list(self.factor_names_), "factors", origin))
 
     # -- save / load ---------------------------------------------------------
 
@@ -757,7 +921,11 @@ class DDFM(BaseFactorModel):
 
     @classmethod
     def _load_state(cls, est: DDFM, path: Path, device: Any, allow_pickle: bool) -> None:
-        """Rebuild the engine without data or seeding, load its weights and restore the fitted attributes."""
+        """Rebuild the engine without data or seeding, load its weights and restore the fitted attributes.
+
+        The interpretation attributes are recomputed from the restored weights,
+        factors and scaled training frame (they are not saved).
+        """
         arrays, meta = cls._read_state(path)
         device = est._load_device(device)
         engine = DDFMEngine._from_saved(est._engine_params(), {name: meta[name] for name in _ENGINE_DIMS}, device)
@@ -792,4 +960,4 @@ class DDFM(BaseFactorModel):
         est.n_factors_ = int(est.n_factors)
         est.random_state_ = est.random_state
         est.conditioning_index_ = index_from_spec(meta["conditioning_index"])
-        est.factors_ = cls._factors_frame(est.result_.Z, est.index_)
+        est._set_interpretation()

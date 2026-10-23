@@ -129,6 +129,7 @@ def test_impute_missing_targets_with_covariates():
     np.testing.assert_array_equal(after[:, covariates], before[:, covariates])
 
 
+@pytest.mark.filterwarnings("error::UserWarning")  # e.g. torch.from_numpy on a read-only frame array
 @pytest.mark.parametrize("exog", [False, True], ids=["all_targets", "exog"])
 def test_ddfm_fit_and_predict_under_copy_on_write(exog):
     panel = _panel(exog=exog)
@@ -140,7 +141,8 @@ def test_ddfm_fit_and_predict_under_copy_on_write(exog):
         model = DDFM(**TINY, scaler="standard").fit(panel)
         outputs = [model.predict(3), model.predict_factors(3), model.predict(3, data=new)]
         model.update(new)
-        outputs += [model.predict(3), model.factors_]
+        outputs += [model.predict(3), model.factors_, model.loadings_, model.explained_variance_]
+        outputs += [model.decompose()["common"], model.decompose(by="factor").drop(columns="idiosyncratic")]
     for out in outputs:
         assert np.isfinite(out.to_numpy()).all()
 
