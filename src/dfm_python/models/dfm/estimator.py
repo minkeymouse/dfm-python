@@ -27,6 +27,7 @@ import math
 import warnings
 from collections.abc import Mapping
 from pathlib import Path
+from statistics import NormalDist
 from typing import Any, Optional
 
 import numpy as np
@@ -93,6 +94,8 @@ _RESULT_REBUILT = ("target_scaler",)
 _SSM_FIELDS = ("A", "C", "Q", "R", "Z_0", "V_0")
 # Optional mixed-frequency arrays (training_state fields), saved as mixed_freq/<name> when set.
 _MIXED_FREQ_ARRAYS = ("constraint_matrix", "constraint_vector", "idio_indicator")
+# Scalers whose inverse_transform is affine per series (data = scale * scaled + offset).
+_AFFINE_SCALERS = (StandardScaler, RobustScaler, MinMaxScaler, MaxAbsScaler)
 
 
 def _is_int(value: Any) -> bool:
@@ -120,6 +123,19 @@ def _symmetric_tent_kernel(slower: str, clock: str) -> list:
     """
     k = PERIODS_PER_YEAR[clock] // PERIODS_PER_YEAR[slower]
     return generate_tent_weights(2 * k - 1).tolist()
+
+
+def _factor_state_groups(layout: DFMStateLayout) -> list:
+    """The state indices of each factor (blocks in order): its current value first, then its ``L - 1`` lags.
+
+    A block's companion form stacks its ``r_b`` factors lag by lag, so factor
+    ``j`` of block ``b`` at lag ``l`` is state ``offset_b + l * r_b + j``.
+    """
+    return [
+        int(layout.factor_offsets[b]) + j + layout.r[b] * np.arange(layout.L)
+        for b in range(len(layout.r))
+        for j in range(layout.r[b])
+    ]
 
 
 class DFM(BaseFactorModel):
@@ -202,9 +218,32 @@ class DFM(BaseFactorModel):
         ``loglik``, ``num_iter``, ``converged``, ``r`` and ``p``. The
         series-indexed matrices (``C``, ``R``, ``x_sm``) are in the internal
         order ``internal_feature_names_``, not the user's.
+    factor_names_ : numpy.ndarray
+        The factor names (object array of str): ``factor_0`` ..
+        ``factor_{r-1}`` for one block, ``<block name>_<j>`` in block order
+        for several.
     factors_ : pandas.DataFrame
+        The smoothed factors ``E[f_t | Y]`` (the current values of the
+        factors in the state, without their lags), float64 on ``index_``,
+        columns ``factor_names_``.
+    states_ : pandas.DataFrame
         ``result_.Z`` as float64 on ``index_``, columns ``state_0`` ..
         ``state_{m-1}`` (the factors, their lags and the idiosyncratic states).
+    loadings_ : pandas.DataFrame
+        float64, index ``feature_names_in_``, columns ``factor_names_``, in
+        the scaled space. A clock-frequency series: its entry of ``C`` on the
+        factor. A slower-frequency series: its loading on the tent-aggregated
+        factor ``sum_l w_l f_{t-l}``, the entry of ``C`` on lag 0 divided by
+        the first tent weight ``w_0`` (the tent restriction sets the entry on
+        lag ``l`` to ``w_l`` times the one on lag 0, so with ``w_0 = 1``, as
+        in ``[1, 2, 3, 2, 1]``, the entries are the loading times ``w_l``).
+    loadings_kind_ : str
+        ``"exact"``: the observation equation is linear in the factors.
+    explained_variance_ : pandas.Series
+        Per series (index ``feature_names_in_``), ``1 - var(x - common) /
+        var(x)`` over the observed training entries of the scaled data ``x``,
+        where ``common`` is the image of the factor states (current values and
+        lags) under ``C``.
     engine_ : DFMEngine
         The fitted engine.
     scaler_ : sklearn transformer or None
@@ -248,6 +287,8 @@ class DFM(BaseFactorModel):
     ...             max_iter=50, scaler="standard").fit(data)  # doctest: +SKIP
     >>> model.predict(6)  # doctest: +SKIP
     >>> model.predict_factors(6)  # doctest: +SKIP
+    >>> model.predict_interval(6, coverage=0.9)  # doctest: +SKIP
+    >>> model.decompose(by="factor")  # doctest: +SKIP
     >>> model.predict(6, data=new_rows)  # filters the rows after index_[-1]; model unchanged  # doctest: +SKIP
     >>> model.update(new_rows).save("dfm_run")  # doctest: +SKIP
     >>> DFM.load("dfm_run").predict(6)  # doctest: +SKIP
@@ -260,6 +301,8 @@ class DFM(BaseFactorModel):
         "capability:missing_values": True,
         "capability:update": True,
         "capability:factor_forecast": True,
+        "capability:interpret": True,
+        "capability:pred_int": True,
         "update_kind": "filter",
         "predict_data": "new_rows",
         "non_deterministic": False,
@@ -666,7 +709,7 @@ class DFM(BaseFactorModel):
         self.internal_feature_names_ = np.asarray(internal, dtype=object)
         self.freq_ = freq
         self.conditioning_index_ = data.index
-        self.factors_ = self._state_frame(self.result_.Z, data.index)
+        self._set_interpretation(data.index)
         self._warn_if_explosive(self.result_.A)
 
     def _warn_if_explosive(self, A: np.ndarray) -> None:
@@ -697,6 +740,76 @@ class DFM(BaseFactorModel):
         """``Z`` as a float64 frame on ``index``, columns ``state_0`` .. ``state_{m-1}``."""
         values = np.asarray(Z, dtype=np.float64)
         return pd.DataFrame(values, index=index, columns=cls._state_columns(values.shape[1]))
+
+    def _training_rows(self) -> np.ndarray:
+        """A C-ordered copy of the scaled data rows ``result_`` describes (internal order, NaN kept).
+
+        The engine's data also holds the rows ``update`` filtered later.
+        """
+        return np.array(self.engine_.data_processed[: self.result_.Z.shape[0]], dtype=np.float64, order="C")
+
+    def _state_and_loadings(self) -> tuple[DFMStateLayout, np.ndarray, np.ndarray]:
+        """The state layout and C-ordered float64 copies of ``result_.Z`` and ``result_.C``."""
+        layout = DFMStateLayout.from_state(self.engine_.training_state)
+        Z = np.array(self.result_.Z, dtype=np.float64, order="C")
+        C = np.array(self.result_.C, dtype=np.float64, order="C")
+        return layout, Z, C
+
+    def _set_interpretation(self, index: pd.Index) -> None:
+        """Set ``factor_names_``, ``factors_``, ``states_``, ``loadings_``, ``loadings_kind_`` and ``explained_variance_``.
+
+        From ``result_`` (its rows on ``index``) and the training rows of the
+        engine's data; ``load`` calls it too, so the loaded attributes are
+        computed from the same arrays.
+        """
+        layout, Z, C = self._state_and_loadings()
+        r = layout.r
+        if len(r) == 1:
+            names = [f"factor_{j}" for j in range(r[0])]
+        else:
+            names = [f"{block}_{j}" for block, n in zip(self.blocks, r) for j in range(n)]
+        current = [int(states[0]) for states in _factor_state_groups(layout)]
+        loadings = C[:, current]
+        if layout.n_slower:
+            tent = next(iter(self.engine_.training_state.tent_weights_dict.values()))
+            loadings[layout.n_clock:] /= float(tent[0])
+        X = self._training_rows()
+        F = layout.n_factor_states
+        explained = 1.0 - np.nanvar(X - Z[:, :F] @ C[:, :F].T, axis=0) / np.nanvar(X, axis=0)
+        internal, user = list(self.internal_feature_names_), list(self.feature_names_in_)
+        self.factor_names_ = np.asarray(names, dtype=object)
+        self.states_ = self._state_frame(Z, index)
+        self.factors_ = pd.DataFrame(Z[:, current], index=index, columns=names)
+        self.loadings_ = pd.DataFrame(loadings, index=internal, columns=names).loc[user]
+        self.loadings_kind_ = "exact"
+        self.explained_variance_ = pd.Series(explained, index=internal, name="explained_variance").loc[user]
+
+    def _user_positions(self) -> np.ndarray:
+        """Positions of the user's series (``feature_names_in_``) in the internal order."""
+        return pd.Index(self.internal_feature_names_).get_indexer(self.feature_names_in_)
+
+    def _affine_scale(self, method: str) -> np.ndarray:
+        """Per series (internal order), ``s`` with ``inverse_transform(x) = s * x + inverse_transform(0)``.
+
+        Raises
+        ------
+        UnsupportedInputError
+            When ``scaler_`` is not None, StandardScaler, RobustScaler,
+            MinMaxScaler or MaxAbsScaler.
+        """
+        scaler = self.scaler_
+        if scaler is None:
+            return np.ones(len(self.internal_feature_names_))
+        if not isinstance(scaler, _AFFINE_SCALERS):
+            raise UnsupportedInputError(
+                f"DFM.{method} needs a scaler that is affine per series (None, StandardScaler, RobustScaler, "
+                f"MinMaxScaler or MaxAbsScaler) to convert to data units; scaler_ is a {type(scaler).__name__}."
+            )
+        if isinstance(scaler, MinMaxScaler):  # inverse_transform divides by scale_
+            return 1.0 / np.asarray(scaler.scale_, dtype=np.float64)
+        if scaler.scale_ is None:  # with_std=False or with_scaling=False
+            return np.ones(len(self.internal_feature_names_))
+        return np.asarray(scaler.scale_, dtype=np.float64)
 
     def _new_rows(self, data: Any, method: str) -> tuple[np.ndarray, pd.Index]:
         """Validate new rows for a fitted model; return them in the internal order and the extended index.
@@ -750,11 +863,14 @@ class DFM(BaseFactorModel):
           new rows in one pass (one row and many rows take the same path). The
           filtered states of the new rows are appended to the engine's state,
           so ``predict(h)`` then starts from the filtered state of the last new
-          row. ``result_``, ``factors_`` and the parameters are unchanged.
+          row. ``result_``, the parameters and the attributes ``fit`` derives
+          from them (``factors_``, ``states_``, ``loadings_``,
+          ``explained_variance_``) are unchanged.
         - ``refit=True``: one EM iteration (today's ``retrain=True``, with
           threshold ``tol``) on all rows, starting from the fitted parameters,
           through the same EM driver as ``fit``. ``result_``, ``n_iter_``,
-          ``converged_``, ``loglik_`` and ``factors_`` then describe the
+          ``converged_``, ``loglik_``, ``factors_``, ``states_``,
+          ``loadings_`` and ``explained_variance_`` then describe the
           refitted model on all rows; ``loglik_`` is the exact log-likelihood
           of the returned parameters on all rows. If the iteration would lower
           it, the fitted parameters are kept (``converged_`` is False).
@@ -797,7 +913,7 @@ class DFM(BaseFactorModel):
             self.n_iter_ = int(result.num_iter)
             self.converged_ = bool(result.converged)
             self.loglik_ = float(result.loglik)
-            self.factors_ = self._state_frame(self.result_.Z, extended)
+            self._set_interpretation(extended)
         return self
 
     def _run_forecast(self, method: str, h: Any, data: Any) -> tuple[np.ndarray, np.ndarray, int, pd.Index]:
@@ -822,6 +938,14 @@ class DFM(BaseFactorModel):
         )
         frame.attrs = {"model": type(self).__name__, "kind": kind, "origin": origin_index[-1]}
         return frame
+
+    def _forecast_frame(self, method: str, h: Any, data: Any) -> pd.DataFrame:
+        """The pandas frame :meth:`predict` returns (series in the user's order)."""
+        X, _, h, origin = self._run_forecast(method, h, data)
+        frame = self._frame(X, h, list(self.internal_feature_names_), "forecast", origin)
+        out = frame[list(self.feature_names_in_)]
+        out.attrs = dict(frame.attrs)
+        return out
 
     def predict(self, h: int, data: Any = None) -> pd.DataFrame:
         """Forecast the series ``h`` clock periods ahead, in data units.
@@ -850,7 +974,8 @@ class DFM(BaseFactorModel):
         pandas.DataFrame
             float64, ``h`` rows after the last conditioning time stamp, one
             column per series in the user's order; ``attrs`` holds ``model``,
-            ``kind="forecast"`` and ``origin``.
+            ``kind="forecast"`` and ``origin``. A polars frame after
+            ``set_output(output="polars")``.
 
         Raises
         ------
@@ -858,12 +983,7 @@ class DFM(BaseFactorModel):
             For ``data`` that does not hold the training series, overlaps the
             conditioning data or is empty (see :meth:`update`).
         """
-        X, _, h, origin = self._run_forecast("predict", h, data)
-        internal = list(self.internal_feature_names_)
-        frame = self._frame(X, h, internal, "forecast", origin)
-        out = frame[list(self.feature_names_in_)]
-        out.attrs = dict(frame.attrs)
-        return out
+        return self._emit(self._forecast_frame("predict", h, data))
 
     def predict_factors(self, h: int, data: Any = None) -> pd.DataFrame:
         """Forecast the state vector ``h`` clock periods ahead (same arguments as :meth:`predict`).
@@ -872,10 +992,144 @@ class DFM(BaseFactorModel):
         -------
         pandas.DataFrame
             float64, ``h`` rows, columns ``state_0`` .. ``state_{m-1}`` (the
-            columns of ``factors_``); ``attrs["kind"]`` is ``"factors"``.
+            columns of ``states_``); ``attrs["kind"]`` is ``"factors"``. A
+            polars frame after ``set_output(output="polars")``.
         """
         _, Z, h, origin = self._run_forecast("predict_factors", h, data)
-        return self._frame(Z, h, self._state_columns(np.asarray(Z).shape[1]), "factors", origin)
+        return self._emit(self._frame(Z, h, self._state_columns(np.asarray(Z).shape[1]), "factors", origin))
+
+    def predict_interval(self, h: int, coverage: float = 0.9, data: Any = None) -> pd.DataFrame:
+        """Central Gaussian prediction intervals of the series ``h`` clock periods ahead, in data units.
+
+        From the filtered state covariance ``P`` at the last conditioning row
+        (the last row of ``data`` when given), the forecast covariance
+        follows ``P <- A P A' + Q`` for each step ahead and the series
+        variance is ``diag(C P C' + R)``. The bounds are the forecast of
+        :meth:`predict` (the same numbers) minus and plus ``z * sd``, with
+        ``z`` the standard normal quantile of ``(1 + coverage) / 2`` and
+        ``sd`` the standard deviation in data units: the scaled one times
+        ``|s|``, where ``scaler_.inverse_transform(x) = s * x + offset``.
+
+        Parameters
+        ----------
+        h : int
+            Forecast horizon, as in :meth:`predict`.
+        coverage : float, default 0.9
+            Nominal coverage of each interval, in (0, 1).
+        data : PanelData, DataFrame or 2-D array, optional
+            New rows to condition on, as in :meth:`predict`; the model is
+            unchanged.
+
+        Returns
+        -------
+        pandas.DataFrame
+            float64, indexed like :meth:`predict`, MultiIndex columns
+            ``(series, bound)``: the series in the user's order, ``bound``
+            ``"lower"`` and ``"upper"``; ``attrs`` holds those of
+            :meth:`predict` and ``coverage``. A polars frame after
+            ``set_output(output="polars")``.
+
+        Raises
+        ------
+        ConfigurationError
+            For ``coverage`` that is not a number in (0, 1).
+        UnsupportedInputError
+            When ``scaler_`` is not None, StandardScaler, RobustScaler,
+            MinMaxScaler or MaxAbsScaler.
+        DataValidationError
+            For ``data`` that does not hold the training series, overlaps the
+            conditioning data or is empty (see :meth:`update`).
+        """
+        self._check_is_fitted("predict_interval")
+        if not (_is_real(coverage) and 0 < coverage < 1):
+            raise ConfigurationError(f"DFM.predict_interval: coverage must be a number in (0, 1), got {coverage!r}.")
+        scale = self._affine_scale("predict_interval")
+        point = self._forecast_frame("predict_interval", h, data)
+        engine = self.engine_
+        X = engine.data_processed
+        if data is not None:
+            X_new, _ = self._new_rows(data, "predict_interval")
+            X = np.vstack([X, X_new if engine.scaler is None else engine.scaler.transform(X_new)])
+        state = engine.training_state
+        A, C, Q, R = state.A, state.C, state.Q, state.R
+        with quiet_engine_loggers(self.verbose, _ENGINE_LOGGERS, logging.ERROR):
+            P = engine._create_kalman_filter().filter(X)[1][-1]
+        variance = np.empty((len(point), C.shape[0]))
+        for step in range(len(point)):
+            P = A @ P @ A.T + Q
+            variance[step] = np.einsum("ij,ij->i", C @ P, C) + np.diag(R)
+        half = NormalDist().inv_cdf(0.5 + coverage / 2) * np.sqrt(variance) * np.abs(scale)
+        centre = point.to_numpy()
+        half = half[:, self._user_positions()]
+        values = np.stack([centre - half, centre + half], axis=2).reshape(len(point), -1)
+        columns = pd.MultiIndex.from_product([list(point.columns), ["lower", "upper"]], names=["series", "bound"])
+        frame = pd.DataFrame(values, index=point.index, columns=columns)
+        frame.attrs = {**point.attrs, "coverage": float(coverage)}
+        return self._emit(frame)
+
+    def decompose(self, *, by: str = "component") -> pd.DataFrame:
+        """Split the training data into its parts, in data units, on the rows of ``factors_``.
+
+        The common component is the image of the factor states (current
+        values and lags, ``states_``) under ``C``, inverse-transformed with
+        ``scaler_``, so it includes the series mean; the idiosyncratic part is
+        the data minus the common component (the idiosyncratic states and the
+        observation noise), NaN where the data is missing.
+
+        Parameters
+        ----------
+        by : {"component", "factor"}, default "component"
+            ``"component"``: MultiIndex columns ``(component, series)``,
+            ``component`` ``"common"`` and ``"idiosyncratic"``.
+            ``"factor"``: MultiIndex columns ``(part, series)``, one ``part``
+            per name of ``factor_names_`` (the factor's states through ``C``,
+            in data units: for a slower-frequency series, summed over the tent
+            lags), ``"mean"`` (the offset ``scaler_.inverse_transform(0)``)
+            and ``"idiosyncratic"``. In both, the parts add up to the data.
+
+        Returns
+        -------
+        pandas.DataFrame
+            float64, indexed like ``factors_`` (``index_`` after ``fit``, all
+            rows after ``update(data, refit=True)``), the series in the user's
+            order. A polars frame after ``set_output(output="polars")``.
+
+        Raises
+        ------
+        ConfigurationError
+            For another ``by``.
+        UnsupportedInputError
+            For ``by="factor"`` when ``scaler_`` is not None, StandardScaler,
+            RobustScaler, MinMaxScaler or MaxAbsScaler (the factor parts add
+            up in data units only for an affine scaler).
+        """
+        if by not in ("component", "factor"):
+            raise ConfigurationError(f"DFM.decompose: by must be 'component' or 'factor', got {by!r}.")
+        self._check_is_fitted("decompose")
+        layout, Z, C = self._state_and_loadings()
+        X = self._training_rows()
+        scaler = self.scaler_
+        data = X if scaler is None else scaler.inverse_transform(X)
+        if by == "component":
+            F = layout.n_factor_states
+            common = Z[:, :F] @ C[:, :F].T
+            if scaler is not None:
+                common = scaler.inverse_transform(common)
+            parts = {"common": common, "idiosyncratic": data - common}
+        else:
+            scale = self._affine_scale("decompose(by='factor')")
+            offset = np.zeros(X.shape[1]) if scaler is None else scaler.inverse_transform(np.zeros((1, X.shape[1])))[0]
+            groups = _factor_state_groups(layout)
+            parts = {name: (Z[:, g] @ C[:, g].T) * scale for name, g in zip(self.factor_names_, groups)}
+            explained = offset + sum(parts.values())
+            parts["mean"] = np.broadcast_to(offset, X.shape)
+            parts["idiosyncratic"] = data - explained
+        user = self._user_positions()
+        columns = pd.MultiIndex.from_product(
+            [list(parts), list(self.feature_names_in_)], names=["component" if by == "component" else "part", "series"]
+        )
+        values = np.hstack([np.asarray(part, dtype=np.float64)[:, user] for part in parts.values()])
+        return self._emit(pd.DataFrame(values, index=self.factors_.index, columns=columns))
 
     def _saved_data_spec(self) -> dict:
         """``data_spec.json``: the base spec plus ``internal_feature_names_`` and ``freq_``."""
@@ -976,7 +1230,13 @@ class DFM(BaseFactorModel):
 
     @classmethod
     def _load_state(cls, est: DFM, path: Path, device: Any, allow_pickle: bool) -> None:
-        """Rebuild the engine without data (``DFMEngine._from_saved``) and restore the fitted attributes."""
+        """Rebuild the engine without data (``DFMEngine._from_saved``) and restore the fitted attributes.
+
+        ``factors_``, ``states_``, ``loadings_``, ``explained_variance_`` and
+        the other attributes of :meth:`_set_interpretation` are recomputed from
+        the saved result and data, as ``fit`` computed them, so runs saved
+        before they existed load too.
+        """
         arrays, meta = cls._read_state(path)
         # JSON sorts dict keys; the block order is the order of the factors.
         if est.blocks is not None:
@@ -1046,5 +1306,4 @@ class DFM(BaseFactorModel):
         est.n_factors_ = int(engine.num_factors)
         est.conditioning_index_ = index_from_spec(meta["conditioning_index"])
         n_rows = result.Z.shape[0]
-        est.factors_ = cls._state_frame(result.Z, est.conditioning_index_[:n_rows] if n_rows != len(est.index_)
-                                        else est.index_)
+        est._set_interpretation(est.conditioning_index_[:n_rows] if n_rows != len(est.index_) else est.index_)

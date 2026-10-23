@@ -523,13 +523,17 @@ def test_fitted_attributes(fitted):
     assert fitted.result_.C.shape[0] == 5 and fitted.result_.x_sm.shape == (60, 5)
 
 
-def test_factors_frame(fitted):
-    factors = fitted.factors_
+def test_factors_and_states_frames(fitted):
+    states = fitted.states_
     m = fitted.result_.Z.shape[1]
-    assert list(factors.columns) == [f"state_{i}" for i in range(m)]
-    assert factors.index.equals(fitted.index_) and factors.index.name == "date"
-    assert all(dtype == np.float64 for dtype in factors.dtypes)
-    np.testing.assert_array_equal(factors.to_numpy(), fitted.result_.Z, strict=True)
+    assert list(states.columns) == [f"state_{i}" for i in range(m)]
+    np.testing.assert_array_equal(states.to_numpy(), fitted.result_.Z, strict=True)
+    # One factor: its current value is the first state.
+    assert list(fitted.factors_.columns) == ["factor_0"] and list(fitted.factor_names_) == ["factor_0"]
+    np.testing.assert_array_equal(fitted.factors_.to_numpy(), fitted.result_.Z[:, :1], strict=True)
+    for frame in (states, fitted.factors_):
+        assert frame.index.equals(fitted.index_) and frame.index.name == "date"
+        assert all(dtype == np.float64 for dtype in frame.dtypes)
 
 
 def test_unfitted_access_raises_not_fitted():
@@ -592,7 +596,7 @@ def test_predict_frame_in_the_user_order(fitted):
 
 def test_predict_factors_frame(fitted):
     factors = fitted.predict_factors(4)
-    assert list(factors.columns) == list(fitted.factors_.columns)
+    assert list(factors.columns) == list(fitted.states_.columns)
     assert factors.index.equals(fitted.predict(4).index)
     assert factors.attrs == {"model": "DFM", "kind": "factors", "origin": fitted.index_[-1]}
     _, Z = fitted.engine_.predict(horizon=4)
@@ -807,7 +811,7 @@ def test_update_refit_runs_one_em_iteration_on_all_rows(split_fit):
     assert model.n_iter_ == result.num_iter == 1 and model.converged_ == bool(result.converged)
     assert model.loglik_ == float(result.loglik)
     assert model.factors_.index.equals(model.conditioning_index_) and model.factors_.shape[0] == 60
-    np.testing.assert_array_equal(model.factors_.to_numpy(), result.Z, strict=True)
+    np.testing.assert_array_equal(model.states_.to_numpy(), result.Z, strict=True)
     assert model.engine_._config.threshold == fitted.tol
     X, _ = engine.predict(horizon=3)
     assert model.predict(3)[_MONTHLY + ["gdp"]].to_numpy().tobytes() == np.asarray(X).tobytes()
@@ -847,7 +851,7 @@ def _assert_same_model(loaded: DFM, model: DFM, new: PanelData | None = None) ->
     assert loaded.index_.equals(model.index_) and loaded.conditioning_index_.equals(model.conditioning_index_)
     assert getattr(loaded.conditioning_index_, "freq", None) == getattr(model.conditioning_index_, "freq", None)
     assert type(loaded.conditioning_index_) is type(model.conditioning_index_)
-    assert loaded.factors_.equals(model.factors_)
+    assert loaded.factors_.equals(model.factors_) and loaded.states_.equals(model.states_)
     assert loaded.get_params() == model.get_params()
     np.testing.assert_array_equal(loaded.engine_.data_processed, model.engine_.data_processed, strict=True)
     np.testing.assert_array_equal(loaded.engine_.get_result().Z, model.engine_.get_result().Z, strict=True)

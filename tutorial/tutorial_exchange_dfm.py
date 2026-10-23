@@ -76,7 +76,8 @@ def main(argv: list[str] | None = None) -> None:
     print(f"   {model!r}")
     model.fit(data)
     print(f"   EM ran {model.n_iter_} iteration(s), converged={model.converged_}, loglik={model.loglik_:.4f}")
-    print(f"   factors_ {model.factors_.shape} (the state: factors, their lags and idiosyncratic states)")
+    print(f"   factors_ {model.factors_.shape} (the factors), states_ {model.states_.shape} (the factors, their lags "
+          "and idiosyncratic states)")
 
     # 4. Forecast the rates (data units, the data's column order) and the state.
     forecast = model.predict(6)

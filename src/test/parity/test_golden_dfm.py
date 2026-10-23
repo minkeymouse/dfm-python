@@ -13,7 +13,7 @@ the recorded hyperparameters under the canonical names. The engine it builds
 must hold the recorded engine config (every field, the EM config, the block
 structure) when EM starts and reproduce every golden output of the fit
 (bitwise on the capture platform, within the ``_golden`` tolerances
-elsewhere); the estimator's ``result_``, ``factors_``, ``scaler_`` and
+elsewhere); the estimator's ``result_``, ``states_``, ``scaler_`` and
 diagnostics must equal that engine's numbers bitwise, ``internal_feature_names_``
 the fixture's columns, ``predict(6)`` the engine's forecast reordered to the
 user's columns, and ``predict_factors(6)`` its state forecast. The permuted case passes
@@ -272,9 +272,9 @@ def test_golden_dfm_estimator(case, build, pinned, engine_at_fit, tmp_path):
     np.testing.assert_array_equal(result.Z, outputs["result_Z"], strict=True)
     np.testing.assert_array_equal(result.x_sm, outputs["result_x_sm"], strict=True)
     assert np.float64(result.loglik).tobytes() == outputs["loglik"].tobytes()
-    np.testing.assert_array_equal(model.factors_.to_numpy(), outputs["result_Z"].astype(np.float64), strict=True)
-    assert list(model.factors_.columns) == [f"state_{i}" for i in range(fixture["result_Z"].shape[1])]
-    assert model.factors_.index.equals(data.index)
+    np.testing.assert_array_equal(model.states_.to_numpy(), outputs["result_Z"].astype(np.float64), strict=True)
+    assert list(model.states_.columns) == [f"state_{i}" for i in range(fixture["result_Z"].shape[1])]
+    assert model.states_.index.equals(data.index) and model.factors_.index.equals(data.index)
     np.testing.assert_array_equal(model.scaler_.mean_, outputs["scaler_mean"], strict=True)
     np.testing.assert_array_equal(model.scaler_.scale_, outputs["scaler_scale"], strict=True)
     assert model.n_iter_ == int(outputs["num_iter"])
@@ -293,7 +293,7 @@ def test_golden_dfm_estimator(case, build, pinned, engine_at_fit, tmp_path):
 
     factors = model.predict_factors(DFM_HORIZON)
     np.testing.assert_array_equal(factors.to_numpy(), outputs["predict_Z"], strict=True)
-    assert list(factors.columns) == list(model.factors_.columns)
+    assert list(factors.columns) == list(model.states_.columns)
     assert factors.index.equals(forecast.index)
 
     new = _new_rows(case.name, manifest)
@@ -332,7 +332,7 @@ def test_golden_dfm_save_load(case, loader, pinned, tmp_path):
         assert getattr(loaded.result_, name).tobytes() == getattr(model.result_, name).tobytes(), name
     assert np.float64(loaded.result_.loglik).tobytes() == np.float64(model.result_.loglik).tobytes()
     assert loaded.result_.num_iter == model.result_.num_iter and loaded.result_.converged == model.result_.converged
-    assert loaded.factors_.equals(model.factors_)
+    assert loaded.factors_.equals(model.factors_) and loaded.states_.equals(model.states_)
     del model
 
     # The loaded engine alone reproduces every golden output of the fit.
