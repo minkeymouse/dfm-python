@@ -15,9 +15,11 @@ missing values and a 300 x 30 synthetic panel.
 - The log-likelihoods of the accepted points do not decrease (the in-house
   exact filter, and the reference filter on the accepted parameters).
 - The extrapolation keeps the structural zeros, the shift entries and the
-  tent restrictions; the fallback paths (an invalid point, a point that lowers
-  the log-likelihood) reproduce plain EM; the guard stops a corrupted run;
-  ``max_iter`` counts E-steps; ``update(refit=True)`` is unchanged.
+  tent restrictions (one block and two blocks); the fallback paths (an invalid
+  point, a point that lowers the log-likelihood) reproduce plain EM; the guard
+  stops a corrupted run; ``max_iter`` counts E-steps; the SQUAREM set of
+  ``get_test_params`` reaches an extrapolated point; ``update(refit=True)`` is
+  unchanged.
 """
 
 from __future__ import annotations
@@ -203,8 +205,12 @@ def test_accepted_logliks_never_decrease(name, monkeypatch):
 # --------------------------------------------------- the extrapolation
 
 
-def _plain_iterates(monkeypatch, n: int):
-    """The first ``n`` M-step outputs of plain EM on the mixed panel, and its engine state."""
+def _plain_iterates(monkeypatch, n: int, two_blocks: bool = False):
+    """The first ``n`` M-step outputs of plain EM on the mixed panel, and the fitted model.
+
+    ``two_blocks``: a global factor and one over four monthly series and the
+    first quarterly one, instead of two global factors.
+    """
     import dfm_python.functional.em as em
 
     outputs = []
@@ -217,6 +223,11 @@ def _plain_iterates(monkeypatch, n: int):
 
     monkeypatch.setattr(em, "em_step", step)
     panel, params = _mixed()
+    if two_blocks:
+        names = list(panel.y.columns)
+        params = {**{k: v for k, v in params.items() if k != "n_factors"},
+                  "blocks": {"global": {"n_factors": 1, "series": names},
+                             "head": {"n_factors": 1, "series": names[:4] + ["q0"]}}}
     logging.disable(logging.CRITICAL)
     try:
         from dfm_python import DFM
@@ -227,11 +238,12 @@ def _plain_iterates(monkeypatch, n: int):
     return outputs, model
 
 
-def test_extrapolation_keeps_the_structure(monkeypatch):
+@pytest.mark.parametrize("two_blocks", [False, True], ids=["one_block", "two_blocks"])
+def test_extrapolation_keeps_the_structure(two_blocks, monkeypatch):
     from dfm_python.functional.em import _squarem_point
     from dfm_python.functional.state_layout import DFMStateLayout
 
-    outputs, model = _plain_iterates(monkeypatch, 30)
+    outputs, model = _plain_iterates(monkeypatch, 30, two_blocks)
     # The first three consecutive M-step outputs that extrapolate (||r|| > ||v||).
     for k in range(len(outputs) - 2):
         theta0, theta1, theta2 = outputs[k:k + 3]
@@ -249,18 +261,20 @@ def test_extrapolation_keeps_the_structure(monkeypatch):
     assert np.count_nonzero(point.R - np.diag(np.diag(point.R))) == 0
     np.testing.assert_array_equal(point.Q, point.Q.T)
     np.testing.assert_array_equal(point.V_0, point.V_0.T)
-    # The tent restriction R_mat c = q on every quarterly series' loadings.
+    # The tent restriction R_mat c = q on every quarterly series' loadings, in every block it loads on.
     layout = DFMStateLayout.from_state(theta0, n_series=theta0.C.shape[0])
     R_mat = np.asarray(theta0.constraint_matrix, dtype=np.float64)
     q = np.asarray(theta0.constraint_vector, dtype=np.float64).ravel()
-    r = int(layout.r[0])
-    cols = layout.factor_offsets[0] + np.arange(R_mat.shape[1] * r)
-    R_con, q_con = np.kron(R_mat, np.eye(r)), np.kron(q, np.ones(r))
-    assert layout.n_clock < theta0.C.shape[0]
+    blocks = np.asarray(theta0.blocks)
+    assert layout.n_clock < theta0.C.shape[0] and blocks.shape[1] == (2 if two_blocks else 1)
     for j in range(layout.n_clock, theta0.C.shape[0]):
-        for state in (theta0, theta1, theta2, point):
-            np.testing.assert_allclose(R_con @ state.C[j, cols], q_con, atol=1e-10)
-        assert not np.allclose(point.C[j, cols], theta2.C[j, cols])
+        for b in np.flatnonzero(blocks[j] > 0):
+            r = int(layout.r[b])
+            cols = layout.factor_offsets[b] + np.arange(R_mat.shape[1] * r)
+            R_con, q_con = np.kron(R_mat, np.eye(r)), np.kron(q, np.ones(r))
+            for state in (theta0, theta1, theta2, point):
+                np.testing.assert_allclose(R_con @ state.C[j, cols], q_con, atol=1e-10)
+            assert not np.allclose(point.C[j, cols], theta2.C[j, cols])
 
 
 def test_step_length_is_clipped_to_one_and_the_bound(monkeypatch):
@@ -385,6 +399,31 @@ def test_max_iter_counts_esteps(max_iter, monkeypatch):
         _assert_same_fit(model, plain)
 
 
+def test_the_contract_parameter_sets_run_an_extrapolated_point(monkeypatch):
+    """``get_test_params``: plain EM, and SQUAREM with two blocks past its first (plain) cycle."""
+    import dfm_python.functional.em as em
+    from dfm_python import DFM
+    from dfm_python.testing import make_panel
+
+    sets = DFM.get_test_params()
+    assert [p["em_acceleration"] for p in sets] == [None, "squarem"] and len(sets[1]["blocks"]) == 2
+    steps = []
+    original = em._squarem_point
+
+    def spy(*args):
+        out = original(*args)
+        steps.append(out[1])
+        return out
+
+    monkeypatch.setattr(em, "_squarem_point", spy)
+    panel = make_panel(DFM)
+    sq, meta, _ = fit(panel, sets[1], monkeypatch)
+    plain, _, _ = fit(panel, sets[1], monkeypatch, em_acceleration=None)
+    assert sq.n_iter_ == plain.n_iter_ == 6
+    assert steps[0] == 1.0 and steps[1] > 1.0 and meta["squarem_fallbacks"] == 0
+    assert sq.loglik_ > plain.loglik_
+
+
 def test_ar_clip_applies_to_every_em_map(monkeypatch):
     from dfm_python.functional.state_layout import DFMStateLayout
 
@@ -408,7 +447,6 @@ def test_update_refit_is_one_em_map_with_both_settings(monkeypatch):
     from dfm_python import PanelData
 
     panel, params = _mixed()
-    model, _, _ = fit(panel, params, monkeypatch, max_iter=20, tol=0.0)
     T = len(panel.index)
     head = PanelData(y=panel.y.iloc[:T - 6], freq=panel.freq)
     new = PanelData(y=panel.y.iloc[T - 6:], freq=panel.freq)

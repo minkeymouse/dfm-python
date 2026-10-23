@@ -179,11 +179,12 @@ class DFM(BaseFactorModel):
         ``"squarem"`` accelerates EM with the SqS3 scheme of Varadhan and
         Roland (2008): from the current parameters two EM maps, a quadratic
         extrapolation along them, and one stabilizing EM map from the
-        extrapolated point, which is kept when its log-likelihood is not below
-        that of the cycle's start (otherwise the second EM map is). It reaches
-        the same maximum in fewer E-steps; every E-step counts towards
-        ``max_iter``, and ``ar_clip`` and ``damping_factor`` apply to every EM
-        map. None runs plain EM.
+        extrapolated point, whose output is kept when the extrapolated point's
+        log-likelihood is not below that of the cycle's start (otherwise the
+        second EM map is). It climbs the same likelihood in fewer E-steps, so
+        at a given ``tol`` it usually stops at a higher log-likelihood than
+        plain EM; every E-step counts towards ``max_iter``, and ``ar_clip`` and
+        ``damping_factor`` apply to every EM map. None runs plain EM.
     scaler : str or sklearn transformer, optional
         Scaler of the series: "standard", "robust", "minmax", "maxabs",
         "quantile", or an unfitted transformer, which is cloned. None (the
@@ -300,16 +301,17 @@ class DFM(BaseFactorModel):
     def get_test_params(cls) -> list[dict]:
         """Small parameter sets for the contract fixture (the quarterly ``s0`` first, then two monthly series).
 
-        One global factor with SQUAREM, and two blocks (a global one and one
-        over ``s1`` and ``s2``) with plain EM, both standardized. ``max_iter=5``
-        runs one SQUAREM cycle and the start of the next.
+        One global factor with plain EM, and two blocks (a global one and one
+        over ``s1`` and ``s2``) with SQUAREM, both standardized. With
+        ``max_iter=6`` SQUAREM runs a cycle of three plain EM maps (its step
+        bound starts at 1), then a cycle with an extrapolated point.
         """
-        base = {"clock": "m", "tent_weights": {"q:m": [1, 2, 3, 2, 1]}, "max_iter": 5, "scaler": "standard"}
+        base = {"clock": "m", "tent_weights": {"q:m": [1, 2, 3, 2, 1]}, "max_iter": 6, "scaler": "standard"}
         blocks = {
             "global": {"n_factors": 1, "series": ["s0", "s1", "s2"]},
             "pair": {"n_factors": 1, "series": ["s1", "s2"]},
         }
-        return [{**base, "em_acceleration": "squarem"}, {**base, "blocks": blocks, "em_acceleration": None}]
+        return [{**base, "em_acceleration": None}, {**base, "blocks": blocks, "em_acceleration": "squarem"}]
 
     def _fail(self, message: str) -> None:
         raise ConfigurationError(f"{type(self).__name__}: {message}")
