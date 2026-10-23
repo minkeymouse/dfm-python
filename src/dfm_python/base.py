@@ -82,6 +82,8 @@ DEFAULT_TAGS: dict = {
     "capability:update": False,
     "capability:factor_forecast": False,
     "capability:device": False,
+    "capability:interpret": False,  # factors_, loadings_, explained_variance_ and decompose()
+    "capability:pred_int": False,  # predict_interval()
     "update_kind": None,  # "filter", "encoder_forward_rescale", "encoder_forward" or "reattach"
     "predict_data": None,  # "new_rows", "full_panel" or "window"
     "non_deterministic": False,
@@ -434,6 +436,65 @@ class BaseFactorModel(BaseEstimator):
                 "call fit(data) to refit on the new data."
             )
         raise NotImplementedError(f"{type(self).__name__} does not implement update().")
+
+    def predict_interval(self, h: int, coverage: float = 0.9, data: Any = None) -> pd.DataFrame:
+        """Central prediction intervals of the ``h`` steps ahead (``capability:pred_int``).
+
+        Returns a DataFrame indexed like :meth:`predict`, with MultiIndex
+        columns ``(series, bound)`` where ``bound`` is ``"lower"`` or
+        ``"upper"``, in data units; ``attrs["coverage"]`` holds ``coverage``.
+        ``data`` conditions on new rows as in :meth:`predict`.
+        """
+        if not self.get_tags()["capability:pred_int"]:
+            raise UnsupportedInputError(
+                f"{type(self).__name__} does not give prediction intervals (tag capability:pred_int is False)."
+            )
+        raise NotImplementedError(f"{type(self).__name__} does not implement predict_interval().")
+
+    def decompose(self, *, by: str = "component") -> pd.DataFrame:
+        """Split the training data into its parts (``capability:interpret``), in data units.
+
+        ``by="component"``: MultiIndex columns ``(component, series)`` with
+        ``component`` ``"common"`` (the factors through the loadings, plus the
+        series mean) and ``"idiosyncratic"`` (data minus common, NaN where the
+        data is missing); ``common + idiosyncratic`` equals the data.
+        ``by="factor"``: MultiIndex columns ``(part, series)`` with one ``part``
+        per factor name (its contribution), ``"mean"`` and
+        ``"idiosyncratic"``; the parts add up to the data. Only models whose
+        observations are linear in the factors support ``by="factor"``.
+        Indexed by ``index_``.
+        """
+        if not self.get_tags()["capability:interpret"]:
+            raise UnsupportedInputError(
+                f"{type(self).__name__} has no factor decomposition (tag capability:interpret is False)."
+            )
+        raise NotImplementedError(f"{type(self).__name__} does not implement decompose().")
+
+    def set_output(self, *, output: str = "pandas") -> BaseFactorModel:
+        """Choose the frame type the prediction methods return and return ``self``.
+
+        ``output="polars"`` makes :meth:`predict`, :meth:`predict_factors`,
+        :meth:`predict_interval`, :meth:`decompose` and :meth:`allocate` return
+        ``polars.DataFrame``: the index becomes the first column (named after
+        the index, or ``"time"``) and MultiIndex columns are joined with
+        ``"__"`` (``"s0__lower"``). ``"pandas"`` (the default) returns pandas.
+        Fitted attributes stay pandas. The choice is not a hyperparameter: it
+        is not cloned or saved. Needs the ``polars`` extra.
+        """
+        from .utils.output import OUTPUTS, require_polars
+
+        if output not in OUTPUTS:
+            raise ConfigurationError(f"output must be one of {list(OUTPUTS)}, got {output!r}.")
+        if output == "polars":
+            require_polars()
+        self._output = output
+        return self
+
+    def _emit(self, frame: Any) -> Any:
+        """``frame`` in the type :meth:`set_output` chose (pandas by default)."""
+        from .utils.output import to_output
+
+        return to_output(frame, getattr(self, "_output", "pandas"))
 
     def allocate(self, data: Any = None) -> pd.DataFrame:
         """Return portfolio weights as a time-indexed DataFrame (``task == "allocation"``)."""
