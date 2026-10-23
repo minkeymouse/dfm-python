@@ -204,11 +204,14 @@ def test_golden_ivdfm_estimator(case, build, pinned, engine_at_fit, tmp_path):
     assert model.context_dim_ == hyper["dataset"]["context_dim"]
     assert model.time_context_ == hyper["time_context"]
     n_windows, window, r = outputs["factors"].shape
-    assert model.factors_.shape == (n_windows * window, r)
-    # factors_ holds the engine's windows, reordered chronologically.
-    rows = model.factors_.to_numpy().reshape(n_windows, window, r)
+    assert model.window_factors_.shape == (n_windows * window, r)
+    # window_factors_ holds the engine's windows, reordered chronologically.
+    rows = model.window_factors_.to_numpy().reshape(n_windows, window, r)
     engine_rows = {outputs["factors"][k].astype(np.float64).tobytes() for k in range(n_windows)}
     assert {rows[w].tobytes() for w in range(n_windows)} == engine_rows
+    # factors_ is the engine's factor path on the training index.
+    assert model.factors_.index.equals(data.index)
+    assert model.factors_.to_numpy().tobytes() == model.network_.factor_path.astype(np.float64).tobytes()
 
 
 @pytest.mark.parametrize("loader", ["iVDFM.load", "dfm_python.load"])

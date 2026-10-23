@@ -92,9 +92,10 @@ def test_constructor_only_stores_and_is_keyword_only():
 def test_tags():
     tags = iVDFM.get_tags()
     assert tags["task"] == "forecast" and tags["backend"] == "torch"
-    for cap in ("exog", "missing_values", "update", "factor_forecast", "device"):
+    for cap in ("exog", "missing_values", "update", "factor_forecast", "device", "interpret"):
         assert tags[f"capability:{cap}"] is True
     assert not tags["capability:series_exog"] and not tags["capability:mixed_frequency"]
+    assert not tags["capability:pred_int"]
     assert tags["update_kind"] == "encoder_forward" and tags["predict_data"] == "window"
     assert tags["non_deterministic"] is False
     assert iVDFM(random_state=None).get_tags()["non_deterministic"] is True
@@ -212,9 +213,9 @@ def test_stride_none_is_half_the_window():
     assert est.stride_ == 5 and est.window_ == 10
     assert est.network_._config.stride == 5
     est = iVDFM(**{**TINY, "window": 10, "stride": 3}).fit(_panel())
-    assert est.stride_ == 3 and est.factors_.index.get_level_values("window").nunique() == (40 - 10) // 3 + 1
+    assert est.stride_ == 3 and est.window_factors_.index.get_level_values("window").nunique() == (40 - 10) // 3 + 1
     whole = iVDFM(**{**TINY, "window": None}).fit(_panel(T=20))
-    assert whole.window_ == 20 and whole.factors_.shape == (20, 2)
+    assert whole.window_ == 20 and whole.window_factors_.shape == (20, 2)
 
 
 # -- fit ------------------------------------------------------------------------
@@ -235,8 +236,8 @@ def test_fit_sets_the_fitted_attributes(fitted):
     np.testing.assert_allclose(est.scaler_.mean_, panel.y.to_numpy().mean(axis=0))
 
 
-def test_factors_frame_is_chronological(fitted):
-    frame = fitted.factors_
+def test_window_factors_frame_is_chronological(fitted):
+    frame = fitted.window_factors_
     n_windows = (40 - 8) // 4 + 1
     assert frame.shape == (n_windows * 8, 2)
     assert list(frame.columns) == ["factor_0", "factor_1"]
@@ -247,7 +248,7 @@ def test_factors_frame_is_chronological(fitted):
         assert frame.loc[w].index.equals(index[w * 4: w * 4 + 8].rename("date"))
 
 
-def test_factors_frame_undoes_the_extraction_order():
+def test_window_factors_frame_undoes_the_extraction_order():
     est = iVDFM(**TINY)
     est.stride_ = 2
     n_windows, window = 4, 3
@@ -256,11 +257,11 @@ def test_factors_frame_undoes_the_extraction_order():
     for k, w in enumerate(order):
         factors[k] = w
     accessed = [0, 1, 2, 3, 3, 2, 1, 0] + order  # training accesses, then the final extraction
-    frame = est._factors_frame(factors, accessed, pd.RangeIndex(10))
+    frame = est._window_factors_frame(factors, accessed, pd.RangeIndex(10))
     for w in range(n_windows):
         assert (frame.loc[w].to_numpy() == w).all()
         assert list(frame.loc[w].index) == [2 * w, 2 * w + 1, 2 * w + 2]
-    natural = est._factors_frame(factors, [], pd.RangeIndex(10))
+    natural = est._window_factors_frame(factors, [], pd.RangeIndex(10))
     np.testing.assert_array_equal(natural.to_numpy().reshape(n_windows, window), factors[:, :, 0])
 
 
@@ -268,9 +269,9 @@ def test_fit_is_repeatable_and_does_not_mutate_inputs():
     panel = _panel()
     y = panel.y.copy()
     est = iVDFM(**TINY)
-    first = est.fit(panel).factors_.copy()
-    assert est.fit(panel).factors_.equals(first)
-    assert iVDFM(**TINY).fit(panel).factors_.equals(first)
+    first = est.fit(panel).window_factors_.copy()
+    assert est.fit(panel).window_factors_.equals(first)
+    assert iVDFM(**TINY).fit(panel).window_factors_.equals(first)
     assert panel.y.equals(y) and est.get_params() == iVDFM(**TINY).get_params()
 
 
@@ -279,7 +280,7 @@ def test_missing_values_are_interpolated():
     y = panel.y.copy()
     y.iloc[[3, 10], [0, 2]] = np.nan
     est = iVDFM(**TINY).fit(PanelData(y=y))
-    assert np.isfinite(est.factors_.to_numpy()).all()
+    assert np.isfinite(est.window_factors_.to_numpy()).all() and np.isfinite(est.factors_.to_numpy()).all()
 
 
 def test_time_columns_from_the_index():
@@ -542,7 +543,7 @@ def _extended(T: int = 52, K: int = 0) -> PanelData:
 
 def test_update_appends_factors_and_keeps_the_fit(fitted):
     est = copy.deepcopy(fitted)
-    weights, result, factors = _weights(est), est.result_, est.factors_.copy()
+    weights, result, factors, windows = _weights(est), est.result_, est.factors_.copy(), est.window_factors_.copy()
     n_windows, window, r = est.network_.factors.shape
     new = _extended()
     assert est.update(new) is est
@@ -553,7 +554,8 @@ def test_update_appends_factors_and_keeps_the_fit(fitted):
     # The factor path the forecast starts from covers every row of the training data and of ``new``.
     assert engine.factor_path.shape == (40 + 52, r)
     assert _same_weights(weights, _weights(est))
-    assert est.result_ is result and est.factors_.equals(factors) and est.index_.equals(_panel().index)
+    assert est.result_ is result and est.factors_.equals(factors) and est.window_factors_.equals(windows)
+    assert est.index_.equals(_panel().index)
     assert est.conditioning_index_.equals(new.index)
     forecast = est.predict(3)
     assert forecast.index.equals(pd.date_range(new.index[-1], periods=4, freq="ME", name="date")[1:])
@@ -698,7 +700,11 @@ def _assert_same_model(loaded: iVDFM, est: iVDFM) -> None:
         assert list(getattr(loaded, name)) == list(getattr(est, name)), name
     assert loaded.index_.equals(est.index_) and getattr(loaded.index_, "freq", None) == getattr(est.index_, "freq", None)
     assert loaded.conditioning_index_.equals(est.conditioning_index_)
-    assert loaded.factors_.equals(est.factors_) and loaded.factors_.index.names == est.factors_.index.names
+    for name in ("factors_", "window_factors_", "loadings_", "explained_variance_"):
+        a, b = getattr(loaded, name), getattr(est, name)
+        assert a.equals(b) and a.index.names == b.index.names, name
+    assert list(loaded.factor_names_) == list(est.factor_names_) and loaded.loadings_kind_ == est.loadings_kind_
+    assert loaded.decompose().equals(est.decompose())
     assert loaded.device_ == torch.device("cpu") and not loaded.network_.training
     engine, original = loaded.network_, est.network_
     for name in ("factors", "innovations", "regime_weights"):

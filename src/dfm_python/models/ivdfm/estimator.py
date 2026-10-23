@@ -8,7 +8,9 @@ constructs the engine with every hyperparameter passed explicitly (the engine
 seeds, then builds its networks) and trains it. ``predict(h)`` inverse-transforms
 the engine's model-space forecast with ``scaler_``; ``update(data)`` encodes
 new data with the fixed networks and appends the factors; ``predict(h, data=...)``
-does the same on a copy. ``save``/``load`` use the pickle-free directory layout
+does the same on a copy. ``factors_``, ``loadings_``, ``explained_variance_``
+and ``decompose()`` describe the training data through the encoded factor path
+and its decoding. ``save``/``load`` use the pickle-free directory layout
 (``state.npz``/``state.json``, ``result.npz``/``result.json``, ``weights.pt``).
 """
 
@@ -16,6 +18,7 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import functools
 import logging
 import math
 import warnings
@@ -31,7 +34,7 @@ from sklearn.preprocessing import MaxAbsScaler, MinMaxScaler, QuantileTransforme
 from sklearn.utils.validation import check_is_fitted
 
 from ...base import BaseFactorModel
-from ...config.constants import VALID_OPTIMIZERS
+from ...config.constants import DEFAULT_TORCH_DTYPE, VALID_OPTIMIZERS
 from ...config.schema.model import iVDFMConfig
 from ...config.schema.params import iVDFMModelState
 from ...config.schema.results import iVDFMResult
@@ -96,6 +99,32 @@ def _is_real(value: Any) -> bool:
         and not isinstance(value, (bool, np.bool_))
         and math.isfinite(value)
     )
+
+
+def _mean_decoder_jacobian(engine: iVDFMEngine, path: np.ndarray) -> np.ndarray:
+    """The mean over the rows of ``path`` (T, r) of the decoder Jacobian, float64 (N, r).
+
+    The path is decoded as the engine's ``get_result`` decodes it (``_decode``
+    without context, so K > 1 mixes the decoders with uniform weights). The
+    decoder acts on each time step separately, so the forward-mode derivative
+    along factor j gives column j of every step's Jacobian at once.
+    """
+    f = torch.as_tensor(path, dtype=DEFAULT_TORCH_DTYPE, device=engine.device).unsqueeze(0)
+    decode = functools.partial(engine._decode, u_1T=None)
+    columns = []
+    for j in range(f.shape[-1]):
+        tangent = torch.zeros_like(f)
+        tangent[..., j] = 1.0
+        _, derivative = torch.func.jvp(decode, (f,), (tangent,))
+        columns.append(to_numpy(derivative[0]).astype(np.float64).mean(axis=0))
+    return np.stack(columns, axis=1)
+
+
+def _explained_variance(data: np.ndarray, common: np.ndarray) -> np.ndarray:
+    """``1 - var(data - common) / var(data)`` per column, over the entries where ``data`` is not NaN."""
+    data = np.asarray(data, dtype=np.float64)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return 1.0 - np.nanvar(data - common, axis=0) / np.nanvar(data, axis=0)
 
 
 class _FittedScaler:
@@ -238,11 +267,33 @@ class iVDFM(BaseFactorModel):
     ----------
     result_ : iVDFMResult
         Factors, innovations, reconstructions and training diagnostics of the
-        engine (factors in the engine's window order; see ``factors_``).
+        engine: ``Z`` is the factor path and ``x_sm`` its decoding.
+    factor_names_ : numpy.ndarray of str
+        ``factor_0`` .. ``factor_{r-1}``.
     factors_ : pandas.DataFrame
-        Smoothed factors of every training window, float64, with a
-        ``(window, time)`` MultiIndex in chronological order and columns
-        ``factor_0`` .. ``factor_{r-1}``. ``update`` does not change it.
+        The factor path: the training series encoded as one sequence with the
+        trained networks (``result_.Z``), float64, indexed by ``index_``, one
+        column per factor name. A run saved before 0.8.3 has no path; it holds
+        the engine's average over the training windows instead, on the last
+        ``window_`` stamps of ``index_``.
+    window_factors_ : pandas.DataFrame
+        The factors of every training window, float64, with a
+        ``(window, time)`` MultiIndex in chronological order and one column
+        per factor name.
+    loadings_ : pandas.DataFrame
+        The mean over the rows of ``factors_`` of the decoder Jacobian
+        d common_t / d f_t, float64, in model (scaled) space, indexed by
+        ``feature_names_in_``, one column per factor name: a local linear
+        summary of the decoder, not exact loadings.
+    loadings_kind_ : str
+        ``"mean_jacobian"``.
+    explained_variance_ : pandas.Series
+        Per series, the share of the variance of the scaled training targets
+        explained by the common component (the decoded factor path,
+        ``result_.x_sm``): ``1 - var(y - common) / var(y)`` over the observed
+        entries. Named ``"explained_variance"``, indexed by
+        ``feature_names_in_``. Not set for a run saved by 0.8.x, which holds
+        no training targets.
     network_ : torch.nn.Module
         The trained engine.
     device_ : torch.device
@@ -280,6 +331,7 @@ class iVDFM(BaseFactorModel):
         "capability:update": True,
         "capability:factor_forecast": True,
         "capability:device": True,
+        "capability:interpret": True,
         "update_kind": "encoder_forward",
         "predict_data": "window",
         # The class default (random_state=3); an instance reports random_state is None.
@@ -670,10 +722,33 @@ class iVDFM(BaseFactorModel):
         self.time_context_ = int(self.time_context)
         self.context_dim_ = int(dataset.context_dim)
         self.conditioning_index_ = data.index
-        self.factors_ = self._factors_frame(engine.factors, dataset.accessed, data.index)
+        self.window_factors_ = self._window_factors_frame(engine.factors, dataset.accessed, data.index)
+        targets = data.y.to_numpy(dtype=np.float64)
+        scaled = np.where(np.isnan(targets), np.nan, dataset.target)
+        self._set_interpretation(targets, _explained_variance(scaled, self.result_.x_sm))
 
-    def _factors_frame(self, factors: np.ndarray, accessed: list, index: pd.Index) -> pd.DataFrame:
-        """``factors_``: the engine's window factors in chronological order on a ``(window, time)`` MultiIndex.
+    def _set_interpretation(self, targets: Optional[np.ndarray], explained: Optional[np.ndarray]) -> None:
+        """Set ``factor_names_``, ``factors_``, ``loadings_``, ``loadings_kind_`` and ``explained_variance_``.
+
+        ``factors_`` is ``result_.Z`` and ``loadings_`` its mean decoder
+        Jacobian. ``targets`` (the training targets in data units, NaN where
+        missing, kept for :meth:`decompose`) and ``explained`` (the
+        explained-variance values) are None for a run saved by 0.8.x.
+        """
+        path = np.asarray(self.result_.Z, dtype=np.float64)
+        self.factor_names_ = np.asarray([f"factor_{i}" for i in range(path.shape[1])], dtype=object)
+        names, series = list(self.factor_names_), list(self.feature_names_in_)
+        self.factors_ = pd.DataFrame(path, index=self.index_[len(self.index_) - len(path):], columns=names)
+        self.loadings_ = pd.DataFrame(
+            _mean_decoder_jacobian(self.network_, self.result_.Z), index=series, columns=names
+        )
+        self.loadings_kind_ = "mean_jacobian"
+        self._targets_ = targets
+        if explained is not None:
+            self.explained_variance_ = pd.Series(explained, index=series, name="explained_variance")
+
+    def _window_factors_frame(self, factors: np.ndarray, accessed: list, index: pd.Index) -> pd.DataFrame:
+        """``window_factors_``: the engine's window factors in chronological order on a ``(window, time)`` MultiIndex.
 
         The engine's last ``len(windows)`` dataset accesses are its final
         factor extraction, so window ``order[k]`` is row ``k`` of the engine's
@@ -685,7 +760,7 @@ class iVDFM(BaseFactorModel):
         chronological = np.asarray(factors)[np.argsort(order, kind="stable")]
         starts = np.arange(n_windows) * self.stride_
         positions = (starts[:, None] + np.arange(window)[None, :]).reshape(-1)
-        return self._factors_from(
+        return self._window_factors_from(
             chronological.reshape(n_windows * window, r).astype(np.float64),
             np.repeat(np.arange(n_windows), window),
             positions,
@@ -693,8 +768,10 @@ class iVDFM(BaseFactorModel):
         )
 
     @staticmethod
-    def _factors_from(values: np.ndarray, windows: np.ndarray, positions: np.ndarray, index: pd.Index) -> pd.DataFrame:
-        """``factors_`` from its float64 values, window labels and row positions in ``index``."""
+    def _window_factors_from(
+        values: np.ndarray, windows: np.ndarray, positions: np.ndarray, index: pd.Index
+    ) -> pd.DataFrame:
+        """``window_factors_`` from its float64 values, window labels and row positions in ``index``."""
         multi = pd.MultiIndex.from_arrays(
             [windows, index[positions]],
             names=["window", index.name if index.name is not None else "time"],
@@ -750,7 +827,9 @@ class iVDFM(BaseFactorModel):
         window-end factors to ``factors``.
         Missing values are filled as in ``fit`` and the targets are scaled with
         the fitted ``scaler_`` (not refitted). The network parameters,
-        ``result_``, ``factors_`` and the other fit diagnostics are unchanged;
+        ``result_``, ``factors_``, ``window_factors_``, ``loadings_``,
+        ``explained_variance_`` and the other fit diagnostics are unchanged,
+        and :meth:`decompose` still splits the training data;
         ``conditioning_index_`` becomes ``data.index``. The encoder samples
         its innovations, so ``update`` draws from the global torch RNG.
 
@@ -931,7 +1010,7 @@ class iVDFM(BaseFactorModel):
         values = np.asarray(y_pred, dtype=np.float64)
         if self.scaler_ is not None:
             values = self.scaler_.inverse_transform(values)
-        return self._frame(values, h, list(self.feature_names_in_), "forecast", origin)
+        return self._emit(self._frame(values, h, list(self.feature_names_in_), "forecast", origin))
 
     def predict_factors(
         self,
@@ -947,11 +1026,65 @@ class iVDFM(BaseFactorModel):
         Returns
         -------
         pandas.DataFrame
-            float64, ``h`` rows, columns ``factor_0`` .. ``factor_{r-1}``;
+            float64, ``h`` rows, one column per name in ``factor_names_``;
             ``attrs["kind"]`` is ``"factors"``.
         """
         factors, _, h, origin = self._run_forecast("predict_factors", h, data, futr_exog, deterministic, n_samples)
-        return self._frame(factors, h, [f"factor_{i}" for i in range(factors.shape[1])], "factors", origin)
+        return self._emit(self._frame(factors, h, list(self.factor_names_), "factors", origin))
+
+    # -- interpretation ------------------------------------------------------
+
+    def decompose(self, *, by: str = "component") -> pd.DataFrame:
+        """Split the training targets into the common component and the idiosyncratic part, in data units.
+
+        The common component is the decoded factor path (``result_.x_sm``)
+        inverse-transformed with ``scaler_``; the idiosyncratic part is the
+        data minus it, NaN where the data is missing, so the two add up to the
+        data.
+
+        Parameters
+        ----------
+        by : {"component", "factor"}, default "component"
+            Only ``"component"``: the decoder is nonlinear
+            (``loadings_kind_`` is ``"mean_jacobian"``), so the common
+            component has no exact split by factor.
+
+        Returns
+        -------
+        pandas.DataFrame
+            float64, indexed by ``index_``, MultiIndex columns
+            ``(component, series)`` with ``component`` ``"common"`` or
+            ``"idiosyncratic"`` and the series in the user's order.
+
+        Raises
+        ------
+        ConfigurationError
+            For ``by`` other than ``"component"`` and ``"factor"``.
+        UnsupportedInputError
+            For ``by="factor"``, and for a run saved by 0.8.x, which holds no
+            training targets.
+        """
+        self._check_is_fitted("decompose")
+        if by == "factor":
+            raise UnsupportedInputError(
+                "iVDFM.decompose(by='factor') is not supported: the decoder is nonlinear (loadings_kind_ "
+                "'mean_jacobian'), so the common component has no exact split by factor. Use by='component'."
+            )
+        if by != "component":
+            raise ConfigurationError(f"by must be 'component' or 'factor', got {by!r}.")
+        if self._targets_ is None:
+            raise UnsupportedInputError(
+                "iVDFM.decompose: this run was saved by dfm-python 0.8 without its training targets. Refit the "
+                "model to decompose its training data."
+            )
+        common = np.asarray(self.result_.x_sm, dtype=np.float64)
+        if self.scaler_ is not None:
+            common = np.asarray(self.scaler_.inverse_transform(common), dtype=np.float64)
+        columns = pd.MultiIndex.from_product(
+            [["common", "idiosyncratic"], list(self.feature_names_in_)], names=["component", "series"]
+        )
+        values = np.hstack([common, self._targets_ - common])
+        return self._emit(pd.DataFrame(values, index=self.index_, columns=columns))
 
     # -- save / load ---------------------------------------------------------
 
@@ -960,15 +1093,17 @@ class iVDFM(BaseFactorModel):
 
         ``state.npz``: the engine's current ``factors``, ``innovations``,
         ``factor_path`` and ``regime_weights`` (when it has them), ``fit/factors``, ``fit/window``
-        and ``fit/position`` (``factors_`` as values, window labels and row
-        positions in ``index_``) and the ``scaler/`` entries. ``state.json``:
-        the training diagnostics, the engine dims, the fitted window attributes
-        and ``conditioning_index``. ``result.npz``/``result.json``: ``result_``
-        without ``model_state_dict`` and ``config``, rebuilt on load from
-        ``weights.pt`` and the engine config.
+        and ``fit/position`` (``window_factors_`` as values, window labels and
+        row positions in ``index_``), ``fit/targets`` (the training targets in
+        data units) and ``fit/explained_variance`` (when the run has them) and
+        the ``scaler/`` entries. ``state.json``: the training diagnostics, the
+        engine dims, the fitted window attributes and ``conditioning_index``.
+        ``result.npz``/``result.json``: ``result_`` without ``model_state_dict``
+        and ``config``, rebuilt on load from ``weights.pt`` and the engine
+        config. Load recomputes ``factors_`` and ``loadings_`` from ``result_.Z``.
         """
         engine = self.network_
-        frame = self.factors_
+        frame = self.window_factors_
         arrays = {"factors": engine.factors, "innovations": engine.innovations}
         if engine.regime_weights is not None:
             arrays["regime_weights"] = engine.regime_weights
@@ -977,6 +1112,9 @@ class iVDFM(BaseFactorModel):
         arrays["fit/factors"] = frame.to_numpy()
         arrays["fit/window"] = frame.index.get_level_values(0).to_numpy(dtype=np.int64)
         arrays["fit/position"] = self.index_.get_indexer(frame.index.get_level_values(1)).astype(np.int64)
+        if self._targets_ is not None:
+            arrays["fit/targets"] = self._targets_
+            arrays["fit/explained_variance"] = self.explained_variance_.to_numpy()
         meta = {
             "num_iter": engine._num_iter,
             "loss_now": engine.loss_now,
@@ -1027,4 +1165,8 @@ class iVDFM(BaseFactorModel):
         est.time_context_ = int(meta["time_context_"])
         est.context_dim_ = int(meta["context_dim_"])
         est.conditioning_index_ = index_from_spec(meta["conditioning_index"])
-        est.factors_ = cls._factors_from(arrays["fit/factors"], arrays["fit/window"], arrays["fit/position"], est.index_)
+        est.window_factors_ = cls._window_factors_from(
+            arrays["fit/factors"], arrays["fit/window"], arrays["fit/position"], est.index_
+        )
+        # Runs saved by 0.8.x hold no training targets.
+        est._set_interpretation(arrays.get("fit/targets"), arrays.get("fit/explained_variance"))
