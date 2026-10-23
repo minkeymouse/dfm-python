@@ -71,6 +71,8 @@ class EMConfig:
     after the last iteration, to a unit-norm current-period loading column
     (likelihood-invariant, see ``_normalize_C_with_invariance``). The opt-in
     ``ar_clip`` and ``damping_factor`` break the EM ascent property.
+    ``em_acceleration`` is ``"squarem"`` (SqS3 extrapolation of the EM map,
+    see ``run_em_algorithm``) or None (plain EM).
     """
     regularization: float = DEFAULT_REGULARIZATION
     min_norm: float = MIN_EIGENVALUE  # loading columns with a smaller norm are not normalized
@@ -97,6 +99,7 @@ class EMConfig:
     damping_factor: Optional[float] = None  # weight of the new parameters (0.8 = 80% new, 20% old)
     data_clip: Optional[float] = None  # clip the data beyond this many standard deviations
     normalize_C: bool = True
+    em_acceleration: Optional[str] = "squarem"  # "squarem" or None (plain EM)
 
 
 _DEFAULT_EM_CONFIG = EMConfig()
@@ -666,14 +669,63 @@ def em_step(
     return state, loglik, kalman_filter
 
 
-#: Relative tolerance of the EM monotonicity guard: an iterate whose exact
-#: log-likelihood is below the best one seen by more than this (relative) stops EM.
+#: Relative tolerance of the EM monotonicity guard: a point of the EM path whose exact
+#: log-likelihood is below the best accepted one by more than this (relative) stops EM.
 EM_MONOTONICITY_RTOL = 1e-6
+
+#: Values of ``EMConfig.em_acceleration``.
+EM_ACCELERATIONS = ("squarem", None)
+
+#: Factor by which the SQUAREM step-length bound grows after an accepted step at
+#: the bound and shrinks (not below 1) after a fallback from one, as in the
+#: SQUAREM package of Varadhan and Roland (``mstep = 4``, initial bound 1).
+SQUAREM_STEP_FACTOR = 4.0
+
+#: The parameters EM estimates; SQUAREM extrapolates them stacked into one vector.
+_SSM_PARAMS = ("A", "C", "Q", "R", "Z_0", "V_0")
 
 
 def _params_finite(state: DFMModelState) -> bool:
     return all(p is not None and np.all(np.isfinite(p)) for p in
                (state.A, state.C, state.Q, state.R, state.Z_0, state.V_0))
+
+
+def _is_psd(M: np.ndarray) -> bool:
+    """``M`` is symmetric and positive semidefinite, both up to rounding relative to ``max |M|``."""
+    M = np.asarray(M, dtype=np.float64)
+    tol = 10.0 * M.shape[0] * np.finfo(np.float64).eps * np.max(np.abs(M), initial=0.0)
+    return bool(np.max(np.abs(M - M.T), initial=0.0) <= tol and np.linalg.eigvalsh(_sym(M))[0] >= -tol)
+
+
+def _squarem_point(theta0: DFMModelState, theta1: DFMModelState, theta2: DFMModelState,
+                   step_max: float) -> Tuple[Optional[DFMModelState], float]:
+    """SqS3 extrapolation (Varadhan and Roland 2008) from ``theta1 = F(theta0)`` and ``theta2 = F(theta1)``.
+
+    With ``r = theta1 - theta0`` and ``v = theta2 - 2 theta1 + theta0`` over the
+    stacked parameters (A, C, Q, R, Z_0, V_0), the step length is
+    ``s = ||r|| / ||v||`` clipped to ``[1, step_max]`` (``alpha = -s``) and the
+    point is ``theta0 - 2 alpha r + alpha^2 v``; ``s = 1`` gives ``theta2``,
+    which is returned as is. The point is an affine combination of the three
+    iterates (weights ``(1 + alpha)^2``, ``-2 alpha (1 + alpha)``,
+    ``alpha^2``, summing to one), so entries equal in all three (structural
+    zeros, the companion and chain shift entries, the fixed idiosyncratic
+    loadings) are kept exactly and the linear tent restrictions on C hold to
+    rounding. Returns ``(point, s)``, the point None unless every parameter is
+    finite and Q, R and V_0 are symmetric positive semidefinite.
+    """
+    r = [getattr(theta1, n) - getattr(theta0, n) for n in _SSM_PARAMS]
+    v = [getattr(theta2, n) - 2.0 * getattr(theta1, n) + getattr(theta0, n) for n in _SSM_PARAMS]
+    r_norm = np.sqrt(sum(np.sum(d * d) for d in r))
+    v_norm = np.sqrt(sum(np.sum(d * d) for d in v))
+    step = float(np.clip(r_norm / v_norm, 1.0, step_max)) if v_norm > 0 else 1.0
+    if not step > 1.0:
+        return theta2, 1.0
+    alpha = -step
+    point = replace(theta0, **{n: getattr(theta0, n) - 2.0 * alpha * dr + alpha ** 2 * dv
+                               for n, dr, dv in zip(_SSM_PARAMS, r, v)})
+    if not (_params_finite(point) and all(_is_psd(getattr(point, n)) for n in ("Q", "R", "V_0"))):
+        return None, step
+    return point, step
 
 
 def _relative_change(loglik: float, previous: float) -> float:
@@ -693,6 +745,265 @@ def _format_time(seconds: float) -> str:
     return f"{int(seconds // 3600)}h{int((seconds % 3600) // 60)}m"
 
 
+class _EMRun:
+    """The iterations of one ``run_em_algorithm`` call and their bookkeeping.
+
+    Holds the E-step count ``num_iter``, the best accepted parameters with
+    their exact log-likelihood, the convergence state, the log-likelihoods of
+    the accepted points (``loglik_path``), the SQUAREM fallbacks and step-length
+    bound, and the stop reason. ``plain`` and ``squarem`` return the parameters
+    EM ends on; when ``stop_reason`` is set, ``run_em_algorithm`` returns
+    ``best_state`` instead. With plain EM every iterate is an accepted point.
+    """
+
+    def __init__(self, X: np.ndarray, kalman_filter: DFMKalmanFilter, config: EMConfig,
+                 block_structure: Optional[BlockStructure], max_iter: int, threshold: float,
+                 checkpoint_callback: Optional[Callable[[int, DFMModelState], None]]):
+        self.X = X
+        self.kalman_filter = kalman_filter
+        self.config = config
+        self.block_structure = block_structure
+        self.max_iter = max_iter
+        self.threshold = threshold
+        self.checkpoint_callback = checkpoint_callback
+        self.num_iter = 0
+        self.best_state: Optional[DFMModelState] = None
+        self.best_loglik = float('-inf')
+        self.previous_loglik = float('-inf')
+        self.converged = False
+        self.stop_reason: Optional[str] = None
+        self.change = DEFAULT_ZERO_VALUE
+        self.loglik_path: list = []
+        self.squarem_fallbacks = 0
+        self.step_max = 1.0
+        self._start_time = time_module.time()
+        self._iter_start = self._start_time
+        self._iteration_times: list = []
+
+    def _em_map(self, state: DFMModelState) -> Tuple[DFMModelState, float]:
+        """``(F(state), L(state))``: ``em_step`` at ``state``, damped when ``config.damping_factor`` is set."""
+        k = self.num_iter
+        self._iter_start = time_module.time()
+        if k % 10 == 0:
+            _logger.info(f"EM heartbeat: iteration {k}/{self.max_iter}")
+        if k < 3:
+            _logger.info(f"Starting iteration {k + 1}/{self.max_iter}...")
+        new_state, loglik, _ = em_step(
+            self.X, state, kalman_filter=self.kalman_filter, config=self.config,
+            block_structure=self.block_structure, num_iter=k
+        )
+        alpha = self.config.damping_factor
+        if alpha is not None and 0 < alpha <= 1:
+            new_state = replace(
+                new_state,
+                **{name: alpha * getattr(new_state, name) + (1 - alpha) * getattr(state, name)
+                   for name in _SSM_PARAMS}
+            )
+            if k < 3:
+                _logger.info(f"  Applied damping: {alpha*100:.0f}% new, {(1-alpha)*100:.0f}% old")
+                _logger.warning("Damping breaks the EM monotonicity guarantee.")
+        return new_state, loglik
+
+    def _keep_best(self, state: DFMModelState, loglik: float) -> None:
+        if loglik > self.best_loglik or self.best_state is None:
+            self.best_state, self.best_loglik = state, float(loglik)
+
+    def step(self, state: DFMModelState, accepted: bool = True) -> Optional[Tuple[DFMModelState, float]]:
+        """E-step and EM map at a point of the EM path: ``(F(state), L(state))``, or None when EM stops.
+
+        Applies the failure handling and the monotonicity guard of
+        ``run_em_algorithm`` against the best accepted log-likelihood
+        (``stop_reason`` is set when it returns None); ``accepted`` points
+        update the best parameters.
+        """
+        k = self.num_iter
+        try:
+            new_state, loglik = self._em_map(state)
+        except _MStepError as e:
+            if k == 0:
+                _logger.error(f"EM step failed at iteration 1: {e}", exc_info=True)
+                raise RuntimeError(f"EM algorithm failed at iteration 1: {e}") from e
+            # The E-step at state succeeded (its loglik is e.loglik); no update
+            # could be computed from it.
+            _logger.error(f"EM: {e}; stopping.")
+            if accepted and np.isfinite(e.loglik):
+                self._keep_best(state, e.loglik)
+            self.stop_reason = "M-step failed"
+            return None
+        except NumericalError as e:
+            if k == 0:
+                _logger.error(f"EM step failed at iteration 1: {e}", exc_info=True)
+                raise RuntimeError(f"EM algorithm failed at iteration 1: {e}") from e
+            # The filter is not usable at state (the previous M-step output).
+            _logger.error(f"EM: the E-step failed at iteration {k + 1} ({e}); stopping.")
+            self.stop_reason = "E-step failed"
+            return None
+        except Exception as e:
+            _logger.error(f"EM step failed at iteration {k + 1}: {e}", exc_info=True)
+            _logger.error(f"  Current parameters shapes - A: {state.A.shape if state.A is not None else None}, C: {state.C.shape if state.C is not None else None}, Q: {state.Q.shape if state.Q is not None else None}, R: {state.R.shape if state.R is not None else None}")
+            _logger.error(f"  Data shape: {self.X.shape}, Block structure: {self.block_structure is not None}")
+            raise RuntimeError(f"EM algorithm failed at iteration {k + 1}: {e}") from e
+
+        if not np.isfinite(loglik):
+            if k == 0:
+                raise RuntimeError(f"EM algorithm failed at iteration 1: the log-likelihood of the "
+                                   f"initial parameters is not finite ({loglik!r}).")
+            _logger.error(f"EM: the log-likelihood is not finite at iteration {k + 1}; stopping.")
+            self.stop_reason = "non-finite log-likelihood"
+            return None
+        if self.best_state is not None and loglik < self.best_loglik - EM_MONOTONICITY_RTOL * abs(self.best_loglik):
+            _logger.warning(
+                f"EM: the exact log-likelihood decreased at iteration {k + 1} "
+                f"({self.best_loglik:.6f} -> {loglik:.6f}); stopping and returning the best parameters."
+            )
+            self.stop_reason = "log-likelihood decreased"
+            return None
+        if accepted:
+            self._keep_best(state, loglik)
+        if k == 0 and loglik < -1e10:
+            _logger.warning(f"Extremely negative initial log-likelihood: {loglik:.2e}. "
+                            f"This may indicate numerical instability or data scaling issues.")
+        return new_state, loglik
+
+    def accept(self, loglik: float) -> None:
+        """Record the exact log-likelihood of an accepted point and test convergence on it.
+
+        From E-step ``config.min_iterations_for_convergence_check`` on, EM has
+        converged when the relative change from the previous accepted point is
+        below ``threshold``.
+        """
+        if self.num_iter >= self.config.min_iterations_for_convergence_check:
+            self.change = _relative_change(loglik, self.previous_loglik)
+            self.converged = self.change < self.threshold
+        elif np.isfinite(self.previous_loglik):
+            self.change = abs(loglik - self.previous_loglik)
+        self.previous_loglik = loglik
+        self.loglik_path.append(float(loglik))
+
+    def advance(self, state: DFMModelState, loglik: float) -> None:
+        """Count the E-step just run, log progress and checkpoint ``state`` (the parameters EM would end on now)."""
+        self.num_iter += 1
+        num_iter, max_iter = self.num_iter, self.max_iter
+        iter_time = time_module.time() - self._iter_start
+        self._iteration_times.append(iter_time)
+        if len(self._iteration_times) > 5:
+            self._iteration_times.pop(0)
+        avg_iter_time = sum(self._iteration_times) / len(self._iteration_times)
+        if (num_iter % self.config.progress_log_interval == 0) or self.converged:
+            elapsed_time = time_module.time() - self._start_time
+            progress_msg = f"[{(num_iter / max_iter) * 100:.1f}%] Elapsed: {_format_time(elapsed_time)}"
+            remaining_iters = max_iter - num_iter if not self.converged else 0
+            if remaining_iters > 0 and len(self._iteration_times) >= 2:
+                progress_msg += f", Est. remaining: {_format_time(avg_iter_time * remaining_iters)}"
+            log_em_iteration(
+                iteration=num_iter,
+                loglik=loglik,
+                delta=self.change if self.change > 0 else None,
+                max_iter=max_iter,
+                converged="✓" if self.converged else ""
+            )
+            _logger.info(f"  Progress: {progress_msg}, Iteration time: {iter_time:.1f}s (avg: {avg_iter_time:.1f}s)")
+
+        if self.checkpoint_callback is not None and num_iter % 5 == 0:
+            try:
+                _logger.info(f"Saving checkpoint at iteration {num_iter}...")
+                self.checkpoint_callback(num_iter, state)
+            except Exception as e:
+                _logger.warning(f"Checkpoint callback failed at iteration {num_iter}: {e}", exc_info=True)
+
+    def _finite(self, state: DFMModelState) -> bool:
+        """True if every parameter of ``state`` is finite; otherwise stop EM."""
+        if _params_finite(state):
+            return True
+        _logger.error(f"EM: non-finite parameters after iteration {self.num_iter}; stopping.")
+        self.stop_reason = "non-finite parameters"
+        return False
+
+    def plain(self, state: DFMModelState) -> DFMModelState:
+        """Iterate the EM map from ``state``; every iterate is an accepted point."""
+        while self.num_iter < self.max_iter:
+            out = self.step(state)
+            if out is None:
+                break
+            state, loglik = out
+            self.accept(loglik)
+            self.advance(state, loglik)
+            if self.converged or not self._finite(state):
+                break
+        return state
+
+    def squarem(self, state: DFMModelState) -> DFMModelState:
+        """SqS3 cycles from ``state``: two EM maps, the extrapolation, one stabilizing EM map.
+
+        Each cycle starts at an accepted point ``theta0`` (convergence is tested
+        on its log-likelihood, and on convergence EM ends on ``F(theta0)``, as
+        plain EM does), maps it to ``theta1`` and ``theta2`` and extrapolates
+        with the step length bounded by ``step_max`` (``_squarem_point``). The
+        next accepted point is ``F(theta')`` when ``theta'`` is valid, its
+        E-step and M-step succeed and ``L(theta') >= L(theta0)``: the
+        log-likelihood the stabilizing E-step gives, and with an exact E-step
+        ``L(F(theta')) >= L(theta')``, so the accepted log-likelihoods do not
+        decrease without an extra E-step. Otherwise the next accepted point is
+        the plain EM point ``theta2`` (a fallback). The bound ``step_max``
+        starts at 1 (a cycle of three plain EM maps) and adapts as in the
+        SQUAREM package (``_stabilize``), so a slowly converging EM is not
+        extrapolated far past the likelihood's ascent region. Every E-step
+        counts towards ``max_iter``.
+        """
+        theta0 = state
+        while self.num_iter < self.max_iter:
+            out = self.step(theta0)
+            if out is None:
+                break
+            theta1, loglik0 = out
+            self.accept(loglik0)
+            self.advance(theta1, loglik0)
+            state = theta1
+            if self.converged or not self._finite(theta1) or self.num_iter >= self.max_iter:
+                break
+            out = self.step(theta1, accepted=False)
+            if out is None:
+                break
+            state, loglik1 = out
+            self.advance(state, loglik1)
+            if not self._finite(state) or self.num_iter >= self.max_iter:
+                break
+            point, step = _squarem_point(theta0, theta1, state, self.step_max)
+            theta0 = state = self._stabilize(point, step, loglik0, fallback=state)
+        return state
+
+    def _stabilize(self, point: Optional[DFMModelState], step: float, loglik0: float,
+                   fallback: DFMModelState) -> DFMModelState:
+        """``F(point)`` if the extrapolated ``point`` is accepted (see ``squarem``), else ``fallback``.
+
+        An invalid ``point`` (None) falls back without an E-step. ``step`` is
+        the step length of ``point``; when it is the bound ``step_max``, the
+        bound is multiplied by ``SQUAREM_STEP_FACTOR`` on acceptance and divided
+        by it (not below 1) on a fallback.
+        """
+        new_state, loglik = None, float('nan')
+        if point is None:
+            _logger.debug("EM: the SQUAREM point is not a valid parameter set; using the EM point.")
+        else:
+            try:
+                new_state, loglik = self._em_map(point)
+            except (NumericalError, np.linalg.LinAlgError, ValueError, FloatingPointError) as e:
+                _logger.debug(f"EM: the E-step or M-step at the SQUAREM point failed ({e}); using the EM point.")
+        accepted = new_state is not None and loglik >= loglik0 and _params_finite(new_state)
+        if step == self.step_max:
+            self.step_max = (self.step_max * SQUAREM_STEP_FACTOR if accepted
+                             else max(1.0, self.step_max / SQUAREM_STEP_FACTOR))
+        if not accepted:
+            if point is not None:
+                _logger.debug(f"EM: the SQUAREM point does not raise the log-likelihood "
+                              f"({loglik0:.6f} -> {loglik:.6f}); using the EM point.")
+            self.squarem_fallbacks += 1
+            new_state = fallback
+        if point is not None:
+            self.advance(new_state, loglik)
+        return new_state
+
+
 def run_em_algorithm(
     X: np.ndarray,
     initial_state: DFMModelState,
@@ -703,36 +1014,55 @@ def run_em_algorithm(
 ) -> Tuple[DFMModelState, Dict[str, Any]]:
     """Run EM from ``initial_state``; return the fitted state and its metadata.
 
-    Iteration ``k`` runs the E-step at ``theta_k`` (exact smoothed moments and
-    log-likelihood ``L_k``) and the M-step to ``theta_{k+1}`` (``em_step``);
-    with the exact E-step ``L_k`` does not decrease. From
-    ``k = config.min_iterations_for_convergence_check`` on, EM stops when
-    ``|L_k - L_{k-1}| / |L_{k-1}| < threshold`` and returns ``theta_{k+1}``;
-    otherwise it returns the last M-step output after ``max_iter`` iterations.
+    Each E-step at ``theta`` gives the exact smoothed moments and
+    log-likelihood ``L(theta)``, and the M-step the EM map ``F(theta)``
+    (``em_step``, then ``config.damping_factor``); with the exact E-step
+    ``L(F(theta)) >= L(theta)``. ``max_iter`` bounds the number of E-steps.
 
-    Guards (each stops EM with ``converged=False`` and returns the parameters
-    with the best exact log-likelihood seen):
+    - ``config.em_acceleration=None`` (plain EM): ``theta_{k+1} = F(theta_k)``;
+      every iterate is an accepted point.
+    - ``"squarem"``: the SqS3 scheme of Varadhan and Roland (2008), see
+      ``_EMRun.squarem``: three E-steps per cycle, the accepted points being
+      the cycle starts; an extrapolation that would lower the log-likelihood
+      falls back to the plain EM point. ``config.ar_clip`` and
+      ``damping_factor`` apply to every EM map. With ``max_iter=1`` both
+      settings run the same single EM map.
 
-    - ``L_k`` is not finite, or ``L_k < L_best - EM_MONOTONICITY_RTOL * |L_best|``
-      (a decrease, which an exact EM cannot produce; a warning is logged);
+    From E-step ``config.min_iterations_for_convergence_check`` on, EM stops
+    when the relative change ``|L_k - L_{k-1}| / |L_{k-1}|`` between
+    consecutive accepted points is below ``threshold`` and returns the EM map
+    of the last one; otherwise it returns the parameters it ends on after
+    ``max_iter`` E-steps.
+
+    Guards on the points of the EM path (the accepted points and, with
+    SQUAREM, ``theta1``; each guard stops EM with ``converged=False`` and
+    returns the accepted parameters with the best exact log-likelihood):
+
+    - ``L`` is not finite, or ``L < L_best - EM_MONOTONICITY_RTOL * |L_best|``
+      with ``L_best`` the best accepted log-likelihood (a decrease, which an
+      exact EM cannot produce; a warning is logged);
     - the E-step fails (non-finite filter, an innovation covariance that is not
       positive definite) or the M-step cannot be computed (singular moment
-      matrix) after the first iteration; in the first iteration either raises
+      matrix) after the first E-step; in the first one either raises
       ``RuntimeError``;
     - the parameters to be returned fail the same checks in the final pass.
 
     The returned parameters get one more filter/smoother pass, after the
     optional likelihood-invariant factor rescaling (``config.normalize_C``).
     Metadata: ``loglik`` (of the returned parameters, from that pass),
-    ``smoothed_factors`` (its smoothed states), ``num_iter`` (iterations run),
-    ``converged``, ``change``, ``stop_reason`` (None unless a guard stopped EM)
-    and ``best_loglik``. ``checkpoint_callback(num_iter, state)`` runs every 5
-    iterations; its exceptions are logged and ignored. The opt-in
+    ``smoothed_factors`` (its smoothed states), ``num_iter`` (E-steps run),
+    ``converged``, ``change``, ``stop_reason`` (None unless a guard stopped EM),
+    ``best_loglik`` (of the best accepted point), ``loglik_path`` (the exact log-likelihoods of the accepted
+    points, in order) and ``squarem_fallbacks`` (SQUAREM cycles that fell back
+    to the plain EM point). ``checkpoint_callback(num_iter, state)`` runs every
+    5 E-steps; its exceptions are logged and ignored. The opt-in
     ``config.damping_factor`` and ``config.ar_clip`` can break monotonicity;
     the guard applies to them too.
     """
     if config is None:
         config = _DEFAULT_EM_CONFIG
+    if config.em_acceleration not in EM_ACCELERATIONS:
+        raise ValueError(f"em_acceleration must be one of {EM_ACCELERATIONS}, got {config.em_acceleration!r}")
 
     if config.data_clip is not None and config.data_clip > 0:
         X_mean = np.nanmean(X, axis=0, keepdims=True)
@@ -753,10 +1083,10 @@ def run_em_algorithm(
         initial_state_mean=state.Z_0,
         initial_state_covariance=state.V_0
     )
-    
+
     block_structure = None
-    if (state.blocks is not None and state.r is not None and state.p is not None 
-        and state.max_lag_size is not None and state.n_clock_freq is not None 
+    if (state.blocks is not None and state.r is not None and state.p is not None
+        and state.max_lag_size is not None and state.n_clock_freq is not None
         and state.idio_indicator is not None):
         block_structure = BlockStructure(
             blocks=state.blocks,
@@ -770,140 +1100,17 @@ def run_em_algorithm(
             n_slower_freq=state.n_slower_freq,
             tent_weights_dict=state.tent_weights_dict
         )
-    
-    min_iterations = config.min_iterations_for_convergence_check
-    progress_interval = config.progress_log_interval
-    best_state: Optional[DFMModelState] = None
-    best_loglik = float('-inf')
-    previous_loglik = float('-inf')
-    num_iter = 0
-    converged = False
-    stop_reason: Optional[str] = None
-    change = DEFAULT_ZERO_VALUE
-    
-    em_start_time = time_module.time()
-    iteration_times = []
-    
-    _logger.info(f"Starting EM algorithm: max_iter={max_iter}, threshold={threshold:.2e}")
+
+    _logger.info(f"Starting EM algorithm: max_iter={max_iter}, threshold={threshold:.2e}, "
+                 f"acceleration={config.em_acceleration}")
     if block_structure is not None:
         _logger.info(f"  Block structure: {state.blocks.shape[1]} blocks, {int(np.sum(state.r))} factors")
     if state.constraint_matrix is not None:
         _logger.info(f"  Mixed-frequency: tent kernel constraints enabled (R_mat shape: {state.constraint_matrix.shape})")
-    
-    while num_iter < max_iter:
-        iter_start_time = time_module.time()
-        if num_iter % 10 == 0:
-            _logger.info(f"EM heartbeat: iteration {num_iter}/{max_iter}")
-        if num_iter < 3:
-            _logger.info(f"Starting iteration {num_iter + 1}/{max_iter}...")
 
-        # E-step at theta_k (= state), M-step to theta_{k+1} (= new_state).
-        try:
-            new_state, loglik, _ = em_step(
-                X, state, kalman_filter=kalman_filter, config=config,
-                block_structure=block_structure, num_iter=num_iter
-            )
-        except _MStepError as e:
-            if num_iter == 0:
-                _logger.error(f"EM step failed at iteration 1: {e}", exc_info=True)
-                raise RuntimeError(f"EM algorithm failed at iteration 1: {e}") from e
-            # The E-step at theta_k succeeded (its loglik is e.loglik); no update
-            # could be computed from it.
-            _logger.error(f"EM: {e}; stopping.")
-            if np.isfinite(e.loglik) and e.loglik > best_loglik:
-                best_state, best_loglik = state, float(e.loglik)
-            stop_reason = "M-step failed"
-            break
-        except NumericalError as e:
-            if num_iter == 0:
-                _logger.error(f"EM step failed at iteration 1: {e}", exc_info=True)
-                raise RuntimeError(f"EM algorithm failed at iteration 1: {e}") from e
-            # The filter is not usable at theta_k (the previous M-step output).
-            _logger.error(f"EM: the E-step failed at iteration {num_iter + 1} ({e}); stopping.")
-            stop_reason = "E-step failed"
-            break
-        except Exception as e:
-            _logger.error(f"EM step failed at iteration {num_iter + 1}: {e}", exc_info=True)
-            _logger.error(f"  Current parameters shapes - A: {state.A.shape if state.A is not None else None}, C: {state.C.shape if state.C is not None else None}, Q: {state.Q.shape if state.Q is not None else None}, R: {state.R.shape if state.R is not None else None}")
-            _logger.error(f"  Data shape: {X.shape}, Block structure: {block_structure is not None}")
-            raise RuntimeError(f"EM algorithm failed at iteration {num_iter + 1}: {e}") from e
-
-        # loglik is L_k, the exact log-likelihood of theta_k.
-        if not np.isfinite(loglik):
-            if num_iter == 0:
-                raise RuntimeError(f"EM algorithm failed at iteration 1: the log-likelihood of the "
-                                   f"initial parameters is not finite ({loglik!r}).")
-            _logger.error(f"EM: the log-likelihood is not finite at iteration {num_iter + 1}; stopping.")
-            stop_reason = "non-finite log-likelihood"
-            break
-        if best_state is not None and loglik < best_loglik - EM_MONOTONICITY_RTOL * abs(best_loglik):
-            _logger.warning(
-                f"EM: the exact log-likelihood decreased at iteration {num_iter + 1} "
-                f"({best_loglik:.6f} -> {loglik:.6f}); stopping and returning the best parameters."
-            )
-            stop_reason = "log-likelihood decreased"
-            break
-        if loglik > best_loglik or best_state is None:
-            best_state, best_loglik = state, float(loglik)
-        if num_iter == 0 and loglik < -1e10:
-            _logger.warning(f"Extremely negative initial log-likelihood: {loglik:.2e}. "
-                            f"This may indicate numerical instability or data scaling issues.")
-
-        # Convergence on the exact loglik of theta_k.
-        if num_iter >= min_iterations:
-            change = _relative_change(loglik, previous_loglik)
-            converged = change < threshold
-        elif np.isfinite(previous_loglik):
-            change = abs(loglik - previous_loglik)
-        previous_loglik = loglik
-
-        if config.damping_factor is not None and 0 < config.damping_factor <= 1:
-            alpha = config.damping_factor
-            new_state = replace(
-                new_state,
-                **{name: alpha * getattr(new_state, name) + (1 - alpha) * getattr(state, name)
-                   for name in ("A", "C", "Q", "R", "Z_0", "V_0")}
-            )
-            if num_iter < 3:
-                _logger.info(f"  Applied damping: {alpha*100:.0f}% new, {(1-alpha)*100:.0f}% old")
-                _logger.warning("Damping breaks the EM monotonicity guarantee.")
-
-        state = new_state
-        num_iter += 1
-
-        iter_time = time_module.time() - iter_start_time
-        iteration_times.append(iter_time)
-        if len(iteration_times) > 5:
-            iteration_times.pop(0)
-        avg_iter_time = sum(iteration_times) / len(iteration_times)
-        if (num_iter % progress_interval == 0) or converged:
-            elapsed_time = time_module.time() - em_start_time
-            progress_msg = f"[{(num_iter / max_iter) * 100:.1f}%] Elapsed: {_format_time(elapsed_time)}"
-            remaining_iters = max_iter - num_iter if not converged else 0
-            if remaining_iters > 0 and len(iteration_times) >= 2:
-                progress_msg += f", Est. remaining: {_format_time(avg_iter_time * remaining_iters)}"
-            log_em_iteration(
-                iteration=num_iter,
-                loglik=loglik,
-                delta=change if change > 0 else None,
-                max_iter=max_iter,
-                converged="✓" if converged else ""
-            )
-            _logger.info(f"  Progress: {progress_msg}, Iteration time: {iter_time:.1f}s (avg: {avg_iter_time:.1f}s)")
-
-        if checkpoint_callback is not None and num_iter % 5 == 0 and num_iter > 0:
-            try:
-                _logger.info(f"Saving checkpoint at iteration {num_iter}...")
-                checkpoint_callback(num_iter, state)
-            except Exception as e:
-                _logger.warning(f"Checkpoint callback failed at iteration {num_iter}: {e}", exc_info=True)
-
-        if converged:
-            break
-        if not _params_finite(state):
-            _logger.error(f"EM: non-finite parameters after iteration {num_iter}; stopping.")
-            stop_reason = "non-finite parameters"
-            break
+    run = _EMRun(X, kalman_filter, config, block_structure, max_iter, threshold, checkpoint_callback)
+    state = run.squarem(state) if config.em_acceleration == "squarem" else run.plain(state)
+    best_state, best_loglik, stop_reason, converged = run.best_state, run.best_loglik, run.stop_reason, run.converged
 
     def _final(candidate: DFMModelState) -> Tuple[DFMModelState, float, np.ndarray]:
         """Rescale (if configured), then the final filter/smoother pass at ``candidate``."""
@@ -916,8 +1123,8 @@ def run_em_algorithm(
             raise NumericalError(f"the log-likelihood of the returned parameters is not finite ({ll_final!r})")
         return candidate, float(ll_final), EZ_final
 
-    # The parameters to return: the last M-step output, unless EM stopped on a
-    # guard; it must also pass the guard (finite, not below the best loglik).
+    # The parameters to return: the ones EM ended on, unless EM stopped on a
+    # guard; they must also pass the guard (finite, not below the best loglik).
     result = None
     if stop_reason is None:
         try:
@@ -947,20 +1154,22 @@ def run_em_algorithm(
 
     log_convergence(
         converged=converged,
-        num_iter=num_iter,
+        num_iter=run.num_iter,
         final_loglik=final_loglik if np.isfinite(final_loglik) else None,
         reason=("converged" if converged else
-                (stop_reason if stop_reason is not None else f"max_iterations_reached (change: {change:.2e})")),
+                (stop_reason if stop_reason is not None else f"max_iterations_reached (change: {run.change:.2e})")),
         model_type="dfm"
     )
 
     metadata = {
         'loglik': final_loglik,
-        'num_iter': num_iter,
+        'num_iter': run.num_iter,
         'converged': converged,
-        'change': change,
+        'change': run.change,
         'smoothed_factors': EZ_final,
         'stop_reason': stop_reason,
         'best_loglik': best_loglik,
+        'loglik_path': run.loglik_path,
+        'squarem_fallbacks': run.squarem_fallbacks,
     }
     return state, metadata

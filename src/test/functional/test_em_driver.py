@@ -6,7 +6,9 @@
   weekly/monthly fits.
 - The monotonicity guard: when an iterate's exact log-likelihood drops (an M-step
   output corrupted on purpose) or its filter is not finite, EM stops, returns
-  the best parameters seen with ``converged=False`` and reports their loglik.
+  the best parameters seen with ``converged=False`` and reports their loglik
+  (plain EM, ``em_acceleration=None``; the SQUAREM guards are tested in
+  ``test_squarem.py``).
 - ``update(refit=True)`` runs one EM iteration on all rows through the same
   driver and reports the exact loglik of what it returns.
 """
@@ -119,7 +121,7 @@ def _run_with_corruption(monkeypatch, corrupt, at: int, max_iter: int = 8):
     monkeypatch.setattr(em, "em_step", step)
     monkeypatch.setattr(em, "run_em_algorithm", run)
     model, panel = _synthetic()
-    model.set_params(max_iter=max_iter)
+    model.set_params(max_iter=max_iter, em_acceleration=None)
     model = _fit(model, panel)
     return model, model.engine_.data_processed, inputs, out
 

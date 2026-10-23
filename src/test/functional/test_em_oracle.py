@@ -7,7 +7,9 @@ each iterate is then computed with the independent reference filter
 (``src/test/ssm/_reference_kf.py``). EM must not decrease it (tolerance 1e-6
 relative): the E-step is exact and every M-step block is a conditional
 maximizer of the expected complete-data log-likelihood (see
-``test_mstep_qfunction.py`` for the block-by-block check).
+``test_mstep_qfunction.py`` for the block-by-block check). The fits run plain
+EM (``em_acceleration=None``), whose every iterate is an EM map; the SQUAREM
+path is tested in ``test_squarem.py``.
 """
 
 from __future__ import annotations
@@ -87,7 +89,7 @@ def _synthetic():
     cols = list(config["frequency"])
     panel = PanelData(y=df.set_index("date"), freq={c: "m" for c in cols})
     model = DFM(blocks={"Block_Global": {"n_factors": 2, "series": cols}}, clock="m",
-                max_iter=15, tol=0.0, scaler="standard")
+                max_iter=15, tol=0.0, scaler="standard", em_acceleration=None)
     return model, panel
 
 
@@ -99,7 +101,8 @@ def _monthly_quarterly():
     panel = PanelData(y=_mq_panel().set_index("date"),
                       freq={**{c: "m" for c in _MQ_MONTHLY}, **{c: "q" for c in _MQ_QUARTERLY}})
     model = DFM(blocks={"Block_Global": {"n_factors": 2, "series": _MQ_MONTHLY + _MQ_QUARTERLY}},
-                clock="m", tent_weights={"q:m": [1, 2, 3, 2, 1]}, max_iter=15, tol=0.0, scaler="standard")
+                clock="m", tent_weights={"q:m": [1, 2, 3, 2, 1]}, max_iter=15, tol=0.0, scaler="standard",
+                em_acceleration=None)
     return model, panel
 
 
@@ -112,7 +115,7 @@ def _weekly_monthly():
     sections = load_yaml(REPO_ROOT / "config" / "dfm_macro.yaml")
     panel = PanelData.from_wide(_macro_tail(_DFM_WM_ROWS), **sections["data"])
     model = DFM.from_config(DFMConfig.from_dict(sections["model"]))
-    model.set_params(max_iter=15, tol=0.0)
+    model.set_params(max_iter=15, tol=0.0, em_acceleration=None)
     return model, panel
 
 
@@ -177,6 +180,7 @@ def test_macro_truncation_sweep(rows, monkeypatch):
         df = _macro_tail(rows)
     panel = PanelData.from_wide(df, **sections["data"])
     model = DFM.from_config(DFMConfig.from_dict(sections["model"]))
+    model.set_params(em_acceleration=None)
     logging.disable(logging.CRITICAL)
     try:
         model, X, iterates = fit_with_iterates(model, panel, monkeypatch)

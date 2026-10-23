@@ -195,6 +195,7 @@ def _estimator_params(hyper: dict) -> dict:
         "data_clip": config["data_clip"],
         "regularization": config["regularization"],
         "damping_factor": config["damping_factor"],
+        "em_acceleration": None,  # the fixtures were captured with plain EM
         "scaler": "standard",
     }
 

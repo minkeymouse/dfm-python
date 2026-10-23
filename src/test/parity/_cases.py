@@ -224,12 +224,22 @@ def _afm_case(factor_model: str, trading: str, **overrides: Any) -> CaseRun:
 
 # ----------------------------------------------------------------------- DFM
 def _dfm_hyper(model: Any) -> dict[str, Any]:
+    """The engine's config, EM config and structure as the DFM fixtures record them.
+
+    The fixtures predate ``em_acceleration``; every case runs plain EM
+    (``em_acceleration=None``), which is left out of the record, so any other
+    value differs from the fixture.
+    """
     cfg = model._config
     config_fields = {f.name: getattr(cfg, f.name) for f in dataclasses.fields(cfg)
                      if not f.name.startswith("_")}
+    em_config = dataclasses.asdict(cfg.to_em_config())
+    for fields in (config_fields, em_config):
+        if fields["em_acceleration"] is None:
+            del fields["em_acceleration"]
     return {
         "config": config_fields,
-        "em_config": dataclasses.asdict(cfg.to_em_config()),
+        "em_config": em_config,
         "num_factors": model.num_factors,
         "r": model.r,
         "p": model.p,
@@ -319,7 +329,8 @@ def _dfm_fit(config_dict: dict[str, Any], df: pd.DataFrame,
     # The engine path: the pre-redesign DFM class, now the private DFMEngine,
     # called as tutorial/tutorial_macro_dfm.py called the old public class.
     _reset_global_rngs()
-    config = _DFMEngineConfig.from_dict(dict(config_dict))
+    # The fixtures were captured with plain EM, before em_acceleration existed.
+    config = _DFMEngineConfig.from_dict({**config_dict, "em_acceleration": None})
     dataset = DFMDataset(config=config, data=df, time_index="date")
     model = DFMEngine(dataset=dataset, config=config, scaler=StandardScaler())
     hyper = _dfm_hyper(model)

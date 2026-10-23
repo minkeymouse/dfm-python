@@ -44,6 +44,7 @@ from ...config.schema.params import DFMModelState
 from ...config.schema.results import DFMResult
 from ...dataset.dfm_dataset import DFMDataset
 from ...dataset.panel import PanelData
+from ...functional.em import EM_ACCELERATIONS
 from ...functional.state_layout import DFMStateLayout
 from ...io.layout import index_from_spec, index_to_spec
 from ...logger import get_logger
@@ -152,10 +153,10 @@ class DFM(BaseFactorModel):
         there is no default kernel, and the error names the symmetric kernel
         of ``generate_tent_weights`` to pass.
     max_iter : int, default 5000
-        Maximum EM iterations.
+        Maximum number of EM iterations (E-steps, each one EM map).
     tol : float, default 1e-5
         EM convergence threshold on the relative change of the
-        log-likelihood.
+        log-likelihood between consecutive accepted parameters.
     ar_clip : dict, optional
         ``{"min": float, "max": float}``: clip the AR coefficients of the
         transition matrix to this range after each M step (a missing key uses
@@ -174,6 +175,15 @@ class DFM(BaseFactorModel):
     damping_factor : float, optional
         In (0, 1]: each EM update is ``damping_factor * new + (1 -
         damping_factor) * old``. None does not damp.
+    em_acceleration : {"squarem", None}, default "squarem"
+        ``"squarem"`` accelerates EM with the SqS3 scheme of Varadhan and
+        Roland (2008): from the current parameters two EM maps, a quadratic
+        extrapolation along them, and one stabilizing EM map from the
+        extrapolated point, which is kept when its log-likelihood is not below
+        that of the cycle's start (otherwise the second EM map is). It reaches
+        the same maximum in fewer E-steps; every E-step counts towards
+        ``max_iter``, and ``ar_clip`` and ``damping_factor`` apply to every EM
+        map. None runs plain EM.
     scaler : str or sklearn transformer, optional
         Scaler of the series: "standard", "robust", "minmax", "maxabs",
         "quantile", or an unfitted transformer, which is cloned. None (the
@@ -206,7 +216,7 @@ class DFM(BaseFactorModel):
     freq_ : dict
         Frequency of every series, in the user's order.
     n_iter_ : int
-        EM iterations run.
+        EM iterations (E-steps) run.
     converged_ : bool
         True when EM stopped on ``tol`` before ``max_iter``.
     loglik_ : float
@@ -268,6 +278,7 @@ class DFM(BaseFactorModel):
         data_clip: Optional[float] = None,
         regularization: Optional[Mapping] = None,
         damping_factor: Optional[float] = None,
+        em_acceleration: Optional[str] = "squarem",
         scaler: Any = None,
         verbose: int = 0,
     ) -> None:
@@ -281,6 +292,7 @@ class DFM(BaseFactorModel):
         self.data_clip = data_clip
         self.regularization = regularization
         self.damping_factor = damping_factor
+        self.em_acceleration = em_acceleration
         self.scaler = scaler
         self.verbose = verbose
 
@@ -288,15 +300,16 @@ class DFM(BaseFactorModel):
     def get_test_params(cls) -> list[dict]:
         """Small parameter sets for the contract fixture (the quarterly ``s0`` first, then two monthly series).
 
-        One global factor, and two blocks (a global one and one over ``s1``
-        and ``s2``), both standardized.
+        One global factor with SQUAREM, and two blocks (a global one and one
+        over ``s1`` and ``s2``) with plain EM, both standardized. ``max_iter=5``
+        runs one SQUAREM cycle and the start of the next.
         """
-        base = {"clock": "m", "tent_weights": {"q:m": [1, 2, 3, 2, 1]}, "max_iter": 3, "scaler": "standard"}
+        base = {"clock": "m", "tent_weights": {"q:m": [1, 2, 3, 2, 1]}, "max_iter": 5, "scaler": "standard"}
         blocks = {
             "global": {"n_factors": 1, "series": ["s0", "s1", "s2"]},
             "pair": {"n_factors": 1, "series": ["s1", "s2"]},
         }
-        return [base, {**base, "blocks": blocks}]
+        return [{**base, "em_acceleration": "squarem"}, {**base, "blocks": blocks, "em_acceleration": None}]
 
     def _fail(self, message: str) -> None:
         raise ConfigurationError(f"{type(self).__name__}: {message}")
@@ -327,6 +340,8 @@ class DFM(BaseFactorModel):
         damping = self.damping_factor
         if damping is not None and (not _is_real(damping) or not 0 < damping <= 1):
             fail(f"damping_factor must be None or a number in (0, 1], got {damping!r}.")
+        if self.em_acceleration not in EM_ACCELERATIONS:
+            fail(f"em_acceleration must be one of {list(EM_ACCELERATIONS)}, got {self.em_acceleration!r}.")
         self._check_scaler()
         if not _is_int(self.verbose) or self.verbose < 0:
             fail(f"verbose must be a non-negative integer (0 silent, 1 progress, 2 debug), got {self.verbose!r}.")
@@ -533,6 +548,7 @@ class DFM(BaseFactorModel):
             "data_clip": self.data_clip,
             "regularization": None if self.regularization is None else dict(self.regularization),
             "damping_factor": self.damping_factor,
+            "em_acceleration": self.em_acceleration,
             "tent_weights": tent,
         }
 
@@ -969,9 +985,14 @@ class DFM(BaseFactorModel):
                     "run is inconsistent."
                 )
             est.blocks = {name: est.blocks[name] for name in order}
+        saved_config = meta["engine_config"]
+        if "em_acceleration" not in saved_config:
+            # Saved before em_acceleration existed (0.8.x): fitted by plain EM.
+            est.em_acceleration = None
+            saved_config = {**saved_config, "em_acceleration": None}
         internal = list(est.internal_feature_names_)
         engine_config = est._engine_config_dict(est.freq_, internal)
-        if engine_config != meta["engine_config"]:
+        if engine_config != saved_config:
             raise ConfigurationError(
                 f"{str(path)!r}: state.json holds the engine config {meta['engine_config']}, but config.json and "
                 f"data_spec.json give {engine_config}; the run is inconsistent."

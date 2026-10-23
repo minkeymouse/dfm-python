@@ -275,6 +275,10 @@ class DFMEngine:
     ) -> DFMModelState:
         """Fit by EM: scale the data, initialize the parameters, run ``run_em_algorithm``.
 
+        EM runs ``config.max_iter`` E-steps at most, plain or accelerated
+        (``config.em_acceleration``); ``_training_num_iter`` is the number of
+        E-steps run.
+
         Parameters
         ----------
         X : np.ndarray or DataFrame, optional
@@ -515,7 +519,8 @@ class DFMEngine:
             (one path for one and for many rows) and their filtered states are
             appended to ``result.Z``; the parameters are unchanged.
         **kwargs
-            With ``retrain``: ``max_iter`` (default 1) and ``threshold``
+            With ``retrain``: ``max_iter`` (default 1: one EM map, the same
+            with and without ``config.em_acceleration``) and ``threshold``
             (default the config's).
         """
         validate_column_order(data, self.scaler)

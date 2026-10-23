@@ -143,7 +143,8 @@ class _DFMEngineConfig(BaseModelConfig):
     parameters, and the public :class:`DFMConfig` mirrors that constructor.
     Factors are organized in blocks (global + sector-specific) and always
     follow AR(1) dynamics. ``ar_clip``, ``data_clip``, ``regularization`` and
-    ``damping_factor`` are off when None.
+    ``damping_factor`` are off when None. ``em_acceleration`` is ``"squarem"``
+    or None (plain EM).
     """
     blocks: Dict[str, Dict[str, Any]] = field(default_factory=dict)  # {"name": {"num_factors": int, "series": [str]}}
     block_names: List[str] = field(init=False)  # derived from blocks
@@ -158,6 +159,7 @@ class _DFMEngineConfig(BaseModelConfig):
     data_clip: Optional[float] = None  # clip values beyond this many standard deviations
     regularization: Optional[Dict[str, float]] = None  # {"scale", "min_eigenvalue", "max_eigenvalue"}
     damping_factor: Optional[float] = None  # 0.8 = 80% new, 20% old
+    em_acceleration: Optional[str] = "squarem"  # "squarem" or None (plain EM)
 
     idio_rho0: float = DEFAULT_IDIO_RHO0  # initial AR coefficient of the idiosyncratic components
     idio_min_var: float = MIN_DIAGONAL_VARIANCE  # floor of the idiosyncratic innovation variance
@@ -194,7 +196,7 @@ class _DFMEngineConfig(BaseModelConfig):
                         self.frequency[series_name] = self.clock
 
     def to_em_config(self) -> 'EMConfig':
-        """The ``EMConfig`` of this configuration (regularization, clipping and damping; the rest defaults)."""
+        """The ``EMConfig`` of this configuration (regularization, clipping, damping, acceleration; the rest defaults)."""
         from ...functional.em import EMConfig
 
         if isinstance(self.regularization, dict):
@@ -213,6 +215,7 @@ class _DFMEngineConfig(BaseModelConfig):
             ar_clip=self.ar_clip,
             damping_factor=self.damping_factor,
             data_clip=self.data_clip,
+            em_acceleration=self.em_acceleration,
         )
 
     def get_blocks_array(self, columns: Optional[List[str]] = None) -> np.ndarray:
@@ -295,6 +298,7 @@ class _DFMEngineConfig(BaseModelConfig):
             'data_clip': data.get('data_clip', None),
             'regularization': data.get('regularization', None),
             'damping_factor': data.get('damping_factor', None),
+            'em_acceleration': data.get('em_acceleration', "squarem"),
             'tent_weights': data.get('tent_weights', None),
         }
         return cls(blocks=_normalize_blocks_dict(blocks_dict), **base_params, **dfm_params)
@@ -573,5 +577,6 @@ class DFMConfig(EstimatorConfig):
     data_clip: Optional[float] = None
     regularization: Optional[Dict[str, float]] = None
     damping_factor: Optional[float] = None
+    em_acceleration: Optional[str] = "squarem"
     scaler: Any = None
     verbose: int = 0
