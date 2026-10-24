@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import copy
 import dataclasses
-import functools
 import logging
 import math
 import warnings
@@ -40,11 +39,12 @@ from ...config.schema.params import iVDFMModelState
 from ...config.schema.results import iVDFMResult
 from ...config.types import to_numpy
 from ...dataset.ivdfm_dataset import iVDFMDataset
-from ...dataset.panel import PanelData
+from ...dataset.panel import PanelData, _polars_time_col, _to_pandas
 from ...io.layout import index_from_spec, index_to_spec
 from ...logger import get_logger
 from ...logger.progress import fit_verbosity, quiet_engine_loggers
 from ...utils.errors import ConfigurationError, DataValidationError, UnsupportedInputError
+from ...utils.interpret import explained_variance
 from ._engine import iVDFMEngine
 
 __all__ = ["iVDFM"]
@@ -106,29 +106,15 @@ def _mean_decoder_jacobian(engine: iVDFMEngine, path: np.ndarray) -> np.ndarray:
 
     The path is decoded as the engine's ``get_result`` decodes it (``_decode``
     without context, so K > 1 mixes the decoders with uniform weights). The
-    decoder acts on each time step separately, so the forward-mode derivative
-    along factor j gives column j of every step's Jacobian at once.
+    decoder acts on each time step separately, so the gradient of series i
+    summed over time holds row i of every step's Jacobian.
     """
-    f = torch.as_tensor(path, dtype=DEFAULT_TORCH_DTYPE, device=engine.device).unsqueeze(0)
-    decode = functools.partial(engine._decode, u_1T=None)
-    columns = []
-    for j in range(f.shape[-1]):
-        tangent = torch.zeros_like(f)
-        tangent[..., j] = 1.0
-        _, derivative = torch.func.jvp(decode, (f,), (tangent,))
-        columns.append(to_numpy(derivative[0]).astype(np.float64).mean(axis=0))
-    return np.stack(columns, axis=1)
-
-
-def _explained_variance(data: np.ndarray, common: np.ndarray) -> np.ndarray:
-    """``1 - var(data - common) / var(data)`` per column, over the entries where ``data`` is not NaN.
-
-    An all-NaN column gives NaN and a constant one -inf (NaN if ``common``
-    matches it), without warnings.
-    """
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", RuntimeWarning)  # nanvar of an all-NaN column; division by zero
-        return 1.0 - np.nanvar(data - common, axis=0) / np.nanvar(data, axis=0)
+    f = torch.as_tensor(path, dtype=DEFAULT_TORCH_DTYPE, device=engine.device).unsqueeze(0).requires_grad_(True)
+    with torch.enable_grad():
+        y = engine._decode(f, u_1T=None)  # (1, T, N)
+        rows = [torch.autograd.grad(y[..., i].sum(), f, retain_graph=True)[0][0].mean(dim=0)
+                for i in range(y.shape[-1])]
+    return to_numpy(torch.stack(rows)).astype(np.float64)
 
 
 class _FittedScaler:
@@ -730,7 +716,7 @@ class iVDFM(BaseFactorModel):
         targets = data.y.to_numpy(dtype=np.float64)
         # The dataset fills non-finite targets like missing ones; they do not count as observed.
         scaled = np.where(np.isfinite(targets), dataset.target, np.nan)
-        self._set_interpretation(targets, _explained_variance(scaled, self.result_.x_sm))
+        self._set_interpretation(targets, explained_variance(scaled, self.result_.x_sm))
 
     def _set_interpretation(self, targets: Optional[np.ndarray], explained: Optional[np.ndarray]) -> None:
         """Set ``factor_names_``, ``factors_``, ``loadings_``, ``loadings_kind_`` and ``explained_variance_``.
@@ -877,7 +863,8 @@ class iVDFM(BaseFactorModel):
 
         A DataFrame is matched by column name, and its index must be the
         forecast index (the ``h`` steps after ``origin_index[-1]``); a default
-        ``RangeIndex`` (0 to h-1) is taken by position, like an array.
+        ``RangeIndex`` (0 to h-1) is taken by position, like an array. A
+        polars frame's single Date/Datetime column is its index.
         """
         exog_names = list(self.exog_names_in_)
         if futr_exog is None:
@@ -894,6 +881,10 @@ class iVDFM(BaseFactorModel):
             raise DataValidationError(
                 "iVDFM was fitted without exog, so predict takes no futr_exog; drop the argument."
             )
+        time_col = _polars_time_col(futr_exog)
+        futr_exog = _to_pandas(futr_exog)
+        if time_col is not None:
+            futr_exog = futr_exog.set_index(time_col)
         if isinstance(futr_exog, pd.DataFrame):
             missing = [c for c in exog_names if c not in futr_exog.columns]
             if missing:
@@ -914,7 +905,9 @@ class iVDFM(BaseFactorModel):
             positional = isinstance(index, pd.RangeIndex) and index.start == 0 and index.step == 1
             if not positional:
                 expected = self._forecast_index(origin_index, h)
-                if not index.equals(expected):
+                # By value: a polars Date column arrives as datetime64[ms], the forecast index as [ns].
+                same = len(index) == len(expected) and bool(np.all(index == expected))
+                if not same:
                     raise DataValidationError(
                         f"futr_exog index runs {index[0]!r} to {index[-1]!r}, but the forecast index runs "
                         f"{expected[0]!r} to {expected[-1]!r} (the {h} steps after {origin_index[-1]!r}). Pass the "

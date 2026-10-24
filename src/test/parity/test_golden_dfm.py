@@ -16,7 +16,7 @@ structure) when EM starts and reproduce every golden output of the fit
 elsewhere); the estimator's ``result_``, ``states_``, ``scaler_`` and
 diagnostics must equal that engine's numbers bitwise, ``internal_feature_names_``
 the fixture's columns, ``predict(6)`` the engine's forecast reordered to the
-user's columns, and ``predict_factors(6)`` its state forecast. The permuted case passes
+user's columns, and ``predict_factors(6)`` the factor columns of its state forecast. The permuted case passes
 the series in the permuted order of its fixture; the estimator's internal
 order is the fixture's dataset order. For the cases with update rows, the
 fixture's update path is reproduced through the estimator: ``predict(6,
@@ -137,6 +137,15 @@ def _assert_outputs(outputs: dict, case: str, fixture) -> None:
     assert_golden(outputs, case, exclude=[key for key in fixture if key not in outputs])
 
 
+def _state_forecast(model: DFM, data: object = None) -> np.ndarray:
+    """The full state forecast behind ``predict_factors``, after checking that its factor columns are those."""
+    _, Z, _, _ = model._run_forecast("predict_factors", DFM_HORIZON, data)
+    factors = model.predict_factors(DFM_HORIZON, data=data)
+    assert list(factors.columns) == list(model.factor_names_)
+    assert factors.to_numpy().tobytes() == np.ascontiguousarray(np.asarray(Z)[:, model._factor_states()]).tobytes()
+    return np.asarray(Z)
+
+
 def _check_update_path(model: DFM, new: PanelData, case: str, fixture) -> None:
     """The fixture's update path through the estimator: predict(data=), update and update(refit=True)."""
     columns = [str(c) for c in fixture["columns"]]
@@ -146,7 +155,7 @@ def _check_update_path(model: DFM, new: PanelData, case: str, fixture) -> None:
     assert _state_hash(model) == before
     assert conditioned.index[0] > new.index[-1] and conditioned.index.equals(conditioned_factors.index)
     _assert_outputs({"predict_data_X": _internal(conditioned, columns),
-                     "predict_data_Z": conditioned_factors.to_numpy()}, case, fixture)
+                     "predict_data_Z": _state_forecast(model, new)}, case, fixture)
 
     updated = copy.deepcopy(model)
     result, factors = updated.result_, updated.factors_.copy()
@@ -157,7 +166,7 @@ def _check_update_path(model: DFM, new: PanelData, case: str, fixture) -> None:
         "update_Z": updated.engine_.get_result().Z,
         "update_data_processed": updated.engine_.data_processed,
         "update_predict_X": _internal(updated.predict(DFM_HORIZON), columns),
-        "update_predict_Z": updated.predict_factors(DFM_HORIZON).to_numpy(),
+        "update_predict_Z": _state_forecast(updated),
     }, case, fixture)
 
     refitted = copy.deepcopy(model)
@@ -172,7 +181,7 @@ def _check_update_path(model: DFM, new: PanelData, case: str, fixture) -> None:
         "refit_converged": np.bool_(refit.converged),
         "refit_result_Z": refitted.result_.Z,
         "refit_predict_X": _internal(refitted.predict(DFM_HORIZON), columns),
-        "refit_predict_Z": refitted.predict_factors(DFM_HORIZON).to_numpy(),
+        "refit_predict_Z": _state_forecast(refitted),
     }, case, fixture)
     # The estimator reports the refitted engine's diagnostics (compared with the fixture above).
     assert refitted.n_iter_ == refit.num_iter and refitted.converged_ == refit.converged
@@ -291,9 +300,8 @@ def test_golden_dfm_estimator(case, build, pinned, engine_at_fit, tmp_path):
     assert all(dtype == np.float64 for dtype in forecast.dtypes)
     assert forecast.index[0] > data.index[-1] and len(forecast.index) == DFM_HORIZON
 
+    np.testing.assert_array_equal(_state_forecast(model), outputs["predict_Z"], strict=True)
     factors = model.predict_factors(DFM_HORIZON)
-    np.testing.assert_array_equal(factors.to_numpy(), outputs["predict_Z"], strict=True)
-    assert list(factors.columns) == list(model.states_.columns)
     assert factors.index.equals(forecast.index)
 
     new = _new_rows(case.name, manifest)

@@ -55,6 +55,7 @@ from ...io.scaler import SCALER_PREFIX, decode_scaler, encode_scaler, is_known_s
 from ...logger import get_logger
 from ...logger.progress import fit_verbosity, quiet_engine_loggers
 from ...utils.errors import ConfigurationError, DataValidationError, UnsupportedInputError
+from ...utils.interpret import affine_scaler_params, explained_variance
 from ._engine import DDFMEngine
 
 __all__ = ["DDFM"]
@@ -145,28 +146,6 @@ def _decode_covariate_scaler(json_dict: Any, arrays: dict, allow_pickle: bool, p
         return pickle.loads(arrays[_COVARIATE_SCALER_PREFIX + "pickle"].tobytes())  # noqa: S301 - gated by allow_pickle
     prefix = _COVARIATE_SCALER_PREFIX
     return decode_scaler(json_dict, {SCALER_PREFIX + k[len(prefix):]: v for k, v in arrays.items() if k.startswith(prefix)})
-
-
-def _affine_scaler_params(scaler: Any, n: int) -> Optional[tuple[np.ndarray, np.ndarray]]:
-    """``(offset, scale)`` with ``data = offset + scale * scaled`` per column, or None for a non-affine scaler.
-
-    None (no scaler) and the fitted ``StandardScaler``, ``RobustScaler``,
-    ``MinMaxScaler`` and ``MaxAbsScaler`` (exact classes) are affine; ``n``
-    is the number of columns.
-    """
-    zeros, ones = np.zeros(n), np.ones(n)
-    if scaler is None:
-        return zeros, ones
-    kind = type(scaler)
-    if kind is StandardScaler:
-        return (scaler.mean_ if scaler.with_mean else zeros), (scaler.scale_ if scaler.with_std else ones)
-    if kind is RobustScaler:
-        return (scaler.center_ if scaler.with_centering else zeros), (scaler.scale_ if scaler.with_scaling else ones)
-    if kind is MinMaxScaler:
-        return -scaler.min_ / scaler.scale_, 1.0 / scaler.scale_
-    if kind is MaxAbsScaler:
-        return zeros, scaler.scale_
-    return None
 
 
 def _is_int(value: Any) -> bool:
@@ -614,10 +593,7 @@ class DDFM(BaseFactorModel):
         series = pd.Index(self.feature_names_in_)
         self.loadings_ = pd.DataFrame(loadings, index=series, columns=names)
         data = self._training_targets()
-        residual = data - self._common_scaled(decoder)  # NaN exactly where data is missing
-        total = np.nanvar(data, axis=0)
-        with np.errstate(divide="ignore", invalid="ignore"):
-            explained = np.where(total > 0, 1.0 - np.nanvar(residual, axis=0) / total, np.nan)
+        explained = explained_variance(data, self._common_scaled(decoder))
         self.explained_variance_ = pd.Series(explained, index=series, name="explained_variance")
 
     def _to_data_units(self, values: np.ndarray) -> np.ndarray:
@@ -664,7 +640,7 @@ class DDFM(BaseFactorModel):
         self._check_is_fitted("decompose")
         if by not in ("component", "factor"):
             raise ConfigurationError(f"DDFM.decompose: by must be 'component' or 'factor', got {by!r}.")
-        affine = _affine_scaler_params(self.scaler_, self.n_features_in_)
+        affine = affine_scaler_params(self.scaler_, self.n_features_in_)
         if by == "factor" and self.loadings_kind_ != "exact":
             raise UnsupportedInputError(
                 "DDFM.decompose(by='factor') needs targets linear in the factors, but the MLP decoder is nonlinear "

@@ -111,3 +111,19 @@ def test_afm_set_output_polars_allocate():
     assert out.drop("date").to_numpy().tobytes() == expected.to_numpy().tobytes()
     tags = model.get_tags()
     assert tags["task"] == "allocation" and not tags["capability:interpret"] and not tags["capability:pred_int"]
+
+
+def test_explained_variance_is_nan_for_short_or_constant_columns():
+    import warnings
+
+    from dfm_python.utils.interpret import explained_variance
+
+    data = np.array([[1.0, 2.0, np.nan, 3.0], [2.0, 2.0, np.nan, np.inf], [4.0, 2.0, 1.0, 5.0]])
+    common = np.array([[1.5, 2.0, 0.0, 3.0], [2.0, 2.0, 0.0, 0.0], [3.5, 2.0, 1.0, 5.0]])
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        out = explained_variance(data, common)
+    x, r = data[:, 0], data[:, 0] - common[:, 0]
+    assert out[0] == pytest.approx(1 - r.var() / x.var())
+    assert np.isnan(out[1]) and np.isnan(out[2])  # constant; one observed entry
+    assert out[3] == pytest.approx(1.0)  # inf counts as missing; the two finite entries are fitted exactly

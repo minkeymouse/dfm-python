@@ -476,6 +476,21 @@ def test_futr_exog_follows_the_time_features(fitted_exog):
     assert factors.shape == (6, 2)
 
 
+def test_futr_exog_accepts_polars_frames(fitted_exog):
+    pl = pytest.importorskip("polars")
+    est = fitted_exog
+    future = np.arange(12, dtype=np.float64).reshape(6, 2) / 10
+    forecast = est.predict(6, futr_exog=future)
+    dates = est._forecast_index(est.conditioning_index_, 6)
+    # A Date column (milliseconds after conversion) is the index and must be the forecast dates.
+    dated = pl.DataFrame({"date": pl.Series(list(dates.date), dtype=pl.Date), "u1": future[:, 1], "u0": future[:, 0]})
+    assert dated.schema["date"] == pl.Date
+    assert est.predict(6, futr_exog=dated).equals(forecast)
+    assert est.predict(6, futr_exog=pl.DataFrame({"u0": future[:, 0], "u1": future[:, 1]})).equals(forecast)
+    with pytest.raises(DataValidationError, match="forecast index"):
+        est.predict(6, futr_exog=dated.with_columns(pl.col("date").dt.offset_by("1y")))
+
+
 def test_futr_exog_missing_warns_and_uses_time_features(fitted_exog):
     with pytest.warns(UserWarning, match="futr_exog"):
         forecast = fitted_exog.predict(3)

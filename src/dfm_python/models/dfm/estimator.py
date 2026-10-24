@@ -51,6 +51,7 @@ from ...io.layout import index_from_spec, index_to_spec
 from ...logger import get_logger
 from ...logger.progress import fit_verbosity, quiet_engine_loggers
 from ...utils.errors import ConfigurationError, DataValidationError, NumericalError, UnsupportedInputError
+from ...utils.interpret import affine_scaler_params, explained_variance
 from ._engine import DFMEngine
 from .tent import generate_tent_weights
 
@@ -94,8 +95,6 @@ _RESULT_REBUILT = ("target_scaler",)
 _SSM_FIELDS = ("A", "C", "Q", "R", "Z_0", "V_0")
 # Optional mixed-frequency arrays (training_state fields), saved as mixed_freq/<name> when set.
 _MIXED_FREQ_ARRAYS = ("constraint_matrix", "constraint_vector", "idio_indicator")
-# Scalers whose inverse_transform is affine per series (data = scale * scaled + offset).
-_AFFINE_SCALERS = (StandardScaler, RobustScaler, MinMaxScaler, MaxAbsScaler)
 
 
 def _is_int(value: Any) -> bool:
@@ -233,10 +232,9 @@ class DFM(BaseFactorModel):
         float64, index ``feature_names_in_``, columns ``factor_names_``, in
         the scaled space. A clock-frequency series: its entry of ``C`` on the
         factor. A slower-frequency series: its loading on the tent-aggregated
-        factor ``sum_l w_l f_{t-l}``, the entry of ``C`` on lag 0 divided by
-        the first tent weight ``w_0`` (the tent restriction sets the entry on
-        lag ``l`` to ``w_l`` times the one on lag 0, so with ``w_0 = 1``, as
-        in ``[1, 2, 3, 2, 1]``, the entries are the loading times ``w_l``).
+        factor ``sum_l w_l f_{t-l}``: the tent restriction makes the entry of
+        ``C`` on lag ``l`` the loading times ``w_l``, so the loading is the
+        entry on lag 0 divided by the first tent weight ``w_0``.
     loadings_kind_ : str
         ``"exact"``: the observation equation is linear in the factors.
     explained_variance_ : pandas.Series
@@ -755,6 +753,11 @@ class DFM(BaseFactorModel):
         C = np.array(self.result_.C, dtype=np.float64, order="C")
         return layout, Z, C
 
+    def _factor_states(self) -> list:
+        """The state index of each factor's current value, in ``factor_names_`` order."""
+        layout = DFMStateLayout.from_state(self.engine_.training_state)
+        return [int(states[0]) for states in _factor_state_groups(layout)]
+
     def _set_interpretation(self, index: pd.Index) -> None:
         """Set ``factor_names_``, ``factors_``, ``states_``, ``loadings_``, ``loadings_kind_`` and ``explained_variance_``.
 
@@ -768,14 +771,14 @@ class DFM(BaseFactorModel):
             names = [f"factor_{j}" for j in range(r[0])]
         else:
             names = [f"{block}_{j}" for block, n in zip(self.blocks, r) for j in range(n)]
-        current = [int(states[0]) for states in _factor_state_groups(layout)]
+        current = self._factor_states()
         loadings = C[:, current]
         if layout.n_slower:
             tent = next(iter(self.engine_.training_state.tent_weights_dict.values()))
             loadings[layout.n_clock:] /= float(tent[0])
         X = self._training_rows()
         F = layout.n_factor_states
-        explained = 1.0 - np.nanvar(X - Z[:, :F] @ C[:, :F].T, axis=0) / np.nanvar(X, axis=0)
+        explained = explained_variance(X, Z[:, :F] @ C[:, :F].T)
         internal, user = list(self.internal_feature_names_), list(self.feature_names_in_)
         self.factor_names_ = np.asarray(names, dtype=object)
         self.states_ = self._state_frame(Z, index)
@@ -797,19 +800,14 @@ class DFM(BaseFactorModel):
             When ``scaler_`` is not None, StandardScaler, RobustScaler,
             MinMaxScaler or MaxAbsScaler.
         """
-        scaler = self.scaler_
-        if scaler is None:
-            return np.ones(len(self.internal_feature_names_))
-        if not isinstance(scaler, _AFFINE_SCALERS):
+        params = affine_scaler_params(self.scaler_, len(self.internal_feature_names_))
+        if params is None:
             raise UnsupportedInputError(
                 f"DFM.{method} needs a scaler that is affine per series (None, StandardScaler, RobustScaler, "
-                f"MinMaxScaler or MaxAbsScaler) to convert to data units; scaler_ is a {type(scaler).__name__}."
+                f"MinMaxScaler or MaxAbsScaler) to convert to data units; scaler_ is a "
+                f"{type(self.scaler_).__name__}."
             )
-        if isinstance(scaler, MinMaxScaler):  # inverse_transform divides by scale_
-            return 1.0 / np.asarray(scaler.scale_, dtype=np.float64)
-        if scaler.scale_ is None:  # with_std=False or with_scaling=False
-            return np.ones(len(self.internal_feature_names_))
-        return np.asarray(scaler.scale_, dtype=np.float64)
+        return np.asarray(params[1], dtype=np.float64)
 
     def _new_rows(self, data: Any, method: str) -> tuple[np.ndarray, pd.Index]:
         """Validate new rows for a fitted model; return them in the internal order and the extended index.
@@ -986,17 +984,18 @@ class DFM(BaseFactorModel):
         return self._emit(self._forecast_frame("predict", h, data))
 
     def predict_factors(self, h: int, data: Any = None) -> pd.DataFrame:
-        """Forecast the state vector ``h`` clock periods ahead (same arguments as :meth:`predict`).
+        """Forecast the factors ``h`` clock periods ahead (same arguments as :meth:`predict`).
 
         Returns
         -------
         pandas.DataFrame
-            float64, ``h`` rows, columns ``state_0`` .. ``state_{m-1}`` (the
-            columns of ``states_``); ``attrs["kind"]`` is ``"factors"``. A
-            polars frame after ``set_output(output="polars")``.
+            float64, ``h`` rows, columns ``factor_names_`` (the current value of
+            each factor, as in ``factors_``); ``attrs["kind"]`` is
+            ``"factors"``. A polars frame after ``set_output(output="polars")``.
         """
         _, Z, h, origin = self._run_forecast("predict_factors", h, data)
-        return self._emit(self._frame(Z, h, self._state_columns(np.asarray(Z).shape[1]), "factors", origin))
+        Z = np.asarray(Z)[:, self._factor_states()]
+        return self._emit(self._frame(Z, h, list(self.factor_names_), "factors", origin))
 
     def predict_interval(self, h: int, coverage: float = 0.9, data: Any = None) -> pd.DataFrame:
         """Central Gaussian prediction intervals of the series ``h`` clock periods ahead, in data units.

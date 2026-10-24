@@ -432,7 +432,7 @@ def test_fit_matches_the_engine_on_the_internal_order():
     assert model.result_.loglik == result.loglik and model.n_iter_ == result.num_iter
     X, Z = engine.predict(horizon=4)
     np.testing.assert_array_equal(model.predict(4)[_MONTHLY + ["gdp"]].to_numpy(), X, strict=True)
-    np.testing.assert_array_equal(model.predict_factors(4).to_numpy(), Z, strict=True)
+    np.testing.assert_array_equal(model.predict_factors(4).to_numpy(), Z[:, model._factor_states()], strict=True)
 
 
 def test_time_column_never_collides():
