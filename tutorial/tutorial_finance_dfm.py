@@ -4,7 +4,7 @@ Loads ``config/dfm_finance.yaml`` (a ``model:`` section with the DFM
 constructor parameters, four blocks of two factors each, and a ``data:``
 section with the ``PanelData.from_wide`` arguments), fits the model by EM on
 the last 1000 days of ``data/finance.csv``, forecasts the 27 series 6 days
-ahead in data units, forecasts the state, and saves and reloads the run.
+ahead in data units, forecasts the factors, and saves and reloads the run.
 
 Run from the repository root (needs the ``yaml`` extra, or PyYAML)::
 
@@ -77,17 +77,17 @@ def main(argv: list[str] | None = None) -> None:
     print(f"   {model!r}")
     model.fit(data)
     print(f"   EM ran {model.n_iter_} iteration(s), converged={model.converged_}, loglik={model.loglik_:.4f}")
-    print(f"   {model.n_factors_} factors in blocks {list(model.blocks)}; factors_ {model.factors_.shape} "
-          "(the state: factors, their lags and idiosyncratic states)")
+    print(f"   {model.n_factors_} factors in blocks {list(model.blocks)}; factors_ {model.factors_.shape}, "
+          f"states_ {model.states_.shape} (the factors, their lags and idiosyncratic states)")
 
-    # 4. Forecast the series (data units, the data's column order) and the state.
+    # 4. Forecast the series (data units, the data's column order) and the factors.
     forecast = model.predict(6)
     print("\n   6-step forecast (data units):")
     print(forecast.to_string(float_format=lambda v: f"{v:.4f}"))
     if not np.isfinite(forecast.to_numpy()).all():
         print("   WARNING: the forecast has non-finite values")
     factors = model.predict_factors(6)
-    print(f"\n   state forecast {factors.shape}, columns {list(factors.columns[:3])} ...")
+    print(f"\n   factor forecast {factors.shape}, columns {list(factors.columns[:3])} ...")
 
     # 5. Save the run and load it back without the data.
     model.save(args.run_dir, overwrite=True)

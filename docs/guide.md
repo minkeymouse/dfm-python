@@ -561,8 +561,9 @@ numbers:
   to `[1, 4, 6, 4, 2]`. Kernels that start with 1, such as `[1, 2, 3, 2, 1]`
   and `[1, 2, 1]`, are unchanged.
 
-Numbers: the DFM Kalman filter and smoother now use the model's structure;
-with `em_acceleration=None` and a kernel that starts with 1, DFM results match
+Numbers: the DFM Kalman filter and smoother use the model's structure from
+56 states up, and the M-step reads only the covariance blocks it needs; with
+`em_acceleration=None` and a kernel that starts with 1, DFM results match
 0.8.3 up to rounding.
 
 Saved runs: runs saved by 0.8.x load. A DFM run loads with

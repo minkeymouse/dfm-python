@@ -133,15 +133,18 @@ Notes:
   [guide](https://github.com/minkeymouse/dfm-python/blob/main/docs/guide.md)).
 - Cost: an EM iteration (E-step) is a Kalman filter and smoother pass, about
   `O(T m^3)` with `m` the state dimension (factor lags plus one idiosyncratic
-  state per series, so `m` grows with `N`). The filter and smoother use the
-  DFM structure of `A` and `C` (AR(1) diagonals, lag shifts, loadings in a
-  few columns): products with `A` and `C` are scalings, gathers and small
-  products, so a row takes three dense products in the filter and five in the
-  smoother instead of about twenty; the results equal those of the dense
-  recursions up to rounding. The passes run the BLAS on one thread (the
-  matrices are small; multithreaded BLAS was 28x slower on a 4-core
-  machine). A 1000 x 100 panel with two factors takes about 1 s per E-step
-  on one core, half the time of the dense recursions.
+  state per series, so `m` grows with `N`). From 56 states up the filter and
+  smoother use the DFM structure of `A` and `C` (AR(1) diagonals, lag
+  shifts, loadings in a few columns): products with `A` and `C` are scalings,
+  gathers and small products, so a row takes three dense products in the
+  filter and five in the smoother instead of about twenty; the results equal
+  those of the dense recursions up to rounding. Below 56 states the dense
+  recursions are faster (fewer numpy calls per row) and run instead. The
+  passes run the BLAS on one thread (the matrices are small; multithreaded
+  BLAS was 28x slower on a 4-core machine). A 1000 x 100 panel with two
+  factors takes about 1 s per E-step on one core, half the time of the
+  dense recursions; on long panels with few states the per-row Python
+  overhead dominates (about 0.2 ms per row at 37 states).
 - No news decomposition of data releases.
 
 Compared with statsmodels' `DynamicFactorMQ` (statsmodels 0.15), which

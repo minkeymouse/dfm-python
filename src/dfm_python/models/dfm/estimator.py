@@ -1103,9 +1103,9 @@ class DFM(BaseFactorModel):
             RobustScaler, MinMaxScaler or MaxAbsScaler (the factor parts add
             up in data units only for an affine scaler).
         """
+        self._check_is_fitted("decompose")
         if by not in ("component", "factor"):
             raise ConfigurationError(f"DFM.decompose: by must be 'component' or 'factor', got {by!r}.")
-        self._check_is_fitted("decompose")
         layout, Z, C = self._state_and_loadings()
         X = self._training_rows()
         scaler = self.scaler_

@@ -3,7 +3,7 @@
 Loads ``config/dfm_exchange.yaml`` (a ``model:`` section with the DFM
 constructor parameters and a ``data:`` section with the ``PanelData.from_wide``
 arguments), fits a two-factor model by EM, forecasts the eight exchange rates
-6 days ahead in data units, forecasts the state, and saves and reloads the run.
+6 days ahead in data units, forecasts the factors, and saves and reloads the run.
 
 Run from the repository root (needs the ``yaml`` extra, or PyYAML)::
 
@@ -79,14 +79,14 @@ def main(argv: list[str] | None = None) -> None:
     print(f"   factors_ {model.factors_.shape} (the factors), states_ {model.states_.shape} (the factors, their lags "
           "and idiosyncratic states)")
 
-    # 4. Forecast the rates (data units, the data's column order) and the state.
+    # 4. Forecast the rates (data units, the data's column order) and the factors.
     forecast = model.predict(6)
     print("\n   6-step forecast (data units):")
     print(forecast.to_string(float_format=lambda v: f"{v:.4f}"))
     if not np.isfinite(forecast.to_numpy()).all():
         print("   WARNING: the forecast has non-finite values")
     factors = model.predict_factors(6)
-    print(f"\n   state forecast {factors.shape}, columns {list(factors.columns[:3])} ...")
+    print(f"\n   factor forecast {factors.shape}, columns {list(factors.columns[:3])} ...")
 
     # 5. Save the run and load it back without the data.
     model.save(args.run_dir, overwrite=True)

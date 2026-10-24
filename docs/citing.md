@@ -43,6 +43,6 @@ Please also cite the paper behind the model you use.
 
 | Model | Reference |
 |-------|-----------|
-| DFM   | Banbura, M. and Modugno, M. (2014), "Maximum likelihood estimation of factor models on datasets with arbitrary pattern of missing data", *Journal of Applied Econometrics* 29(1). Tent kernel `[1, 2, 3, 2, 1]`: Mariano, R. S. and Murasawa, Y. (2003), "A new coincident index of business cycles based on monthly and quarterly series", *Journal of Applied Econometrics* 18(4). |
+| DFM   | Banbura, M. and Modugno, M. (2014), "Maximum likelihood estimation of factor models on datasets with arbitrary pattern of missing data", *Journal of Applied Econometrics* 29(1). Tent kernel `[1, 2, 3, 2, 1]`: Mariano, R. S. and Murasawa, Y. (2003), "A new coincident index of business cycles based on monthly and quarterly series", *Journal of Applied Econometrics* 18(4). EM acceleration (`em_acceleration="squarem"`): Varadhan, R. and Roland, C. (2008), "Simple and globally convergent methods for accelerating the convergence of any EM algorithm", *Scandinavian Journal of Statistics* 35(2). |
 | iVDFM | Chang, M. and Kim, J.-Y. (2026), arXiv:2603.22886 (above). |
 | AFM   | Epstein, Wang, Choi and Pelger (2025), "Attention Factors for Statistical Arbitrage", arXiv:2510.11616. LongConv filter: Fu et al. (2023). OU benchmark: Avellaneda and Lee (2010). |
