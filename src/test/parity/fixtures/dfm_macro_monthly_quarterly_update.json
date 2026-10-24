@@ -54,7 +54,7 @@
     "python": "3.12",
     "torch": "2.14.1+cu130"
   },
-  "git_commit": "bfa0053022b3fcbb83e363fbacf452d6f464fc11",
+  "git_commit": "2b461b36e180b3cf416d6400780706092a3434e9",
   "global_rng_preseed": 20251019,
   "hyperparameters": {
     "blocks": [
@@ -402,5 +402,5 @@
     }
   },
   "raised": null,
-  "src_dirty": false
+  "src_dirty": true
 }
