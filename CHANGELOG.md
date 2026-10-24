@@ -1,5 +1,98 @@
 # Changelog
 
+## Unreleased
+
+Speed and API release. DFM fits are faster and use SQUAREM by default, the
+factor models share an interpretation API, DFM gives prediction intervals,
+and every model reads and writes polars frames. The breaking changes are
+listed under "Upgrading from 0.8" (also in docs/guide.md).
+
+### DFM speed
+
+Measured on one 4-core machine, default settings, against 0.8.3:
+
+| Fit | 0.8.3 | now |
+|-----|-------|-----|
+| README quick start (4 series) | 3.7 s, 222 E-steps | about 2.8 s, 109 E-steps |
+| 1000 x 100 panel, 3 factors | 38.5 s, 14 E-steps | 24.1 s, 19 E-steps, higher log-likelihood |
+| same panel, `em_acceleration=None` | 38.5 s, 14 E-steps | 16.7 s, 14 E-steps, same log-likelihood |
+| `tutorial/tutorial_macro_dfm.py` (2538 rows, 14 series) | 10.9 s | 9.2 s |
+
+- The Kalman filter and smoother exploit the DFM structure when the state
+  dimension is at least 56: blockwise products with the transition matrix,
+  the sparsity of the loadings, a Cholesky-based covariance update instead
+  of the Joseph form, and a smoother that reuses the filtered moments. At a
+  state dimension of 135 a filter-and-smoother pass costs 0.62 times the
+  dense one; below 56 states the dense path is faster and still runs.
+  Results agree with the dense path to rounding (tested to 1e-9 relative on
+  random structured models and end to end on a fit).
+- The M-step reads only the covariance blocks each update needs, instead of
+  a T x m x m second-moment array and a dense `C V C'` contraction: from
+  about 0.6 s to 0.04 s per iteration at m = 106.
+- `em_acceleration="squarem"` (the new default) accelerates EM with the SqS3
+  scheme of Varadhan and Roland (2008), with a safeguard that keeps every
+  accepted step's log-likelihood non-decreasing. It needs about half the
+  E-steps of plain EM on small panels; at a given `tol` it usually stops at
+  a higher log-likelihood. `em_acceleration=None` runs plain EM.
+- A compiled kernel was not added: at m = 106 the remaining time is half
+  BLAS, so it would gain at most about 1.5x; for long panels with few states
+  (the macro tutorial) the per-row Python overhead dominates and a compiled
+  kernel would help more.
+
+### Interpretation API
+
+`DFM`, `DDFM` and `iVDFM` (tag `capability:interpret`) have:
+
+- `factor_names_`, `factors_` (the factor path on `index_`), `loadings_`
+  (series x factors, in the scaled space) with `loadings_kind_`
+  (`"exact"` for a linear observation equation, `"mean_jacobian"` for a
+  nonlinear decoder: the decoder Jacobian averaged over the factor path),
+  and `explained_variance_` (per series, the share of the variance of the
+  scaled training data explained by the common component).
+- `decompose(by="component")`: common and idiosyncratic parts in data units,
+  adding up to the data; `by="factor"` splits the common part by factor for
+  models linear in the factors (DFM, DDFM with the linear decoder).
+
+### Prediction intervals
+
+- `DFM.predict_interval(h, coverage=0.9, data=None)` (tag
+  `capability:pred_int`): Gaussian intervals from the Kalman forecast
+  moments, centred on `predict`, in data units (scalers that are affine per
+  series). They do not include parameter uncertainty.
+
+### polars
+
+- `set_output(output="polars")` on every model: `predict`,
+  `predict_factors`, `predict_interval`, `decompose` and `allocate` return
+  polars frames (the index becomes the first column, MultiIndex columns are
+  joined with `"__"`).
+- A polars frame passed to `fit`, `predict(data=)`, `update`, `allocate` or
+  `backtest` uses its single Date/Datetime column as the time index (before,
+  the date column was read as a series and rejected); iVDFM `futr_exog`
+  accepts polars too.
+- `PanelData.to_polars(layout="long" | "wide")`.
+
+### Bug fixes
+
+- DFM tent restriction: the loading on lag l was tied to w_l times the
+  loading on lag 0, which is the kernel's shape only when the first weight
+  is 1 (`[2, 4, 6, 4, 2]` gave loadings proportional to `[1, 4, 6, 4, 2]`).
+  The lag loadings are now proportional to the whole kernel. Kernels with a
+  first weight of 1, including the default, are unchanged.
+
+### Upgrading from 0.8
+
+- DFM `factors_` holds the current factors (columns `factor_names_`); the
+  full state frame it held before is `states_`.
+- DFM `predict_factors` returns the current factors, not the state vector.
+- iVDFM `factors_` is the factor path of the series encoded as one sequence;
+  the window frame it held before is `window_factors_`.
+- The SQUAREM default changes DFM estimates at a given `tol`, and `n_iter_`
+  counts E-steps. Pass `em_acceleration=None` for the 0.8 behaviour; its
+  numbers agree with 0.8.3 to rounding (the DFM golden fixtures were
+  recaptured and agree with 0.8.3's within 8e-13).
+- DFM fits with a tent kernel whose first weight is not 1 change.
+
 ## 0.8.3
 
 Performance and forecasting-correctness release. No API changes.
