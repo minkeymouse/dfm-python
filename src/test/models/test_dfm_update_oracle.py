@@ -66,6 +66,11 @@ def _reference_forecast(model, X_all: np.ndarray) -> np.ndarray:
     return np.array(out)
 
 
+def _states(model, data=None) -> np.ndarray:
+    """The full state forecast behind predict_factors (which reports its current-factor columns)."""
+    return np.asarray(_quiet(model._run_forecast, "predict_factors", H, data)[1])
+
+
 def _quiet(fn, *args, **kwargs):
     logging.disable(logging.CRITICAL)
     try:
@@ -82,7 +87,7 @@ def test_update_continues_the_training_filter(n_new):
     model, _, new, X_all = _fit(n_new)
     expected = _reference_forecast(model, X_all)
     _quiet(model.update, new)
-    got = _quiet(model.predict_factors, H).to_numpy()
+    got = _states(model)
     assert ref.rel_err(got, expected) < RTOL
 
 
@@ -97,8 +102,8 @@ def test_update_one_row_at_a_time_matches_all_at_once():
 
         row = PanelData(y=new.y.iloc[k:k + 1], freq=new.freq)
         _quiet(one_by_one.update, row)
-    a = _quiet(together.predict_factors, H).to_numpy()
-    b = _quiet(one_by_one.predict_factors, H).to_numpy()
+    a = _states(together)
+    b = _states(one_by_one)
     assert ref.rel_err(a, b) < RTOL
 
 
@@ -107,7 +112,9 @@ def test_predict_with_data_continues_the_training_filter(n_new):
     """predict_factors(h, data=new) forecasts from the reference x_{T+n|T+n} (rel 1e-8), model unchanged."""
     model, _, new, X_all = _fit(n_new)
     expected = _reference_forecast(model, X_all)
-    before = _quiet(model.predict_factors, H).to_numpy()
-    got = _quiet(model.predict_factors, H, data=new).to_numpy()
+    before = _states(model)
+    got = _states(model, new)
     assert ref.rel_err(got, expected) < RTOL
-    np.testing.assert_array_equal(_quiet(model.predict_factors, H).to_numpy(), before)
+    np.testing.assert_array_equal(_states(model), before)
+    np.testing.assert_array_equal(_quiet(model.predict_factors, H, data=new).to_numpy(),
+                                  got[:, model._factor_states()])

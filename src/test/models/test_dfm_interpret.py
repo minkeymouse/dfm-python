@@ -454,7 +454,7 @@ def test_set_output_polars(fitted):
     pandas_model = fitted[0]
     calls = {
         "predict": (lambda m: m.predict(3), USER),
-        "predict_factors": (lambda m: m.predict_factors(3), list(pandas_model.states_.columns)),
+        "predict_factors": (lambda m: m.predict_factors(3), list(pandas_model.factor_names_)),
         "predict_interval": (lambda m: m.predict_interval(3), [f"{s}__{b}" for s in USER for b in ("lower", "upper")]),
         "decompose": (lambda m: m.decompose(), [f"{c}__{s}" for c in ("common", "idiosyncratic") for s in USER]),
         "decompose_factor": (

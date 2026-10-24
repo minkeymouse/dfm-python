@@ -596,11 +596,11 @@ def test_predict_frame_in_the_user_order(fitted):
 
 def test_predict_factors_frame(fitted):
     factors = fitted.predict_factors(4)
-    assert list(factors.columns) == list(fitted.states_.columns)
+    assert list(factors.columns) == list(fitted.factor_names_) == list(fitted.factors_.columns)
     assert factors.index.equals(fitted.predict(4).index)
     assert factors.attrs == {"model": "DFM", "kind": "factors", "origin": fitted.index_[-1]}
-    _, Z = fitted.engine_.predict(horizon=4)
-    np.testing.assert_array_equal(factors.to_numpy(), Z, strict=True)
+    _, Z = fitted.engine_.predict(horizon=4)  # the full state forecast; the factors are its current-value states
+    np.testing.assert_array_equal(factors.to_numpy(), Z[:, fitted._factor_states()], strict=True)
 
 
 def test_range_index_continues_by_position():
@@ -687,7 +687,7 @@ def test_predict_data_is_the_engine_path_on_a_copy(split_fit):
     X, Z = copy.deepcopy(model.engine_).predict(horizon=4, data=_internal_rows(new))
     assert forecast.to_numpy().tobytes() == pd.DataFrame(X, columns=_MONTHLY + ["gdp"])[
         ["gdp", "m0", "m1", "m2", "m3"]].to_numpy().tobytes()
-    assert factors.to_numpy().tobytes() == np.asarray(Z, dtype=np.float64).tobytes()
+    assert factors.to_numpy().tobytes() == np.ascontiguousarray(np.asarray(Z, dtype=np.float64)[:, model._factor_states()]).tobytes()
     expected_index = pd.date_range(new.index[-1], periods=5, freq="ME")[1:].rename("date")
     assert forecast.index.equals(expected_index) and factors.index.equals(expected_index)
     assert forecast.attrs == {"model": "DFM", "kind": "forecast", "origin": new.index[-1]}
@@ -776,7 +776,7 @@ def test_update_filters_the_new_rows_with_fixed_parameters(split_fit):
     X, Z = engine.predict(horizon=3)
     forecast = model.predict(3)
     assert forecast[_MONTHLY + ["gdp"]].to_numpy().tobytes() == np.asarray(X).tobytes()
-    assert model.predict_factors(3).to_numpy().tobytes() == np.asarray(Z).tobytes()
+    assert model.predict_factors(3).to_numpy().tobytes() == np.ascontiguousarray(np.asarray(Z)[:, model._factor_states()]).tobytes()
     assert forecast.index[0] == _frame().index[-1] + pd.offsets.MonthEnd(1)
     # predict(h, data=new) on the fitted model continues the same filter as update(new): the same forecast.
     np.testing.assert_allclose(fitted.predict(3, data=new).to_numpy(), forecast.to_numpy(), rtol=1e-12, atol=1e-12)
@@ -1066,7 +1066,7 @@ def test_ported_predict():
     model = _weekly_model().fit(_weekly_panel())
     forecast, factors = model.predict(5), model.predict_factors(5)
     assert forecast.shape == (5, 3) and list(forecast.columns) == _WEEKLY
-    assert factors.shape == (5, model.result_.Z.shape[1])
+    assert factors.shape == (5, len(model.factor_names_))
     assert forecast.index[0] == _weekly_panel().index[-1] + pd.offsets.Week(weekday=6)
 
 
