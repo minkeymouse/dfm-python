@@ -54,6 +54,8 @@ def _missing_requirement(block: str) -> str | None:
         importlib.util.find_spec("omegaconf") or importlib.util.find_spec("yaml")
     ):
         return "omegaconf or PyYAML (the yaml extra)"
+    if "polars" in block and not (importlib.util.find_spec("polars") and importlib.util.find_spec("pyarrow")):
+        return "polars and pyarrow (the polars extra)"
     return None
 
 

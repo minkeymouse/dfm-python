@@ -34,7 +34,7 @@ a CPU-only or a specific CUDA torch build, install `torch` from the
 | `yaml`    | omegaconf         | YAML configs (`load_yaml`, `XConfig.from_yaml`), `tutorial/` |
 | `tune`    | optuna            | iVDFM hyperparameter search (`dfm_python.tuning`)           |
 | `metrics` | sktime            | `calculate_rmse`, `calculate_mae`                           |
-| `polars`  | polars, pyarrow   | passing polars DataFrames to `PanelData`                    |
+| `polars`  | polars, pyarrow   | polars input and output (`set_output`, `to_polars`)         |
 | `all`     | all of the above  |                                                             |
 | `dev`     | pytest, ruff, build, twine, omegaconf, pyyaml, optuna, statsmodels | tests and packaging |
 
@@ -66,11 +66,23 @@ df.loc[df.index.month % 3 != 0, "gdp"] = np.nan          # quarterly: NaN betwee
 
 data = PanelData(y=df, freq={"gdp": "q"})                # unlisted series run at the clock
 model = DFM(n_factors=1, clock="m", tent_weights={"q:m": [1, 2, 3, 2, 1]},
-            scaler="standard", max_iter=100).fit(data)
-model.result_.loglik, model.n_iter_, model.converged_
+            scaler="standard", max_iter=200).fit(data)
+model.result_.loglik, model.n_iter_, model.converged_    # n_iter_: E-steps run (about 110), converged_ True
 fc = model.predict(6)               # DataFrame 6 x 4, every series at every month, data units
-zf = model.predict_factors(6)       # DataFrame 6 x state dimension
+zf = model.predict_factors(6)       # DataFrame 6 x 1, column factor_0
 model.save("runs/quickstart", overwrite=True)            # dfm_python.load() reads it back
+```
+
+The factors and loadings, a split of the data into its parts, prediction
+intervals, and polars output (the `polars` extra):
+
+```python
+model.factors_                      # DataFrame 120 x 1 (factor_0), the smoothed factor on the training dates
+model.loadings_, model.explained_variance_       # 4 x 1 loadings (scaled space); share of variance per series
+parts = model.decompose(by="factor")             # columns (factor_0 | mean | idiosyncratic, series): sum = data
+bands = model.predict_interval(6, coverage=0.9)  # columns (series, lower | upper), Gaussian, data units
+model.set_output(output="polars")   # predict, predict_interval, decompose, ... now return polars frames
+model.predict(6).columns            # ['date', 'ip', 'sales', 'jobs', 'gdp']
 ```
 
 ## Other models
@@ -128,7 +140,7 @@ model.result_.sharpe, model.book_returns_
 
 | Page | Contents |
 |------|----------|
-| [User guide](https://github.com/minkeymouse/dfm-python/blob/main/docs/guide.md) | `PanelData`, the estimator contract, `update` and `predict(data=)`, saving and loading, YAML configs, reproducibility, logging, errors |
+| [User guide](https://github.com/minkeymouse/dfm-python/blob/main/docs/guide.md) | `PanelData`, the estimator contract, `update` and `predict(data=)`, interpretation, prediction intervals, polars, saving and loading, YAML configs, reproducibility, logging, errors, upgrading from 0.8 |
 | [Models](https://github.com/minkeymouse/dfm-python/blob/main/docs/models.md) | DFM, DDFM, iVDFM and AFM: full examples, hyperparameters, notes, method references |
 | [Migrating from 0.7](https://github.com/minkeymouse/dfm-python/blob/main/docs/migration-0.7.md) | the 0.7 to 0.8 API table |
 | [Development](https://github.com/minkeymouse/dfm-python/blob/main/docs/development.md) | setup, tests, lint, repository layout, golden tests, releases |
