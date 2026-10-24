@@ -72,7 +72,7 @@
     "python": "3.12",
     "torch": "2.14.1+cu130"
   },
-  "git_commit": "2b461b36e180b3cf416d6400780706092a3434e9",
+  "git_commit": "269af9373ea3283431c77c91f78827a6ba8ba368",
   "global_rng_preseed": 20251019,
   "hyperparameters": {
     "blocks": [

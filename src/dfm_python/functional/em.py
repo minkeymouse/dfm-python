@@ -305,10 +305,26 @@ def _update_transition_matrix_blocked(
     return replace(state, A=A_new, Q=Q_new, V_0=_initial_covariance_update(V_smooth[0]))
 
 
-def _second_moments(EZ: np.ndarray, V_smooth: np.ndarray) -> np.ndarray:
-    """``E[x_t x_t' | Y] = EZ_t EZ_t' + V_smooth_t`` for every row, (T x m x m)."""
-    EZ = np.asarray(EZ, dtype=np.float64)
-    return np.asarray(V_smooth, dtype=np.float64) + EZ[:, :, np.newaxis] * EZ[:, np.newaxis, :]
+def _as_index(idx: np.ndarray) -> Any:
+    """``idx`` as a slice when it is a contiguous ascending run (a view instead of a copy), else as is."""
+    if idx.size and np.all(np.diff(idx) == 1):
+        return slice(int(idx[0]), int(idx[-1]) + 1)
+    return idx
+
+
+def _moment_block(w: np.ndarray, EZ: np.ndarray, V_smooth: np.ndarray, rows: np.ndarray,
+                  cols: np.ndarray) -> np.ndarray:
+    """``sum_t w_t E[x_t,rows x_t,cols' | Y] = sum_t w_t (V_t[rows, cols] + EZ_t[rows] EZ_t[cols]')``.
+
+    Reads only the (rows, cols) block of each smoothed covariance, never a
+    (T x m x m) second-moment array.
+    """
+    r, c = _as_index(rows), _as_index(cols)
+    if isinstance(r, slice) or isinstance(c, slice):
+        V = V_smooth[:, r, c]
+    else:
+        V = V_smooth[:, r[:, np.newaxis], c[np.newaxis, :]]
+    return np.einsum('t,tab->ab', w, V) + (EZ[:, r] * w[:, np.newaxis]).T @ EZ[:, c]
 
 
 def _update_loading_row(
@@ -318,7 +334,7 @@ def _update_loading_row(
     Y0: np.ndarray,
     W: np.ndarray,
     EZ: np.ndarray,
-    EZZ: np.ndarray,
+    V_smooth: np.ndarray,
     R_con: Optional[np.ndarray] = None,
     q_con: Optional[np.ndarray] = None,
 ) -> np.ndarray:
@@ -335,11 +351,13 @@ def _update_loading_row(
     ``c = c_u - den^-1 R' (R den^-1 R')^-1 (R c_u - q)`` is returned.
     """
     w = W[:, j].astype(np.float64)
-    M = np.tensordot(w, EZZ[:, cols, :], axes=(0, 0))  # (len(cols), m)
-    den = M[:, cols]
     c_other = C[j].copy()
     c_other[cols] = 0.0
-    nom = (Y0[:, j] * w) @ EZ[:, cols] - M @ c_other
+    other = np.flatnonzero(c_other)
+    den = _moment_block(w, EZ, V_smooth, cols, cols)
+    nom = (Y0[:, j] * w) @ EZ[:, cols]
+    if other.size:
+        nom = nom - _moment_block(w, EZ, V_smooth, cols, other) @ c_other[other]
     what = f"loadings of series {j}"
     if R_con is None or R_con.shape[0] == 0:
         return _solve_spd(den, nom, what)
@@ -389,9 +407,9 @@ def _update_observation_matrix_blocked(
                 f"Tent length {k} exceeds the companion width {p_plus_one} of the factor blocks."
             )
 
+    V_smooth = np.asarray(V_smooth, dtype=np.float64)
     W = ~np.isnan(X)
     Y0 = np.where(W, X, 0.0)
-    EZZ = _second_moments(EZ, V_smooth)
 
     for j in range(N):
         if not W[:, j].any():
@@ -406,7 +424,7 @@ def _update_observation_matrix_blocked(
         else:
             cols = np.concatenate([offsets[b] + np.arange(r[b]) for b in loaded])
             R_con = q_con = None
-        C[j, cols] = _update_loading_row(j, cols, C, Y0, W, EZ, EZZ, R_con, q_con)
+        C[j, cols] = _update_loading_row(j, cols, C, Y0, W, EZ, V_smooth, R_con, q_con)
 
     return replace(state, C=C)
 
@@ -426,6 +444,35 @@ def _observation_noise_floor(state: DFMModelState, N: int, config: EMConfig) -> 
         floor[:len(idio)][idio] = MIN_OBSERVATION_NOISE
     floor[n_clock:] = MIN_OBSERVATION_NOISE
     return floor
+
+
+def _diag_cvc(C: np.ndarray, V: np.ndarray) -> np.ndarray:
+    """``diag(C V_t C')`` for every row ``t``, (T x N), from the sparsity of ``C``.
+
+    Columns with several nonzeros (the factors and their lags) form a dense
+    part ``C_D``; every other nonzero column belongs to one series (an
+    idiosyncratic state or tent-chain state). The diagonal is
+    ``C_D V_DD C_D'`` plus twice the series' cross terms with ``D`` plus its
+    own idiosyncratic block, so no (T x N x m x m) contraction is formed.
+    """
+    T, N = V.shape[0], C.shape[0]
+    nonzero = C != 0
+    counts = nonzero.sum(axis=0)
+    D = np.flatnonzero(counts > 1)
+    E = np.flatnonzero(counts == 1)
+    CD = C[:, D]
+    out = np.einsum('id,tde,ie->ti', CD, V[:, D[:, np.newaxis], D], CD, optimize=True) if D.size else np.zeros((T, N))
+    if E.size:
+        owner = np.argmax(nonzero[:, E], axis=0)  # the series of each single-series column
+        gamma = C[owner, E]
+        incidence = np.zeros((E.size, N))
+        incidence[np.arange(E.size), owner] = 1.0
+        if D.size:
+            cross = np.einsum('ted,ed->te', V[:, E[:, np.newaxis], D], CD[owner])
+            out = out + (2.0 * gamma * cross) @ incidence
+        a, b = np.nonzero(owner[:, np.newaxis] == owner[np.newaxis, :])  # pairs of one series' columns
+        out = out + (V[:, E[a], E[b]] * (gamma[a] * gamma[b])) @ incidence[a]
+    return out
 
 
 def _update_observation_noise_blocked(
@@ -449,7 +496,7 @@ def _update_observation_noise_blocked(
     R_old = np.diag(np.asarray(state.R, dtype=np.float64))
     W = ~np.isnan(X)
     resid = np.where(W, X - EZ @ C.T, 0.0)
-    CVC = np.einsum('ij,tjk,ik->ti', C, V_smooth, C, optimize=True)
+    CVC = _diag_cvc(C, V_smooth)
     total = (np.sum(resid ** 2, axis=0) + np.sum(np.where(W, CVC, 0.0), axis=0)
              + np.sum(~W, axis=0) * R_old)
     R_diag = total / T
@@ -485,12 +532,11 @@ def _update_unstructured(
     X = np.asarray(X, dtype=np.float64)
     W = ~np.isnan(X)
     Y0 = np.where(W, X, 0.0)
-    EZZ = _second_moments(EZ, V_smooth)
     C = np.array(state.C, dtype=np.float64, copy=True)
     cols = np.arange(m)
     for j in range(X.shape[1]):
         if W[:, j].any():
-            C[j] = _update_loading_row(j, cols, C, Y0, W, EZ, EZZ)
+            C[j] = _update_loading_row(j, cols, C, Y0, W, EZ, V_smooth)
     state = replace(state, A=A, Q=Q, C=C, V_0=_initial_covariance_update(V_smooth[0]))
     return _update_observation_noise_blocked(X, EZ, V_smooth, state, config)
 

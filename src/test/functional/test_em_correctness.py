@@ -459,3 +459,25 @@ class TestCacheInvalidation:
         # Cache should be cleared
         assert not block_structure.has_cached_indices()
         assert block_structure._cached_N is None
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test_diag_cvc_matches_the_dense_contraction(seed):
+    """The sparse diag(C V_t C') of the R update equals the dense einsum (factors, idio states, tent chains)."""
+    from dfm_python.functional.em import _diag_cvc
+
+    rng = np.random.default_rng(seed)
+    T, N, k, chain = 40, 7, 3, 5
+    n_clock = N - 2
+    m = k * chain + n_clock + 2 * chain
+    C = np.zeros((N, m))
+    C[:n_clock, :k] = rng.standard_normal((n_clock, k))
+    C[n_clock:, :k * chain] = np.kron(np.array([1.0, 2, 3, 2, 1]), rng.standard_normal((2, k)))
+    C[np.arange(n_clock), k * chain + np.arange(n_clock)] = 1.0
+    for i in range(2):  # each slower series loads its own tent chain
+        C[n_clock + i, k * chain + n_clock + i * chain:k * chain + n_clock + (i + 1) * chain] = [1, 2, 3, 2, 1]
+    C[:, k * chain - 1] = 0.0  # an unused lag column (all zeros) is allowed
+    L = rng.standard_normal((T, m, m))
+    V = L @ L.transpose(0, 2, 1)
+    expected = np.einsum('ij,tjk,ik->ti', C, V, C)
+    np.testing.assert_allclose(_diag_cvc(C, V), expected, rtol=1e-12, atol=1e-10)
