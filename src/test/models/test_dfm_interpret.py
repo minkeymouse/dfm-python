@@ -497,3 +497,31 @@ def test_save_load_round_trip(fitted, tmp_path):
     loaded = DFM.load(tmp_path / "refitted")
     _assert_same_outputs(loaded, refitted, None)
     assert len(loaded.factors_) == len(df)
+
+
+@pytest.mark.parametrize("kernel", [[2, 4, 6, 4, 2], [0.5, 1, 1.5, 1, 0.5]])
+def test_tent_restriction_keeps_the_kernel_shape(kernel):
+    # The lag loadings of a slower series are proportional to the whole kernel. Before 0.9
+    # the restriction fixed lag l to w_l times lag 0, which changes the shape when w_0 != 1
+    # ([2, 4, 6, 4, 2] gave loadings proportional to [1, 4, 6, 4, 2]).
+    from dfm_python.models.dfm.tent import generate_R_mat
+
+    w = np.asarray(kernel, dtype=float)
+    R_mat, _ = generate_R_mat(w)
+    np.testing.assert_allclose(R_mat @ (0.7 * w), 0.0, atol=1e-12)
+
+    rng = np.random.default_rng(0)
+    f = np.zeros(150)
+    for t in range(1, 150):
+        f[t] = 0.8 * f[t - 1] + rng.standard_normal()
+    idx = pd.date_range("2010-01-31", periods=150, freq="ME", name="date")
+    df = pd.DataFrame({"ip": f, "sales": 0.7 * f, "jobs": -0.5 * f}, index=idx) + 0.5 * rng.standard_normal((150, 3))
+    df["gdp"] = np.convolve(f, [1, 2, 3, 2, 1])[:150] / 9 + 0.2 * rng.standard_normal(150)
+    df.loc[df.index.month % 3 != 0, "gdp"] = np.nan
+    model = DFM(n_factors=1, clock="m", tent_weights={"q:m": kernel}, scaler="standard", max_iter=20).fit(
+        PanelData(y=df, freq={"gdp": "q"}))
+    layout = DFMStateLayout.from_state(model.engine_.training_state)
+    row = list(model.internal_feature_names_).index("gdp")
+    lags = model.result_.C[row, layout.factor_lags(0, len(w))]
+    np.testing.assert_allclose(lags / lags[0], w / w[0], rtol=1e-10)
+    assert model.loadings_.loc["gdp", "factor_0"] == pytest.approx(lags[0] / w[0], rel=1e-12)

@@ -59,9 +59,11 @@ def generate_tent_weights(n_periods: int, tent_type: str = 'symmetric') -> np.nd
 def generate_R_mat(tent_weights: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """Constraint ``R_mat c = q`` that ties the loadings to the tent pattern.
 
-    Row ``i`` enforces ``tent_weights[i+1] * c0 - c(i+1) = 0`` (FRBNY ``dfm.m``):
-    for ``[1, 2, 3, 2, 1]``, ``R_mat = [[2, -1, 0, 0, 0], [3, 0, -1, 0, 0],
-    [2, 0, 0, -1, 0], [1, 0, 0, 0, -1]]``.
+    Row ``i`` enforces ``w[i+1] * c0 - w[0] * c(i+1) = 0``, so the loadings on
+    the lags are proportional to the weights, ``c = (c0 / w[0]) * w``; any
+    positive multiple of a kernel gives the same restriction. For
+    ``[1, 2, 3, 2, 1]`` (FRBNY ``dfm.m``), ``R_mat = [[2, -1, 0, 0, 0],
+    [3, 0, -1, 0, 0], [2, 0, 0, -1, 0], [1, 0, 0, 0, -1]]``.
 
     Returns
     -------
@@ -85,7 +87,7 @@ def generate_R_mat(tent_weights: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     q = np.zeros(n - 1)
     for i in range(n - 1):
         R_mat[i, 0] = tent_weights[i + 1]
-        R_mat[i, i + 1] = -1
+        R_mat[i, i + 1] = -tent_weights[0]
     return R_mat, q
 
 
