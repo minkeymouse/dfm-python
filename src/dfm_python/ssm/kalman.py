@@ -86,6 +86,12 @@ _logger = get_logger(__name__)
 
 _LOG2PI = float(np.log(2.0 * np.pi))
 
+#: Smallest state dimension for the structured path. Below it the dense path
+#: is faster (fewer numpy calls per row): measured on DFM-shaped models, the
+#: structured path took 1.35x the dense time at m = 33, the same at m = 55,
+#: and 0.62x at m = 135.
+_STRUCTURED_MIN_STATES = 56
+
 #: Relative tolerance on the most negative eigenvalue of V_0 before it is reported as indefinite.
 _PSD_RTOL = 1e-8
 
@@ -492,7 +498,7 @@ class DFMKalmanFilter:
         self.observation_covariance = R
         self.initial_state_mean = Z_0
         self.initial_state_covariance = V_0
-        self._structure = _Structure.detect(A, C, R) if m > 0 else None
+        self._structure = _Structure.detect(A, C, R) if m >= _STRUCTURED_MIN_STATES else None
         self._initialized = True
         self._cached_smoothed_factors = None
 

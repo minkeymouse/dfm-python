@@ -19,6 +19,20 @@ from dfm_python.utils.errors import NumericalError
 
 from ._dense_kf import DenseKalmanFilter
 
+
+@pytest.fixture(autouse=True)
+def _structured_for_small_models(monkeypatch):
+    """Take the structured path at any state dimension (by default it starts at 56 states)."""
+    monkeypatch.setattr("dfm_python.ssm.kalman._STRUCTURED_MIN_STATES", 1)
+
+
+def test_small_models_use_the_dense_path(monkeypatch):
+    monkeypatch.setattr("dfm_python.ssm.kalman._STRUCTURED_MIN_STATES", 56)
+    params, _ = _structured_model(0)
+    kf = DFMKalmanFilter()
+    kf.update_parameters(*params)
+    assert params[0].shape[0] < 56 and kf._structure is None
+
 RTOL, ATOL = 1e-9, 1e-12
 TENT = np.array([1.0, 2.0, 3.0, 2.0, 1.0])
 
@@ -311,3 +325,38 @@ def test_structure_follows_parameter_updates():
     sm0, _, _, ll0 = DenseKalmanFilter(*params).filter_and_smooth(Y)
     assert ll == pytest.approx(ll0, rel=RTOL)
     _assert_close(sm, sm0)
+
+
+def test_dfm_fit_matches_on_both_paths(monkeypatch):
+    """A whole DFM fit (EM with SQUAREM, mixed frequency, missing values) gives the same model on either path."""
+    import pandas as pd
+
+    from dfm_python import DFM, PanelData
+
+    rng = np.random.default_rng(3)
+    T, n = 120, 12
+    f = np.zeros(T)
+    for t in range(1, T):
+        f[t] = 0.8 * f[t - 1] + rng.standard_normal()
+    y = np.outer(f, rng.standard_normal(n)) + 0.5 * rng.standard_normal((T, n))
+    y[rng.random((T, n)) < 0.1] = np.nan
+    df = pd.DataFrame(y, index=pd.date_range("2010-01-31", periods=T, freq="ME", name="date"),
+                      columns=[f"s{i}" for i in range(n)])
+    df["gdp"] = np.convolve(f, [1, 2, 3, 2, 1])[:T] / 9
+    df.loc[df.index.month % 3 != 0, "gdp"] = np.nan
+    data = PanelData(y=df, freq={"gdp": "q"})
+
+    def fit(min_states, structured):
+        monkeypatch.setattr("dfm_python.ssm.kalman._STRUCTURED_MIN_STATES", min_states)
+        model = DFM(n_factors=2, clock="m", tent_weights={"q:m": [1, 2, 3, 2, 1]}, scaler="standard",
+                    max_iter=15).fit(data)
+        assert (model.engine_._create_kalman_filter()._structure is not None) is structured
+        return model
+
+    structured, dense = fit(1, True), fit(10**9, False)
+    assert structured.n_iter_ == dense.n_iter_
+    np.testing.assert_allclose(structured.result_.loglik, dense.result_.loglik, rtol=1e-10)
+    for name in ("A", "C", "Q", "R"):
+        np.testing.assert_allclose(getattr(structured.result_, name), getattr(dense.result_, name),
+                                   rtol=1e-7, atol=1e-10, err_msg=name)
+    pd.testing.assert_frame_equal(structured.predict(6), dense.predict(6), rtol=1e-7)
