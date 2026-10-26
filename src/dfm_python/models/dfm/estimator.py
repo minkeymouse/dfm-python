@@ -25,7 +25,7 @@ import copy
 import logging
 import math
 import warnings
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from statistics import NormalDist
 from typing import Any, Optional
@@ -52,6 +52,7 @@ from ...logger import get_logger
 from ...logger.progress import fit_verbosity, quiet_engine_loggers
 from ...utils.errors import ConfigurationError, DataValidationError, NumericalError, UnsupportedInputError
 from ...utils.interpret import affine_scaler_params, explained_variance
+from ...utils.run_control import RunControl
 from ._engine import DFMEngine
 from .tent import generate_tent_weights
 
@@ -172,6 +173,11 @@ class DFM(BaseFactorModel):
     tol : float, default 1e-5
         EM convergence threshold on the relative change of the
         log-likelihood between consecutive accepted parameters.
+    max_time : float, optional
+        Training budget in seconds (initialization and EM). After the first
+        E-step that ends past it, EM stops as ``max_iter`` E-steps would stop
+        it there (``stop_reason_ == "max_time"``, ``converged_`` False) and
+        ``fit`` warns with ``ConvergenceWarning``. None sets no budget.
     ar_clip : dict, optional
         ``{"min": float, "max": float}``: clip the AR coefficients of the
         transition matrix to this range after each M step (a missing key uses
@@ -257,6 +263,12 @@ class DFM(BaseFactorModel):
         EM iterations (E-steps) run.
     converged_ : bool
         True when EM stopped on ``tol`` before ``max_iter``.
+    stop_reason_ : str
+        Why EM stopped: ``"converged"`` (on ``tol``), ``"max_iter"``,
+        ``"max_time"``, ``"callback"`` (the ``fit`` callback returned True) or
+        ``"early_stopping"`` (a numerical guard stopped EM, which kept the
+        accepted parameters with the best log-likelihood: a log-likelihood
+        decrease, a failed E-step or M-step, or non-finite values).
     loglik_ : float
         The engine's log-likelihood of the last EM iteration.
     n_factors_ : int
@@ -317,6 +329,7 @@ class DFM(BaseFactorModel):
         tent_weights: Optional[Mapping] = None,
         max_iter: int = 5000,
         tol: float = 1e-5,
+        max_time: Optional[float] = None,
         ar_clip: Optional[Mapping] = None,
         data_clip: Optional[float] = None,
         regularization: Optional[Mapping] = None,
@@ -331,6 +344,7 @@ class DFM(BaseFactorModel):
         self.tent_weights = tent_weights
         self.max_iter = max_iter
         self.tol = tol
+        self.max_time = max_time
         self.ar_clip = ar_clip
         self.data_clip = data_clip
         self.regularization = regularization
@@ -344,16 +358,20 @@ class DFM(BaseFactorModel):
         """Small parameter sets for the contract fixture (the quarterly ``s0`` first, then two monthly series).
 
         One global factor with plain EM, and two blocks (a global one and one
-        over ``s1`` and ``s2``) with SQUAREM, both standardized. With
-        ``max_iter=6`` SQUAREM runs a cycle of three plain EM maps (its step
-        bound starts at 1), then a cycle with an extrapolated point.
+        over ``s1`` and ``s2``) with SQUAREM and a time budget it does not
+        reach, both standardized. With ``max_iter=6`` SQUAREM runs a cycle of
+        three plain EM maps (its step bound starts at 1), then a cycle with an
+        extrapolated point.
         """
         base = {"clock": "m", "tent_weights": {"q:m": [1, 2, 3, 2, 1]}, "max_iter": 6, "scaler": "standard"}
         blocks = {
             "global": {"n_factors": 1, "series": ["s0", "s1", "s2"]},
             "pair": {"n_factors": 1, "series": ["s1", "s2"]},
         }
-        return [{**base, "em_acceleration": None}, {**base, "blocks": blocks, "em_acceleration": "squarem"}]
+        return [
+            {**base, "em_acceleration": None},
+            {**base, "blocks": blocks, "em_acceleration": "squarem", "max_time": 600.0},
+        ]
 
     def _describe_fitted(self) -> dict:
         return {"loglik": self.loglik_}
@@ -380,6 +398,8 @@ class DFM(BaseFactorModel):
             fail(f"max_iter must be a positive integer, got {self.max_iter!r}.")
         if not _is_real(self.tol) or self.tol < 0:
             fail(f"tol must be a finite number >= 0, got {self.tol!r}.")
+        if self.max_time is not None and (not _is_real(self.max_time) or self.max_time <= 0):
+            fail(f"max_time must be None or a finite number of seconds > 0, got {self.max_time!r}.")
         self._check_ar_clip()
         if self.data_clip is not None and (not _is_real(self.data_clip) or self.data_clip <= 0):
             fail(f"data_clip must be None or a finite number > 0 (standard deviations), got {self.data_clip!r}.")
@@ -640,7 +660,7 @@ class DFM(BaseFactorModel):
             )
         return clone(scaler)
 
-    def fit(self, data: Any, *, checkpoint_callback: Any = None) -> DFM:
+    def fit(self, data: Any, *, callback: Optional[Callable[[dict], Any]] = None) -> DFM:
         """Estimate the model on ``data`` by EM and return ``self``.
 
         Parameters
@@ -650,10 +670,19 @@ class DFM(BaseFactorModel):
             frequencies in ``freq``; missing values are allowed, and a slower
             series is NaN between its observations. ``exog`` and
             ``series_exog`` are rejected.
-        checkpoint_callback : callable, optional
-            Passed to the engine's EM loop unchanged; it receives the engine's
-            state, whose series-indexed matrices are in the internal order
-            ``[clock | slower]``.
+        callback : callable, optional
+            Called as ``callback(info)`` after every E-step (the E-steps of
+            the SQUAREM cycles included). ``info`` holds ``"model"``
+            (``"DFM"``), ``"iteration"`` (the E-steps run, 1-based),
+            ``"max_iter"``, ``"elapsed"`` (seconds since training started),
+            ``"objective"`` (the exact log-likelihood of that E-step's
+            parameters), ``"objective_name"`` (``"loglik"``) and ``"state"``
+            (the engine's ``DFMModelState`` of the parameters EM would end on
+            there; its series-indexed matrices are in the internal order
+            ``[clock | slower]``). Without ``"state"`` the dict is
+            JSON-serializable. A true return value stops EM as ``max_iter``
+            would there (``stop_reason_ == "callback"``, no warning); an
+            exception it raises propagates and leaves the model unfitted.
 
         Raises
         ------
@@ -668,9 +697,13 @@ class DFM(BaseFactorModel):
             non-string series name, infinite values, or a series with fewer
             than 2 observed values or the same value (up to rounding) at
             every observation.
+        TypeError
+            For a ``callback`` that is not callable.
 
         Warns
         -----
+        ConvergenceWarning
+            When ``max_time`` stopped EM.
         UserWarning
             When ``scaler`` is an already fitted transformer (it is cloned and
             refitted).
@@ -683,9 +716,9 @@ class DFM(BaseFactorModel):
         A failed fit leaves the model unfitted (earlier fitted attributes are
         removed).
         """
-        return super().fit(data, checkpoint_callback=checkpoint_callback)
+        return super().fit(data, callback=callback)
 
-    def _fit(self, data: PanelData, *, checkpoint_callback: Any = None) -> None:
+    def _fit(self, data: PanelData, *, callback: Optional[Callable[[dict], Any]] = None) -> None:
         self._validate_params()
         self._check_series(data)
         freq = self._series_frequencies(data)
@@ -696,7 +729,7 @@ class DFM(BaseFactorModel):
             if self.verbose >= 2:
                 _logger.debug("DFM: engine config %s, internal order %s", config, internal)
             engine = DFMEngine(dataset=dataset, config=config, scaler=scaler)
-            engine.fit(checkpoint_callback=checkpoint_callback)
+            engine.fit(control=RunControl(type(self).__name__, self.max_iter, "loglik", self.max_time, callback))
             result = engine.get_result()
         # The engine keeps no reference to the training data; it keeps its
         # scaled training matrix (data_processed), which the filter reads.
@@ -708,6 +741,7 @@ class DFM(BaseFactorModel):
         self.scaler_ = engine.scaler
         self.n_iter_ = int(result.num_iter)
         self.converged_ = bool(result.converged)
+        self.stop_reason_ = engine._training_stop_reason
         self.loglik_ = float(result.loglik)
         self.n_factors_ = int(engine.num_factors)
         self.internal_feature_names_ = np.asarray(internal, dtype=object)
@@ -873,11 +907,13 @@ class DFM(BaseFactorModel):
         - ``refit=True``: one EM iteration (today's ``retrain=True``, with
           threshold ``tol``) on all rows, starting from the fitted parameters,
           through the same EM driver as ``fit``. ``result_``, ``n_iter_``,
-          ``converged_``, ``loglik_``, ``factors_``, ``states_``,
-          ``loadings_`` and ``explained_variance_`` then describe the
-          refitted model on all rows; ``loglik_`` is the exact log-likelihood
-          of the returned parameters on all rows. If the iteration would lower
-          it, the fitted parameters are kept (``converged_`` is False).
+          ``converged_``, ``stop_reason_`` (``"max_iter"``), ``loglik_``,
+          ``factors_``, ``states_``, ``loadings_`` and
+          ``explained_variance_`` then describe the refitted model on all
+          rows; ``loglik_`` is the exact log-likelihood of the returned
+          parameters on all rows. If the iteration would lower it, the fitted
+          parameters are kept (``converged_`` is False and ``stop_reason_``
+          is ``"early_stopping"``).
 
         In both cases ``conditioning_index_`` is extended by ``data.index``.
 
@@ -916,6 +952,7 @@ class DFM(BaseFactorModel):
             self.result_ = copy.deepcopy(result)
             self.n_iter_ = int(result.num_iter)
             self.converged_ = bool(result.converged)
+            self.stop_reason_ = engine._training_stop_reason
             self.loglik_ = float(result.loglik)
             self._set_interpretation(extended)
         return self
@@ -1172,8 +1209,8 @@ class DFM(BaseFactorModel):
           ``n_slower_freq``, ``n_clock_freq``, ``max_lag_size``,
           ``mixed_freq``, ``tent_weights_dict`` (lists), the series
           ``frequencies`` in the internal order, the block order, the
-          engine's ``num_iter``, ``converged`` and ``loglik`` and
-          ``conditioning_index``.
+          engine's ``num_iter``, ``converged`` and ``loglik``,
+          ``stop_reason`` and ``conditioning_index``.
         - ``result.npz`` / ``result.json``: ``result_`` without
           ``target_scaler`` (always None for DFM).
         """
@@ -1229,6 +1266,7 @@ class DFM(BaseFactorModel):
             "num_iter": int(engine._training_num_iter),
             "converged": bool(engine._training_converged),
             "loglik": float(engine._training_loglik),
+            "stop_reason": self.stop_reason_,
             "conditioning_index": index_to_spec(self.conditioning_index_),
         }
         self._write_state(path, arrays, meta)
@@ -1241,7 +1279,8 @@ class DFM(BaseFactorModel):
         ``factors_``, ``states_``, ``loadings_``, ``explained_variance_`` and
         the other attributes of :meth:`_set_interpretation` are recomputed from
         the saved result and data, as ``fit`` computed them, so runs saved
-        before they existed load too.
+        before they existed load too. A run saved without ``stop_reason``
+        (0.8.x) gets ``"converged"`` or ``"max_iter"`` from ``converged``.
         """
         arrays, meta = cls._read_state(path)
         # JSON sorts dict keys; the block order is the order of the factors.
@@ -1308,6 +1347,7 @@ class DFM(BaseFactorModel):
         est.scaler_ = scaler
         est.n_iter_ = int(result.num_iter)
         est.converged_ = bool(result.converged)
+        est.stop_reason_ = meta.get("stop_reason", "converged" if est.converged_ else "max_iter")
         est.loglik_ = float(result.loglik)
         est.n_factors_ = int(engine.num_factors)
         est.conditioning_index_ = index_from_spec(meta["conditioning_index"])

@@ -16,6 +16,7 @@ pickle-free save directory; a loaded model has no data attached.
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Optional
 
@@ -35,6 +36,7 @@ from ...io.results import result_from_files
 from ...logger import get_logger
 from ...logger.progress import fit_verbosity
 from ...utils.errors import ConfigurationError, DataValidationError, UnsupportedInputError
+from ...utils.run_control import RunControl
 from ._engine import AFMEngine
 
 __all__ = ["AFM"]
@@ -113,6 +115,12 @@ class AFM(BaseFactorModel):
     patience : int, optional
         Stop after this many epochs without improvement; None trains for
         ``max_epochs``.
+    max_time : float, optional
+        Training budget in seconds, for ``fit`` and ``update(data,
+        refit=True)``. After the first epoch that ends past it, training
+        stops as ``max_epochs`` would stop it there (``stop_reason_ ==
+        "max_time"``, ``converged_`` False) and a ``ConvergenceWarning`` is
+        issued. None sets no budget.
     random_state : int, optional
         Seed of the global torch RNG, applied just before the network is
         built. None (default) does not seed, so runs differ.
@@ -147,6 +155,11 @@ class AFM(BaseFactorModel):
         Training epochs run.
     converged_ : bool
         True when training stopped early through ``patience``.
+    stop_reason_ : str
+        Why training stopped: ``"early_stopping"`` (on ``patience``),
+        ``"max_iter"`` (after ``max_epochs``), ``"max_time"``, ``"callback"``
+        (the ``fit`` callback returned True) or ``"converged"`` (nothing to
+        train: ``factor_model="pca", trading="ou"`` runs one epoch).
     n_factors_ : int
     n_char_ : int or None
         Number of characteristics (None without ``series_exog``).
@@ -189,6 +202,7 @@ class AFM(BaseFactorModel):
         learning_rate: float = 1e-3,
         max_epochs: int = 50,
         patience: Optional[int] = None,
+        max_time: Optional[float] = None,
         random_state: Optional[int] = None,
         device: Any = "auto",
         verbose: int = 0,
@@ -210,6 +224,7 @@ class AFM(BaseFactorModel):
         self.learning_rate = learning_rate
         self.max_epochs = max_epochs
         self.patience = patience
+        self.max_time = max_time
         self.random_state = random_state
         self.device = device
         self.verbose = verbose
@@ -219,11 +234,12 @@ class AFM(BaseFactorModel):
 
     @classmethod
     def get_test_params(cls) -> list[dict]:
-        """Small CPU parameter sets for the contract checks: the paper's three model classes."""
+        """Small CPU parameter sets for the contract checks: the paper's three model classes, one with a time budget."""
         tiny = {"n_factors": 2, "hist_len": 5, "max_epochs": 2, "random_state": 0, "device": "cpu"}
         return [
             {**tiny, "factor_model": "attention", "trading": "longconv", "embed_dim": 4, "n_kernels": 4},
-            {**tiny, "factor_model": "pca", "trading": "longconv", "n_kernels": 4, "pca_window": 20, "reestim": 5},
+            {**tiny, "factor_model": "pca", "trading": "longconv", "n_kernels": 4, "pca_window": 20, "reestim": 5,
+             "max_time": 600.0},
             {**tiny, "factor_model": "pca", "trading": "ou", "pca_window": 20, "reestim": 5},
         ]
 
@@ -255,6 +271,9 @@ class AFM(BaseFactorModel):
             raise ConfigurationError(f"{name}: learning_rate must be a finite number > 0, got {self.learning_rate!r}.")
         if self.patience is not None and (not _is_int(self.patience) or self.patience < 1):
             raise ConfigurationError(f"{name}: patience must be None or a positive integer, got {self.patience!r}.")
+        max_time = self.max_time
+        if max_time is not None and (not _is_real(max_time) or not math.isfinite(max_time) or max_time <= 0):
+            raise ConfigurationError(f"{name}: max_time must be None or a finite number of seconds > 0, got {max_time!r}.")
         if self.random_state is not None and not _is_int(self.random_state):
             raise ConfigurationError(f"{name}: random_state must be None or an integer, got {self.random_state!r}.")
         if not _is_int(self.verbose) or self.verbose < 0:
@@ -341,7 +360,7 @@ class AFM(BaseFactorModel):
             "seed": self.random_state,
         }
 
-    def fit(self, data: Any, **fit_kwargs: Any) -> AFM:
+    def fit(self, data: Any, *, callback: Optional[Callable[[dict], Any]] = None) -> AFM:
         """Train on ``data`` and return ``self``.
 
         Parameters
@@ -350,6 +369,16 @@ class AFM(BaseFactorModel):
             Asset returns in ``y`` (T x N) and, for attention factors, firm
             characteristics in ``series_exog``. ``exog``, mixed frequency,
             missing and infinite values are rejected.
+        callback : callable, optional
+            Called as ``callback(info)`` after every epoch. ``info`` is a
+            JSON-serializable dict with ``"model"`` (``"AFM"``),
+            ``"iteration"`` (the epoch, 1-based), ``"max_iter"``
+            (``max_epochs``), ``"elapsed"`` (seconds since training started),
+            ``"objective"`` (the epoch's loss, ``-(Sharpe + lambda_var *
+            EV)``) and ``"objective_name"`` (``"loss"``). A true return value
+            stops training as ``max_epochs`` would there (``stop_reason_ ==
+            "callback"``, no warning); an exception it raises propagates and
+            leaves the model unfitted.
 
         Raises
         ------
@@ -360,25 +389,35 @@ class AFM(BaseFactorModel):
             ``series_exog``.
         DataValidationError
             For infinite values in ``y`` or ``series_exog``.
+        TypeError
+            For a ``callback`` that is not callable.
+
+        Warns
+        -----
+        ConvergenceWarning
+            When ``max_time`` stopped training.
 
         A failed fit leaves the model unfitted (earlier fitted attributes are
         removed).
         """
-        return super().fit(data, **fit_kwargs)
+        return super().fit(data, callback=callback)
 
-    def _fit(self, data: PanelData, **fit_kwargs: Any) -> None:
-        if fit_kwargs:
-            raise TypeError(f"AFM.fit() got unexpected keyword arguments {sorted(fit_kwargs)}.")
+    def _fit(self, data: PanelData, *, callback: Optional[Callable[[dict], Any]] = None) -> None:
         self._validate_params()
         self._require_characteristics(data, self.factor_model)
         device = self._resolve_device()
         dataset = self._adapter(data)
         # The engine seeds the global torch RNG (random_state) and then builds its network.
         engine = AFMEngine(dataset, **self._engine_params(), device=device)
-        self._train(engine, dataset, lambda: engine.fit())
+        self._train(engine, dataset, lambda: engine.fit(self._run_control(callback)))
         self._set_fitted(engine, device)
         self.data_ = data
         self._set_results(data.index)
+        self.stop_reason_ = engine._stop_reason
+
+    def _run_control(self, callback: Optional[Callable[[dict], Any]] = None) -> RunControl:
+        """The ``max_time`` budget and ``callback`` of one training run (the clock starts now)."""
+        return RunControl(type(self).__name__, self.max_epochs, "loss", self.max_time, callback)
 
     def _train(self, engine: AFMEngine, dataset: AFMDataset, run: Any) -> None:
         """Call ``run()`` (the engine's training) between the progress records of ``verbose``."""
@@ -507,18 +546,26 @@ class AFM(BaseFactorModel):
         """Attach ``data`` for later ``allocate()``; with ``refit=True`` also continue training on it.
 
         ``refit=True`` trains from the current weights (the engine's
-        ``update(..., retrain=True)``) and refreshes ``result_``,
-        ``residuals_``, ``book_returns_``, ``n_iter_``, ``converged_`` and
-        ``index_``. Returns ``self``.
+        ``update(..., retrain=True)``, within ``max_time``) and refreshes
+        ``result_``, ``residuals_``, ``book_returns_``, ``n_iter_``,
+        ``converged_``, ``stop_reason_`` and ``index_``. Returns ``self``.
+
+        Warns
+        -----
+        ConvergenceWarning
+            When ``max_time`` stopped the refit.
         """
         self._check_is_fitted("update")
         panel = self._panel(data, "update")
         if refit:
             dataset = self._adapter(panel)
+            engine = self.network_
             with fit_verbosity(self.verbose):
-                self._train(self.network_, dataset, lambda: self.network_.update(dataset, retrain=True))
+                self._train(engine, dataset, lambda: engine.update(dataset, retrain=True, control=self._run_control()))
             self._set_data_attributes(panel)
             self._set_results(panel.index)
+            self.stop_reason_ = engine._stop_reason
+            self._warn_if_out_of_time(stacklevel=3)  # _warn_if_out_of_time < update < caller
         self.data_ = panel
         return self
 
@@ -526,7 +573,8 @@ class AFM(BaseFactorModel):
         """Write the AFM part of the saved run.
 
         - ``state.npz``: ``residuals`` and ``book_returns`` of the last training
-          pass; ``state.json``: the training diagnostics and ``n_char``;
+          pass; ``state.json``: the training diagnostics, ``stop_reason`` and
+          ``n_char``;
         - ``result.npz`` / ``result.json``: ``result_`` without ``Z`` and
           ``x_sm``, which alias ``residual_portfolios`` and are restored as such;
         - ``weights.pt``: ``network_.state_dict()``.
@@ -539,6 +587,7 @@ class AFM(BaseFactorModel):
             "loss_now": state.loss_now,
             "sharpe": state.sharpe,
             "explained_variance": state.explained_variance,
+            "stop_reason": self.stop_reason_,
             "n_char": self.n_char_,
         }
         self._write_state(path, arrays, meta)
@@ -547,7 +596,11 @@ class AFM(BaseFactorModel):
 
     @classmethod
     def _load_state(cls, est: AFM, path: Path, device: Any, allow_pickle: bool) -> None:
-        """Rebuild the engine without data or seeding, load its weights and restore the fitted attributes."""
+        """Rebuild the engine without data or seeding, load its weights and restore the fitted attributes.
+
+        A run saved without ``stop_reason`` (0.8.x) gets ``"converged"`` or
+        ``"max_iter"`` from ``converged``.
+        """
         arrays, meta = cls._read_state(path)
         device = est._load_device(device)
         engine = AFMEngine._from_saved(est._engine_params(), meta["n_char"], device)
@@ -574,3 +627,4 @@ class AFM(BaseFactorModel):
         )
         est._set_fitted(engine, device)
         est._set_results(est.index_)  # result_ is the engine's (cached) result, as after fit
+        est.stop_reason_ = meta.get("stop_reason", "converged" if est.converged_ else "max_iter")

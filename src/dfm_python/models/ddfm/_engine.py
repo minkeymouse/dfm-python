@@ -62,6 +62,7 @@ from ...config.constants import (
 from ...utils.errors import (
     ModelNotTrainedError, ModelNotInitializedError, ConfigurationError, DataValidationError
 )
+from ...utils.run_control import RunControl
 from ...utils.validation import check_condition
 from ...numeric.validator import validate_no_nan_inf, validate_horizon
 from ...utils.helper import interpolate_dataframe
@@ -321,8 +322,14 @@ class DDFMEngine(nn.Module):
             self.eps = to_numpy(self.data_denoised_interpolated[self._dataset.target_series]) - y_pred_full
         return self._update_previous_predictions(y_pred_full, y_pred_full)
 
-    def fit(self) -> None:
-        """Build the autoencoder, pre-train it on the complete rows and run the MCMC loop."""
+    def fit(self, control: Optional[RunControl] = None) -> None:
+        """Build the autoencoder, pre-train it on the complete rows and run the MCMC loop.
+
+        The loop stops when the reconstruction MSE converges (``tolerance``),
+        after ``max_iter`` iterations, or when ``control`` (optional; called
+        after every iteration with that iteration's reconstruction MSE) asks
+        for a stop before either; ``_stop_reason`` records which.
+        """
         start_time = time.time()
         self.autoencoder = SimpleAutoencoder.build(
             input_dim=self.input_dim,
@@ -375,10 +382,11 @@ class DDFMEngine(nn.Module):
             self.y_actual = self.data_denoised_interpolated.values[self.lags_input:, self.target_indices]
 
         converged = False
+        halted = None
         self._num_iter = 0
         self.prediction_std = None
         self.factor_std = None
-        while not converged and self._num_iter < self.max_iter:
+        while not converged and halted is None and self._num_iter < self.max_iter:
             (
                 self.factors, y_pred, y_pred_full, self.prediction_std,
                 self.factor_std, self.data_denoised_interpolated, autoencoder_datasets
@@ -440,6 +448,14 @@ class DDFMEngine(nn.Module):
                 self._last_iter_datasets = autoencoder_datasets
 
             self._num_iter += 1
+            if control is not None:
+                # The reconstruction MSE of the convergence check (loss_now from the third iteration on).
+                target_pred = y_pred_full if self._dataset.all_columns_are_targets else y_pred
+                loss = convergence_checker(target_pred, target_pred, self.y_actual)[1]
+                halt = control.step(self._num_iter, loss)
+                if not converged and self._num_iter < self.max_iter:
+                    halted = halt
+        self._stop_reason = halted or ("converged" if converged else "max_iter")
 
         # last_neurons: the factors for the linear decoder, the MLP decoder's
         # last hidden layer otherwise.

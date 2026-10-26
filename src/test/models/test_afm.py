@@ -623,7 +623,8 @@ class TestAFMSaveLoad:
         state = json.loads((path / "state.json").read_text())
         st = model.network_.training_state
         assert state == {"num_iter": st.num_iter, "converged": st.converged, "loss_now": st.loss_now,
-                         "sharpe": st.sharpe, "explained_variance": st.explained_variance, "n_char": 8}
+                         "sharpe": st.sharpe, "explained_variance": st.explained_variance,
+                         "stop_reason": model.stop_reason_, "n_char": 8}
         with np.load(path / "result.npz", allow_pickle=False) as npz:
             # Z and x_sm alias residual_portfolios and are not written again.
             assert sorted(npz.files) == ["book_returns", "residual_portfolios"]

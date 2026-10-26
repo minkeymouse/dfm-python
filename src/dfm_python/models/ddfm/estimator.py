@@ -33,6 +33,7 @@ import logging
 import math
 import pickle
 import warnings
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Optional
 
@@ -56,6 +57,7 @@ from ...logger import get_logger
 from ...logger.progress import fit_verbosity, quiet_engine_loggers
 from ...utils.errors import ConfigurationError, DataValidationError, UnsupportedInputError
 from ...utils.interpret import affine_scaler_params, explained_variance
+from ...utils.run_control import RunControl
 from ._engine import DDFMEngine
 
 __all__ = ["DDFM"]
@@ -203,6 +205,12 @@ class DDFM(BaseFactorModel):
     tol : float, default 5e-4
         Training stops when the relative change of the reconstruction MSE
         between iterations falls below ``tol``.
+    max_time : float, optional
+        Training budget in seconds (pre-training and the MCMC loop). After
+        the first MCMC iteration that ends past it, training stops as
+        ``max_iter`` would stop it there (``stop_reason_ == "max_time"``,
+        ``converged_`` False) and ``fit`` warns with ``ConvergenceWarning``.
+        None sets no budget.
     interpolation_method : str, default "linear"
         ``pandas.DataFrame.interpolate`` method for missing values (the
         frame has a RangeIndex, so index-based methods use positions).
@@ -266,6 +274,9 @@ class DDFM(BaseFactorModel):
         MCMC iterations run.
     converged_ : bool
         True when training stopped on ``tol`` before ``max_iter``.
+    stop_reason_ : str
+        Why training stopped: ``"converged"`` (on ``tol``), ``"max_iter"``,
+        ``"max_time"`` or ``"callback"`` (the ``fit`` callback returned True).
     n_factors_ : int
         Number of factors.
     random_state_ : int or None
@@ -312,6 +323,7 @@ class DDFM(BaseFactorModel):
         window_size: int = 100,
         max_iter: int = 200,
         tol: float = 5e-4,
+        max_time: Optional[float] = None,
         interpolation_method: str = "linear",
         interpolation_limit: Optional[int] = 10,
         interpolation_limit_direction: str = "both",
@@ -330,6 +342,7 @@ class DDFM(BaseFactorModel):
         self.window_size = window_size
         self.max_iter = max_iter
         self.tol = tol
+        self.max_time = max_time
         self.interpolation_method = interpolation_method
         self.interpolation_limit = interpolation_limit
         self.interpolation_limit_direction = interpolation_limit_direction
@@ -343,12 +356,12 @@ class DDFM(BaseFactorModel):
 
     @classmethod
     def get_test_params(cls) -> list[dict]:
-        """Small CPU parameter sets: a linear decoder, and an MLP decoder with a scaler."""
+        """Small CPU parameter sets: a linear decoder, and an MLP decoder with a scaler and an unreached time budget."""
         tiny = {
             "n_factors": 2, "encoder_layers": (4,), "n_mc_samples": 2, "window_size": 16, "max_iter": 3,
             "scaler": None, "random_state": 0, "device": "cpu",
         }
-        return [tiny, {**tiny, "decoder_type": "mlp", "encoder_layers": (6, 4), "scaler": "standard"}]
+        return [tiny, {**tiny, "decoder_type": "mlp", "encoder_layers": (6, 4), "scaler": "standard", "max_time": 600.0}]
 
     # -- validation ----------------------------------------------------------
 
@@ -381,6 +394,8 @@ class DDFM(BaseFactorModel):
             fail(f"learning_rate must be a finite number > 0, got {self.learning_rate!r}.")
         if not _is_real(self.tol) or self.tol < 0:
             fail(f"tol must be a finite number >= 0, got {self.tol!r}.")
+        if self.max_time is not None and (not _is_real(self.max_time) or self.max_time <= 0):
+            fail(f"max_time must be None or a finite number of seconds > 0, got {self.max_time!r}.")
         if not isinstance(self.interpolation_method, str) or not self.interpolation_method:
             fail(f"interpolation_method must be a non-empty string, got {self.interpolation_method!r}.")
         limit = self.interpolation_limit
@@ -498,7 +513,7 @@ class DDFM(BaseFactorModel):
 
     # -- fit -----------------------------------------------------------------
 
-    def fit(self, data: Any, **fit_kwargs: Any) -> DDFM:
+    def fit(self, data: Any, *, callback: Optional[Callable[[dict], Any]] = None) -> DDFM:
         """Train on ``data`` and return ``self``.
 
         Pre-trains the autoencoder, runs the MCMC denoising loop and builds
@@ -512,6 +527,17 @@ class DDFM(BaseFactorModel):
             Missing values are allowed (interpolated for the encoder, and
             missing targets imputed during training). Mixed frequency and
             ``series_exog`` are rejected.
+        callback : callable, optional
+            Called as ``callback(info)`` after every MCMC iteration. ``info``
+            is a JSON-serializable dict with ``"model"`` (``"DDFM"``),
+            ``"iteration"`` (1-based), ``"max_iter"``, ``"elapsed"`` (seconds
+            since training started), ``"objective"`` (the loss of the ``tol``
+            check: the mean squared error of the iteration's predictions
+            against the interpolated targets, in model space) and
+            ``"objective_name"`` (``"loss"``). A true return value
+            stops training as ``max_iter`` would there (``stop_reason_ ==
+            "callback"``, no warning); an exception it raises propagates and
+            leaves the model unfitted.
 
         Raises
         ------
@@ -523,9 +549,13 @@ class DDFM(BaseFactorModel):
             For infinite values, or a target series with fewer than 2
             observed values or the same value (up to rounding) at every
             observation.
+        TypeError
+            For a ``callback`` that is not callable.
 
         Warns
         -----
+        ConvergenceWarning
+            When ``max_time`` stopped training.
         UserWarning
             When ``scaler`` is an already fitted transformer (it is cloned and
             refitted).
@@ -533,11 +563,9 @@ class DDFM(BaseFactorModel):
         A failed fit leaves the model unfitted (earlier fitted attributes are
         removed).
         """
-        return super().fit(data, **fit_kwargs)
+        return super().fit(data, callback=callback)
 
-    def _fit(self, data: PanelData, **fit_kwargs: Any) -> None:
-        if fit_kwargs:
-            raise TypeError(f"DDFM.fit() got unexpected keyword arguments {sorted(fit_kwargs)}.")
+    def _fit(self, data: PanelData, *, callback: Optional[Callable[[dict], Any]] = None) -> None:
         self._validate_params()
         device = self._resolve_device()
         dataset = self._adapter(data)
@@ -547,7 +575,7 @@ class DDFM(BaseFactorModel):
             if self.verbose >= 2:
                 _logger.debug("DDFM: engine hyperparameters %s", params)
             engine = DDFMEngine(dataset=dataset, device=device, **params)
-            engine.fit()
+            engine.fit(control=RunControl(type(self).__name__, self.max_iter, "loss", self.max_time, callback))
             engine.build_state_space()
             result = engine.get_result()
         # The engine keeps no reference to the training data and drops the MCMC
@@ -562,6 +590,7 @@ class DDFM(BaseFactorModel):
         self.result_ = result
         self.n_iter_ = int(engine._num_iter)
         self.converged_ = bool(getattr(engine, "_converged", False))
+        self.stop_reason_ = engine._stop_reason
         self.n_factors_ = int(self.n_factors)
         self.random_state_ = self.random_state
         self.conditioning_index_ = data.index
@@ -879,7 +908,7 @@ class DDFM(BaseFactorModel):
         interpolates the new rows against) and the covariate scaler's arrays
         under ``covariate_scaler/``. ``state.json`` holds the training
         diagnostics (``loss_now`` is null when training stopped before
-        computing it), the engine dims and sizes, ``data_columns``, the
+        computing it) with ``stop_reason``, the engine dims and sizes, ``data_columns``, the
         covariate scaler's JSON part and ``conditioning_index``.
         ``result.npz``/``result.json`` hold ``result_`` without
         ``target_scaler`` (load sets it to ``scaler_``) and ``weights.pt`` the
@@ -907,6 +936,7 @@ class DDFM(BaseFactorModel):
             "num_iter": int(engine._num_iter),
             "loss_now": None if loss_now is None else float(loss_now),
             "converged": bool(getattr(engine, "_converged", False)),
+            "stop_reason": self.stop_reason_,
             **{name: getattr(engine, name) for name in _ENGINE_DIMS},
             "encoder_size": list(engine.encoder_size),
             "decoder_size": None if engine.decoder_size is None else list(engine.decoder_size),
@@ -923,7 +953,9 @@ class DDFM(BaseFactorModel):
         """Rebuild the engine without data or seeding, load its weights and restore the fitted attributes.
 
         The interpretation attributes are recomputed from the restored weights,
-        factors and scaled training frame (they are not saved).
+        factors and scaled training frame (they are not saved). A run saved
+        without ``stop_reason`` (0.8.x) gets ``"converged"`` or ``"max_iter"``
+        from ``converged``.
         """
         arrays, meta = cls._read_state(path)
         device = est._load_device(device)
@@ -956,6 +988,7 @@ class DDFM(BaseFactorModel):
         est.result_ = cls._read_result(path, DDFMResult, target_scaler=est.scaler_)
         est.n_iter_ = int(meta["num_iter"])
         est.converged_ = bool(meta["converged"])
+        est.stop_reason_ = meta.get("stop_reason", "converged" if est.converged_ else "max_iter")
         est.n_factors_ = int(est.n_factors)
         est.random_state_ = est.random_state
         est.conditioning_index_ = index_from_spec(meta["conditioning_index"])

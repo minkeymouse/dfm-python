@@ -39,6 +39,7 @@ from ...config.constants import (
     DEFAULT_REGULARIZATION,
 )
 from ...utils.errors import ModelNotTrainedError, ConfigurationError, DataValidationError
+from ...utils.run_control import RunControl
 from ...utils.seed import apply_seed
 from ...utils.loss import compute_elbo_loss
 from ...layer.pca import extract_pca_factors
@@ -739,8 +740,14 @@ class iVDFMEngine(nn.Module):
         )
         return elbo, loss_dict
 
-    def fit(self, *args, **kwargs) -> 'iVDFMEngine':
-        """Train on the dataset passed to ``__init__`` as ``dataset=``; then extract the factors of every window."""
+    def fit(self, control: Optional[RunControl] = None) -> 'iVDFMEngine':
+        """Train on the dataset passed to ``__init__`` as ``dataset=``; then extract the factors of every window.
+
+        Training stops on early stopping (``patience``, restoring the best
+        epoch), on ``tolerance``, after ``max_epochs`` epochs, or when
+        ``control`` (optional; called after every epoch with the epoch's mean
+        ELBO loss) asks for a stop before those; ``_stop_reason`` records which.
+        """
         dataset = self._dataset
         if dataset is None or not isinstance(dataset, iVDFMDataset):
             raise ModelNotTrainedError(
@@ -823,6 +830,7 @@ class iVDFMEngine(nn.Module):
         batch_elbos: list[float] = []   # every batch of every epoch, for the tolerance check
 
         early_stop_enabled = self.patience is not None and self.patience > 0
+        self._stop_reason = "max_iter"
         patience_str = f"early stopping patience={self.patience}" if early_stop_enabled else "early stopping disabled"
         batches_per_epoch = 1 if use_single_batch else len(dataloader)
         _logger.info(f"Starting training: {self.max_epochs} epochs, {batches_per_epoch} batches/epoch, {patience_str}")
@@ -919,6 +927,7 @@ class iVDFMEngine(nn.Module):
                     f"LR: {current_lr:.2e}"
                 )
 
+            halt = None if control is None else control.step(epoch + 1, self._elbo)
             if early_stop_enabled:
                 if self._elbo < best_elbo:
                     best_elbo = self._elbo
@@ -947,6 +956,7 @@ class iVDFMEngine(nn.Module):
                         _logger.info(f"Restored best model from epoch {best_model_state['epoch']}")
 
                         self._converged = True
+                        self._stop_reason = "early_stopping"
                         train_logger.log_convergence(
                             converged=True,
                             num_epochs=epoch + 1,
@@ -957,6 +967,7 @@ class iVDFMEngine(nn.Module):
 
             if self._check_convergence(batch_elbos):
                 self._converged = True
+                self._stop_reason = "converged"
                 train_logger.log_convergence(
                     converged=True,
                     num_epochs=epoch + 1,
@@ -964,6 +975,10 @@ class iVDFMEngine(nn.Module):
                     reason="converged"
                 )
                 _logger.info(f"Converged at epoch {epoch + 1}")
+                break
+
+            if halt is not None and epoch + 1 < self.max_epochs:
+                self._stop_reason = halt
                 break
 
         total_step = t_fwd + t_bwd + t_clip + t_step + t_data
@@ -981,9 +996,9 @@ class iVDFMEngine(nn.Module):
         if not self._converged:
             train_logger.log_convergence(
                 converged=False,
-                num_epochs=self.max_epochs,
+                num_epochs=self._num_iter,
                 final_loss=self._elbo,
-                reason="max_epochs"
+                reason=self._stop_reason
             )
 
         # Final extraction over every window (in the loader's order when shuffled).

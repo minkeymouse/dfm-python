@@ -21,6 +21,7 @@ import dataclasses
 import logging
 import math
 import warnings
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Optional
 
@@ -45,6 +46,7 @@ from ...logger import get_logger
 from ...logger.progress import fit_verbosity, quiet_engine_loggers
 from ...utils.errors import ConfigurationError, DataValidationError, UnsupportedInputError
 from ...utils.interpret import explained_variance
+from ...utils.run_control import RunControl
 from ._engine import iVDFMEngine
 
 __all__ = ["iVDFM"]
@@ -236,6 +238,12 @@ class iVDFM(BaseFactorModel):
     patience : int, optional, default 20
         Early stopping: stop after this many epochs without a lower ELBO and
         restore the best epoch. None disables it.
+    max_time : float, optional
+        Training budget in seconds (PCA initialization and the epochs).
+        After the first epoch that ends past it, training stops as
+        ``max_epochs`` would stop it there, keeping that epoch's weights
+        (``stop_reason_ == "max_time"``, ``converged_`` False), and ``fit``
+        warns with ``ConvergenceWarning``. None sets no budget.
     scheduler_type : {"step", "plateau", "cosine", "exponential", None}, default "step"
         Learning-rate scheduler; None disables it.
     scheduler_step_size : int, optional
@@ -303,8 +311,13 @@ class iVDFM(BaseFactorModel):
     n_iter_ : int
         Training epochs (the best epoch when early stopping restored it).
     converged_ : bool
-        True when training stopped before ``max_epochs`` (tolerance or
-        patience).
+        True when training stopped before ``max_epochs`` on ``tol`` or
+        ``patience``.
+    stop_reason_ : str
+        Why training stopped: ``"converged"`` (on ``tol``),
+        ``"early_stopping"`` (on ``patience``), ``"max_iter"`` (after
+        ``max_epochs``), ``"max_time"`` or ``"callback"`` (the ``fit``
+        callback returned True).
     n_factors_ : int
         Number of factors.
     random_state_ : int or None
@@ -378,6 +391,7 @@ class iVDFM(BaseFactorModel):
         max_epochs: int = 100,
         tol: float = 5e-4,
         patience: Optional[int] = 20,
+        max_time: Optional[float] = None,
         scheduler_type: Optional[str] = "step",
         scheduler_step_size: Optional[int] = None,
         scheduler_gamma: float = 0.5,
@@ -418,6 +432,7 @@ class iVDFM(BaseFactorModel):
         self.max_epochs = max_epochs
         self.tol = tol
         self.patience = patience
+        self.max_time = max_time
         self.scheduler_type = scheduler_type
         self.scheduler_step_size = scheduler_step_size
         self.scheduler_gamma = scheduler_gamma
@@ -434,7 +449,8 @@ class iVDFM(BaseFactorModel):
 
     @classmethod
     def get_test_params(cls) -> list[dict]:
-        """Small CPU parameter sets: one regime, and two regimes with AR(2) factors, mixing, a linear decoder and a scaler."""
+        """Small CPU parameter sets: one regime, and two regimes with AR(2) factors, mixing, a linear decoder, a
+        scaler and a time budget it does not reach."""
         tiny = {
             "n_factors": 2, "window": 12, "encoder_hidden_dim": 8, "decoder_hidden_dim": 8, "prior_hidden_dim": 8,
             "encoder_n_hidden_layers": 1, "decoder_n_hidden_layers": 1, "prior_n_hidden_layers": 1,
@@ -443,7 +459,7 @@ class iVDFM(BaseFactorModel):
         return [
             tiny,
             {**tiny, "n_regimes": 2, "factor_order": 2, "time_context": 2, "mixing": True, "decoder_type": "linear",
-             "scaler": "standard"},
+             "scaler": "standard", "max_time": 600.0},
         ]
 
     # -- validation ----------------------------------------------------------
@@ -494,6 +510,8 @@ class iVDFM(BaseFactorModel):
                 fail(f"{param} must be in (0, 1], got {value!r}.")
         if not _is_int(self.scheduler_patience) or self.scheduler_patience < 0:
             fail(f"scheduler_patience must be an integer >= 0, got {self.scheduler_patience!r}.")
+        if self.max_time is not None and (not _is_real(self.max_time) or self.max_time <= 0):
+            fail(f"max_time must be None or a finite number of seconds > 0, got {self.max_time!r}.")
         for param in ("use_layer_norm", "mixing"):
             if not isinstance(getattr(self, param), (bool, np.bool_)):
                 fail(f"{param} must be True or False, got {getattr(self, param)!r}.")
@@ -670,7 +688,7 @@ class iVDFM(BaseFactorModel):
 
     # -- fit -----------------------------------------------------------------
 
-    def fit(self, data: Any, **fit_kwargs: Any) -> iVDFM:
+    def fit(self, data: Any, *, callback: Optional[Callable[[dict], Any]] = None) -> iVDFM:
         """Train on ``data`` and return ``self``.
 
         Parameters
@@ -680,6 +698,16 @@ class iVDFM(BaseFactorModel):
             Missing and infinite values are interpolated linearly, then
             filled forward, backward and with zeros (in targets and exog).
             Mixed frequency and ``series_exog`` are rejected.
+        callback : callable, optional
+            Called as ``callback(info)`` after every epoch. ``info`` is a
+            JSON-serializable dict with ``"model"`` (``"iVDFM"``),
+            ``"iteration"`` (the epoch, 1-based), ``"max_iter"``
+            (``max_epochs``), ``"elapsed"`` (seconds since training started),
+            ``"objective"`` (the epoch's mean ELBO loss, the negative ELBO:
+            lower is better) and ``"objective_name"`` (``"elbo"``). A true
+            return value stops training as ``max_epochs`` would there
+            (``stop_reason_ == "callback"``, no warning); an exception it
+            raises propagates and leaves the model unfitted.
 
         Raises
         ------
@@ -690,9 +718,13 @@ class iVDFM(BaseFactorModel):
         DataValidationError
             For a target series with fewer than 2 observed (finite) values,
             or with the same value (up to rounding) at every observation.
+        TypeError
+            For a ``callback`` that is not callable.
 
         Warns
         -----
+        ConvergenceWarning
+            When ``max_time`` stopped training.
         UserWarning
             When ``scaler`` is an already fitted transformer (it is cloned and
             refitted).
@@ -700,11 +732,9 @@ class iVDFM(BaseFactorModel):
         A failed fit leaves the model unfitted (earlier fitted attributes are
         removed).
         """
-        return super().fit(data, **fit_kwargs)
+        return super().fit(data, callback=callback)
 
-    def _fit(self, data: PanelData, **fit_kwargs: Any) -> None:
-        if fit_kwargs:
-            raise TypeError(f"iVDFM.fit() got unexpected keyword arguments {sorted(fit_kwargs)}.")
+    def _fit(self, data: PanelData, *, callback: Optional[Callable[[dict], Any]] = None) -> None:
         self._validate_params()
         device = self._resolve_device()
         dataset = self._adapter(data, device)
@@ -716,7 +746,7 @@ class iVDFM(BaseFactorModel):
             self._restore_none_params(engine, params)
             if self.verbose >= 2:
                 _logger.debug("iVDFM: engine hyperparameters %s", params)
-            engine.fit()
+            engine.fit(control=RunControl(type(self).__name__, self.max_epochs, "elbo", self.max_time, callback))
         engine._dataset = None  # the engine keeps no reference to the training data
 
         self.network_ = engine
@@ -725,6 +755,7 @@ class iVDFM(BaseFactorModel):
         self.result_ = engine.get_result()
         self.n_iter_ = int(engine._num_iter)
         self.converged_ = bool(engine._converged)
+        self.stop_reason_ = engine._stop_reason
         self.n_factors_ = int(engine.latent_dim)
         self.random_state_ = self.random_state
         self.window_ = int(dataset.window)
@@ -1119,8 +1150,9 @@ class iVDFM(BaseFactorModel):
         and ``fit/position`` (``window_factors_`` as values, window labels and
         row positions in ``index_``), ``fit/targets`` (the training targets in
         data units) and ``fit/explained_variance`` (when the run has them) and
-        the ``scaler/`` entries. ``state.json``: the training diagnostics, the
-        engine dims, the fitted window attributes and ``conditioning_index``.
+        the ``scaler/`` entries. ``state.json``: the training diagnostics with
+        ``stop_reason``, the engine dims, the fitted window attributes and
+        ``conditioning_index``.
         ``result.npz``/``result.json``: ``result_`` without ``model_state_dict``
         and ``config``, rebuilt on load from ``weights.pt`` and the engine
         config. Load recomputes ``factors_`` and ``loadings_`` from ``result_.Z``.
@@ -1143,6 +1175,7 @@ class iVDFM(BaseFactorModel):
             "loss_now": engine.loss_now,
             "elbo": engine._elbo,
             "converged": engine._converged,
+            "stop_reason": self.stop_reason_,
             **{name: getattr(engine, name) for name in _ENGINE_DIMS},
             "window_": self.window_,
             "stride_": self.stride_,
@@ -1156,7 +1189,11 @@ class iVDFM(BaseFactorModel):
 
     @classmethod
     def _load_state(cls, est: iVDFM, path: Path, device: Any, allow_pickle: bool) -> None:
-        """Rebuild the engine without data or seeding, load its weights and restore the fitted attributes."""
+        """Rebuild the engine without data or seeding, load its weights and restore the fitted attributes.
+
+        A run saved without ``stop_reason`` (0.8.x) gets ``"converged"`` or
+        ``"max_iter"`` from ``converged``.
+        """
         arrays, meta = cls._read_state(path)
         device = est._load_device(device)
         params = est._engine_params(meta["window"], meta["stride_"])
@@ -1181,6 +1218,7 @@ class iVDFM(BaseFactorModel):
         )
         est.n_iter_ = int(meta["num_iter"])
         est.converged_ = bool(meta["converged"])
+        est.stop_reason_ = meta.get("stop_reason", "converged" if est.converged_ else "max_iter")
         est.n_factors_ = int(engine.latent_dim)
         est.random_state_ = est.random_state
         est.window_ = int(meta["window_"])

@@ -15,7 +15,7 @@ The M-step takes every state index from ``functional.state_layout.DFMStateLayout
 
 import time as time_module
 import numpy as np
-from typing import Tuple, Optional, Dict, Any, Callable
+from typing import Tuple, Optional, Dict, Any
 from dataclasses import dataclass, replace
 from scipy.linalg import block_diag, cho_factor, cho_solve
 
@@ -54,6 +54,7 @@ from ..numeric.estimator import (
     apply_ar_clipping,
 )
 from ..utils.errors import DataValidationError, NumericalError
+from ..utils.run_control import RunControl
 from ..logger.progress import log_em_iteration, log_convergence
 
 _logger = get_logger(__name__)
@@ -797,27 +798,30 @@ class _EMRun:
     Holds the E-step count ``num_iter``, the best accepted parameters with
     their exact log-likelihood, the convergence state, the log-likelihoods of
     the accepted points (``loglik_path``), the SQUAREM fallbacks and step-length
-    bound, and the stop reason. ``plain`` and ``squarem`` return the parameters
-    EM ends on; when ``stop_reason`` is set, ``run_em_algorithm`` returns
-    ``best_state`` instead. With plain EM every iterate is an accepted point.
+    bound, the stop reason of a guard and ``halted`` (``"max_time"`` or
+    ``"callback"`` when ``control`` stopped EM). ``plain`` and ``squarem``
+    return the parameters EM ends on; when ``stop_reason`` is set,
+    ``run_em_algorithm`` returns ``best_state`` instead. With plain EM every
+    iterate is an accepted point.
     """
 
     def __init__(self, X: np.ndarray, kalman_filter: DFMKalmanFilter, config: EMConfig,
                  block_structure: Optional[BlockStructure], max_iter: int, threshold: float,
-                 checkpoint_callback: Optional[Callable[[int, DFMModelState], None]]):
+                 control: Optional[RunControl]):
         self.X = X
         self.kalman_filter = kalman_filter
         self.config = config
         self.block_structure = block_structure
         self.max_iter = max_iter
         self.threshold = threshold
-        self.checkpoint_callback = checkpoint_callback
+        self.control = control
         self.num_iter = 0
         self.best_state: Optional[DFMModelState] = None
         self.best_loglik = float('-inf')
         self.previous_loglik = float('-inf')
         self.converged = False
         self.stop_reason: Optional[str] = None
+        self.halted: Optional[str] = None
         self.change = DEFAULT_ZERO_VALUE
         self.loglik_path: list = []
         self.squarem_fallbacks = 0
@@ -927,7 +931,12 @@ class _EMRun:
         self.loglik_path.append(float(loglik))
 
     def advance(self, state: DFMModelState, loglik: float) -> None:
-        """Count the E-step just run, log progress and checkpoint ``state`` (the parameters EM would end on now)."""
+        """Count the E-step just run (at a point with log-likelihood ``loglik``), log progress and report it to ``control``.
+
+        ``state`` is the parameters EM would end on now (``info["state"]``).
+        A stop that ``control`` asks for sets ``halted`` unless EM ends here
+        anyway (converged, or ``max_iter`` E-steps run).
+        """
         self.num_iter += 1
         num_iter, max_iter = self.num_iter, self.max_iter
         iter_time = time_module.time() - self._iter_start
@@ -950,12 +959,14 @@ class _EMRun:
             )
             _logger.info(f"  Progress: {progress_msg}, Iteration time: {iter_time:.1f}s (avg: {avg_iter_time:.1f}s)")
 
-        if self.checkpoint_callback is not None and num_iter % 5 == 0:
-            try:
-                _logger.info(f"Saving checkpoint at iteration {num_iter}...")
-                self.checkpoint_callback(num_iter, state)
-            except Exception as e:  # documented boundary: a failing checkpoint must not abort a long EM run
-                _logger.warning(f"Checkpoint callback failed at iteration {num_iter}: {e}", exc_info=True)
+        if self.control is not None:
+            halt = self.control.step(num_iter, loglik, state=state)
+            if halt is not None and not self.converged and num_iter < max_iter:
+                self.halted = halt
+
+    def _done(self) -> bool:
+        """True once ``max_iter`` E-steps ran or ``control`` stopped EM."""
+        return self.num_iter >= self.max_iter or self.halted is not None
 
     def _finite(self, state: DFMModelState) -> bool:
         """True if every parameter of ``state`` is finite; otherwise stop EM."""
@@ -967,7 +978,7 @@ class _EMRun:
 
     def plain(self, state: DFMModelState) -> DFMModelState:
         """Iterate the EM map from ``state``; every iterate is an accepted point."""
-        while self.num_iter < self.max_iter:
+        while not self._done():
             out = self.step(state)
             if out is None:
                 break
@@ -994,10 +1005,11 @@ class _EMRun:
         starts at 1 (a cycle of three plain EM maps) and adapts as in the
         SQUAREM package (``_stabilize``), so a slowly converging EM is not
         extrapolated far past the likelihood's ascent region. Every E-step
-        counts towards ``max_iter``.
+        counts towards ``max_iter``, and a stop by ``control`` after any of
+        them ends EM where ``max_iter`` E-steps would.
         """
         theta0 = state
-        while self.num_iter < self.max_iter:
+        while not self._done():
             out = self.step(theta0)
             if out is None:
                 break
@@ -1005,14 +1017,14 @@ class _EMRun:
             self.accept(loglik0)
             self.advance(theta1, loglik0)
             state = theta1
-            if self.converged or not self._finite(theta1) or self.num_iter >= self.max_iter:
+            if self.converged or not self._finite(theta1) or self._done():
                 break
             out = self.step(theta1, accepted=False)
             if out is None:
                 break
             state, loglik1 = out
             self.advance(state, loglik1)
-            if not self._finite(state) or self.num_iter >= self.max_iter:
+            if not self._finite(state) or self._done():
                 break
             point, step = _squarem_point(theta0, theta1, state, self.step_max)
             theta0 = state = self._stabilize(point, step, loglik0, fallback=state)
@@ -1056,7 +1068,7 @@ def run_em_algorithm(
     max_iter: int = 200,
     threshold: float = 1e-4,
     config: Optional[EMConfig] = None,
-    checkpoint_callback: Optional[Callable[[int, DFMModelState], None]] = None
+    control: Optional[RunControl] = None
 ) -> Tuple[DFMModelState, Dict[str, Any]]:
     """Run EM from ``initial_state``; return the fitted state and its metadata.
 
@@ -1078,7 +1090,11 @@ def run_em_algorithm(
     when the relative change ``|L_k - L_{k-1}| / |L_{k-1}|`` between
     consecutive accepted points is below ``threshold`` and returns the EM map
     of the last one; otherwise it returns the parameters it ends on after
-    ``max_iter`` E-steps.
+    ``max_iter`` E-steps. ``control`` (optional) gets ``control.step(num_iter,
+    L, state=...)`` after every E-step, SQUAREM ones included, with ``L`` the
+    log-likelihood of that E-step and ``state`` the parameters EM would end
+    on there; a stop it asks for (``"max_time"`` or ``"callback"``) ends EM
+    as ``max_iter`` E-steps would at that point.
 
     Guards on the points of the EM path (the accepted points and, with
     SQUAREM, ``theta1``; each guard stops EM with ``converged=False`` and
@@ -1098,10 +1114,10 @@ def run_em_algorithm(
     Metadata: ``loglik`` (of the returned parameters, from that pass),
     ``smoothed_factors`` (its smoothed states), ``num_iter`` (E-steps run),
     ``converged``, ``change``, ``stop_reason`` (None unless a guard stopped EM),
-    ``best_loglik`` (of the best accepted point), ``loglik_path`` (the exact log-likelihoods of the accepted
-    points, in order) and ``squarem_fallbacks`` (SQUAREM cycles that fell back
-    to the plain EM point). ``checkpoint_callback(num_iter, state)`` runs every
-    5 E-steps; its exceptions are logged and ignored. The opt-in
+    ``halted`` (the stop ``control`` asked for, else None), ``best_loglik``
+    (of the best accepted point), ``loglik_path`` (the exact log-likelihoods
+    of the accepted points, in order) and ``squarem_fallbacks`` (SQUAREM
+    cycles that fell back to the plain EM point). The opt-in
     ``config.damping_factor`` and ``config.ar_clip`` can break monotonicity;
     the guard applies to them too.
     """
@@ -1154,7 +1170,7 @@ def run_em_algorithm(
     if state.constraint_matrix is not None:
         _logger.info(f"  Mixed-frequency: tent kernel constraints enabled (R_mat shape: {state.constraint_matrix.shape})")
 
-    run = _EMRun(X, kalman_filter, config, block_structure, max_iter, threshold, checkpoint_callback)
+    run = _EMRun(X, kalman_filter, config, block_structure, max_iter, threshold, control)
     state = run.squarem(state) if config.em_acceleration == "squarem" else run.plain(state)
     best_state, best_loglik, stop_reason, converged = run.best_state, run.best_loglik, run.stop_reason, run.converged
 
@@ -1203,7 +1219,7 @@ def run_em_algorithm(
         num_iter=run.num_iter,
         final_loglik=final_loglik if np.isfinite(final_loglik) else None,
         reason=("converged" if converged else
-                (stop_reason if stop_reason is not None else f"max_iterations_reached (change: {run.change:.2e})")),
+                (run.halted or stop_reason or f"max_iterations_reached (change: {run.change:.2e})")),
         model_type="dfm"
     )
 
@@ -1214,6 +1230,7 @@ def run_em_algorithm(
         'change': run.change,
         'smoothed_factors': EZ_final,
         'stop_reason': stop_reason,
+        'halted': run.halted,
         'best_loglik': best_loglik,
         'loglik_path': run.loglik_path,
         'squarem_fallbacks': run.squarem_fallbacks,

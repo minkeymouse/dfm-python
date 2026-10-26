@@ -71,7 +71,7 @@ def test_defaults_are_the_values_that_ran_when_omitted():
         "innovation_distribution": "laplace", "decoder_var": 0.01, "n_regimes": 1, "regime_temperature": 1.0,
         "beta_kl": 1.0, "use_layer_norm": False, "mixing": False, "learning_rate": 1e-3, "optimizer": "Adam",
         "optimizer_weight_decay": 0.0, "optimizer_momentum": 0.9, "batch_size": 32, "max_epochs": 100,
-        "tol": 5e-4, "patience": 20, "scheduler_type": "step", "scheduler_step_size": None,
+        "tol": 5e-4, "patience": 20, "max_time": None, "scheduler_type": "step", "scheduler_step_size": None,
         "scheduler_gamma": 0.5, "scheduler_patience": 10, "scheduler_factor": 0.1, "scheduler_min_lr": 0.0,
         "scaler": "standard", "random_state": 3, "device": "auto", "verbose": 0,
     }

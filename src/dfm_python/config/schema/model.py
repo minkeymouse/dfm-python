@@ -463,6 +463,7 @@ class AFMConfig(EstimatorConfig):
     learning_rate: float = DEFAULT_LEARNING_RATE
     max_epochs: int = DEFAULT_AFM_MAX_EPOCHS
     patience: Optional[int] = None
+    max_time: Optional[float] = None  # training budget in seconds
     random_state: Optional[int] = None
     device: str = "auto"
     verbose: int = 0
@@ -512,6 +513,7 @@ class iVDFMConfig(EstimatorConfig):
     max_epochs: int = 100
     tol: float = 5e-4
     patience: Optional[int] = 20
+    max_time: Optional[float] = None
     scheduler_type: Optional[str] = "step"
     scheduler_step_size: Optional[int] = None
     scheduler_gamma: float = 0.5
@@ -550,6 +552,7 @@ class DDFMConfig(EstimatorConfig):
     window_size: int = 100
     max_iter: int = 200
     tol: float = 5e-4
+    max_time: Optional[float] = None
     interpolation_method: str = "linear"
     interpolation_limit: Optional[int] = 10
     interpolation_limit_direction: str = "both"
@@ -581,6 +584,7 @@ class DFMConfig(EstimatorConfig):
     tent_weights: Optional[Dict[str, List[float]]] = None
     max_iter: int = 5000
     tol: float = 1e-5
+    max_time: Optional[float] = None
     ar_clip: Optional[Dict[str, float]] = None
     data_clip: Optional[float] = None
     regularization: Optional[Dict[str, float]] = None

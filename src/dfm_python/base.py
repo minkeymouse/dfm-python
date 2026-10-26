@@ -5,10 +5,12 @@ The four models (``DFM``, ``DDFM``, ``iVDFM``, ``AFM``) subclass
 
 - ``__init__`` takes keyword-only hyperparameters and only stores them, so
   ``get_params``, ``set_params``, ``clone`` and ``repr`` work unchanged.
-- ``fit(data)`` coerces ``data`` to :class:`~dfm_python.PanelData`, rejects
-  inputs the tags exclude, infinite values and (forecasting models) target
-  series observed fewer than twice or constant, records the data attributes,
-  runs the subclass's ``_fit`` inside :func:`~dfm_python.logger.fit_verbosity`
+- ``fit(data, *, callback=None)`` coerces ``data`` to
+  :class:`~dfm_python.PanelData`, rejects inputs the tags exclude, infinite
+  values and (forecasting models) target series observed fewer than twice or
+  constant, records the data attributes, runs the subclass's ``_fit`` inside
+  :func:`~dfm_python.logger.fit_verbosity` (which hands ``callback`` to the
+  training loop through :class:`~dfm_python.utils.run_control.RunControl`)
   and returns ``self``.
 - Fitted state lives in attributes ending in ``_``; before ``fit`` they raise
   :class:`~dfm_python.utils.errors.NotFittedError` (an ``AttributeError``), so
@@ -34,13 +36,14 @@ from __future__ import annotations
 import functools
 import math
 import warnings
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Any, ClassVar, Optional
 
 import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator
+from sklearn.exceptions import ConvergenceWarning
 
 from .config.estimator import EstimatorConfig, _is_torch_device, _unknown_keys_message
 from .dataset.panel import PanelData
@@ -505,13 +508,25 @@ class BaseFactorModel(BaseEstimator):
             )
         return self._extend_index(last, index, name)
 
-    def fit(self, data: Any, **fit_kwargs: Any) -> BaseFactorModel:
+    def fit(self, data: Any, *, callback: Optional[Callable[[dict], Any]] = None) -> BaseFactorModel:
         """Fit on ``data`` (``PanelData``, a DataFrame or a 2-D array) and return ``self``.
 
         Refitting starts from scratch: earlier fitted attributes are removed
-        first, and also when fitting fails. Progress output follows the
-        ``verbose`` hyperparameter (0 silent, 1 progress, 2 debug).
+        first, and also when fitting fails (an exception raised by
+        ``callback`` included). Progress output follows the ``verbose``
+        hyperparameter (0 silent, 1 progress, 2 debug). ``callback(info)`` is
+        called after every training iteration with the iteration's info dict
+        (see the model's ``fit``); a true return value stops training there.
+        When the ``max_time`` budget stopped training (``stop_reason_ ==
+        "max_time"``), ``fit`` warns with ``ConvergenceWarning``.
+
+        Raises
+        ------
+        TypeError
+            If ``callback`` is neither None nor callable.
         """
+        if callback is not None and not callable(callback):
+            raise TypeError(f"callback must be None or a callable taking the info dict, got {type(callback).__name__}.")
         panel = self._validate_data(data)
         self._check_training_targets(panel)
         verbose = getattr(self, "verbose", 0)
@@ -519,15 +534,27 @@ class BaseFactorModel(BaseEstimator):
         try:
             with fit_verbosity(verbose):
                 self._set_data_attributes(panel)
-                self._fit(panel, **fit_kwargs)
+                self._fit(panel, callback=callback)
+            self._warn_if_out_of_time(stacklevel=4)  # _warn_if_out_of_time < BaseFactorModel.fit < Model.fit < caller
         except BaseException:
             self._clear_fitted()
             raise
         return self
 
-    def _fit(self, data: PanelData, **fit_kwargs: Any) -> None:
-        """Train on validated data and set the fitted attributes (``result_`` and the rest)."""
+    def _fit(self, data: PanelData, *, callback: Optional[Callable[[dict], Any]] = None) -> None:
+        """Train on validated data and set the fitted attributes (``result_``, ``stop_reason_`` and the rest)."""
         raise NotImplementedError(f"{type(self).__name__} does not implement _fit().")
+
+    def _warn_if_out_of_time(self, stacklevel: int) -> None:
+        """Warn with ``ConvergenceWarning`` when the ``max_time`` budget stopped the last training run."""
+        if vars(self).get("stop_reason_") == "max_time":
+            warnings.warn(
+                f"{type(self).__name__}: training stopped after {self.n_iter_} iteration(s) because it ran past "
+                f"max_time={self.max_time} seconds; the model keeps the parameters of that iteration and converged_ "
+                "is False. Raise max_time, or set it to None, to train longer.",
+                ConvergenceWarning,
+                stacklevel=stacklevel,
+            )
 
     def predict(self, h: int, data: Any = None, **predict_kwargs: Any) -> pd.DataFrame:
         """Forecast ``h`` steps as a time-indexed DataFrame (``task == "forecast"``)."""

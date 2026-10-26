@@ -34,6 +34,7 @@ from ...config.schema.results import AFMResult
 from ...config.schema.params import AFMModelState
 from ...utils.errors import (ConfigurationError, ModelNotTrainedError,
                              DataValidationError)
+from ...utils.run_control import RunControl
 from ...utils.seed import apply_seed
 from .factors import AttentionFactors, PCAFactors, residuals, rolling_pca_weights
 from .longconv import LongConv1d
@@ -266,8 +267,15 @@ class AFMEngine(nn.Module):
         return {"loss": loss, "sharpe": sharpe, "ev": ev, "residuals": eps,
                 "book_returns": book_returns, "weights": weights}
 
-    def fit(self) -> AFMModelState:
-        """Train full-batch by maximizing Sharpe + lambda_var * EV on the attached dataset."""
+    def fit(self, control: Optional[RunControl] = None) -> AFMModelState:
+        """Train full-batch by maximizing Sharpe + lambda_var * EV on the attached dataset.
+
+        Training stops after ``max_epochs`` epochs, on ``patience``, after one
+        epoch when nothing is trainable, or when ``control`` (optional; called
+        after every epoch with the epoch's loss) asks for a stop before those;
+        ``_stop_reason`` records which (``"converged"`` when nothing is
+        trainable).
+        """
         if self._dataset is None:
             raise ConfigurationError("no dataset attached; pass one to __init__ or update")
         if not self._built:
@@ -281,6 +289,7 @@ class AFMEngine(nn.Module):
         no_improve = 0
         last = None
         self._converged = False
+        self._stop_reason = "max_iter"
         for epoch in range(int(self.max_epochs)):
             out = self.forward(returns, characteristics)
             loss = out["loss"]
@@ -297,10 +306,16 @@ class AFMEngine(nn.Module):
                 no_improve = 0
             else:
                 no_improve += 1
-            if optimizer is None:
-                break                                              # nothing to learn
+            halt = None if control is None else control.step(epoch + 1, self.loss_now)
+            if optimizer is None:                                  # nothing to learn
+                self._stop_reason = "converged"
+                break
             if self.patience is not None and no_improve >= self.patience:
                 self._converged = True
+                self._stop_reason = "early_stopping"
+                break
+            if halt is not None and epoch + 1 < self.max_epochs:
+                self._stop_reason = halt
                 break
 
         self._sharpe = float(last["sharpe"].detach())
@@ -337,12 +352,12 @@ class AFMEngine(nn.Module):
             characteristics = characteristics.unsqueeze(0)
         return returns, characteristics
 
-    def update(self, data: Any, *, retrain: bool = False) -> None:
-        """Attach ``data``; with ``retrain`` continue training on it from the current weights."""
+    def update(self, data: Any, *, retrain: bool = False, control: Optional[RunControl] = None) -> None:
+        """Attach ``data``; with ``retrain`` continue training on it from the current weights (``fit(control)``)."""
         self._dataset = data
         self._infer_dims(data, getattr(self, "n_char", None))
         if retrain:
-            self.fit()
+            self.fit(control)
 
     def get_result(self) -> AFMResult:
         if self.training_state is None:

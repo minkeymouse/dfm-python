@@ -3,11 +3,13 @@
 import copy
 import logging
 import pickle
+import warnings
 
 import numpy as np
 import pandas as pd
 import pytest
 from sklearn.base import clone
+from sklearn.exceptions import ConvergenceWarning
 from sklearn.exceptions import NotFittedError as SklearnNotFittedError
 from sklearn.utils.validation import check_is_fitted
 
@@ -386,13 +388,38 @@ def test_rejected_data_leaves_a_fitted_model_untouched(panel):
     assert est.mean_ is mean
 
 
-def test_fit_kwargs_reach_fit(panel):
+def test_callback_reaches_fit(panel):
     class _Kw(_DummyForecaster):
         def _fit(self, data, *, callback=None):
             super()._fit(data)
             self.callback_ = callback
 
-    assert _Kw().fit(panel, callback="cb").callback_ == "cb"
+    def callback(info):
+        return None
+
+    assert _Kw().fit(panel, callback=callback).callback_ is callback
+    assert _Kw().fit(panel).callback_ is None
+    with pytest.raises(TypeError, match="callback must be None or a callable"):
+        _Kw().fit(panel, callback="cb")
+
+
+def test_a_max_time_stop_warns(panel):
+    def timed(reason):
+        class _Timed(_DummyForecaster):
+            max_time = 2.0
+
+            def _fit(self, data, *, callback=None):
+                super()._fit(data)
+                self.n_iter_ = 3
+                self.stop_reason_ = reason
+
+        return _Timed()
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", ConvergenceWarning)
+        timed("max_iter").fit(panel)
+    with pytest.warns(ConvergenceWarning, match=r"_Timed: training stopped after 3 iteration\(s\).*max_time=2\.0"):
+        timed("max_time").fit(panel)
 
 
 def test_unimplemented_fit(panel):

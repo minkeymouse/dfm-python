@@ -29,6 +29,7 @@ from ...utils.errors import (
     ConfigurationError,
     DataValidationError,
 )
+from ...utils.run_control import RunControl
 from ...utils.validation import check_condition
 from ...numeric.estimator import forecast_ar1_factors
 from ...numeric.validator import (
@@ -45,6 +46,20 @@ from .mixed_freq import setup_mixed_frequency_params
 from ...numeric.builder import build_dfm_structure, build_dfm_blocks, log_blocks_diagnostics
 
 _logger = get_logger(__name__)
+
+
+def _stop_reason(metadata: Dict[str, Any]) -> str:
+    """Why ``run_em_algorithm`` stopped, as the estimator's ``stop_reason_``.
+
+    The stop ``control`` asked for (``"max_time"``, ``"callback"``);
+    ``"early_stopping"`` when a guard stopped EM and it returned the best
+    accepted parameters; else ``"converged"`` or ``"max_iter"``.
+    """
+    if metadata['halted'] is not None:
+        return metadata['halted']
+    if metadata['stop_reason'] is not None:
+        return "early_stopping"
+    return "converged" if metadata['converged'] else "max_iter"
 
 
 def _init_engine_state(engine: Any) -> None:
@@ -271,13 +286,14 @@ class DFMEngine:
     def fit(
         self,
         X: Optional[Union[np.ndarray, Any]] = None,
-        checkpoint_callback: Optional[Any] = None
+        control: Optional[RunControl] = None
     ) -> DFMModelState:
         """Fit by EM: scale the data, initialize the parameters, run ``run_em_algorithm``.
 
         EM runs ``config.max_iter`` E-steps at most, plain or accelerated
         (``config.em_acceleration``); ``_training_num_iter`` is the number of
-        E-steps run.
+        E-steps run and ``_training_stop_reason`` why EM stopped
+        (:func:`_stop_reason`).
 
         Parameters
         ----------
@@ -286,8 +302,8 @@ class DFMEngine:
             ``dataset.variables``. Scaled with ``scaler`` (fitted here unless
             already fitted); the scaled series must have standard deviations
             in ``[MIN_STD_SCALED, MAX_STD_UNSCALED]``.
-        checkpoint_callback : callable, optional
-            Passed to the EM loop.
+        control : RunControl, optional
+            The time budget and the per-E-step callback, passed to the EM loop.
 
         Returns
         -------
@@ -399,7 +415,7 @@ class DFMEngine:
                 max_iter=self._config.max_iter,
                 threshold=self._config.threshold,
                 config=self._config.to_em_config(),
-                checkpoint_callback=checkpoint_callback
+                control=control
             )
         except Exception as e:  # diagnostics only: logs the model's structure and re-raises unchanged
             _logger.error(f"EM algorithm failed: {e}", exc_info=True)
@@ -415,6 +431,7 @@ class DFMEngine:
         self._training_loglik = training_metadata['loglik']
         self._training_num_iter = training_metadata['num_iter']
         self._training_converged = training_metadata['converged']
+        self._training_stop_reason = _stop_reason(training_metadata)
         # The smoothed factors of the last EM iteration save get_result a smoother run.
         if training_metadata.get('smoothed_factors') is not None:
             self._cached_smoothed_factors = training_metadata['smoothed_factors']
@@ -543,13 +560,13 @@ class DFMEngine:
                 max_iter=kwargs.get('max_iter', 1),
                 threshold=kwargs.get('threshold', self._config.threshold),
                 config=self._config.to_em_config(),
-                checkpoint_callback=None
             )
             self.data_processed = X_combined
             self.training_state = final_state
             self._training_loglik = training_metadata['loglik']
             self._training_num_iter = training_metadata['num_iter']
             self._training_converged = training_metadata['converged']
+            self._training_stop_reason = _stop_reason(training_metadata)
             # The parameters changed: the cached result and smoothed factors are stale.
             self._result = None
             self._cached_smoothed_factors = None

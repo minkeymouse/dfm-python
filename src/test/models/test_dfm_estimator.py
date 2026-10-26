@@ -78,7 +78,7 @@ def fitted() -> DFM:
 def test_defaults_are_the_values_that_ran_when_omitted():
     assert DFM().get_params() == {
         "n_factors": None, "blocks": None, "clock": "m", "tent_weights": None, "max_iter": 5000, "tol": 1e-5,
-        "ar_clip": None, "data_clip": None, "regularization": None, "damping_factor": None,
+        "max_time": None, "ar_clip": None, "data_clip": None, "regularization": None, "damping_factor": None,
         "em_acceleration": "squarem", "scaler": "standard", "verbose": 0,
     }
     # The engine config defaults these came from.
@@ -372,17 +372,17 @@ def test_every_hyperparameter_reaches_the_engine(monkeypatch):
 
     monkeypatch.setattr(DFMEngine, "fit", fit)
 
-    def callback(*args, **kwargs):
+    def callback(info):
         return None
 
     params = {
         "blocks": {"g": {"n_factors": 2, "series": ["m0", "m1", "m2", "m3", "gdp"]}, "r": {"series": ["m2"]}},
-        "clock": "m", "tent_weights": {"q:m": [1, 2, 1]}, "max_iter": 4, "tol": 1e-3,
+        "clock": "m", "tent_weights": {"q:m": [1, 2, 1]}, "max_iter": 4, "tol": 1e-3, "max_time": 600.0,
         "ar_clip": {"min": -0.9, "max": 0.9}, "data_clip": 6.0,
         "regularization": {"scale": 1e-5, "min_eigenvalue": 1e-7, "max_eigenvalue": 0.95},
         "damping_factor": 0.9, "scaler": "robust",
     }
-    model = DFM(**params).fit(_mixed(["gdp", "m0", "m1", "m2", "m3"]), checkpoint_callback=callback)
+    model = DFM(**params).fit(_mixed(["gdp", "m0", "m1", "m2", "m3"]), callback=callback)
     config = seen["config"]
     assert config.blocks == {"g": {"num_factors": 2, "series": ["m0", "m1", "m2", "m3", "gdp"]},
                              "r": {"num_factors": 1, "series": ["m2"]}}
@@ -394,7 +394,10 @@ def test_every_hyperparameter_reaches_the_engine(monkeypatch):
     assert config.regularization == params["regularization"] and config.damping_factor == 0.9
     em = config.to_em_config()
     assert em.regularization == 1e-5 and em.min_norm == 1e-7 and em.max_eigenval == 0.95
-    assert type(seen["scaler"]) is RobustScaler and seen["kwargs"] == {"checkpoint_callback": callback}
+    assert type(seen["scaler"]) is RobustScaler and list(seen["kwargs"]) == ["control"]
+    control = seen["kwargs"]["control"]
+    assert control.callback is callback and control.max_time == 600.0 and control.max_iter == 4
+    assert control.model == "DFM" and control.objective_name == "loglik"
     assert seen["columns"] == ["m0", "m1", "m2", "m3", "gdp"]
     # The engine got copies: the hyperparameters are unchanged objects of the caller.
     assert config.tent_weights["q:m"] is not params["tent_weights"]["q:m"]

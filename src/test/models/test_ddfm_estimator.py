@@ -83,7 +83,7 @@ def test_defaults_are_the_values_that_ran_when_omitted():
     assert DDFM().get_params() == {
         "n_factors": 4, "encoder_layers": (16,), "decoder_type": "linear", "activation": "relu",
         "learning_rate": 0.005, "optimizer": "Adam", "n_mc_samples": 10, "window_size": 100, "max_iter": 200,
-        "tol": 5e-4, "interpolation_method": "linear", "interpolation_limit": 10,
+        "tol": 5e-4, "max_time": None, "interpolation_method": "linear", "interpolation_limit": 10,
         "interpolation_limit_direction": "both", "scaler": "standard", "random_state": 3, "device": "auto", "verbose": 0,
     }
 
