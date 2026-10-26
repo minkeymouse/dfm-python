@@ -106,10 +106,9 @@ def test_constructor_only_stores_and_is_keyword_only():
 def test_tags():
     tags = DDFM.get_tags()
     assert tags["task"] == "forecast" and tags["backend"] == "torch"
-    for cap in ("exog", "missing_values", "update", "factor_forecast", "device", "interpret"):
+    for cap in ("exog", "missing_values", "update", "factor_forecast", "device", "interpret", "pred_int"):
         assert tags[f"capability:{cap}"] is True
     assert not tags["capability:series_exog"] and not tags["capability:mixed_frequency"]
-    assert not tags["capability:pred_int"]
     assert tags["update_kind"] == "encoder_forward" and tags["predict_data"] == "new_rows"
     assert tags["non_deterministic"] is False
     assert DDFM().get_tags()["non_deterministic"] is False

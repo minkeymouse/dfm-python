@@ -60,7 +60,7 @@ def _fd_mean_jacobian(engine, path: np.ndarray, h: float = 1e-6) -> np.ndarray:
 
 def test_tags():
     tags = iVDFM.get_tags()
-    assert tags["capability:interpret"] is True and tags["capability:pred_int"] is False
+    assert tags["capability:interpret"] is True and tags["capability:pred_int"] is True
 
 
 def test_factors_is_the_engine_factor_path(case):
@@ -116,10 +116,13 @@ def test_loadings_are_the_mean_decoder_jacobian(case):
 
 
 def test_linear_decoder_loadings_are_the_weights():
+    """One regime: the loadings are exact (test_intervals_deep covers them and decompose(by='factor'))."""
     est = iVDFM(**TINY, decoder_type="linear", mixing=True).fit(_panel())
     engine = est.network_
-    weight = (engine.decoder.linear.weight @ engine.factor_mixing.M.weight).detach().numpy()
-    np.testing.assert_allclose(est.loadings_.to_numpy(), weight, rtol=1e-5, atol=1e-7)
+    weight = (engine.decoder.linear.weight.double() @ engine.factor_mixing.M.weight.double()).detach().numpy()
+    assert est.loadings_kind_ == "exact"
+    np.testing.assert_allclose(est.loadings_.to_numpy(), weight, rtol=1e-12, atol=0)
+    np.testing.assert_allclose(est.loadings_.to_numpy(), _fd_mean_jacobian(engine, est.result_.Z), rtol=1e-4, atol=1e-6)
 
 
 def test_explained_variance_matches_a_direct_computation(case):

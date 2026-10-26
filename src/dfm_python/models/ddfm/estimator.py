@@ -7,8 +7,9 @@ engine's dataset from :class:`~dfm_python.PanelData` as the frame
 engine with every hyperparameter passed explicitly, trains it and builds the
 linear state space on its factors.
 
-``predict(h)`` returns the target forecasts in data units and
-``predict_factors(h)`` the AR(1) factor forecast. ``update(data)`` takes the
+``predict(h)`` returns the target forecasts in data units,
+``predict_factors(h)`` the AR(1) factor forecast and ``predict_interval(h)``
+Gaussian intervals of the same state space. ``update(data)`` takes the
 rows after the conditioning data (overlap raises), scales them with the
 scalers fitted at fit time, interpolates them as fit does and appends their
 encoded factors; ``predict(h, data=...)`` does the same on a copy.
@@ -35,6 +36,7 @@ import pickle
 import warnings
 from collections.abc import Callable
 from pathlib import Path
+from statistics import NormalDist
 from typing import Any, Optional
 
 import numpy as np
@@ -296,6 +298,7 @@ class DDFM(BaseFactorModel):
         "capability:factor_forecast": True,
         "capability:device": True,
         "capability:interpret": True,
+        "capability:pred_int": True,
         "update_kind": "encoder_forward",
         "predict_data": "new_rows",
         # The class default (random_state=3); an instance reports random_state is None.
@@ -821,19 +824,27 @@ class DDFM(BaseFactorModel):
 
     # -- forecasting ---------------------------------------------------------
 
-    def _run_forecast(self, method: str, h: Any, data: Any) -> tuple[np.ndarray, np.ndarray, int, pd.Index]:
-        self._check_is_fitted(method)
-        h = self._validate_horizon(h)
+    def _conditioned_engine(self, method: str, data: Any) -> tuple[DDFMEngine, pd.Index]:
+        """The engine the forecast starts from and the conditioning index.
+
+        Without ``data``, the model's engine and ``conditioning_index_``; with
+        it, :meth:`update` on a copy of the engine (the global torch RNG is
+        restored afterwards) and the extended index.
+        """
         if data is None:
-            y_forecast, z_forecast = self.network_._forecast(h)
-            return y_forecast, z_forecast, h, self.conditioning_index_
+            return self.network_, self.conditioning_index_
         frame, extended = self._new_rows(data, method)
-        # update(data) on a copy of the engine; the global torch RNG is restored afterwards.
         with torch.random.fork_rng(devices=self._rng_devices()):
             engine = copy.deepcopy(self.network_)
             self._condition(engine, frame)
-            y_forecast, z_forecast = engine._forecast(h)
-        return y_forecast, z_forecast, h, extended
+        return engine, extended
+
+    def _run_forecast(self, method: str, h: Any, data: Any) -> tuple[np.ndarray, np.ndarray, int, pd.Index]:
+        self._check_is_fitted(method)
+        h = self._validate_horizon(h)
+        engine, origin = self._conditioned_engine(method, data)
+        y_forecast, z_forecast = engine._forecast(h)
+        return y_forecast, z_forecast, h, origin
 
     def _frame(self, values: np.ndarray, h: int, columns: list, kind: str, origin_index: pd.Index) -> pd.DataFrame:
         frame = pd.DataFrame(
@@ -895,6 +906,116 @@ class DDFM(BaseFactorModel):
         """
         _, z_forecast, h, origin = self._run_forecast("predict_factors", h, data)
         return self._emit(self._frame(z_forecast, h, list(self.factor_names_), "factors", origin))
+
+    def _noise_variance(self, C: np.ndarray) -> np.ndarray:
+        """Per target (N,), the mean square of ``x_t - C z_t`` over the observed training entries.
+
+        ``x`` is the scaled training targets and ``z`` the MC-averaged factors
+        ``result_.Z``: the maximum-likelihood variance of zero-mean Gaussian
+        noise around the forecast's observation map ``C``.
+        """
+        residual = self._training_targets() - np.asarray(self.result_.Z, dtype=np.float64) @ C.T
+        observed = np.isfinite(residual)
+        return (np.where(observed, residual, 0.0) ** 2).sum(axis=0) / observed.sum(axis=0)
+
+    def predict_interval(self, h: int, coverage: float = 0.9, data: Any = None) -> pd.DataFrame:
+        """Central Gaussian prediction intervals of the targets ``h`` steps ahead, in data units.
+
+        The intervals are those of the linear state space that :meth:`predict`
+        forecasts with: factors ``z_{t+1} = A z_t + w_t`` with ``w_t ~ N(0,
+        Q)`` (``result_.A``, ``result_.Q``) and scaled targets ``x_t = C z_t +
+        e_t`` (``result_.C``) with ``e_t ~ N(0, diag(s2))`` independent over
+        time. This holds for both decoder types: with the MLP decoder,
+        ``result_.C`` is the first ``n_factors`` columns of the output layer's
+        weight, and neither the forecast nor the intervals evaluate the
+        decoder's hidden layers. ``s2`` is, per target, the mean square of
+        ``x_t - C z_t`` over the observed training rows (``z_t`` from
+        ``result_.Z``): the maximum-likelihood variance of zero-mean noise
+        around the forecast map. It holds the idiosyncratic part, which the
+        forecast sets to zero, and stands in for ``result_.R``, a fixed
+        ``1e-15 * I``.
+
+        The factor state at the last conditioning row has covariance ``P``,
+        the covariance of the engine's ``n_mc_samples`` Monte Carlo factor
+        draws at that row (zero at a row that ``update`` or ``data``
+        appended: the encoder maps it to one value). For each step ahead
+        ``P <- A P A' + Q`` and the scaled variance is ``diag(C P C') + s2``.
+        With ``q`` the standard normal quantile of ``(1 + coverage) / 2``
+        and ``sd`` the scaled standard deviation, the bounds in data units are:
+
+        - for an affine scaler (None, StandardScaler, RobustScaler,
+          MinMaxScaler or MaxAbsScaler; ``data = offset + s * scaled``),
+          :meth:`predict`'s forecast (the same numbers) minus and plus
+          ``q * sd * |s|``;
+        - for any other scaler, ``scaler_.inverse_transform`` of the scaled
+          forecast minus and plus ``q * sd``. This assumes the scaler maps
+          each target separately and monotonically (``QuantileTransformer``
+          does), so that the bounds are the quantiles of the forecast
+          distribution in data units; :meth:`predict`'s forecast is then its
+          median, not the midpoint of the interval.
+
+        The fitted parameters are taken as known, so the intervals leave out
+        estimation uncertainty.
+
+        Parameters
+        ----------
+        h : int
+            Forecast horizon, as in :meth:`predict`.
+        coverage : float, default 0.9
+            Nominal coverage of each interval, in (0, 1).
+        data : PanelData, DataFrame or 2-D array, optional
+            New rows to condition on, as in :meth:`predict`: :meth:`update`
+            on a copy of the model, which is unchanged; the result equals
+            ``update(data)`` followed by ``predict_interval(h)``.
+
+        Returns
+        -------
+        pandas.DataFrame
+            float64, indexed like :meth:`predict`, MultiIndex columns
+            ``(series, bound)``: the targets in the user's order, ``bound``
+            ``"lower"`` and ``"upper"``; ``attrs`` holds those of
+            :meth:`predict` and ``coverage``. A polars frame after
+            ``set_output(output="polars")``.
+
+        Raises
+        ------
+        ConfigurationError
+            For ``coverage`` that is not a number in (0, 1).
+        DataValidationError
+            For ``data`` that does not hold the training series and exog,
+            overlaps the conditioning data or is empty (see :meth:`update`).
+        """
+        self._check_is_fitted("predict_interval")
+        if not (_is_real(coverage) and 0 < coverage < 1):
+            raise ConfigurationError(f"DDFM.predict_interval: coverage must be a number in (0, 1), got {coverage!r}.")
+        h = self._validate_horizon(h)
+        engine, origin = self._conditioned_engine("predict_interval", data)
+        y_forecast, z_forecast = engine._forecast(h)
+        state = engine.training_state
+        # The forecast zeroes non-finite entries of A and C; so does the variance.
+        A, C = (np.nan_to_num(m, nan=0.0, posinf=0.0, neginf=0.0) for m in (state.F, state.H))
+        draws = np.asarray(engine.factors[:, -1, :], dtype=np.float64)
+        deviation = draws - draws.mean(axis=0)
+        P = deviation.T @ deviation / len(draws)
+        noise = self._noise_variance(C)
+        variance = np.empty((h, C.shape[0]))
+        for step in range(h):
+            P = A @ P @ A.T + state.Q
+            variance[step] = np.einsum("ij,ij->i", C @ P, C) + noise
+        # q = -Phi^-1((1 - coverage) / 2): (1 + coverage) / 2 rounds to 1 for the floats just below 1.
+        half = -NormalDist().inv_cdf((1 - coverage) / 2) * np.sqrt(variance)
+        affine = affine_scaler_params(self.scaler_, self.n_features_in_)
+        if affine is not None:
+            half = half * np.abs(affine[1])
+            lower, upper = y_forecast - half, y_forecast + half
+        else:
+            centre = z_forecast @ C.T
+            low, high = self._to_data_units(centre - half), self._to_data_units(centre + half)
+            lower, upper = np.minimum(low, high), np.maximum(low, high)
+        columns = pd.MultiIndex.from_product([list(self.feature_names_in_), ["lower", "upper"]], names=["series", "bound"])
+        frame = self._frame(np.stack([lower, upper], axis=2).reshape(h, -1), h, columns, "forecast", origin)
+        frame.attrs["coverage"] = float(coverage)
+        return self._emit(frame)
 
     # -- save / load ---------------------------------------------------------
 

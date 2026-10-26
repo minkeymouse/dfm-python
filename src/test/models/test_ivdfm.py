@@ -288,7 +288,7 @@ class TestiVDFM:
         assert tags["task"] == "forecast" and tags["backend"] == "torch"
         assert tags["capability:exog"] and tags["capability:update"] and tags["capability:device"]
         assert tags["capability:factor_forecast"] and tags["capability:missing_values"]
-        assert tags["capability:interpret"] and not tags["capability:pred_int"]
+        assert tags["capability:interpret"] and tags["capability:pred_int"]
         assert not tags["capability:series_exog"] and not tags["capability:mixed_frequency"]
         assert tags["update_kind"] == "encoder_forward" and tags["predict_data"] == "window"
         assert tags["non_deterministic"] is False  # the default random_state=3

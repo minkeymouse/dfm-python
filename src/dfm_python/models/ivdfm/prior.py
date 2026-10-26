@@ -165,9 +165,7 @@ class iVDFMPriorNetwork(nn.Module):
             scale = torch.exp(params['log_scale'])
             df = torch.exp(params['log_df'])
             z = torch.randn_like(location, device=device, dtype=dtype)
-            chi2 = torch.distributions.Gamma(df / 2, 0.5).sample(location.shape).to(
-                device=device, dtype=dtype
-            )
+            chi2 = torch.distributions.Gamma(df / 2, 0.5).sample().to(device=device, dtype=dtype)  # shape of df
             return location + scale * z * torch.sqrt(df / (chi2 + 1e-8))
         if dist == 'gamma':
             rate = torch.exp(params['log_rate'])

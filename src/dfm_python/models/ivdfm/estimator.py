@@ -8,20 +8,23 @@ constructs the engine with every hyperparameter passed explicitly (the engine
 seeds, then builds its networks) and trains it. ``predict(h)`` inverse-transforms
 the engine's model-space forecast with ``scaler_``; ``update(data)`` encodes
 new data with the fixed networks and appends the factors; ``predict(h, data=...)``
-does the same on a copy. ``factors_``, ``loadings_``, ``explained_variance_``
-and ``decompose()`` describe the training data through the encoded factor path
+does the same on a copy; ``predict_interval(h)`` takes quantiles of sampled
+forecast paths. ``factors_``, ``loadings_``, ``explained_variance_`` and
+``decompose()`` describe the training data through the encoded factor path
 and its decoding. ``save``/``load`` use the pickle-free directory layout
 (``state.npz``/``state.json``, ``result.npz``/``result.json``, ``weights.pt``).
 """
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import dataclasses
+import functools
 import logging
 import math
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, Optional
 
@@ -45,8 +48,9 @@ from ...io.layout import index_from_spec, index_to_spec
 from ...logger import get_logger
 from ...logger.progress import fit_verbosity, quiet_engine_loggers
 from ...utils.errors import ConfigurationError, DataValidationError, UnsupportedInputError
-from ...utils.interpret import explained_variance
+from ...utils.interpret import affine_scaler_params, explained_variance
 from ...utils.run_control import RunControl
+from ...utils.seed import apply_seed
 from ._engine import iVDFMEngine
 
 __all__ = ["iVDFM"]
@@ -89,6 +93,8 @@ _TIME_COLUMN = "__dfm_python_time__"
 _RESULT_REBUILT = ("model_state_dict", "config")
 # Values of the engine and of the estimator that training sets, written to state.json.
 _ENGINE_DIMS = ("data_dim", "context_dim", "time_context", "window")
+# Forecast paths predict_interval draws.
+_N_INTERVAL_PATHS = 1000
 
 
 def _is_int(value: Any) -> bool:
@@ -287,12 +293,15 @@ class iVDFM(BaseFactorModel):
         ``(window, time)`` MultiIndex in chronological order and one column
         per factor name.
     loadings_ : pandas.DataFrame
-        The mean over the rows of ``factors_`` of the decoder Jacobian
-        d common_t / d f_t, float64, in model (scaled) space, indexed by
-        ``feature_names_in_``, one column per factor name: a local linear
-        summary of the decoder, not exact loadings.
+        float64, in model (scaled) space, indexed by ``feature_names_in_``,
+        one column per factor name. With ``decoder_type="linear"`` and
+        ``n_regimes=1`` the decoding ``y = W (M f) + b`` is linear (``M`` the
+        mixing matrix, the identity without ``mixing``) and the loadings are
+        exactly ``W M``. Otherwise, the mean over the rows of ``factors_`` of
+        the decoder Jacobian d common_t / d f_t: a local linear summary of the
+        decoder, not exact loadings.
     loadings_kind_ : str
-        ``"mean_jacobian"``.
+        ``"exact"`` (linear decoder, one regime) or ``"mean_jacobian"``.
     explained_variance_ : pandas.Series
         Per series, the share of the variance of the scaled training targets
         explained by the common component (the decoded factor path,
@@ -343,6 +352,7 @@ class iVDFM(BaseFactorModel):
         "capability:factor_forecast": True,
         "capability:device": True,
         "capability:interpret": True,
+        "capability:pred_int": True,
         "update_kind": "encoder_forward",
         "predict_data": "window",
         # The class default (random_state=3); an instance reports random_state is None.
@@ -772,22 +782,43 @@ class iVDFM(BaseFactorModel):
         scaled = np.where(np.isfinite(targets), dataset.target, np.nan)
         self._set_interpretation(targets, explained_variance(scaled, self.result_.x_sm))
 
+    def _linear_decoder(self) -> Optional[tuple[np.ndarray, np.ndarray]]:
+        """``(loadings, bias)`` in float64 when the decoding is linear in the factors, else None.
+
+        With ``decoder_type="linear"`` and one regime the engine decodes
+        ``y = W (M f) + b``, ``M`` the bias-free mixing matrix (the identity
+        without ``mixing``), so the loadings (N, r) are ``W M`` and the bias
+        (N,) is ``b``. With K > 1 regimes the decoders are mixed with weights
+        that depend on the context, so the decoding is not one linear map.
+        """
+        engine = self.network_
+        if engine.decoder_type != "linear" or engine.num_regimes != 1:
+            return None
+        layer = engine.decoder.linear
+        weight = layer.weight.detach().cpu().to(torch.float64)
+        if engine.factor_mixing is not None:
+            weight = weight @ engine.factor_mixing.M.weight.detach().cpu().to(torch.float64)
+        return weight.numpy(), layer.bias.detach().cpu().to(torch.float64).numpy()
+
     def _set_interpretation(self, targets: Optional[np.ndarray], explained: Optional[np.ndarray]) -> None:
         """Set ``factor_names_``, ``factors_``, ``loadings_``, ``loadings_kind_`` and ``explained_variance_``.
 
-        ``factors_`` is ``result_.Z`` and ``loadings_`` its mean decoder
-        Jacobian. ``targets`` (the training targets in data units, NaN where
-        missing, kept for :meth:`decompose`) and ``explained`` (the
+        ``factors_`` is ``result_.Z``; ``loadings_`` are the linear decoder's
+        loadings (:meth:`_linear_decoder`) or else the mean decoder Jacobian
+        on ``factors_``. ``targets`` (the training targets in data units, NaN
+        where missing, kept for :meth:`decompose`) and ``explained`` (the
         explained-variance values) are None for a run saved by 0.8.x.
         """
         path = np.asarray(self.result_.Z, dtype=np.float64)
         self.factor_names_ = np.asarray([f"factor_{i}" for i in range(path.shape[1])], dtype=object)
         names, series = list(self.factor_names_), list(self.feature_names_in_)
         self.factors_ = pd.DataFrame(path, index=self.index_[len(self.index_) - len(path):], columns=names)
-        self.loadings_ = pd.DataFrame(
-            _mean_decoder_jacobian(self.network_, self.result_.Z), index=series, columns=names
-        )
-        self.loadings_kind_ = "mean_jacobian"
+        linear = self._linear_decoder()
+        if linear is None:
+            loadings, self.loadings_kind_ = _mean_decoder_jacobian(self.network_, self.result_.Z), "mean_jacobian"
+        else:
+            loadings, self.loadings_kind_ = linear[0], "exact"
+        self.loadings_ = pd.DataFrame(loadings, index=series, columns=names)
         self._targets_ = targets
         if explained is not None:
             self.explained_variance_ = pd.Series(explained, index=series, name="explained_variance")
@@ -970,42 +1001,50 @@ class iVDFM(BaseFactorModel):
                     )
         return values
 
+    def _future_context(self, engine: iVDFMEngine, h: int, futr_exog: Optional[np.ndarray]) -> Optional[np.ndarray]:
+        """The engine's ``context_data``: ``[time features | futr_exog]``, or None without ``futr_exog``.
+
+        With None the engine generates time features for every context column.
+        """
+        if futr_exog is None:
+            return None
+        return np.hstack([engine._future_time_features(h, self.time_context_), futr_exog])
+
     def _engine_forecast(
         self, engine: iVDFMEngine, h: int, futr_exog: Optional[np.ndarray], deterministic: bool, n_samples: int
     ) -> tuple[np.ndarray, np.ndarray]:
-        """The engine's forecast factors (h, r) and model-space observations (h, N).
-
-        The context is ``[time features | futr_exog]`` (``context_data``), or
-        None when no ``futr_exog`` is given (the engine then generates time
-        features for every context column).
-        """
-        context_data = None
-        if futr_exog is not None:
-            context_data = np.hstack([engine._future_time_features(h, self.time_context_), futr_exog])
-        factors, y_pred = engine._forecast(h, context_data, deterministic, n_samples)
+        """The engine's forecast factors (h, r) and model-space observations (h, N)."""
+        factors, y_pred = engine._forecast(h, self._future_context(engine, h, futr_exog), deterministic, n_samples)
         return to_numpy(factors.squeeze(0)), to_numpy(y_pred.squeeze(0))
 
-    def _run_forecast(
-        self, method: str, h: Any, data: Any, futr_exog: Any, deterministic: Any, n_samples: Any
-    ) -> tuple[np.ndarray, np.ndarray, int, pd.Index]:
-        self._check_is_fitted(method)
-        h = self._validate_horizon(h)
-        panel = None if data is None else self._panel(data, method)
+    def _point_forecast(self, deterministic: Any, n_samples: Any) -> Any:
+        """``(engine, h, futr_exog) -> (factors, y_pred)``, the forecast of :meth:`predict`, after validating its arguments."""
         if not isinstance(deterministic, (bool, np.bool_)):
             raise TypeError(f"deterministic must be True or False, got {deterministic!r}.")
         if not _is_int(n_samples) or n_samples < 1:
             raise ValueError(f"n_samples must be a positive integer, got {n_samples!r}.")
+        return functools.partial(self._engine_forecast, deterministic=bool(deterministic), n_samples=int(n_samples))
+
+    def _run_forecast(self, method: str, h: Any, data: Any, futr_exog: Any, forecast: Any) -> tuple[Any, int, pd.Index]:
+        """Validate the inputs and run ``forecast(engine, h, futr_exog)``; return its result, ``h`` and the origin index.
+
+        ``engine`` is the model's engine, or with ``data`` a copy of it that
+        ``update(data)`` conditioned; the copy's update and ``forecast`` then
+        run inside ``torch.random.fork_rng``, so the global torch RNG they draw
+        from is restored afterwards. ``futr_exog`` is passed as validated by
+        :meth:`_futr_exog_values`.
+        """
+        self._check_is_fitted(method)
+        h = self._validate_horizon(h)
+        panel = None if data is None else self._panel(data, method)
         futr = self._futr_exog_values(h, futr_exog, self.conditioning_index_ if panel is None else panel.index)
         if panel is None:
-            factors, y_pred = self._engine_forecast(self.network_, h, futr, bool(deterministic), int(n_samples))
-            return factors, y_pred, h, self.conditioning_index_
-        # update(data) on a copy of the engine; the global torch RNG the update and
-        # a sampled forecast draw from is restored afterwards.
+            return forecast(self.network_, h, futr), h, self.conditioning_index_
         with torch.random.fork_rng(devices=self._rng_devices()):
             engine = copy.deepcopy(self.network_)
             self._condition(engine, panel)
-            factors, y_pred = self._engine_forecast(engine, h, futr, bool(deterministic), int(n_samples))
-        return factors, y_pred, h, panel.index
+            out = forecast(engine, h, futr)
+        return out, h, panel.index
 
     def _frame(self, values: np.ndarray, h: int, columns: list, kind: str, origin_index: pd.Index) -> pd.DataFrame:
         frame = pd.DataFrame(
@@ -1063,7 +1102,8 @@ class iVDFM(BaseFactorModel):
             column per target in the user's order; ``attrs`` holds ``model``,
             ``kind="forecast"`` and ``origin``.
         """
-        _, y_pred, h, origin = self._run_forecast("predict", h, data, futr_exog, deterministic, n_samples)
+        forecast = self._point_forecast(deterministic, n_samples)
+        (_, y_pred), h, origin = self._run_forecast("predict", h, data, futr_exog, forecast)
         values = np.asarray(y_pred, dtype=np.float64)
         if self.scaler_ is not None:
             values = self.scaler_.inverse_transform(values)
@@ -1086,62 +1126,178 @@ class iVDFM(BaseFactorModel):
             float64, ``h`` rows, one column per name in ``factor_names_``;
             ``attrs["kind"]`` is ``"factors"``.
         """
-        factors, _, h, origin = self._run_forecast("predict_factors", h, data, futr_exog, deterministic, n_samples)
+        forecast = self._point_forecast(deterministic, n_samples)
+        (factors, _), h, origin = self._run_forecast("predict_factors", h, data, futr_exog, forecast)
         return self._emit(self._frame(factors, h, list(self.factor_names_), "factors", origin))
 
-    # -- interpretation ------------------------------------------------------
+    @contextlib.contextmanager
+    def _seeded_rng(self) -> Iterator[None]:
+        """Seed the global torch RNG with ``random_state_`` and restore it on exit; with None it is used as it is."""
+        if self.random_state_ is None:
+            yield
+            return
+        # apply_seed (torch.manual_seed) seeds every CUDA device, so all their generators are forked.
+        devices = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
+        with torch.random.fork_rng(devices=devices):
+            apply_seed(self.random_state_)
+            yield
 
-    def decompose(self, *, by: str = "component") -> pd.DataFrame:
-        """Split the training targets into the common component and the idiosyncratic part, in data units.
+    def _sample_paths(self, engine: iVDFMEngine, h: int, futr_exog: Optional[np.ndarray]) -> np.ndarray:
+        """``_N_INTERVAL_PATHS`` sampled forecast paths of the targets in data units, float64 (paths, h, N)."""
+        paths = engine._sample_paths(h, self._future_context(engine, h, futr_exog), _N_INTERVAL_PATHS)
+        paths = to_numpy(paths).astype(np.float64)
+        if self.scaler_ is None:
+            return paths
+        flat = self.scaler_.inverse_transform(paths.reshape(-1, paths.shape[-1]))
+        return np.asarray(flat, dtype=np.float64).reshape(paths.shape)
 
-        The common component is the decoded factor path (``result_.x_sm``)
-        inverse-transformed with ``scaler_``; the idiosyncratic part is the
-        data minus it, NaN where the data is missing, so the two add up to the
-        data.
+    def predict_interval(
+        self, h: int, coverage: float = 0.9, data: Any = None, *, futr_exog: Any = None
+    ) -> pd.DataFrame:
+        """Central Monte Carlo prediction intervals of the targets ``h`` steps ahead, in data units.
+
+        The engine draws 1000 forecast paths from the factor state at the last
+        conditioning row: each path samples its innovations from the prior
+        given the future context (the sampling of ``predict(h,
+        deterministic=False)``), rolls the factors forward, decodes them and
+        adds the decoder's observation noise N(0, ``decoder_var``) in the
+        scaled space. The paths are inverse-transformed with ``scaler_`` (any
+        scaler: every path is transformed), and the bounds are the empirical
+        ``(1 - coverage) / 2`` and ``(1 + coverage) / 2`` quantiles of each
+        series at each step (linear interpolation between order statistics).
+
+        The draws come from the global torch RNG seeded with ``random_state_``
+        (the run's ``random_state``) and restored afterwards, so the intervals
+        are the same on every call and the global RNG is unchanged; with
+        ``random_state=None`` they are drawn from the global RNG as it is, and
+        differ between calls.
+
+        The centre of an interval is not :meth:`predict`'s forecast, which
+        sets the innovations to zero and adds no noise: the intervals describe
+        the sampled distribution, whose median differs from that forecast
+        because the prior need not be centred at zero and the decoder can be
+        nonlinear. The fitted networks are taken as known, so the intervals
+        leave out estimation uncertainty.
 
         Parameters
         ----------
-        by : {"component", "factor"}, default "component"
-            Only ``"component"``: the decoder is nonlinear
-            (``loadings_kind_`` is ``"mean_jacobian"``), so the common
-            component has no exact split by factor.
+        h : int
+            Forecast horizon, as in :meth:`predict`.
+        coverage : float, default 0.9
+            Nominal coverage of each interval, in (0, 1).
+        data : PanelData, DataFrame or 2-D array, optional
+            A window to condition on, as in :meth:`predict`: ``update(data)``
+            on a copy of the model, whose encoder draws come from the same
+            seeded generator; the model is unchanged.
+        futr_exog : DataFrame or array of shape (h, n_exog), optional
+            Future values of the exog columns, as in :meth:`predict` (without
+            them a model fitted with exog warns and uses time features).
 
         Returns
         -------
         pandas.DataFrame
-            float64, indexed by ``index_``, MultiIndex columns
-            ``(component, series)`` with ``component`` ``"common"`` or
-            ``"idiosyncratic"`` and the series in the user's order.
+            float64, indexed like :meth:`predict`, MultiIndex columns
+            ``(series, bound)``: the series in the user's order, ``bound``
+            ``"lower"`` and ``"upper"``; ``attrs`` holds those of
+            :meth:`predict` and ``coverage``. A polars frame after
+            ``set_output(output="polars")``.
+
+        Raises
+        ------
+        ConfigurationError
+            For ``coverage`` that is not a number in (0, 1).
+        DataValidationError
+            For ``data`` or ``futr_exog`` that :meth:`predict` rejects.
+        """
+        self._check_is_fitted("predict_interval")
+        if not (_is_real(coverage) and 0 < coverage < 1):
+            raise ConfigurationError(f"iVDFM.predict_interval: coverage must be a number in (0, 1), got {coverage!r}.")
+        with self._seeded_rng():
+            paths, h, origin = self._run_forecast("predict_interval", h, data, futr_exog, self._sample_paths)
+        lower, upper = np.quantile(paths, [(1 - coverage) / 2, (1 + coverage) / 2], axis=0)
+        series = list(self.feature_names_in_)
+        columns = pd.MultiIndex.from_product([series, ["lower", "upper"]], names=["series", "bound"])
+        frame = self._frame(np.stack([lower, upper], axis=2).reshape(h, -1), h, columns, "forecast", origin)
+        frame.attrs["coverage"] = float(coverage)
+        return self._emit(frame)
+
+    # -- interpretation ------------------------------------------------------
+
+    def decompose(self, *, by: str = "component") -> pd.DataFrame:
+        """Split the training targets into their parts, in data units.
+
+        Parameters
+        ----------
+        by : {"component", "factor"}, default "component"
+            ``"component"``: MultiIndex columns ``(component, series)`` with
+            ``"common"``, the decoded factor path ``result_.x_sm``
+            inverse-transformed with ``scaler_`` (so it includes the series
+            mean), and ``"idiosyncratic"``, the data minus common (NaN where
+            the data is missing).
+            ``"factor"`` (``loadings_kind_`` ``"exact"``: ``decoder_type=
+            "linear"`` with one regime): MultiIndex columns ``(part,
+            series)``. Writing the scaler as ``data = offset + scale *
+            scaled`` per target, factor ``j``'s part of target ``i`` is
+            ``scale_i * L_ij * f_jt`` (``L`` is ``loadings_``, ``f`` is
+            ``factors_``), ``"mean"`` is ``offset_i + scale_i * b_i`` (``b``
+            the decoder bias) and ``"idiosyncratic"`` is the data minus the
+            other parts. These are computed in float64, so the idiosyncratic
+            part differs from ``by="component"``'s by the float32 rounding of
+            ``result_.x_sm``.
+            In both, the parts add up to the data.
+
+        Returns
+        -------
+        pandas.DataFrame
+            float64, indexed by ``index_``, one column per part and series
+            (series in the user's order).
 
         Raises
         ------
         ConfigurationError
             For ``by`` other than ``"component"`` and ``"factor"``.
         UnsupportedInputError
-            For ``by="factor"``, and for a run saved by 0.8.x, which holds no
-            training targets.
+            For ``by="factor"`` when the decoding is nonlinear
+            (``loadings_kind_`` ``"mean_jacobian"``) or the scaler is not
+            affine (other than None, ``StandardScaler``, ``RobustScaler``,
+            ``MinMaxScaler`` and ``MaxAbsScaler``), and for a run saved by
+            0.8.x, which holds no training targets.
         """
         self._check_is_fitted("decompose")
-        if by == "factor":
-            raise UnsupportedInputError(
-                "iVDFM.decompose(by='factor') is not supported: the decoder is nonlinear (loadings_kind_ "
-                "'mean_jacobian'), so the common component has no exact split by factor. Use by='component'."
-            )
-        if by != "component":
+        if by not in ("component", "factor"):
             raise ConfigurationError(f"by must be 'component' or 'factor', got {by!r}.")
+        affine = affine_scaler_params(self.scaler_, self.n_features_in_)
+        if by == "factor" and self.loadings_kind_ != "exact":
+            raise UnsupportedInputError(
+                "iVDFM.decompose(by='factor') needs targets linear in the factors, but the decoder is nonlinear or "
+                "mixes regime decoders (loadings_kind_ 'mean_jacobian'). Use by='component', or "
+                "decoder_type='linear' with n_regimes=1."
+            )
+        if by == "factor" and affine is None:
+            raise UnsupportedInputError(
+                f"iVDFM.decompose(by='factor') needs an affine scaler (None, 'standard', 'robust', 'minmax' or "
+                f"'maxabs'), got {type(self.scaler_).__name__}: the factor parts do not add up in data units. "
+                "Use by='component'."
+            )
         if self._targets_ is None:
             raise UnsupportedInputError(
                 "iVDFM.decompose: this run was saved by dfm-python 0.8 without its training targets. Refit the "
                 "model to decompose its training data."
             )
-        common = np.asarray(self.result_.x_sm, dtype=np.float64)
-        if self.scaler_ is not None:
-            common = np.asarray(self.scaler_.inverse_transform(common), dtype=np.float64)
-        columns = pd.MultiIndex.from_product(
-            [["common", "idiosyncratic"], list(self.feature_names_in_)], names=["component", "series"]
-        )
-        values = np.hstack([common, self._targets_ - common])
-        return self._emit(pd.DataFrame(values, index=self.index_, columns=columns))
+        if by == "component":
+            common = np.asarray(self.result_.x_sm, dtype=np.float64)
+            if self.scaler_ is not None:
+                common = np.asarray(self.scaler_.inverse_transform(common), dtype=np.float64)
+            parts, level = {"common": common, "idiosyncratic": self._targets_ - common}, "component"
+        else:
+            offset, scale = affine
+            factors, loadings = self.factors_.to_numpy(), self.loadings_.to_numpy()
+            parts = {name: factors[:, [j]] * (scale * loadings[:, j]) for j, name in enumerate(self.factor_names_)}
+            parts["mean"] = np.tile(offset + scale * self._linear_decoder()[1], (len(factors), 1))
+            parts["idiosyncratic"] = self._targets_ - sum(parts.values())
+            level = "part"
+        columns = pd.MultiIndex.from_product([list(parts), list(self.feature_names_in_)], names=[level, "series"])
+        return self._emit(pd.DataFrame(np.hstack(list(parts.values())), index=self.index_, columns=columns))
 
     # -- save / load ---------------------------------------------------------
 

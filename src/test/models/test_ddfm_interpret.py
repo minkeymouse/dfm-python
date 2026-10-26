@@ -66,12 +66,9 @@ def _decoder64(model: DDFM) -> torch.nn.Module:
 # -- tags and attributes ---------------------------------------------------------
 
 
-def test_tags_enable_interpret_but_not_prediction_intervals(case):
-    model, _ = case
+def test_tags_enable_interpret_and_prediction_intervals():
     tags = DDFM.get_tags()
-    assert tags["capability:interpret"] is True and tags["capability:pred_int"] is False
-    with pytest.raises(UnsupportedInputError, match="capability:pred_int"):
-        model.predict_interval(2)
+    assert tags["capability:interpret"] is True and tags["capability:pred_int"] is True
 
 
 def test_attributes_cover_the_targets(case):

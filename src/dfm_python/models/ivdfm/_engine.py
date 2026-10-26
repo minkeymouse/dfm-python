@@ -8,7 +8,8 @@ innovation process that drives the factor dynamics (conditional
 exponential-family priors on the innovations, not on the states).
 
 Compared with the old public class: ``predict`` is split into
-:meth:`iVDFMEngine._future_time_features` and :meth:`iVDFMEngine._forecast`;
+:meth:`iVDFMEngine._future_time_features` and :meth:`iVDFMEngine._forecast`
+(and :meth:`iVDFMEngine._sample_paths` draws forecast paths for intervals);
 :meth:`iVDFMEngine._from_saved` rebuilds a saved run without ``__init__``
 (no dataset, no seeding); ``set_dataset``, the ``torch.save`` checkpoint
 methods, the raw-data branch of ``update`` and
@@ -1107,6 +1108,77 @@ class iVDFMEngine(nn.Module):
             features.append(periodic.reshape(-1, 1))
         return np.hstack(features)
 
+    def _forecast_start(
+        self,
+        horizon: int,
+        context_data: Optional[Union[np.ndarray, torch.Tensor]],
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """The last factor state (1, r) and the future context u (1, horizon, context_dim) of a forecast.
+
+        ``context_data`` (horizon, context_dim) is the future u_t; None
+        generates time features (and logs a warning when the model has
+        context columns besides them).
+        """
+        f_last = self._factor_path()[-1, :]  # (r,)
+        f_last_tensor = torch.from_numpy(f_last).to(
+            dtype=DEFAULT_TORCH_DTYPE,
+            device=self.device
+        ).unsqueeze(0)  # (1, r)
+
+        if context_data is None:
+            u_future = self._future_time_features(horizon, self.time_context)
+            if self.context_dim > self.time_context:
+                _logger.warning(
+                    f"Model has custom context columns (context_dim={self.context_dim} > time_context={self.time_context}). "
+                    f"Only time features generated. Provide context_data parameter for full context."
+                )
+        else:
+            if isinstance(context_data, torch.Tensor):
+                u_future = context_data.cpu().numpy()
+            else:
+                u_future = context_data
+            if u_future.shape[0] != horizon:
+                raise ValueError(
+                    f"context_data shape[0] ({u_future.shape[0]}) must match horizon ({horizon})"
+                )
+            if u_future.shape[1] != self.context_dim:
+                raise ValueError(
+                    f"context_data shape[1] ({u_future.shape[1]}) must match context_dim ({self.context_dim})"
+                )
+
+        u_future_tensor = torch.from_numpy(u_future).to(
+            dtype=DEFAULT_TORCH_DTYPE,
+            device=self.device
+        ).unsqueeze(0)  # (1, horizon, context_dim)
+        return f_last_tensor, u_future_tensor
+
+    def _rollout(
+        self,
+        f_last: torch.Tensor,
+        eta_future: torch.Tensor,
+        u_future: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Factors (batch, horizon, r) from ``f_last`` (batch, r) driven by ``eta_future``, and their decoding (batch, horizon, data_dim)."""
+        # K > 1: the AR(p) coefficients are the π-mix at the first future step.
+        if self.num_regimes > 1 and self.A_diag is not None:
+            pi_w = self.regime_net(u_future[:, 0:1, :], temperature=self.regime_temperature).squeeze(1)  # (batch, K)
+            A_eff, B_eff = self._effective_regime_coeffs(pi_w)  # (batch, r, p), (batch, r)
+            group_id = pi_w.argmax(dim=-1)  # (batch,) for the grouped path
+            factors_future = self.ssm.forward_closed_loop_with_coeffs(
+                f_current=f_last,
+                eta_future=eta_future,
+                ar_coeffs=A_eff,
+                B_diag=B_eff,
+                group_id=group_id,
+            )
+        else:
+            factors_future = self.ssm.forward_closed_loop(
+                f_current=f_last,
+                eta_future=eta_future,
+                horizon=eta_future.shape[1],
+            )
+        return factors_future, self._decode(factors_future, u_future)
+
     def _forecast(
         self,
         horizon: int,
@@ -1117,38 +1189,7 @@ class iVDFMEngine(nn.Module):
         """Closed-loop forecast from the last factor state: factors (1, horizon, r) and model-space y (1, horizon, data_dim)."""
         self.eval()
         with torch.no_grad():
-            f_last = self._factor_path()[-1, :]  # (r,)
-            f_last_tensor = torch.from_numpy(f_last).to(
-                dtype=DEFAULT_TORCH_DTYPE,
-                device=self.device
-            ).unsqueeze(0)  # (1, r)
-
-            if context_data is None:
-                u_future = self._future_time_features(horizon, self.time_context)
-                if self.context_dim > self.time_context:
-                    _logger.warning(
-                        f"Model has custom context columns (context_dim={self.context_dim} > time_context={self.time_context}). "
-                        f"Only time features generated. Provide context_data parameter for full context."
-                    )
-            else:
-                if isinstance(context_data, torch.Tensor):
-                    u_future = context_data.cpu().numpy()
-                else:
-                    u_future = context_data
-                if u_future.shape[0] != horizon:
-                    raise ValueError(
-                        f"context_data shape[0] ({u_future.shape[0]}) must match horizon ({horizon})"
-                    )
-                if u_future.shape[1] != self.context_dim:
-                    raise ValueError(
-                        f"context_data shape[1] ({u_future.shape[1]}) must match context_dim ({self.context_dim})"
-                    )
-
-            u_future_tensor = torch.from_numpy(u_future).to(
-                dtype=DEFAULT_TORCH_DTYPE,
-                device=self.device
-            ).unsqueeze(0)  # (1, horizon, context_dim)
-
+            f_last_tensor, u_future_tensor = self._forecast_start(horizon, context_data)
             if deterministic:
                 eta_future = torch.zeros(1, horizon, self.latent_dim, device=self.device, dtype=DEFAULT_TORCH_DTYPE)
             elif num_samples == 1:
@@ -1156,28 +1197,29 @@ class iVDFMEngine(nn.Module):
             else:
                 samples = [self._sample_prior(u_future_tensor) for _ in range(num_samples)]  # (1, horizon, r) each
                 eta_future = torch.stack(samples, dim=0).mean(dim=0)
+            return self._rollout(f_last_tensor, eta_future, u_future_tensor)
 
-            # K > 1: the AR(p) coefficients are the π-mix at the first future step.
-            if self.num_regimes > 1 and self.A_diag is not None:
-                pi_w = self.regime_net(u_future_tensor[:, 0:1, :], temperature=self.regime_temperature).squeeze(1)  # (1, K)
-                A_eff, B_eff = self._effective_regime_coeffs(pi_w)  # (1, r, p), (1, r)
-                group_id = pi_w.argmax(dim=-1)  # (1,) for the grouped path
-                factors_future = self.ssm.forward_closed_loop_with_coeffs(
-                    f_current=f_last_tensor,
-                    eta_future=eta_future,
-                    ar_coeffs=A_eff,
-                    B_diag=B_eff,
-                    group_id=group_id,
-                )
-            else:
-                factors_future = self.ssm.forward_closed_loop(
-                    f_current=f_last_tensor,
-                    eta_future=eta_future,
-                    horizon=horizon,
-                )
+    def _sample_paths(
+        self,
+        horizon: int,
+        context_data: Optional[Union[np.ndarray, torch.Tensor]],
+        num_paths: int,
+    ) -> torch.Tensor:
+        """``num_paths`` draws of the model-space observations (num_paths, horizon, data_dim) from the last factor state.
 
-            y_pred = self._decode(factors_future, u_future_tensor)
-            return factors_future, y_pred
+        Each path draws its innovations from the prior given the future
+        context (as ``_forecast`` with ``deterministic=False`` and one
+        sample), rolls the factors forward and decodes them, and adds
+        observation noise N(0, ``decoder_var``) to every entry. The draws come
+        from the global torch RNG.
+        """
+        self.eval()
+        with torch.no_grad():
+            f_last, u_future = self._forecast_start(horizon, context_data)
+            f_last = f_last.expand(num_paths, -1)
+            u_future = u_future.expand(num_paths, -1, -1)
+            _, y_mean = self._rollout(f_last, self._sample_prior(u_future), u_future)
+            return y_mean + float(np.sqrt(self.decoder_var)) * torch.randn_like(y_mean)
 
     def update(
         self,
