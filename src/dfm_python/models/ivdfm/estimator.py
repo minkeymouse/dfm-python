@@ -943,8 +943,8 @@ class iVDFM(BaseFactorModel):
 
     # -- forecasting ---------------------------------------------------------
 
-    def _futr_exog_values(self, h: int, futr_exog: Any, origin_index: pd.Index) -> Optional[np.ndarray]:
-        """``futr_exog`` validated as a float64 (h, n_exog) array, or None.
+    def _futr_exog_values(self, h: int, futr_exog: Any, origin_index: pd.Index, method: str) -> Optional[np.ndarray]:
+        """``futr_exog`` of the public ``method`` validated as a float64 (h, n_exog) array, or None.
 
         A DataFrame is matched by column name, and its index must be the
         forecast index (the ``h`` steps after ``origin_index[-1]``); a default
@@ -955,7 +955,7 @@ class iVDFM(BaseFactorModel):
         if futr_exog is None:
             if exog_names:
                 warnings.warn(
-                    f"iVDFM was fitted with exog {exog_names} but predict got no futr_exog; the forecast context "
+                    f"iVDFM was fitted with exog {exog_names} but {method} got no futr_exog; the forecast context "
                     "is generated time features in every column, as the engine does without context_data. Pass "
                     "futr_exog (h rows, one column per exog name) for the context the model was trained on.",
                     UserWarning,
@@ -964,7 +964,7 @@ class iVDFM(BaseFactorModel):
             return None
         if not exog_names:
             raise DataValidationError(
-                "iVDFM was fitted without exog, so predict takes no futr_exog; drop the argument."
+                f"iVDFM was fitted without exog, so {method} takes no futr_exog; drop the argument."
             )
         time_col = _polars_time_col(futr_exog)
         futr_exog = _to_pandas(futr_exog)
@@ -1017,8 +1017,14 @@ class iVDFM(BaseFactorModel):
         factors, y_pred = engine._forecast(h, self._future_context(engine, h, futr_exog), deterministic, n_samples)
         return to_numpy(factors.squeeze(0)), to_numpy(y_pred.squeeze(0))
 
-    def _point_forecast(self, deterministic: Any, n_samples: Any) -> Any:
-        """``(engine, h, futr_exog) -> (factors, y_pred)``, the forecast of :meth:`predict`, after validating its arguments."""
+    def _point_forecast(self, method: str, deterministic: Any, n_samples: Any) -> Any:
+        """``(engine, h, futr_exog) -> (factors, y_pred)``, the forecast of :meth:`predict`.
+
+        Checks that the model is fitted (before the arguments, as
+        :meth:`_run_forecast` does) and validates ``deterministic`` and
+        ``n_samples``.
+        """
+        self._check_is_fitted(method)
         if not isinstance(deterministic, (bool, np.bool_)):
             raise TypeError(f"deterministic must be True or False, got {deterministic!r}.")
         if not _is_int(n_samples) or n_samples < 1:
@@ -1037,7 +1043,7 @@ class iVDFM(BaseFactorModel):
         self._check_is_fitted(method)
         h = self._validate_horizon(h)
         panel = None if data is None else self._panel(data, method)
-        futr = self._futr_exog_values(h, futr_exog, self.conditioning_index_ if panel is None else panel.index)
+        futr = self._futr_exog_values(h, futr_exog, self.conditioning_index_ if panel is None else panel.index, method)
         if panel is None:
             return forecast(self.network_, h, futr), h, self.conditioning_index_
         with torch.random.fork_rng(devices=self._rng_devices()):
@@ -1102,7 +1108,7 @@ class iVDFM(BaseFactorModel):
             column per target in the user's order; ``attrs`` holds ``model``,
             ``kind="forecast"`` and ``origin``.
         """
-        forecast = self._point_forecast(deterministic, n_samples)
+        forecast = self._point_forecast("predict", deterministic, n_samples)
         (_, y_pred), h, origin = self._run_forecast("predict", h, data, futr_exog, forecast)
         values = np.asarray(y_pred, dtype=np.float64)
         if self.scaler_ is not None:
@@ -1126,7 +1132,7 @@ class iVDFM(BaseFactorModel):
             float64, ``h`` rows, one column per name in ``factor_names_``;
             ``attrs["kind"]`` is ``"factors"``.
         """
-        forecast = self._point_forecast(deterministic, n_samples)
+        forecast = self._point_forecast("predict_factors", deterministic, n_samples)
         (factors, _), h, origin = self._run_forecast("predict_factors", h, data, futr_exog, forecast)
         return self._emit(self._frame(factors, h, list(self.factor_names_), "factors", origin))
 
@@ -1168,9 +1174,11 @@ class iVDFM(BaseFactorModel):
 
         The draws come from the global torch RNG seeded with ``random_state_``
         (the run's ``random_state``) and restored afterwards, so the intervals
-        are the same on every call and the global RNG is unchanged; with
-        ``random_state=None`` they are drawn from the global RNG as it is, and
-        differ between calls.
+        are the same on every call and the global RNG is unchanged. With
+        ``random_state=None`` they are drawn from the global RNG as it is:
+        without ``data`` they advance it and differ between calls; with
+        ``data`` the global RNG is restored afterwards, as for ``predict(h,
+        data=...)``.
 
         The centre of an interval is not :meth:`predict`'s forecast, which
         sets the innovations to zero and adds no noise: the intervals describe

@@ -128,6 +128,22 @@ def test_ddfm_bounds_match_the_forecast_covariance(ddfm, frame):
     np.testing.assert_allclose((upper - lower) / 2, expected, rtol=1e-9)
 
 
+def test_ddfm_interval_starts_from_the_spread_of_the_last_mc_draws(ddfm, frame):
+    """The initial covariance is that of the MC factor draws at the last row: spread them around the same mean."""
+    model = copy.deepcopy(ddfm)
+    factors = model.network_.factors.copy()
+    factors[:, -1, :] += np.array([[0.5, 0.3], [-0.5, 0.0], [0.0, -0.3]], dtype=factors.dtype)
+    model.network_.factors = factors
+    P0 = _mc_covariance(model)
+    assert np.trace(P0) > 0.1
+    lower, upper = _bounds(model.predict_interval(3))
+    scaled = model.scaler_.transform(frame.iloc[:T_FIT].to_numpy())
+    expected = _ddfm_half_widths(model, scaled, 3, 0.9, P0) * model.scaler_.scale_
+    np.testing.assert_allclose((upper - lower) / 2, expected, rtol=1e-9)
+    before = _bounds(ddfm.predict_interval(3))
+    assert ((upper - lower) > (before[1] - before[0])).all()
+
+
 def test_ddfm_interval_with_data_and_after_update(ddfm, frame):
     new = PanelData(y=frame.iloc[T_FIT:T_FIT + 5])
     before = ddfm.predict_interval(3)
@@ -250,6 +266,48 @@ def test_ivdfm_interval_is_the_quantiles_of_the_seeded_paths(ivdfm):
     np.testing.assert_allclose(upper, np.quantile(paths, 0.9, axis=0), rtol=1e-12, atol=1e-12)
 
 
+def test_ivdfm_interval_matches_the_gaussian_forecast_distribution(frame):
+    """Linear decoder, Gaussian innovations, AR(1): the paths are Gaussian with a mean and variance derived here.
+
+    Step k's factors are the deterministic forecast plus ``sum_{j<=k} H_{k-j} eta_j`` (``H`` the impulse
+    response, ``eta_j ~ N(mu_j, var_j)`` from the prior at the future context), so the scaled targets are
+    Gaussian with mean ``W m_k + b`` and variance ``W^2 v_k + decoder_var``. The 1000-path quantiles match
+    that distribution's to within a few Monte Carlo standard errors (about 0.07 sd per bound).
+    """
+    h, coverage, decoder_var = 4, 0.9, 0.1
+    params = {**IVDFM_PARAMS, "decoder_type": "linear", "innovation_distribution": "gaussian", "decoder_var": decoder_var}
+    model = _fit(iVDFM, PanelData(y=frame.iloc[:T_FIT]), **params)
+    engine = model.network_
+    u = torch.as_tensor(engine._future_time_features(h, model.time_context_)).unsqueeze(0)
+    with torch.no_grad():
+        prior = engine.prior_network(u)
+        impulse = engine.ssm.get_impulse_response(h).double().numpy()  # (r, h): B * A^k
+    mu, var = prior["mu"][0].double().numpy(), prior["logvar"][0].double().exp().numpy()
+    W = engine.decoder.linear.weight.detach().double().numpy()
+    b = engine.decoder.linear.bias.detach().double().numpy()
+    deterministic = model.predict_factors(h).to_numpy()
+    mean = np.array([deterministic[k] + sum(impulse[:, k - j] * mu[j] for j in range(k + 1)) for k in range(h)])
+    variance = np.array([sum(impulse[:, k - j] ** 2 * var[j] for j in range(k + 1)) for k in range(h)])
+    scale, offset = model.scaler_.scale_, model.scaler_.mean_
+    centre, sd = offset + scale * (mean @ W.T + b), scale * np.sqrt(variance @ (W**2).T + decoder_var)
+    lower, upper = _bounds(model.predict_interval(h, coverage=coverage))
+    z = norm.ppf((1 + coverage) / 2)
+    assert (np.abs(lower - (centre - z * sd)) / sd).max() < 0.3
+    assert (np.abs(upper - (centre + z * sd)) / sd).max() < 0.3
+
+
+def test_ivdfm_interval_with_regimes_and_an_ar2(frame):
+    """K > 1 regimes and AR(2) factors: the batched rollout of every path."""
+    params = {**IVDFM_PARAMS, "n_regimes": 2, "factor_order": 2}
+    model = _fit(iVDFM, PanelData(y=frame.iloc[:T_FIT]), **params)
+    point = model.predict(4)
+    interval = model.predict_interval(4)
+    _assert_interval_frame(interval, point, 0.9)
+    assert model.predict_interval(4).equals(interval)
+    lower, upper = _bounds(interval)
+    assert ((point.to_numpy() >= lower) & (point.to_numpy() <= upper)).mean() >= 0.8
+
+
 def test_ivdfm_interval_without_a_seed_draws_from_the_global_rng(frame):
     model = _fit(iVDFM, PanelData(y=frame.iloc[:T_FIT]), **{**IVDFM_PARAMS, "random_state": None})
     torch.manual_seed(0)
@@ -257,6 +315,12 @@ def test_ivdfm_interval_without_a_seed_draws_from_the_global_rng(frame):
     assert not model.predict_interval(2).equals(first)
     torch.manual_seed(0)
     assert model.predict_interval(2).equals(first)
+    # With data the global RNG is restored afterwards, as for predict(h, data=...).
+    window = PanelData(y=frame.iloc[T_FIT - 20:T_FIT + 6])
+    state = torch.random.get_rng_state()
+    conditioned = model.predict_interval(2, data=window)
+    assert torch.equal(torch.random.get_rng_state(), state)
+    assert model.predict_interval(2, data=window).equals(conditioned)
 
 
 def test_ivdfm_interval_with_data(ivdfm, frame):
@@ -277,7 +341,7 @@ def test_ivdfm_interval_with_futr_exog(ivdfm_exog):
     frame = model.predict_interval(3, futr_exog=future)
     _assert_interval_frame(frame, model.predict(3, futr_exog=future), 0.9)
     np.testing.assert_array_equal(model.predict_interval(3, futr_exog=future.to_numpy()).to_numpy(), frame.to_numpy())
-    with pytest.warns(UserWarning, match="futr_exog") as record:
+    with pytest.warns(UserWarning, match="predict_interval got no futr_exog") as record:
         without = model.predict_interval(3)
     assert record[0].filename == __file__
     assert not np.array_equal(without.to_numpy(), frame.to_numpy())
@@ -300,9 +364,11 @@ def test_ivdfm_interval_with_a_non_affine_scaler_and_student_t_innovations(frame
 def test_ivdfm_interval_errors_and_polars(ivdfm):
     with pytest.raises(NotFittedError, match="predict_interval"):
         iVDFM(**IVDFM_PARAMS).predict_interval(2)
+    with pytest.raises(NotFittedError, match="predict"):  # before the arguments are validated
+        iVDFM(**IVDFM_PARAMS).predict(2, deterministic="yes")
     with pytest.raises(ConfigurationError, match="coverage"):
         ivdfm.predict_interval(2, coverage=1.0)
-    with pytest.raises(DataValidationError, match="futr_exog"):
+    with pytest.raises(DataValidationError, match="predict_interval takes no futr_exog"):
         ivdfm.predict_interval(2, futr_exog=np.zeros((2, 1)))
     pl = pytest.importorskip("polars")
     out = copy.deepcopy(ivdfm).set_output(output="polars").predict_interval(2)

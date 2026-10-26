@@ -235,7 +235,9 @@ def test_runs_saved_by_0_8_load(release, tmp_path):
     if release == "0.8.3":
         assert loaded.factors_.equals(est.factors_) and loaded.loadings_.equals(est.loadings_)
         pd.testing.assert_frame_equal(loaded.predict(3), est.predict(3))
+        pd.testing.assert_frame_equal(loaded.predict_interval(3), est.predict_interval(3))
     else:
+        assert np.isfinite(loaded.predict_interval(3).to_numpy()).all()
         assert loaded.factors_.index.equals(est.index_[-est.window_:])
         np.testing.assert_array_equal(loaded.factors_.to_numpy(), average.astype(np.float64))
         np.testing.assert_allclose(
