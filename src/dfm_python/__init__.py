@@ -9,6 +9,11 @@ Models
 - ``iVDFM``: identifiable variational dynamic factor model.
 - ``AFM``: attention factor model for cross-sectional returns.
 
+``DFM`` needs numpy only. ``DDFM``, ``iVDFM`` and ``AFM`` train with torch,
+the ``deep`` extra (``pip install "dfm-python[deep]"``); importing the package
+and building any estimator does not import torch, and fitting or loading a
+torch model without it raises ``ImportError`` naming the extra.
+
 ``AFM`` follows the estimator API: hyperparameters in the constructor, data in
 one ``PanelData`` container, fitted state in attributes ending in ``_`` and a
 pickle-free save directory::

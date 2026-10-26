@@ -3,7 +3,7 @@
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
-from typing import Optional, Union, Tuple, List
+from typing import Any, Optional, Union, Tuple, List
 import pandas as pd
 from sklearn.preprocessing import StandardScaler, RobustScaler, MinMaxScaler, MaxAbsScaler, QuantileTransformer
 
@@ -279,3 +279,21 @@ class iVDFMDataset(Dataset):
             num_workers=num_workers,
             **kwargs
         )
+
+
+class RecordingDataset(iVDFMDataset):
+    """The iVDFM estimator's dataset: an ``iVDFMDataset`` recording the window index of every ``__getitem__`` call.
+
+    On CPU the engine trains and extracts its final factors through a shuffled
+    ``DataLoader``, so its factor arrays are in shuffled window order. The last
+    ``len(dataset)`` recorded indices are the order of that final extraction.
+    Recording reads no random numbers, so the engine's numbers are unchanged.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.accessed: list[int] = []
+
+    def __getitem__(self, idx: int):
+        self.accessed.append(int(idx))
+        return super().__getitem__(idx)

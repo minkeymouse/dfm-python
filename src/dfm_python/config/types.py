@@ -1,18 +1,26 @@
-"""Type aliases and the numpy/torch conversion helpers used across the package."""
+"""Type aliases and the numpy/torch conversion helpers used across the package.
 
-from typing import Union, Tuple, Optional, Dict, Any, Literal
+torch is optional (the ``deep`` extra), so the aliases name its types as
+forward references and importing this module does not import torch. The
+aliases of torch classes (``Tensor``, ``Loss``, ``Optimizer``) are resolved
+on first access, which imports torch.
+"""
+
+import sys
+from typing import TYPE_CHECKING, Union, Tuple, Optional, Dict, Any, Literal
 from pathlib import Path
 import numpy as np
-import torch
-from torch import Tensor
+
+if TYPE_CHECKING:
+    import torch
 
 # Array types
-ArrayLike = Union[np.ndarray, Tensor]
-FloatArray = Union[np.ndarray, Tensor]
-IntArray = Union[np.ndarray, Tensor]
-BoolArray = Union[np.ndarray, Tensor]
+ArrayLike = Union[np.ndarray, "torch.Tensor"]
+FloatArray = Union[np.ndarray, "torch.Tensor"]
+IntArray = Union[np.ndarray, "torch.Tensor"]
+BoolArray = Union[np.ndarray, "torch.Tensor"]
 OptionalArray = Optional[ArrayLike]
-OptionalTensor = Optional[Tensor]
+OptionalTensor = Optional["torch.Tensor"]
 OptionalArrayLike = Optional[ArrayLike]
 
 # Model types
@@ -39,10 +47,8 @@ DatasetName = str
 ModelName = Literal['var', 'vecm', 'dfm', 'ddfm']
 
 # Training types
-Batch = Union[Tensor, Tuple[Tensor, Tensor]]
+Batch = Union["torch.Tensor", Tuple["torch.Tensor", "torch.Tensor"]]
 """Data tensor or (data, target) tuple."""
-Loss = Tensor
-Optimizer = torch.optim.Optimizer
 
 # Result types
 ResultDict = Dict[str, Any]
@@ -51,7 +57,7 @@ MetricsDict = Dict[str, float]
 CheckpointDict = Dict[str, Any]
 ConfigDict = Dict[str, Any]
 
-Device = Union[torch.device, str]
+Device = Union["torch.device", str]
 
 # Shape types
 Shape = Tuple[int, ...]
@@ -81,7 +87,9 @@ def is_numpy_array(obj: Any) -> bool:
 
 
 def is_torch_tensor(obj: Any) -> bool:
-    return isinstance(obj, Tensor)
+    # A tensor exists only once torch is imported, so this never imports it.
+    torch = sys.modules.get("torch")
+    return torch is not None and isinstance(obj, torch.Tensor)
 
 
 def is_array_like(obj: Any) -> bool:
@@ -118,8 +126,10 @@ def to_numpy(arr: ArrayLike, dtype: Optional[np.dtype] = None) -> np.ndarray:
     return result
 
 
-def to_tensor(arr: ArrayLike, device: Optional[Device] = None, dtype: Optional['torch.dtype'] = None) -> Tensor:
+def to_tensor(arr: ArrayLike, device: Optional[Device] = None, dtype: Optional['torch.dtype'] = None) -> "torch.Tensor":
     """Convert a numpy array or tensor to a tensor on ``device`` with ``dtype``; raises ``DataValidationError`` otherwise."""
+    import torch
+
     if is_torch_tensor(arr):
         result = arr
         if device is not None:
@@ -150,6 +160,15 @@ def to_tensor(arr: ArrayLike, device: Optional[Device] = None, dtype: Optional['
         )
 
 
+def __getattr__(name: str) -> Any:
+    # The aliases of torch classes; resolving one imports torch.
+    if name not in ('Tensor', 'Loss', 'Optimizer'):
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    import torch
+
+    return torch.optim.Optimizer if name == 'Optimizer' else torch.Tensor
+
+
 __all__ = [
     'ArrayLike',
     'FloatArray',
@@ -168,8 +187,8 @@ __all__ = [
     'DatasetName',
     'ModelName',
     'Batch',
-    'Loss',
-    'Optimizer',
+    'Loss',  # noqa: F822 - resolved by __getattr__
+    'Optimizer',  # noqa: F822 - resolved by __getattr__
     'ResultDict',
     'ForecastDict',
     'MetricsDict',
@@ -194,5 +213,5 @@ __all__ = [
     'get_array_shape',
     'to_numpy',
     'to_tensor',
-    'Tensor',
+    'Tensor',  # noqa: F822 - resolved by __getattr__
 ]

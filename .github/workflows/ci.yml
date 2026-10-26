@@ -29,12 +29,46 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           enable-cache: true
-      # Installs the locked dependency set (default PyPI torch wheel) plus every
-      # optional extra, since some tests import optuna, omegaconf, sktime, polars.
+      # Installs the locked dependency set plus every optional extra: torch (the
+      # default PyPI wheel) comes with the deep extra, and some tests import
+      # optuna, omegaconf, sktime, polars.
       - name: Install dependencies
         run: uv sync --locked --group dev --all-extras
       - name: Run tests
         run: uv run --no-sync pytest src/test -q
+
+  # DFM without the deep extra: the dev group pulls in no torch, so without
+  # --all-extras the environment has neither torch nor einops, as a plain
+  # `pip install dfm-python` does. Runs the DFM tests and the optional-torch checks.
+  test-without-torch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - name: Install dependencies (no extras)
+        run: uv sync --locked --group dev
+      - name: Check that torch and einops are not installed
+        run: uv run --no-sync python -c "import importlib.util as u; assert not (u.find_spec('torch') or u.find_spec('einops'))"
+      - name: Run the DFM tests
+        run: >-
+          uv run --no-sync pytest -q
+          src/test/test_optional_torch.py
+          src/test/models/test_dfm_engine.py
+          src/test/models/test_dfm_estimator.py
+          src/test/models/test_dfm_interpret.py
+          src/test/models/test_dfm_state_layout.py
+          src/test/models/test_dfm_update_oracle.py
+          src/test/functional
+          src/test/ssm/test_estep_oracle.py
+          src/test/ssm/test_kalman.py
+          src/test/ssm/test_kalman_correctness.py
+          src/test/ssm/test_kalman_dk.py
+          src/test/ssm/test_kalman_structured.py
 
   # Smoke run of every tutorial/ script on truncated data with one EM iteration
   # or training epoch (about 30 s on CPU). Each script fits, forecasts, saves to

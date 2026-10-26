@@ -21,6 +21,7 @@ import dataclasses
 import hashlib
 import json
 import random
+import sys
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -28,7 +29,6 @@ from unittest import mock
 
 import numpy as np
 import pandas as pd
-import torch
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 MACRO_CSV = REPO_ROOT / "data" / "macro.csv"
@@ -85,7 +85,7 @@ def jsonable(obj: Any) -> Any:
         return int(obj)
     if isinstance(obj, np.floating):
         return float(obj)
-    if isinstance(obj, torch.device):
+    if _is_torch(obj, "device"):
         return str(obj)
     if obj is None or isinstance(obj, (str, int, float)):
         return obj
@@ -130,8 +130,14 @@ def _class_name(obj: Any) -> str | None:
     return None if obj is None else type(obj).__name__
 
 
+def _is_torch(obj: Any, cls: str) -> bool:
+    """``isinstance(obj, torch.<cls>)`` without importing torch (the DFM cases run without it)."""
+    torch = sys.modules.get("torch")
+    return torch is not None and isinstance(obj, getattr(torch, cls))
+
+
 def _np(t: Any) -> np.ndarray:
-    if isinstance(t, torch.Tensor):
+    if _is_torch(t, "Tensor"):
         return t.detach().cpu().numpy()
     return np.asarray(t)
 
@@ -139,12 +145,18 @@ def _np(t: Any) -> np.ndarray:
 def _reset_global_rngs() -> None:
     random.seed(GLOBAL_RNG_PRESEED)
     np.random.seed(GLOBAL_RNG_PRESEED)
+    try:
+        import torch
+    except ImportError:  # the DFM cases also run without the deep extra
+        return
     torch.manual_seed(GLOBAL_RNG_PRESEED)
 
 
 @contextlib.contextmanager
 def force_cpu() -> Iterator[None]:
     """Make today's ``cuda if available else cpu`` device choice resolve to CPU."""
+    import torch
+
     with mock.patch.object(torch.cuda, "is_available", return_value=False):
         yield
 

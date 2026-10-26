@@ -454,24 +454,28 @@ name = "dfm-python"
 version = "0.8.3"
 source = { editable = "." }
 dependencies = [
-    { name = "einops" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.3.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "pandas" },
     { name = "scikit-learn" },
     { name = "scipy" },
     { name = "threadpoolctl" },
-    { name = "torch" },
 ]
 
 [package.optional-dependencies]
 all = [
+    { name = "einops" },
     { name = "omegaconf" },
     { name = "optuna" },
     { name = "polars" },
     { name = "pyarrow", version = "25.0.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "pyarrow", version = "26.0.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "sktime" },
+    { name = "torch" },
+]
+deep = [
+    { name = "einops" },
+    { name = "torch" },
 ]
 dev = [
     { name = "build" },
@@ -515,8 +519,8 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "build", marker = "extra == 'dev'", specifier = ">=1.4.0" },
-    { name = "dfm-python", extras = ["tune", "yaml", "metrics", "polars"], marker = "extra == 'all'" },
-    { name = "einops", specifier = ">=0.8.1" },
+    { name = "dfm-python", extras = ["deep", "tune", "yaml", "metrics", "polars"], marker = "extra == 'all'" },
+    { name = "einops", marker = "extra == 'deep'", specifier = ">=0.8.1" },
     { name = "numpy", specifier = ">=1.24.0" },
     { name = "omegaconf", marker = "extra == 'dev'", specifier = ">=2.3.0" },
     { name = "omegaconf", marker = "extra == 'yaml'", specifier = ">=2.3.0" },
@@ -534,10 +538,10 @@ requires-dist = [
     { name = "sktime", marker = "extra == 'metrics'", specifier = ">=0.40.1" },
     { name = "statsmodels", marker = "extra == 'dev'", specifier = ">=0.14.0" },
     { name = "threadpoolctl", specifier = ">=3.1.0" },
-    { name = "torch", specifier = ">=2.10.0" },
+    { name = "torch", marker = "extra == 'deep'", specifier = ">=2.10.0" },
     { name = "twine", marker = "extra == 'dev'", specifier = ">=7.0.0" },
 ]
-provides-extras = ["tune", "yaml", "metrics", "polars", "all", "dev"]
+provides-extras = ["deep", "tune", "yaml", "metrics", "polars", "all", "dev"]
 
 [package.metadata.requires-dev]
 dev = [

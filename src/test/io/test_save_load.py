@@ -75,6 +75,12 @@ def test_config_json(tmp_path):
     assert list(config) == sorted(config)
 
 
+def test_config_json_runtime_of_a_numpy_model_has_no_torch_settings(tmp_path):
+    _fitted(_DummyForecaster).save(tmp_path / "run")
+    runtime = json.loads((tmp_path / "run" / "config.json").read_text())["runtime"]
+    assert runtime == {"device": None, "numpy_version": np.__version__}
+
+
 def test_data_spec_json(tmp_path):
     est = _fitted(_DummyAllocator)
     est.save(tmp_path / "run")

@@ -1,11 +1,9 @@
 """Input and parameter validators shared by the DFM, DDFM, iVDFM and AFM engines."""
 
 import os
-from typing import Optional, Union, List, Tuple, Any, Dict
+from typing import TYPE_CHECKING, Optional, Union, List, Tuple, Any, Dict
 import numpy as np
 import pandas as pd
-import torch
-from torch import Tensor
 
 from ..utils.errors import (
     ModelNotInitializedError,
@@ -16,21 +14,24 @@ from ..utils.errors import (
     ConfigurationError
 )
 from ..utils.validation import check_condition
-from ..config.types import to_numpy
+from ..config.types import is_torch_tensor, to_numpy
 from ..config.constants import MAX_EIGENVALUE, MIN_VARIABLES, MIN_DDFM_TIME_STEPS
 from ..logger import get_logger
+
+if TYPE_CHECKING:
+    import torch
 
 _logger = get_logger(__name__)
 
 
 def validate_data_shape(
-    data: Union[np.ndarray, Tensor],
+    data: Union[np.ndarray, "torch.Tensor"],
     min_dims: int = 2,
     max_dims: int = 3,
     min_size: int = 1
 ) -> Tuple[int, ...]:
     """Return ``data.shape`` after checking its ndim and that every dimension is >= ``min_size``."""
-    if isinstance(data, Tensor):
+    if is_torch_tensor(data):
         shape = tuple(data.shape)
     elif isinstance(data, np.ndarray):
         shape = data.shape
@@ -46,11 +47,11 @@ def validate_data_shape(
     return shape
 
 
-def validate_no_nan_inf(data: Union[np.ndarray, Tensor], name: str = "data") -> None:
+def validate_no_nan_inf(data: Union[np.ndarray, "torch.Tensor"], name: str = "data") -> None:
     """Raise ``DataValidationError`` if an array or tensor holds NaN or Inf; other types pass."""
-    if isinstance(data, Tensor):
-        has_nan = torch.isnan(data).any().item()
-        has_inf = torch.isinf(data).any().item()
+    if is_torch_tensor(data):
+        has_nan = data.isnan().any().item()
+        has_inf = data.isinf().any().item()
     elif isinstance(data, np.ndarray):
         has_nan = np.isnan(data).any()
         has_inf = np.isinf(data).any()
@@ -231,7 +232,7 @@ def validate_and_convert_update_data(
 
 
 def validate_factors(
-    factors: Union[np.ndarray, Tensor],
+    factors: Union[np.ndarray, "torch.Tensor"],
     num_factors: int,
     operation: str = "operation"
 ) -> np.ndarray:
@@ -264,7 +265,7 @@ def validate_factors(
 
 
 def validate_ddfm_training_data(
-    X_torch: Tensor,
+    X_torch: "torch.Tensor",
     num_factors: int,
     encoder_layers: Optional[List[int]] = None,
     encoder: Optional[Any] = None,
@@ -293,7 +294,7 @@ def validate_ddfm_training_data(
         details="Please provide training data"
     )
     check_condition(
-        isinstance(X_torch, Tensor),
+        is_torch_tensor(X_torch),
         DataError,
         f"DDFM {operation} failed: X_torch must be torch.Tensor, got {type(X_torch)}",
         details="Training data must be a torch.Tensor. Convert numpy arrays using torch.from_numpy()"

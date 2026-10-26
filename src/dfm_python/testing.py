@@ -74,6 +74,7 @@ import io
 import json
 import logging
 import shutil
+import sys
 import tempfile
 import types
 import warnings
@@ -84,19 +85,20 @@ from unittest import mock
 
 import numpy as np
 import pandas as pd
-import torch
 from sklearn.base import clone
 from sklearn.exceptions import NotFittedError as _SklearnNotFittedError
 from sklearn.utils.validation import check_is_fitted
 
 from .base import DEFAULT_TAGS, BaseFactorModel
 from .config.estimator import EstimatorConfig, load_yaml
+from .config.types import is_torch_tensor
 from .dataset.panel import PanelData
 from .io.layout import CONFIG_FILE, FORMAT_VERSION, REQUIRED_FILES, WEIGHTS_FILE
 from .io.loading import load as _load_any
 from .io.scaler import SCALER_JSON, SCALER_PKL, is_known_scaler
 from .registry import all_estimators
 from .utils.errors import ConfigurationError, NotFittedError, UnsupportedInputError
+from .utils.optional import require_torch, torch
 
 __all__ = ["check_estimator", "make_panel"]
 
@@ -182,6 +184,12 @@ def make_panel(tags: Any, *, seed: int = 0) -> PanelData:
 # ---------------------------------------------------------------------------
 
 
+def _is_torch_module(obj: Any) -> bool:
+    # A torch module exists only once torch is imported, so this never imports it.
+    imported = sys.modules.get("torch")
+    return imported is not None and isinstance(obj, imported.nn.Module)
+
+
 def _deep_equal(a: Any, b: Any) -> bool:
     """Structural equality: arrays by value (NaN equals NaN), estimators by params, tuple != list."""
     if a is b:
@@ -194,8 +202,8 @@ def _deep_equal(a: Any, b: Any) -> bool:
         if a.dtype.hasobject:
             return all(_deep_equal(x, y) for x, y in zip(a.ravel().tolist(), b.ravel().tolist()))
         return bool(np.array_equal(a, b, equal_nan=a.dtype.kind in "fc"))
-    if isinstance(a, torch.Tensor) or isinstance(b, torch.Tensor):
-        return isinstance(a, torch.Tensor) and isinstance(b, torch.Tensor) and a.dtype == b.dtype and torch.equal(a, b)
+    if is_torch_tensor(a) or is_torch_tensor(b):
+        return is_torch_tensor(a) and is_torch_tensor(b) and a.dtype == b.dtype and torch.equal(a, b)
     if isinstance(a, (pd.DataFrame, pd.Series, pd.Index)):
         return type(a) is type(b) and a.equals(b)
     if isinstance(a, float) and isinstance(b, float) and np.isnan(a) and np.isnan(b):
@@ -239,7 +247,7 @@ def _feed(h: Any, obj: Any, seen: set, depth: int = 0) -> None:
         else:
             h.update(np.ascontiguousarray(obj).tobytes())
         return
-    if isinstance(obj, torch.Tensor):
+    if is_torch_tensor(obj):
         t = obj.detach().cpu().contiguous()
         h.update(f"pt:{t.dtype}:{tuple(t.shape)};".encode())
         h.update(t.reshape(-1).view(torch.uint8).numpy().tobytes())
@@ -251,7 +259,7 @@ def _feed(h: Any, obj: Any, seen: set, depth: int = 0) -> None:
         h.update(b"<seen>")
         return
     seen.add(id(obj))
-    if isinstance(obj, torch.nn.Module):
+    if _is_torch_module(obj):
         h.update(f"module:{type(obj).__qualname__}:{obj.training};".encode())
         for key, value in obj.state_dict().items():
             h.update(key.encode())
@@ -322,7 +330,7 @@ def _network_hash(est: BaseFactorModel) -> str:
 def _collect_arrays(obj: Any, path: str, out: dict, seen: set) -> None:
     if isinstance(obj, np.ndarray):
         out[path] = obj.copy()
-    elif isinstance(obj, torch.Tensor):
+    elif is_torch_tensor(obj):
         out[path] = obj.detach().cpu().numpy().copy()
     elif isinstance(obj, (pd.DataFrame, pd.Series)):
         out[path] = obj.to_numpy(copy=True)
@@ -332,7 +340,7 @@ def _collect_arrays(obj: Any, path: str, out: dict, seen: set) -> None:
         out[path] = np.asarray(obj)
     elif id(obj) in seen:
         return
-    elif isinstance(obj, torch.nn.Module):
+    elif _is_torch_module(obj):
         seen.add(id(obj))
         for key, value in obj.state_dict().items():
             _collect_arrays(value, f"{path}.{key}", out, seen)
@@ -485,17 +493,22 @@ def _check_tags(ctx: _Context) -> None:
 
 
 def _check_pure_construction(ctx: _Context) -> None:
-    torch_state = torch.random.get_rng_state()
+    # check_estimator imports torch for a torch model; for a numpy model torch is checked if something imported it.
+    imported = sys.modules.get("torch")
+    torch_state = None if imported is None else imported.random.get_rng_state()
     np_state = np.random.get_state()
-    cuda_was_initialized = torch.cuda.is_initialized()
+    cuda_was_initialized = imported is not None and imported.cuda.is_initialized()
     est = ctx.cls(**ctx.params)
-    assert torch.equal(torch_state, torch.random.get_rng_state()), "the constructor changed the global torch RNG state."
+    if imported is not None:
+        assert imported.equal(torch_state, imported.random.get_rng_state()), (
+            "the constructor changed the global torch RNG state."
+        )
     after = np.random.get_state()
     assert np_state[0] == after[0] and np.array_equal(np_state[1], after[1]) and np_state[2:] == after[2:], (
         "the constructor changed the global numpy RNG state."
     )
-    if not cuda_was_initialized:
-        assert not torch.cuda.is_initialized(), "the constructor initialized CUDA."
+    if imported is not None and not cuda_was_initialized:
+        assert not imported.cuda.is_initialized(), "the constructor initialized CUDA."
     params = est.get_params(deep=False)
     state = vars(est)
     diff = _diff_keys(state, params)
@@ -1150,6 +1163,8 @@ def check_estimator(estimator_or_class: Any, *, data: Any = None) -> list[str]:
     if params_list is None:
         params_list = cls.get_test_params()
     class_tags = cls.get_tags()
+    if class_tags["backend"] == "torch":
+        require_torch("check_estimator")
     panel = make_panel(class_tags) if data is None else PanelData._coerce(data)
     train, new = _split(panel)
 

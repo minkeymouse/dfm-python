@@ -77,6 +77,7 @@ from .io.results import result_from_files, result_to_files
 from .io.scaler import SCALER_PREFIX, has_scaler, read_scaler, write_scaler
 from .logger.progress import fit_verbosity
 from .utils.errors import ConfigurationError, DataValidationError, NotFittedError, UnsupportedInputError
+from .utils.optional import require_torch
 
 __all__ = ["BaseFactorModel", "DEFAULT_TAGS"]
 
@@ -299,6 +300,12 @@ class BaseFactorModel(BaseEstimator):
                 f"This {type(self).__name__} instance is not fitted yet. Call fit(data) before {method}()."
             )
 
+    @classmethod
+    def _require_backend(cls, method: str) -> None:
+        """Raise ``ImportError`` naming the ``deep`` extra when a torch model (tag ``backend``) lacks torch."""
+        if cls.get_tags()["backend"] == "torch":
+            require_torch(f"{cls.__name__}.{method}")
+
     def _clear_fitted(self) -> None:
         for name in [k for k in vars(self) if _is_fitted_name(k)]:
             delattr(self, name)
@@ -519,7 +526,9 @@ class BaseFactorModel(BaseEstimator):
         called after every training iteration with the iteration's info dict
         (see the model's ``fit``); a true return value stops training there.
         When the ``max_time`` budget stopped training (``stop_reason_ ==
-        "max_time"``), ``fit`` warns with ``ConvergenceWarning``.
+        "max_time"``), ``fit`` warns with ``ConvergenceWarning``. A torch
+        model (tag ``backend="torch"``) raises ``ImportError`` naming the
+        ``deep`` extra when torch is not installed.
 
         Raises
         ------
@@ -528,6 +537,7 @@ class BaseFactorModel(BaseEstimator):
         """
         if callback is not None and not callable(callback):
             raise TypeError(f"callback must be None or a callable taking the info dict, got {type(callback).__name__}.")
+        self._require_backend("fit")
         panel = self._validate_data(data)
         self._check_training_targets(panel)
         verbose = getattr(self, "verbose", 0)
@@ -737,11 +747,14 @@ class BaseFactorModel(BaseEstimator):
 
         Raises
         ------
+        ImportError
+            For a torch model when torch (the ``deep`` extra) is not installed.
         ConfigurationError
             If ``path`` is a single-file checkpoint from an earlier release or
             not a saved run, holds another model type, lacks a file the
             ``backend`` tag requires, or needs ``allow_pickle=True``.
         """
+        cls._require_backend("load")
         path = Path(path)
         config = read_config(path, allow_import=allow_pickle)
         model_type = config["model_type"]
@@ -787,25 +800,27 @@ class BaseFactorModel(BaseEstimator):
             )
 
     def _saved_config(self, params: dict) -> dict:
-        """Content of ``config.json``."""
-        import torch
-
+        """Content of ``config.json``; ``runtime`` has the torch settings only for a torch model."""
         from . import __version__
 
         device = vars(self).get("device_")
+        tags = self.get_tags()
+        runtime = {"device": None if device is None else str(device), "numpy_version": str(np.__version__)}
+        if tags["backend"] == "torch":
+            import torch
+
+            runtime.update(
+                torch_version=str(torch.__version__),
+                deterministic_algorithms=bool(torch.are_deterministic_algorithms_enabled()),
+                num_threads=int(torch.get_num_threads()),
+            )
         return {
             "format_version": FORMAT_VERSION,
             "model_type": type(self).__name__,
             "library_version": str(__version__),
             "params": params,
-            "tags": self.get_tags(),
-            "runtime": {
-                "device": None if device is None else str(device),
-                "torch_version": str(torch.__version__),
-                "numpy_version": str(np.__version__),
-                "deterministic_algorithms": bool(torch.are_deterministic_algorithms_enabled()),
-                "num_threads": int(torch.get_num_threads()),
-            },
+            "tags": tags,
+            "runtime": runtime,
         }
 
     def _saved_data_spec(self) -> dict:

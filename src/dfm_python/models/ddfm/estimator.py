@@ -37,11 +37,10 @@ import warnings
 from collections.abc import Callable
 from pathlib import Path
 from statistics import NormalDist
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import numpy as np
 import pandas as pd
-import torch
 from sklearn.base import clone
 from sklearn.exceptions import NotFittedError as SklearnNotFittedError
 from sklearn.preprocessing import MaxAbsScaler, MinMaxScaler, QuantileTransformer, RobustScaler, StandardScaler
@@ -51,7 +50,6 @@ from ...base import BaseFactorModel
 from ...config.constants import VALID_OPTIMIZERS
 from ...config.schema.model import DDFMConfig
 from ...config.schema.results import DDFMResult
-from ...dataset.ddfm_dataset import DDFMDataset
 from ...dataset.panel import PanelData
 from ...io.layout import index_from_spec, index_to_spec
 from ...io.scaler import SCALER_PREFIX, decode_scaler, encode_scaler, is_known_scaler
@@ -59,8 +57,12 @@ from ...logger import get_logger
 from ...logger.progress import fit_verbosity, quiet_engine_loggers
 from ...utils.errors import ConfigurationError, DataValidationError, UnsupportedInputError
 from ...utils.interpret import affine_scaler_params, explained_variance
+from ...utils.optional import torch
 from ...utils.run_control import RunControl
-from ._engine import DDFMEngine
+
+if TYPE_CHECKING:
+    from ...dataset.ddfm_dataset import DDFMDataset
+    from ._engine import DDFMEngine
 
 __all__ = ["DDFM"]
 
@@ -487,6 +489,8 @@ class DDFM(BaseFactorModel):
         covariates with a fresh instance of the same class, which it keeps
         (the engine's ``covariate_scaler``).
         """
+        from ...dataset.ddfm_dataset import DDFMDataset
+
         frame = self._engine_frame(panel)
         time_col = _TIME_COLUMN
         while time_col in set(frame.columns):
@@ -569,6 +573,8 @@ class DDFM(BaseFactorModel):
         return super().fit(data, callback=callback)
 
     def _fit(self, data: PanelData, *, callback: Optional[Callable[[dict], Any]] = None) -> None:
+        from ._engine import DDFMEngine
+
         self._validate_params()
         device = self._resolve_device()
         dataset = self._adapter(data)
@@ -1078,6 +1084,8 @@ class DDFM(BaseFactorModel):
         without ``stop_reason`` (0.8.x) gets ``"converged"`` or ``"max_iter"``
         from ``converged``.
         """
+        from ._engine import DDFMEngine
+
         arrays, meta = cls._read_state(path)
         device = est._load_device(device)
         engine = DDFMEngine._from_saved(est._engine_params(), {name: meta[name] for name in _ENGINE_DIMS}, device)

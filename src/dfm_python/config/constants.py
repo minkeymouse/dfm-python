@@ -3,7 +3,6 @@
 from typing import Dict
 from datetime import datetime
 import numpy as np
-import torch
 
 # Convergence
 DEFAULT_CONVERGENCE_THRESHOLD = 1e-4  # EM (general)
@@ -244,7 +243,7 @@ DEFAULT_PROGRESS_LOG_INTERVAL = 5  # EM
 
 # Precision
 DEFAULT_DTYPE = np.float64
-DEFAULT_TORCH_DTYPE = torch.float32
+# DEFAULT_TORCH_DTYPE (torch.float32) is resolved by __getattr__ below: torch is optional.
 
 DEFAULT_IRF_HORIZON = 20
 DEFAULT_FORECAST_HORIZON = 6
@@ -558,3 +557,12 @@ __all__ = [
     'MIN_STD_SCALED',
     'MAX_FALLBACKS_PER_ITERATION',
 ]
+
+
+def __getattr__(name: str):
+    # The torch models' dtype; resolving it imports torch, which only they need.
+    if name == "DEFAULT_TORCH_DTYPE":
+        import torch
+
+        return torch.float32
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -37,6 +37,9 @@ CI runs on GitHub-hosted runners whose CPUs differ from the capture machine, so
 CI takes the tolerance path (look for ``GoldenToleranceWarning`` in its output)
 and would skip any ``cross_platform=False`` case. Only the capture machine, the one
 whose fingerprint the manifests record, runs the bitwise comparison.
+
+torch is imported by the functions that need it, so :func:`load_golden` also
+works without it (the DFM oracle tests run without the ``deep`` extra).
 """
 
 from __future__ import annotations
@@ -54,7 +57,6 @@ from typing import Any
 import numpy as np
 import scipy.linalg  # noqa: F401  (load scipy's BLAS so the fingerprint is stable)
 import threadpoolctl
-import torch
 
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 
@@ -88,6 +90,8 @@ def pinned() -> Iterator[None]:
     Sets ``threadpoolctl.threadpool_limits(1)`` (BLAS and OpenMP),
     ``torch.set_num_threads(1)`` and ``torch.use_deterministic_algorithms(True)``.
     """
+    import torch
+
     prev_threads = torch.get_num_threads()
     prev_det = torch.are_deterministic_algorithms_enabled()
     prev_warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
@@ -139,12 +143,16 @@ def _cpu_model() -> str:
 
 def _cpu_capability() -> str | None:
     """The SIMD level torch's CPU kernels dispatch to (e.g. ``AVX2``, ``AVX512``)."""
+    import torch
+
     get = getattr(getattr(torch.backends, "cpu", None), "get_cpu_capability", None)
     return None if get is None else str(get())
 
 
 def fingerprint() -> dict[str, Any]:
     """Platform fingerprint that decides between bitwise and tolerance comparison."""
+    import torch
+
     return {
         "machine": platform.machine(),
         "processor": platform.processor(),

@@ -21,16 +21,19 @@ classifiers = [
     "Topic :: Scientific/Engineering",
 ]
 dependencies = [
-    "einops>=0.8.1",
     "numpy>=1.24.0",
     "pandas>=2.0.0",
     "scikit-learn>=1.7.2",
     "scipy>=1.10.0",
     "threadpoolctl>=3.1.0",  # single-threaded BLAS inside the Kalman loops
-    "torch>=2.10.0",  # 2.10 fixes CVE-2026-24747 in the weights_only=True unpickler used by load()
 ]
 
 [project.optional-dependencies]
+# DDFM, iVDFM and AFM (the torch models); DFM needs none of it
+deep = [
+    "einops>=0.8.1",
+    "torch>=2.10.0",  # 2.10 fixes CVE-2026-24747 in the weights_only=True unpickler used by load()
+]
 # iVDFM hyperparameter search (dfm_python.tuning)
 tune = [
     "optuna>=4.7.0",
@@ -49,7 +52,7 @@ polars = [
     "pyarrow>=22.0.0",
 ]
 all = [
-    "dfm-python[tune,yaml,metrics,polars]",
+    "dfm-python[deep,tune,yaml,metrics,polars]",
 ]
 # Keep in sync with [dependency-groups].dev below.
 dev = [

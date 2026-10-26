@@ -148,7 +148,7 @@ def test_invalid_parameters_raise_configuration_error_naming_them(params, name, 
     def no_engine(*args, **kwargs):
         raise AssertionError("the engine must not be built")
 
-    monkeypatch.setattr("dfm_python.models.ddfm.estimator.DDFMEngine", no_engine)
+    monkeypatch.setattr("dfm_python.models.ddfm._engine.DDFMEngine", no_engine)
     est = DDFM(**{**TINY, **params})
     with pytest.raises(ConfigurationError, match=name):
         est.fit(_panel())
@@ -165,7 +165,7 @@ def test_valid_edge_parameters_are_accepted(monkeypatch):
         built.append(kwargs)
         raise Stop
 
-    monkeypatch.setattr("dfm_python.models.ddfm.estimator.DDFMEngine", engine)
+    monkeypatch.setattr("dfm_python.models.ddfm._engine.DDFMEngine", engine)
     for params in ({"encoder_layers": ()}, {"encoder_layers": [np.int64(4)]}, {"interpolation_limit": None},
                    {"tol": 0}, {"random_state": None}, {"scaler": "Standard"}, {"scaler": RobustScaler()},
                    {"device": torch.device("cpu")}, {"n_factors": np.int64(2)}):

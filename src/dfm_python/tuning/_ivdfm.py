@@ -1,9 +1,9 @@
-"""Optuna hyperparameter search for the iVDFM estimator (needs the ``tune`` extra).
+"""Optuna hyperparameter search for the iVDFM estimator (needs the ``tune`` and ``deep`` extras).
 
 Trials train on the latest windows of the data (``train_window_ratio`` of the
 available windows; 1.0 = all) and are scored on the last ``horizon`` steps
 (sMSE, sMAE or MSE) in the units of the estimator's scaler fitted on the full
-series (data units without a scaler). optuna is imported when a search runs.
+series (data units without a scaler). optuna and torch are imported when a search runs.
 """
 
 from __future__ import annotations
@@ -13,11 +13,11 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Un
 
 import numpy as np
 import pandas as pd
-import torch
 from sklearn.base import clone
 
 from ..dataset.panel import PanelData
 from ..logger import get_logger
+from ..utils.optional import require_torch, torch
 
 if TYPE_CHECKING:
     import optuna
@@ -518,7 +518,8 @@ def tune_hyperparameters(
     TypeError
         If ``estimator`` is not an iVDFM.
     ImportError
-        If optuna is not installed (``pip install 'dfm-python[tune]'``).
+        If optuna is not installed (``pip install 'dfm-python[tune]'``), or
+        torch (``pip install 'dfm-python[deep]'``).
     ValueError
         For an unknown metric, a ``fixed`` key that is not an iVDFM
         hyperparameter, ``min_batch_size`` different from
@@ -534,6 +535,7 @@ def tune_hyperparameters(
             f"tune_hyperparameters supports the iVDFM estimator only, got {type(estimator).__name__}."
         )
     optuna = _require_optuna()
+    require_torch("tune_hyperparameters")
     if str(metric).upper() not in _METRICS:
         raise ValueError(f"Unknown metric: {metric}. Use 'MSE', 'sMSE', or 'sMAE'.")
 

@@ -18,17 +18,15 @@ from __future__ import annotations
 import math
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import numpy as np
 import pandas as pd
-import torch
 
 from ...base import BaseFactorModel
 from ...config.schema.model import AFMConfig
 from ...config.schema.params import AFMModelState
 from ...config.schema.results import AFMResult
-from ...dataset.afm_dataset import AFMDataset
 from ...dataset.panel import PanelData
 from ...io.codecs import read_json, read_npz
 from ...io.layout import RESULT_JSON, RESULT_NPZ
@@ -36,8 +34,12 @@ from ...io.results import result_from_files
 from ...logger import get_logger
 from ...logger.progress import fit_verbosity
 from ...utils.errors import ConfigurationError, DataValidationError, UnsupportedInputError
+from ...utils.optional import torch
 from ...utils.run_control import RunControl
-from ._engine import AFMEngine
+
+if TYPE_CHECKING:
+    from ...dataset.afm_dataset import AFMDataset
+    from ._engine import AFMEngine
 
 __all__ = ["AFM"]
 
@@ -331,6 +333,8 @@ class AFM(BaseFactorModel):
         Fortran-ordered array, whose strided float32 tensor takes other BLAS
         paths and rounds differently.
         """
+        from ...dataset.afm_dataset import AFMDataset
+
         returns = np.ascontiguousarray(panel.y.to_numpy(np.float64))
         characteristics = panel.series_exog_array()
         if characteristics is not None:
@@ -403,6 +407,8 @@ class AFM(BaseFactorModel):
         return super().fit(data, callback=callback)
 
     def _fit(self, data: PanelData, *, callback: Optional[Callable[[dict], Any]] = None) -> None:
+        from ._engine import AFMEngine
+
         self._validate_params()
         self._require_characteristics(data, self.factor_model)
         device = self._resolve_device()
@@ -611,6 +617,8 @@ class AFM(BaseFactorModel):
         (AFM converges only through ``patience``) or ``"max_iter"`` from
         ``converged``.
         """
+        from ._engine import AFMEngine
+
         arrays, meta = cls._read_state(path)
         device = est._load_device(device)
         engine = AFMEngine._from_saved(est._engine_params(), meta["n_char"], device)

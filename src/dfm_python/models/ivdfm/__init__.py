@@ -1,14 +1,12 @@
 """Identifiable Variational Dynamic Factor Model (iVDFM).
 
 ``iVDFM`` is the public estimator; the training code is the private engine
-``_engine.iVDFMEngine``.
+``_engine.iVDFMEngine``. The network components are torch modules, imported
+on first access (they need the ``deep`` extra).
 """
 
+from ...utils.optional import lazy_torch_exports
 from .estimator import iVDFM
-from .encoder import iVDFMInnovationEncoder
-from .decoder import iVDFMDecoder
-from .prior import iVDFMPriorNetwork
-from ...layer.regime import RegimeNet
 
 __all__ = [
     'iVDFM',
@@ -17,3 +15,10 @@ __all__ = [
     'iVDFMPriorNetwork',
     'RegimeNet',
 ]
+
+__getattr__ = lazy_torch_exports(__name__, {
+    'iVDFMInnovationEncoder': '.encoder',
+    'iVDFMDecoder': '.decoder',
+    'iVDFMPriorNetwork': '.prior',
+    'RegimeNet': '...layer.regime',
+})

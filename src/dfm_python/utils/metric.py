@@ -6,25 +6,17 @@ Each function takes ``actual`` and ``predicted`` of the same shape, (T,) or
 over each series separately, ``per_series`` being (N,) or a length-1 array
 for 1-D input. Entries that are NaN or Inf in either array are always
 excluded; a series (or the pooled set) with no valid entry gives NaN.
+
+sktime is imported when RMSE or MAE is first computed: importing it takes
+seconds and imports torch when that is installed.
 """
 
-from typing import Callable, Optional, Tuple
+from typing import Any, Callable, Optional, Tuple
 import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_absolute_percentage_error, r2_score
 
 from ..utils.errors import DataValidationError
-
-try:
-    from sktime.performance_metrics.forecasting import (
-        MeanSquaredError,
-        MeanAbsoluteError,
-    )
-    _has_sktime = True
-except ImportError:
-    _has_sktime = False
-    MeanSquaredError = None
-    MeanAbsoluteError = None
 
 
 def _as_float(result) -> float:
@@ -75,12 +67,16 @@ def _masked_metric(
     return overall, per_series
 
 
-def _require_sktime(name: str) -> None:
-    if not _has_sktime:
+def _require_sktime(name: str) -> Any:
+    """``sktime.performance_metrics.forecasting``, or ``ImportError`` naming the ``metrics`` extra."""
+    try:
+        from sktime.performance_metrics import forecasting
+    except ImportError as err:
         raise ImportError(
             f"sktime is required for {name}. "
             "Install it with: pip install 'dfm-python[metrics]'"
-        )
+        ) from err
+    return forecasting
 
 
 def calculate_rmse(
@@ -89,10 +85,10 @@ def calculate_rmse(
     mask: Optional[np.ndarray] = None
 ) -> Tuple[float, np.ndarray]:
     """Root mean squared error via sktime ``MeanSquaredError(square_root=True)``; needs the ``metrics`` extra."""
-    _require_sktime("calculate_rmse")
+    metrics = _require_sktime("calculate_rmse")
 
     def score(a: np.ndarray, p: np.ndarray) -> float:
-        return _as_float(MeanSquaredError(square_root=True)(pd.Series(a), pd.Series(p)))
+        return _as_float(metrics.MeanSquaredError(square_root=True)(pd.Series(a), pd.Series(p)))
 
     return _masked_metric(actual, predicted, mask, score)
 
@@ -103,10 +99,10 @@ def calculate_mae(
     mask: Optional[np.ndarray] = None
 ) -> Tuple[float, np.ndarray]:
     """Mean absolute error via sktime ``MeanAbsoluteError``; needs the ``metrics`` extra."""
-    _require_sktime("calculate_mae")
+    metrics = _require_sktime("calculate_mae")
 
     def score(a: np.ndarray, p: np.ndarray) -> float:
-        return _as_float(MeanAbsoluteError()(pd.Series(a), pd.Series(p)))
+        return _as_float(metrics.MeanAbsoluteError()(pd.Series(a), pd.Series(p)))
 
     return _masked_metric(actual, predicted, mask, score)
 

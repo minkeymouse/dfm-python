@@ -1,8 +1,11 @@
-"""Builders for model structure, observation matrices, optimizers and state spaces."""
+"""Builders for model structure, observation matrices, optimizers and state spaces.
+
+The optimizer and companion builders of the torch models import torch when
+called; the DFM builders need numpy only.
+"""
 
 import numpy as np
-import torch
-from typing import Optional, Tuple, Any, List
+from typing import TYPE_CHECKING, Optional, Tuple, Any, List
 
 from ..logger import get_logger
 from ..config.constants import (
@@ -18,6 +21,9 @@ from ..config.constants import (
 from .stability import create_scaled_identity
 from .estimator import get_transition_params
 from ..utils.errors import ConfigurationError, ModelNotTrainedError, NumericalError
+
+if TYPE_CHECKING:
+    import torch
 
 _logger = get_logger(__name__)
 
@@ -165,6 +171,8 @@ def build_ddfm_optimizer(
     ``ExponentialDecay(decay_steps=n_mc_samples)`` of the reference
     TensorFlow implementation.
     """
+    import torch
+
     optimizers = {
         'Adam': lambda: torch.optim.Adam(
             model.parameters(),
@@ -231,6 +239,8 @@ def build_ivdfm_optimizer(
     optimizer : torch.optim.Optimizer
     scheduler : torch.optim.lr_scheduler.LRScheduler or None
     """
+    import torch
+
     optimizers = {
         'Adam': lambda: torch.optim.Adam(
             model.parameters(),
@@ -390,7 +400,7 @@ def build_ddfm_state_space(
     return F, Q, mu_0, Sigma_0, H, R
 
 
-def ivdfm_companion_from_p(p: torch.Tensor) -> torch.Tensor:
+def ivdfm_companion_from_p(p: "torch.Tensor") -> "torch.Tensor":
     """Companion matrix (..., p, p) of AR coefficients ``p`` of shape (..., p).
 
     Sub-diagonal shift block with the coefficients in the last row::
@@ -400,6 +410,8 @@ def ivdfm_companion_from_p(p: torch.Tensor) -> torch.Tensor:
          ...
          [p_0, p_1, ..., p_{p-1}]]
     """
+    import torch
+
     d = p.shape[-1]
     A = torch.zeros(*p.shape[:-1], d, d, dtype=p.dtype, device=p.device)
     if d > 1:
@@ -409,12 +421,14 @@ def ivdfm_companion_from_p(p: torch.Tensor) -> torch.Tensor:
 
 
 def build_ivdfm_diagonal_companion(
-    ar_coeffs: torch.Tensor
-) -> torch.Tensor:
+    ar_coeffs: "torch.Tensor"
+) -> "torch.Tensor":
     """Block-diagonal (r*p, r*p) matrix of per-factor AR(p) companions from ``ar_coeffs`` (r, p).
 
     Factors stay independent, which the iVDFM identification requires.
     """
+    import torch
+
     r, p = ar_coeffs.shape
     A_block = torch.zeros(r * p, r * p, dtype=ar_coeffs.dtype, device=ar_coeffs.device)
     for i in range(r):
@@ -432,6 +446,8 @@ def build_afm_optimizer(
 
     ``optimizer_type`` is 'Adam', 'AdamW' or 'SGD', matched case-insensitively.
     """
+    import torch
+
     opt = optimizer_type.lower()
     if opt == 'adamw':
         return torch.optim.AdamW(params, lr=learning_rate, weight_decay=weight_decay)

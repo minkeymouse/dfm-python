@@ -26,32 +26,33 @@ import math
 import warnings
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import numpy as np
 import pandas as pd
-import torch
 from sklearn.base import clone
 from sklearn.exceptions import NotFittedError as SklearnNotFittedError
 from sklearn.preprocessing import MaxAbsScaler, MinMaxScaler, QuantileTransformer, RobustScaler, StandardScaler
 from sklearn.utils.validation import check_is_fitted
 
 from ...base import BaseFactorModel
-from ...config.constants import DEFAULT_TORCH_DTYPE, VALID_OPTIMIZERS
+from ...config.constants import VALID_OPTIMIZERS
 from ...config.schema.model import iVDFMConfig
 from ...config.schema.params import iVDFMModelState
 from ...config.schema.results import iVDFMResult
 from ...config.types import to_numpy
-from ...dataset.ivdfm_dataset import iVDFMDataset
 from ...dataset.panel import PanelData, _polars_time_col, _to_pandas
 from ...io.layout import index_from_spec, index_to_spec
 from ...logger import get_logger
 from ...logger.progress import fit_verbosity, quiet_engine_loggers
 from ...utils.errors import ConfigurationError, DataValidationError, UnsupportedInputError
 from ...utils.interpret import affine_scaler_params, explained_variance
+from ...utils.optional import torch
 from ...utils.run_control import RunControl
-from ...utils.seed import apply_seed
-from ._engine import iVDFMEngine
+
+if TYPE_CHECKING:
+    from ...dataset.ivdfm_dataset import RecordingDataset
+    from ._engine import iVDFMEngine
 
 __all__ = ["iVDFM"]
 
@@ -117,6 +118,8 @@ def _mean_decoder_jacobian(engine: iVDFMEngine, path: np.ndarray) -> np.ndarray:
     decoder acts on each time step separately, so the gradient of series i
     summed over time holds row i of every step's Jacobian.
     """
+    from ...config.constants import DEFAULT_TORCH_DTYPE
+
     f = torch.as_tensor(path, dtype=DEFAULT_TORCH_DTYPE, device=engine.device).unsqueeze(0).requires_grad_(True)
     with torch.enable_grad():
         y = engine._decode(f, u_1T=None)  # (1, T, N)
@@ -144,24 +147,6 @@ class _FittedScaler:
 
     def inverse_transform(self, X: Any) -> Any:
         return self.scaler.inverse_transform(X)
-
-
-class _RecordingDataset(iVDFMDataset):
-    """The engine's dataset, recording the window index of every ``__getitem__`` call.
-
-    On CPU the engine trains and extracts its final factors through a shuffled
-    ``DataLoader``, so its factor arrays are in shuffled window order. The last
-    ``len(dataset)`` recorded indices are the order of that final extraction.
-    Recording reads no random numbers, so the engine's numbers are unchanged.
-    """
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-        self.accessed: list[int] = []
-
-    def __getitem__(self, idx: int):
-        self.accessed.append(int(idx))
-        return super().__getitem__(idx)
 
 
 class iVDFM(BaseFactorModel):
@@ -591,7 +576,7 @@ class iVDFM(BaseFactorModel):
             )
         return clone(scaler)
 
-    def _adapter(self, panel: PanelData, device: torch.device, *, fitted: bool = False) -> _RecordingDataset:
+    def _adapter(self, panel: PanelData, device: torch.device, *, fitted: bool = False) -> RecordingDataset:
         """The engine's dataset built from ``panel``: a frame ``[time | y | exog]`` on a RangeIndex.
 
         The time column holds the ``DatetimeIndex`` (a ``PeriodIndex`` through
@@ -601,6 +586,8 @@ class iVDFM(BaseFactorModel):
         ``stride_`` and ``time_context_`` and scales the targets with
         ``scaler_`` without refitting it.
         """
+        from ...dataset.ivdfm_dataset import RecordingDataset
+
         frame = panel.y.reset_index(drop=True)
         if panel.exog is not None:
             frame = pd.concat([frame, panel.exog.reset_index(drop=True)], axis=1)
@@ -621,7 +608,7 @@ class iVDFM(BaseFactorModel):
             scaler = None if self.scaler_ is None else _FittedScaler(self.scaler_)
         else:
             window, stride, time_context, scaler = self.window, self.stride, self.time_context, self._fresh_scaler()
-        return _RecordingDataset(
+        return RecordingDataset(
             data=frame,
             window=window,
             stride=stride,
@@ -748,6 +735,8 @@ class iVDFM(BaseFactorModel):
         return super().fit(data, callback=callback)
 
     def _fit(self, data: PanelData, *, callback: Optional[Callable[[dict], Any]] = None) -> None:
+        from ._engine import iVDFMEngine
+
         self._validate_params()
         device = self._resolve_device()
         dataset = self._adapter(data, device)
@@ -1142,6 +1131,8 @@ class iVDFM(BaseFactorModel):
         if self.random_state_ is None:
             yield
             return
+        from ...utils.seed import apply_seed  # torch-only module
+
         # apply_seed (torch.manual_seed) seeds every CUDA device, so all their generators are forked.
         devices = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
         with torch.random.fork_rng(devices=devices):
@@ -1361,6 +1352,8 @@ class iVDFM(BaseFactorModel):
         A run saved without ``stop_reason`` (0.8.x) gets ``"converged"`` or
         ``"max_iter"`` from ``converged``.
         """
+        from ._engine import iVDFMEngine
+
         arrays, meta = cls._read_state(path)
         device = est._load_device(device)
         params = est._engine_params(meta["window"], meta["stride_"])
