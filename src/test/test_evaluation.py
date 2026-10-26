@@ -322,7 +322,8 @@ def test_start_is_a_label_or_a_position():
     data = _panel(T=12)
     for start in (8, np.int64(8), -4, data.index[8], "2020-09-30", datetime.date(2020, 9, 30)):
         assert backtest(_LastValue(), data, start=start, h=1).origins.equals(data.index[[8, 9, 10]]), start
-    assert backtest(_LastValue(), data, start=0, h=1, step=4).origins.equals(data.index[[0, 4, 8]])
+    # The first origin needs two training rows (fit rejects a series observed once).
+    assert backtest(_LastValue(), data, start=1, h=1, step=4).origins.equals(data.index[[1, 5, 9]])
 
 
 def test_h_past_the_end_of_the_data():
@@ -339,7 +340,7 @@ def test_h_past_the_end_of_the_data():
     assert m.loc[[3, 4, 5], ["RMSE", "MAE", "bias", "coverage"]].isna().all().all()
     assert len(fc) == 2 * 5 * 2
 
-    ranged = backtest(_LastValue(), pd.DataFrame(np.ones((5, 1)), columns=["a"]), start=3, h=3).forecasts
+    ranged = backtest(_LastValue(), pd.DataFrame(np.arange(5.0)[:, None], columns=["a"]), start=3, h=3).forecasts
     assert ranged["time"].tolist() == [4, 5, 6] and ranged["actual"].isna().tolist() == [False, True, True]
 
 
