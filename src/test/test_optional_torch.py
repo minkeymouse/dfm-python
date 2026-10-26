@@ -79,6 +79,8 @@ def test_import_does_not_import_torch():
 
         from dfm_python import AFM, DDFM, DFM, PanelData, iVDFM, load
         import dfm_python.models, dfm_python.ssm, dfm_python.testing, dfm_python.tuning
+        from dfm_python.config import *
+        from dfm_python.utils import *
         from dfm_python.registry import all_estimators
 
         assert [name for name, _ in all_estimators()] == ["AFM", "DDFM", "DFM", "iVDFM"]
@@ -111,6 +113,7 @@ def test_dfm_passes_the_contract_checks_without_torch():
 def test_torch_models_build_without_torch_and_name_the_extra_when_used():
     _run(
         """
+        import importlib.util
         import json
         import tempfile
         from pathlib import Path
@@ -122,6 +125,8 @@ def test_torch_models_build_without_torch_and_name_the_extra_when_used():
         import dfm_python.models.ddfm
         import dfm_python.ssm
         from dfm_python import AFM, DDFM, iVDFM
+        from dfm_python.testing import check_estimator
+        from dfm_python.tuning import tune_hyperparameters
 
         def raises_naming_the_extra(call, what):
             try:
@@ -142,6 +147,9 @@ def test_torch_models_build_without_torch_and_name_the_extra_when_used():
             run.mkdir()
             (run / "config.json").write_text(json.dumps({"format_version": 1, "model_type": "DDFM", "params": {}}))
             raises_naming_the_extra(lambda: dfm_python.load(run), "DDFM.load")
+        raises_naming_the_extra(lambda: check_estimator(DDFM), "check_estimator")
+        if importlib.util.find_spec("optuna") is not None:  # without it, the tune extra is named first
+            raises_naming_the_extra(lambda: tune_hyperparameters(iVDFM(), data), "tune_hyperparameters")
         raises_naming_the_extra(lambda: dfm_python.models.ddfm.DDFMEncoder, "DDFMEncoder")
         raises_naming_the_extra(lambda: dfm_python.ssm.iVDFMCompanionSSM, "iVDFMCompanionSSM")
         """,

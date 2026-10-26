@@ -1,9 +1,7 @@
 """Type aliases and the numpy/torch conversion helpers used across the package.
 
 torch is optional (the ``deep`` extra), so the aliases name its types as
-forward references and importing this module does not import torch. The
-aliases of torch classes (``Tensor``, ``Loss``, ``Optimizer``) are resolved
-on first access, which imports torch.
+forward references and importing this module does not import torch.
 """
 
 import sys
@@ -160,15 +158,6 @@ def to_tensor(arr: ArrayLike, device: Optional[Device] = None, dtype: Optional['
         )
 
 
-def __getattr__(name: str) -> Any:
-    # The aliases of torch classes; resolving one imports torch.
-    if name not in ('Tensor', 'Loss', 'Optimizer'):
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    import torch
-
-    return torch.optim.Optimizer if name == 'Optimizer' else torch.Tensor
-
-
 __all__ = [
     'ArrayLike',
     'FloatArray',
@@ -187,8 +176,6 @@ __all__ = [
     'DatasetName',
     'ModelName',
     'Batch',
-    'Loss',  # noqa: F822 - resolved by __getattr__
-    'Optimizer',  # noqa: F822 - resolved by __getattr__
     'ResultDict',
     'ForecastDict',
     'MetricsDict',
@@ -213,5 +200,4 @@ __all__ = [
     'get_array_shape',
     'to_numpy',
     'to_tensor',
-    'Tensor',  # noqa: F822 - resolved by __getattr__
 ]

@@ -386,6 +386,8 @@ class AFM(BaseFactorModel):
 
         Raises
         ------
+        ImportError
+            If the ``deep`` extra (torch and einops) is not installed.
         ConfigurationError
             For an invalid hyperparameter.
         UnsupportedInputError

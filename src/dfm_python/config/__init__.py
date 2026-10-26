@@ -76,11 +76,6 @@ def __getattr__(name: str):
         value = getattr(tent, name)
         globals()[name] = value
         return value
-    if name in ("Tensor", "Loss", "Optimizer"):
-        # Aliases of torch classes: resolving one imports torch (optional, the deep extra).
-        from . import types
-
-        return getattr(types, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
@@ -117,8 +112,6 @@ __all__ = [
     'DatasetName',
     'ModelName',
     'Batch',
-    'Loss',
-    'Optimizer',
     'ResultDict',
     'ForecastDict',
     'MetricsDict',
@@ -137,7 +130,6 @@ __all__ = [
     'PathLike',
     'ValidationIssue',
     'ValidationResult',
-    'Tensor',
     'is_numpy_array',
     'is_torch_tensor',
     'is_array_like',

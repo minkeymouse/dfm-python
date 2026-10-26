@@ -3,10 +3,11 @@
 Modules: ``errors`` (exception classes), ``misc`` (parameter and config
 helpers, scaler lookup), ``metric`` (RMSE, MAE, MAPE, R2), ``helper``
 (linear-algebra fallback, interpolation), ``validation`` (condition checks),
-``checkpoint`` (input-dimension inference), ``loss`` (masked and ELBO
-losses), ``run_control`` (the training time budget and per-iteration
-callback) and ``seed`` (global RNG seeding). Names from ``numeric``,
-``config`` and ``dataset`` are re-exported here for backward compatibility.
+``optional`` (the ``deep`` extra check), ``run_control`` (the training time
+budget and per-iteration callback), and the torch-only ``checkpoint``
+(input-dimension inference), ``loss`` (masked and ELBO losses) and ``seed``
+(global RNG seeding). Names from ``numeric``, ``config`` and ``dataset`` are
+re-exported here for backward compatibility.
 """
 
 from ..numeric.estimator import (
