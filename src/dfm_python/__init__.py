@@ -30,6 +30,11 @@ in ``exog``, then ``predict(h)`` and ``predict_factors(h)``. And ``DFM``:
 scaler="standard").fit(PanelData(y=df, freq={"gdp": "q"}))``, then
 ``predict(h)`` (series in the user's column order) and ``predict_factors(h)``;
 see docs/models.md for complete examples of every model.
+
+``dfm_python.evaluation.backtest(model, data, start=..., h=...)`` evaluates a
+forecasting model walk-forward: it fits (or updates) a clone at each origin,
+forecasts ``h`` steps and returns the forecasts beside the data with RMSE,
+MAE, bias and interval coverage per horizon or series.
 """
 
 import logging as _logging
@@ -62,6 +67,7 @@ from .models.dfm import DFM
 from .models.ddfm.estimator import DDFM
 from .models.ivdfm.estimator import iVDFM
 from .models.afm.estimator import AFM
+from . import evaluation
 
 __all__ = [
     # Models
@@ -79,6 +85,8 @@ __all__ = [
     'NotFittedError', 'UnsupportedInputError',
     # Logging
     'set_verbosity', 'get_verbosity',
+    # Walk-forward evaluation (the module)
+    'evaluation',
 ]
 
 _apply_env_verbosity()

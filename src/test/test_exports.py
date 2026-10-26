@@ -24,6 +24,14 @@ def test_new_api_names_are_exported():
         assert name in dfm_python.__all__, name
 
 
+def test_evaluation_module_is_exported():
+    import dfm_python.evaluation as evaluation
+
+    assert dfm_python.evaluation is evaluation and "evaluation" in dfm_python.__all__
+    assert evaluation.__all__ == ["backtest", "BacktestResult"]
+    assert callable(evaluation.backtest) and isinstance(evaluation.BacktestResult, type)
+
+
 def test_every_name_in_all_exists():
     missing = [name for name in dfm_python.__all__ if not hasattr(dfm_python, name)]
     assert not missing
