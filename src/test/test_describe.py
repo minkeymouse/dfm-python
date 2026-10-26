@@ -6,6 +6,7 @@ import json
 import warnings
 
 import numpy as np
+import pandas as pd
 import pytest
 from sklearn.preprocessing import StandardScaler
 
@@ -144,9 +145,17 @@ def test_describe_omits_missing_attributes(fitted):
     assert "explained_variance" not in d and "factor_names" in d
 
 
-def test_describe_range_index():
-    est = DFM(max_iter=2).fit(np.random.default_rng(0).standard_normal((30, 3)))
+def test_describe_index_summary():
+    values = np.random.default_rng(0).standard_normal((30, 3))
+    est = DFM(max_iter=2).fit(values)
     assert est.describe()["index"] == {"start": 0, "end": 29, "length": 30, "freq": None}
+    # A DatetimeIndex without freq (as read from a file) reports the inferred one, which forecasts also use.
+    index = pd.DatetimeIndex(list(pd.date_range("2000-01-31", periods=30, freq="ME")))
+    est = DFM(max_iter=2).fit(pd.DataFrame(values, index=index, columns=["a", "b", "c"]))
+    assert est.index_.freq is None
+    assert est.describe()["index"] == {
+        "start": "2000-01-31 00:00:00", "end": "2002-06-30 00:00:00", "length": 30, "freq": "ME",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -204,13 +213,19 @@ def test_json_schema_types_enums_and_descriptions():
 
 @pytest.mark.parametrize("cls", ESTIMATORS, ids=lambda cls: cls.__name__)
 def test_json_schema_enums_match_validation(cls):
+    """Enum values pass validation and other strings fail; a string parameter without an enum takes any string.
+
+    The second half catches a validated set of strings missing from ``_param_choices``.
+    """
     base = {"n_factors": 2}  # valid for every model (AFM requires it)
-    enums = {name: prop["enum"] for name, prop in CONFIGS[cls].json_schema()["properties"].items() if "enum" in prop}
-    assert set(enums) == set(cls._param_choices)
-    for name, values in enums.items():
-        for value in values:
-            cls(**{**base, name: value})._validate_params()
-        with pytest.raises(ConfigurationError, match=name):
+    for name, prop in CONFIGS[cls].json_schema()["properties"].items():
+        types = prop.get("type", ["string"])  # no type (Any) may hold a string
+        if "enum" in prop:
+            for value in prop["enum"]:
+                cls(**{**base, name: value})._validate_params()
+            with pytest.raises(ConfigurationError, match=name):
+                cls(**{**base, name: "__not_a_choice__"})._validate_params()
+        elif "string" in ([types] if isinstance(types, str) else types) and name != "device":  # any torch device
             cls(**{**base, name: "__not_a_choice__"})._validate_params()
 
 

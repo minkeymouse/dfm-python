@@ -235,7 +235,8 @@ class BaseFactorModel(BaseEstimator):
 
         A fitted model adds, for each attribute it has: ``n_features_in``,
         ``feature_names``, ``index`` (``start`` and ``end`` as str, int for a
-        ``RangeIndex``, ``length`` and ``freq``), ``n_iter``, ``converged``,
+        ``RangeIndex``, ``length``, and ``freq``, inferred for a
+        ``DatetimeIndex`` without one), ``n_iter``, ``converged``,
         ``stop_reason``, ``factor_names``, ``explained_variance`` (``{series:
         float or None}``) and the model's own entries (``loglik`` for DFM,
         ``sharpe`` for AFM). A key whose attribute the model lacks is omitted.
@@ -867,9 +868,16 @@ def _json_safe(value: Any) -> Any:
 
 
 def _index_summary(index: pd.Index) -> dict:
-    """``{"start", "end", "length", "freq"}`` of a training index: stamps as str (int for a ``RangeIndex``)."""
+    """``{"start", "end", "length", "freq"}`` of a training index: stamps as str (int for a ``RangeIndex``).
+
+    ``freq`` is the index's frequency string; a ``DatetimeIndex`` without one
+    gets what ``pd.infer_freq`` finds (three or more stamps), as forecasts do.
+    Otherwise it is None.
+    """
     stamp = int if isinstance(index, pd.RangeIndex) else str
     freq = getattr(index, "freqstr", None)
+    if freq is None and isinstance(index, pd.DatetimeIndex) and len(index) >= 3:
+        freq = pd.infer_freq(index)
     return {"start": stamp(index[0]), "end": stamp(index[-1]), "length": len(index), "freq": freq}
 
 
