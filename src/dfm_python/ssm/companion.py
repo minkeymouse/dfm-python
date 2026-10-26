@@ -61,10 +61,11 @@ class iVDFMCompanionSSM(BaseSSM):
             self.B = nn.Parameter(torch.randn(latent_dim) * init_scale)
 
         if self.factor_order > 1:
-            # C[i, i*p] = 1: factor i is the first state of its block.
-            self.C = nn.Parameter(torch.zeros(latent_dim, latent_dim * factor_order))
-            for i in range(latent_dim):
-                self.C.data[i, i * factor_order] = 1.0
+            # C[i, i*p] = 1: factor i is the first state of its block. A fixed
+            # selector (a buffer, not trained), so the factors stay independent.
+            C = torch.zeros(latent_dim, latent_dim * factor_order)
+            C[torch.arange(latent_dim), torch.arange(latent_dim) * factor_order] = 1.0
+            self.register_buffer("C", C)
         else:
             self.C = None  # the AR(1) paths never read C
 
@@ -109,6 +110,15 @@ class iVDFMCompanionSSM(BaseSSM):
 
     def _normed(self, x: torch.Tensor) -> torch.Tensor:
         return self.norm(x, ord=self.norm_order) if self.norm_order > 0 else x
+
+    def _initial_state(self, f0: torch.Tensor) -> torch.Tensor:
+        """The companion state (batch, r*p) from ``f0``: a full state as is, factors (batch, r) with zero lags."""
+        r, p = self.latent_dim, self.factor_order
+        if f0.shape[-1] == r * p:
+            return f0
+        s0 = torch.zeros(f0.shape[0], r * p, device=f0.device, dtype=f0.dtype)
+        s0[:, ::p] = f0
+        return s0
 
     def _batched_f0(self, f0: Optional[torch.Tensor], batch_size: int) -> torch.Tensor:
         """``f0`` as (batch, r); None means the learned ``self.f0``."""
@@ -253,8 +263,7 @@ class iVDFMCompanionSSM(BaseSSM):
             eta_T = rearrange(eta_b, 'b t r -> b r t')
             factors_b = self.fft_conv(eta_T, H)
             factors_b = rearrange(factors_b, 'b r t -> b t r')
-            s0 = torch.zeros(1, r * self.factor_order, device=f0.device, dtype=f0.dtype)
-            s0[:, ::self.factor_order] = f0[b : b + 1]
+            s0 = self._initial_state(f0[b : b + 1])
             ar_norm = self._normed(ar_coeffs[b])
             A_block = build_ivdfm_diagonal_companion(ar_norm)
             A_block_b = A_block.unsqueeze(0)
@@ -275,7 +284,6 @@ class iVDFMCompanionSSM(BaseSSM):
     ) -> torch.Tensor:
         """One impulse response per group (from its first window), batched in the group."""
         batch_size, T, r = eta_sequence.shape
-        p = self.factor_order
         factors = torch.empty(batch_size, T, r, device=eta_sequence.device, dtype=eta_sequence.dtype)
         uniq = group_id.unique()
         for g in uniq:
@@ -287,8 +295,7 @@ class iVDFMCompanionSSM(BaseSSM):
             eta_g_t = rearrange(eta_g, 'b t r -> b r t')
             f_conv_g = self.fft_conv(eta_g_t, H_g)  # (|g|, r, T)
             f_conv_g = rearrange(f_conv_g, 'b r t -> b t r')
-            s0_g = torch.zeros(idx.shape[0], r * p, device=f0.device, dtype=f0.dtype)
-            s0_g[:, ::p] = f0[idx]
+            s0_g = self._initial_state(f0[idx])
             ar_norm_g = self._normed(ar_g)
             A_block_g = build_ivdfm_diagonal_companion(ar_norm_g)
             A_block_batched = A_block_g.unsqueeze(0).expand(idx.shape[0], -1, -1)
@@ -297,6 +304,21 @@ class iVDFMCompanionSSM(BaseSSM):
             f_init_g = rearrange(f_init_g, 'b r t -> b t r')
             factors[idx] = f_conv_g + f_init_g
         return factors
+
+    def forward_closed_loop(self, f_current: torch.Tensor, eta_future: torch.Tensor, horizon: int) -> torch.Tensor:
+        """Forecast rollout ``f_{t+h} = C A^h s_t + sum_{k=0}^{h-1} H_k eta_{t+h-k}`` (see ``BaseSSM``).
+
+        ``f_current`` is the factors (batch, r) or, for ``factor_order > 1``,
+        the companion state (batch, r*p) ``[f_t, f_{t-1}, ..., f_{t-p+1}]`` per
+        factor (with only the factors the lags are taken as zero). The AR(1)
+        scan treats its ``f0`` as the state before the first row, so it runs
+        on ``eta_future`` from ``f_current`` directly; the AR(p) companion path
+        treats ``f0`` as the first row's state and takes the padded rollout of
+        ``BaseSSM``.
+        """
+        if self.factor_order == 1:
+            return self.forward(eta_future, f0=f_current)
+        return super().forward_closed_loop(f_current, eta_future, horizon)
 
     def forward_closed_loop_with_coeffs(
         self,
@@ -307,6 +329,8 @@ class iVDFMCompanionSSM(BaseSSM):
         group_id: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """``forward_closed_loop`` with per-window coefficients (``forward_with_coeffs``)."""
+        if self.factor_order == 1:  # the AR(1) scan starts from the state before the first row
+            return self.forward_with_coeffs(eta_future, f_current, ar_coeffs, B_diag, group_id=group_id)
         batch_size = f_current.shape[0]
         eta_padded = torch.cat([
             torch.zeros(batch_size, 1, self.latent_dim, device=eta_future.device, dtype=eta_future.dtype),
@@ -358,11 +382,10 @@ class iVDFMCompanionSSM(BaseSSM):
         factors = self.fft_conv(eta_T, H)  # (batch, r, T)
         factors = rearrange(factors, 'b r t -> b t r')
 
-        # Initial-state term: s_0 = [f_0, 0, ..., 0] per block, propagated by A^t.
+        # Initial-state term: the companion state s_0 (from f0, see _initial_state), propagated by A^t.
         ar_coeffs_norm = self._normed(self.ar_coeffs)
         A_block = build_ivdfm_diagonal_companion(ar_coeffs_norm)
-        s0 = torch.zeros(batch_size, r * self.factor_order, device=f0.device, dtype=f0.dtype)
-        s0[:, ::self.factor_order] = f0
+        s0 = self._initial_state(f0)
         # A is broadcast over the batch so that each s0[b] gets its own sequence.
         A_block_b = A_block.unsqueeze(0).expand(batch_size, -1, -1)  # (batch, r*p, r*p)
         s_seq = krylov(T, A_block_b, s0, c=None)  # (batch, r*p, T)

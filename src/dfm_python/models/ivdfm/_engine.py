@@ -1113,17 +1113,20 @@ class iVDFMEngine(nn.Module):
         horizon: int,
         context_data: Optional[Union[np.ndarray, torch.Tensor]],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """The last factor state (1, r) and the future context u (1, horizon, context_dim) of a forecast.
+        """The last state (1, r), or (1, r*p) for AR(p), and the future context u (1, horizon, context_dim) of a forecast.
 
         ``context_data`` (horizon, context_dim) is the future u_t; None
         generates time features (and logs a warning when the model has
         context columns besides them).
         """
-        f_last = self._factor_path()[-1, :]  # (r,)
-        f_last_tensor = torch.from_numpy(f_last).to(
+        # The state at the last row: the factors (r,) for AR(1); for AR(p) the
+        # companion state (r*p,) with the last p rows of the factor path, most
+        # recent first in each factor's block (f0 before the path starts).
+        f_last = self._compute_full_state(np.asarray(self._factor_path())[-self.factor_order:])[-1]
+        f_last_tensor = torch.from_numpy(np.ascontiguousarray(f_last)).to(
             dtype=DEFAULT_TORCH_DTYPE,
             device=self.device
-        ).unsqueeze(0)  # (1, r)
+        ).unsqueeze(0)  # (1, r) or (1, r*p)
 
         if context_data is None:
             u_future = self._future_time_features(horizon, self.time_context)

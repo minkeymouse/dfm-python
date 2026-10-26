@@ -89,16 +89,14 @@ class TestCompanionRegime:
         assert out.shape == (batch, horizon, r)
         assert not torch.isnan(out).any()
 
-    def test_forward_closed_loop_with_coeffs_matches_forward_slice(self, ssm_p1):
-        """closed_loop_with_coeffs matches forward_with_coeffs on [0, eta_future] then slice [1:]."""
+    def test_forward_closed_loop_with_coeffs_is_the_scan_from_f_current(self, ssm_p1):
+        """For AR(1) closed_loop_with_coeffs is the scan of eta_future from f_current (the state before step 1)."""
         batch, horizon, r = 2, 6, 3
         f_current = torch.randn(batch, r)
         eta_future = torch.randn(batch, horizon, r)
         ar_coeffs = torch.randn(batch, r, 1)
         B_diag = torch.randn(batch, r)
-        eta_padded = torch.cat([torch.zeros(batch, 1, r), eta_future], dim=1)
-        full = ssm_p1.forward_with_coeffs(eta_padded, f_current, ar_coeffs, B_diag)
-        expected = full[:, 1:, :]
+        expected = ssm_p1.forward_with_coeffs(eta_future, f_current, ar_coeffs, B_diag)
         out = ssm_p1.forward_closed_loop_with_coeffs(f_current, eta_future, ar_coeffs, B_diag)
         torch.testing.assert_close(out, expected)
 
@@ -162,3 +160,80 @@ class TestCompanionNorm:
         with torch.no_grad():
             ssm.ar_coeffs[2] = 0.0
         assert torch.isfinite(ssm.get_impulse_response(12, use_cache=False)).all()
+
+
+@pytest.mark.parametrize("with_coeffs", [False, True])
+def test_ar1_closed_loop_steps_once_per_horizon(with_coeffs):
+    """Step h of the AR(1) rollout is A^h f_t plus the innovations (it was A^(h+1) f_t)."""
+    from dfm_python.ssm.companion import iVDFMCompanionSSM
+
+    torch.manual_seed(0)
+    ssm = iVDFMCompanionSSM(latent_dim=3, factor_order=1, device="cpu")
+    f = torch.randn(2, 3)
+    eta = torch.randn(2, 4, 3)
+    with torch.no_grad():
+        if with_coeffs:
+            ar = torch.randn(2, 3, 1)
+            B = torch.randn(2, 3).abs() + 0.1
+            out = ssm.forward_closed_loop_with_coeffs(f, eta, ar, B)
+            A, Bn = torch.sigmoid(ar[:, :, 0]), ssm._normed(B)
+        else:
+            out = ssm.forward_closed_loop(f, eta, horizon=4)
+            A, Bn = torch.sigmoid(ssm.A), ssm._normed(ssm.B)
+    expected, state = [], f
+    for h in range(4):
+        state = A * state + Bn * eta[:, h]
+        expected.append(state)
+    torch.testing.assert_close(out, torch.stack(expected, dim=1))
+
+
+def test_ar2_closed_loop_steps_once_per_horizon():
+    """The companion path (p > 1) already stepped once per horizon: step 1 is a_1 f_t + a_2 f_{t-1}=0 + B eta."""
+    from dfm_python.ssm.companion import iVDFMCompanionSSM
+
+    torch.manual_seed(1)
+    ssm = iVDFMCompanionSSM(latent_dim=2, factor_order=2, device="cpu")
+    f = torch.randn(1, 2)
+    eta = torch.zeros(1, 1, 2)
+    with torch.no_grad():
+        out = ssm.forward_closed_loop(f, eta, horizon=1)
+        a = ssm._normed(ssm.ar_coeffs)
+    torch.testing.assert_close(out[0, 0], a[:, 0] * f[0])
+
+
+def test_ar2_impulse_response_follows_the_ar_recursion():
+    """H_0 = b, H_1 = a1 b, H_k = a1 H_{k-1} + a2 H_{k-2} per factor (the companion matrix had no dynamics)."""
+    from dfm_python.ssm.companion import iVDFMCompanionSSM
+
+    torch.manual_seed(2)
+    ssm = iVDFMCompanionSSM(latent_dim=2, factor_order=2, device="cpu")
+    with torch.no_grad():
+        H = ssm.get_impulse_response(6, use_cache=False)
+        a, b = ssm._normed(ssm.ar_coeffs), ssm._normed(ssm.B)
+    expected = [b, a[:, 0] * b]
+    for _ in range(4):
+        expected.append(a[:, 0] * expected[-1] + a[:, 1] * expected[-2])
+    torch.testing.assert_close(H, torch.stack(expected, dim=1))
+
+
+def test_rollout_from_a_full_state_uses_the_lags():
+    from dfm_python.ssm.companion import iVDFMCompanionSSM
+
+    torch.manual_seed(3)
+    ssm = iVDFMCompanionSSM(latent_dim=2, factor_order=2, device="cpu")
+    f_t, f_lag = torch.randn(1, 2), torch.randn(1, 2)
+    state = torch.stack([f_t, f_lag], dim=-1).reshape(1, 4)  # [f_t, f_{t-1}] per factor
+    with torch.no_grad():
+        out = ssm.forward_closed_loop(state, torch.zeros(1, 2, 2), horizon=2)
+        a = ssm._normed(ssm.ar_coeffs)
+    step1 = a[:, 0] * f_t[0] + a[:, 1] * f_lag[0]
+    torch.testing.assert_close(out[0, 0], step1)
+    torch.testing.assert_close(out[0, 1], a[:, 0] * step1 + a[:, 1] * f_t[0])
+
+
+def test_c_is_a_fixed_selector():
+    from dfm_python.ssm.companion import iVDFMCompanionSSM
+
+    ssm = iVDFMCompanionSSM(latent_dim=3, factor_order=2, device="cpu")
+    assert "C" not in dict(ssm.named_parameters()) and "C" in ssm.state_dict()
+    torch.testing.assert_close(ssm.C, torch.eye(3).repeat_interleave(2, dim=1) * torch.tensor([1.0, 0.0]).repeat(3))

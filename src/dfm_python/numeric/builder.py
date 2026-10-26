@@ -403,12 +403,14 @@ def build_ddfm_state_space(
 def ivdfm_companion_from_p(p: "torch.Tensor") -> "torch.Tensor":
     """Companion matrix (..., p, p) of AR coefficients ``p`` of shape (..., p).
 
-    Sub-diagonal shift block with the coefficients in the last row::
+    For the state ``[f_t, f_{t-1}, ..., f_{t-p+1}]`` (current value first, the
+    layout ``iVDFMCompanionSSM`` reads with ``C``): the coefficients in the
+    first row (``p_k`` multiplies ``f_{t-k}``) and a shift on the sub-diagonal::
 
-        [[0, 1, 0, ..., 0],
-         [0, 0, 1, ..., 0],
+        [[p_0, p_1, ..., p_{p-1}],
+         [1,   0,   ..., 0      ],
          ...
-         [p_0, p_1, ..., p_{p-1}]]
+         [0, ..., 1,        0   ]]
     """
     import torch
 
@@ -416,7 +418,7 @@ def ivdfm_companion_from_p(p: "torch.Tensor") -> "torch.Tensor":
     A = torch.zeros(*p.shape[:-1], d, d, dtype=p.dtype, device=p.device)
     if d > 1:
         A[..., 1:, :-1] = torch.eye(d - 1, dtype=p.dtype, device=p.device)
-    A[..., -1, :] = p
+    A[..., 0, :] = p
     return A
 
 

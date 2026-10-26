@@ -104,7 +104,9 @@ class BaseSSM(nn.Module, ABC):
         ``eta_future.shape[1]``; ``horizon`` is not read.
         """
         # forward() from f_current on a sequence with a leading zero innovation,
-        # dropping that first step.
+        # dropping that first step: forward() treats f0 as the state at its
+        # first row. A model whose forward() treats f0 as the state before the
+        # first row (the AR(1) scan of iVDFMCompanionSSM) overrides this.
         batch_size = f_current.shape[0]
         eta_padded = torch.cat([
             torch.zeros(batch_size, 1, self.latent_dim, device=eta_future.device),

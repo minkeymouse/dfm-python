@@ -102,6 +102,11 @@ def _is_int(value: Any) -> bool:
     return isinstance(value, (int, np.integer)) and not isinstance(value, (bool, np.bool_))
 
 
+#: Marks runs saved with the fixed AR(p) companion matrix (coefficients in the
+#: first row of each factor's block); runs without it trained with the old one.
+_COMPANION_LAYOUT = "current_first"
+
+
 def _is_real(value: Any) -> bool:
     return (
         isinstance(value, (int, float, np.integer, np.floating))
@@ -1342,6 +1347,7 @@ class iVDFM(BaseFactorModel):
             "time_context_": self.time_context_,
             "context_dim_": self.context_dim_,
             "conditioning_index": index_to_spec(self.conditioning_index_),
+            "companion": _COMPANION_LAYOUT,
         }
         self._write_state(path, arrays, meta)
         self._write_result(path, exclude=_RESULT_REBUILT)
@@ -1370,6 +1376,14 @@ class iVDFM(BaseFactorModel):
         engine.loss_now = None if meta["loss_now"] is None else np.float64(meta["loss_now"])
         engine._elbo = None if meta["elbo"] is None else np.float64(meta["elbo"])
         engine._converged = meta["converged"]
+        if engine.factor_order > 1 and meta.get("companion") != _COMPANION_LAYOUT:
+            warnings.warn(
+                "This iVDFM run (factor_order > 1) was saved before the AR(p) companion matrix was fixed: its "
+                "parameters were trained without lagged factor dynamics, and the fixed model uses them with the "
+                "dynamics restored, so its forecasts differ from the ones it gave when saved. Refit it.",
+                UserWarning,
+                stacklevel=3,
+            )
         engine.training_state = iVDFMModelState.from_model(engine)
 
         weights = {k: v.detach().cpu() for k, v in engine.state_dict().items()}

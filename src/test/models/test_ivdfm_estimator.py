@@ -877,3 +877,27 @@ def test_saved_run_keeps_the_factor_path(tmp_path):
     loaded = iVDFM.load(tmp_path / "run", device="cpu")
     np.testing.assert_array_equal(loaded.network_.factor_path, est.network_.factor_path)
     pd.testing.assert_frame_equal(loaded.predict(3), est.predict(3))
+
+
+def test_ar2_forecast_starts_from_the_last_two_factor_rows():
+    est = iVDFM(**{**TINY, "factor_order": 2}).fit(_panel())
+    engine = est.network_
+    path = engine.factor_path
+    with torch.no_grad():
+        a = engine.ssm._normed(engine.ssm.ar_coeffs).numpy()
+    step1 = est.predict_factors(1).to_numpy()[0]
+    np.testing.assert_allclose(step1, a[:, 0] * path[-1] + a[:, 1] * path[-2], rtol=1e-5, atol=1e-6)
+
+
+def test_loading_an_ar_p_run_saved_before_the_companion_fix_warns(tmp_path):
+    est = iVDFM(**{**TINY, "factor_order": 2}).fit(_panel())
+    est.save(tmp_path / "run")
+    state = json.loads((tmp_path / "run" / "state.json").read_text())
+    assert state["companion"] == "current_first"
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        iVDFM.load(tmp_path / "run", device="cpu")
+    del state["companion"]
+    (tmp_path / "run" / "state.json").write_text(json.dumps(state))
+    with pytest.warns(UserWarning, match="companion matrix was fixed"):
+        iVDFM.load(tmp_path / "run", device="cpu")
