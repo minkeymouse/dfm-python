@@ -401,7 +401,7 @@ class DFMEngine:
                 config=self._config.to_em_config(),
                 checkpoint_callback=checkpoint_callback
             )
-        except Exception as e:
+        except Exception as e:  # diagnostics only: logs the model's structure and re-raises unchanged
             _logger.error(f"EM algorithm failed: {e}", exc_info=True)
             _logger.error("  Initialization parameters:")
             _logger.error(f"    A shape: {self.A.shape}, C shape: {self.C.shape}")

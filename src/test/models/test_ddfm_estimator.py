@@ -84,7 +84,7 @@ def test_defaults_are_the_values_that_ran_when_omitted():
         "n_factors": 4, "encoder_layers": (16,), "decoder_type": "linear", "activation": "relu",
         "learning_rate": 0.005, "optimizer": "Adam", "n_mc_samples": 10, "window_size": 100, "max_iter": 200,
         "tol": 5e-4, "interpolation_method": "linear", "interpolation_limit": 10,
-        "interpolation_limit_direction": "both", "scaler": None, "random_state": 3, "device": "auto", "verbose": 0,
+        "interpolation_limit_direction": "both", "scaler": "standard", "random_state": 3, "device": "auto", "verbose": 0,
     }
 
 
@@ -248,7 +248,7 @@ def test_adapter_time_column_never_collides():
 
 
 def test_adapter_without_exog_and_without_scaler():
-    ds = DDFM(**TINY)._adapter(_panel(K=0))
+    ds = DDFM(**TINY, scaler=None)._adapter(_panel(K=0))
     assert list(ds.data.columns) == ["s0", "s1", "s2"] and ds.covariates == [] and ds.scaler is None
 
 
@@ -413,7 +413,7 @@ def test_predict_does_not_change_the_model(fitted):
 
 
 def test_scaler_none_forecasts_in_model_space():
-    model = DDFM(**TINY).fit(_panel(index="range"))
+    model = DDFM(**TINY, scaler=None).fit(_panel(index="range"))
     assert model.scaler_ is None
     fc = model.predict(3)
     _, z_forecast = model.network_._forecast(3)
@@ -625,7 +625,7 @@ def test_successive_updates_equal_one_update_with_all_rows(fitted):
 
 
 def test_update_without_a_scaler_and_without_exog():
-    est = DDFM(**TINY).fit(_panel(K=0, index="range"))
+    est = DDFM(**TINY, scaler=None).fit(_panel(K=0, index="range"))
     assert est.network_.covariate_scaler is None
     new = _panel(T=60, K=0, index="range", seed=1)
     new = PanelData(y=new.y.iloc[48:])
@@ -828,7 +828,7 @@ def test_a_run_saved_without_the_covariate_scaler_cannot_update(fitted, tmp_path
 
 
 def test_save_load_mlp_without_scaler_or_exog(tmp_path):
-    est = DDFM(**{**TINY, "decoder_type": "mlp", "encoder_layers": (6, 4), "max_iter": 3}).fit(
+    est = DDFM(**{**TINY, "decoder_type": "mlp", "encoder_layers": (6, 4), "max_iter": 3, "scaler": None}).fit(
         _panel(K=0, index="range")
     )
     assert isinstance(est.network_.loss_now, float)

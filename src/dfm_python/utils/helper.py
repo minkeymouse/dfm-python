@@ -119,7 +119,7 @@ def interpolate_dataframe(
                 order=3 if method == 'spline' else None,
                 limit=limit
             )
-        except Exception:
+        except Exception:  # documented fallback; scipy's FITPACK raises a private error class, not a ValueError
             _logger.warning(
                 "Spline interpolation failed (possibly not enough points), falling back to linear"
             )

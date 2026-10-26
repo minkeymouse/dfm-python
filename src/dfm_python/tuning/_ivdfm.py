@@ -340,21 +340,19 @@ def _make_objective(
     def objective(trial: optuna.Trial) -> float:
         optuna = _require_optuna()
 
-        try:
-            params = suggest_ivdfm_hyperparameters(
-                trial,
-                max_window=max_window,
-                min_window=min_window,
-                max_regimes=max_regimes,
-                metric=metric,
-                fixed=fixed,
-                max_hidden_dim=max_hidden_dim,
-                search_scope=search_scope,
-                min_stride=min_stride,
-            )
-        except Exception as e:
-            _logger.warning(f"Suggest failed: {e}")
-            raise optuna.TrialPruned()
+        # A search space that cannot be sampled, or a parameter set_params rejects, is the caller's
+        # error and fails every trial alike, so it propagates.
+        params = suggest_ivdfm_hyperparameters(
+            trial,
+            max_window=max_window,
+            min_window=min_window,
+            max_regimes=max_regimes,
+            metric=metric,
+            fixed=fixed,
+            max_hidden_dim=max_hidden_dim,
+            search_scope=search_scope,
+            min_stride=min_stride,
+        )
 
         window = max(2, min(int(params.pop("window")), T_train - 1))
         stride = min(max(10, int(params.pop("stride"))), window)
@@ -363,12 +361,10 @@ def _make_objective(
         model_params = {k: v for k, v in params.items() if k not in _META_KEYS and k not in _NOT_PARAMS}
         # The targets are already scaled (see _imputed_arrays), so the trials fit no scaler of their own.
         model_params.update(window=window, stride=stride, max_epochs=max_epochs, scaler=None, verbose=0)
-        try:
-            model = clone(estimator).set_params(**model_params)
-        except Exception as e:
-            _logger.warning(f"Model build failed: {e}")
-            raise optuna.TrialPruned()
+        model = clone(estimator).set_params(**model_params)
 
+        # Trial boundary: hyperparameters that cannot be trained or forecast with (invalid, diverging or
+        # out of memory) prune the trial, so the search goes on; tune_hyperparameters warns when none completes.
         try:
             model.fit(train_panel)
         except Exception as e:
@@ -377,7 +373,7 @@ def _make_objective(
 
         try:
             preds = model.predict(horizon, futr_exog=futr_exog).to_numpy(dtype=np.float64)
-        except Exception as e:
+        except Exception as e:  # trial boundary, as for fit
             _logger.warning(f"Predict failed: {e}")
             raise optuna.TrialPruned()
 
@@ -526,7 +522,10 @@ def tune_hyperparameters(
     ValueError
         For an unknown metric, a ``fixed`` key that is not an iVDFM
         hyperparameter, ``min_batch_size`` different from
-        ``fixed["batch_size"]``, or data too short for ``horizon``.
+        ``fixed["batch_size"]``, data too short for ``horizon``, a target
+        series that ``fit`` rejects (``DataValidationError``), or a search
+        space optuna cannot sample (such as a fixed ``window`` above 2000,
+        whose lowest stride is above the highest).
     """
     from ..models.ivdfm.estimator import iVDFM
 
@@ -553,6 +552,7 @@ def tune_hyperparameters(
         fixed["batch_size"] = min_batch_size
 
     panel = estimator._validate_data(data)
+    estimator._check_training_targets(panel)
     scaled_by = clone(estimator).set_params(scaler=fixed["scaler"]) if "scaler" in fixed else estimator
     targets, exog = _imputed_arrays(scaled_by, panel)
     T_total = targets.shape[0]

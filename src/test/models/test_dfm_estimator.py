@@ -79,7 +79,7 @@ def test_defaults_are_the_values_that_ran_when_omitted():
     assert DFM().get_params() == {
         "n_factors": None, "blocks": None, "clock": "m", "tent_weights": None, "max_iter": 5000, "tol": 1e-5,
         "ar_clip": None, "data_clip": None, "regularization": None, "damping_factor": None,
-        "em_acceleration": "squarem", "scaler": None, "verbose": 0,
+        "em_acceleration": "squarem", "scaler": "standard", "verbose": 0,
     }
     # The engine config defaults these came from.
     assert _DFMEngineConfig(blocks={"b": {"num_factors": 1, "series": []}}).max_iter == 5000
@@ -494,7 +494,7 @@ def test_fit_does_not_warn_on_stationary_data():
 
 
 def test_scaler_none_fits_on_the_data_as_given():
-    model = DFM(**TINY).fit(_mixed())
+    model = DFM(**TINY, scaler=None).fit(_mixed())
     assert model.scaler_ is None and model.engine_.scaler is None
     np.testing.assert_array_equal(model.engine_.data_processed, _frame()[_MONTHLY + ["gdp"]].to_numpy(), strict=True)
 
@@ -922,7 +922,7 @@ def test_save_load_keeps_the_block_order_and_needs_no_data(tmp_path):
     """JSON sorts dict keys; the loaded model keeps the block (factor) order and refits like the original."""
     blocks = {"zeta": {"n_factors": 1, "series": _MONTHLY + ["gdp"]}, "alpha": {"series": ["m2", "m3"]}}
     train, new = _split_frame()
-    model = DFM(**TINY, blocks=blocks).fit(train)
+    model = DFM(**TINY, blocks=blocks, scaler=None).fit(train)
     model.save(tmp_path / "run")
     loaded = DFM.load(tmp_path / "run")
     assert list(loaded.blocks) == ["zeta", "alpha"] and loaded.scaler_ is None
@@ -1108,7 +1108,7 @@ def test_ported_mixed_freq_initialization_sparse_monthly():
         assert df[col].isna().mean() > 0.7
     data = PanelData(y=df, freq={"m": monthly})
     model = DFM(blocks={"Block_Global": {"n_factors": 2, "series": columns}}, clock="w",
-                tent_weights={"m:w": [1, 2, 1]})
+                tent_weights={"m:w": [1, 2, 1]}, scaler=None)
     model.fit(data)
     state = model.engine_.training_state
     internal = list(model.internal_feature_names_)

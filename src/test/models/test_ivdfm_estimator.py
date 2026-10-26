@@ -56,7 +56,7 @@ def fitted() -> iVDFM:
 
 @pytest.fixture(scope="module")
 def fitted_exog() -> iVDFM:
-    return iVDFM(**TINY, time_context=2).fit(_panel(K=2))
+    return iVDFM(**TINY, time_context=2, scaler=None).fit(_panel(K=2))
 
 
 # -- construction ---------------------------------------------------------------
@@ -73,7 +73,7 @@ def test_defaults_are_the_values_that_ran_when_omitted():
         "optimizer_weight_decay": 0.0, "optimizer_momentum": 0.9, "batch_size": 32, "max_epochs": 100,
         "tol": 5e-4, "patience": 20, "scheduler_type": "step", "scheduler_step_size": None,
         "scheduler_gamma": 0.5, "scheduler_patience": 10, "scheduler_factor": 0.1, "scheduler_min_lr": 0.0,
-        "scaler": None, "random_state": 3, "device": "auto", "verbose": 0,
+        "scaler": "standard", "random_state": 3, "device": "auto", "verbose": 0,
     }
 
 
@@ -392,7 +392,7 @@ def test_predict_is_in_data_units(fitted):
 
 
 def test_predict_without_scaler_is_the_engine_forecast():
-    est = iVDFM(**TINY).fit(_panel(index="range"))
+    est = iVDFM(**TINY, scaler=None).fit(_panel(index="range"))
     forecast = est.predict(3)
     np.testing.assert_array_equal(forecast.to_numpy(), est.network_.predict(horizon=3).astype(np.float64))
     assert forecast.index.equals(pd.RangeIndex(40, 43, name="time"))

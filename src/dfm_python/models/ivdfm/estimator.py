@@ -248,7 +248,7 @@ class iVDFM(BaseFactorModel):
         ReduceLROnPlateau factor, in (0, 1].
     scheduler_min_lr : float, default 0.0
         ReduceLROnPlateau minimum learning rate.
-    scaler : str or sklearn transformer, optional
+    scaler : str, sklearn transformer or None, default "standard"
         Scaler of the targets (not of exog): "standard", "robust", "minmax",
         "maxabs", "quantile", or an unfitted transformer, which is cloned. None
         trains on the data as given. Forecasts are always in data units.
@@ -344,6 +344,7 @@ class iVDFM(BaseFactorModel):
         "scheduler_type": _SCHEDULERS,
         "scaler": (*_SCALERS, None),
     }
+    _interpolates_non_finite = True  # the dataset fills infinite values like missing ones
 
     def __init__(
         self,
@@ -383,7 +384,7 @@ class iVDFM(BaseFactorModel):
         scheduler_patience: int = 10,
         scheduler_factor: float = 0.1,
         scheduler_min_lr: float = 0.0,
-        scaler: Any = None,
+        scaler: Any = "standard",
         random_state: Optional[int] = 3,
         device: Any = "auto",
         verbose: int = 0,
@@ -437,7 +438,7 @@ class iVDFM(BaseFactorModel):
         tiny = {
             "n_factors": 2, "window": 12, "encoder_hidden_dim": 8, "decoder_hidden_dim": 8, "prior_hidden_dim": 8,
             "encoder_n_hidden_layers": 1, "decoder_n_hidden_layers": 1, "prior_n_hidden_layers": 1,
-            "batch_size": 4, "max_epochs": 2, "random_state": 0, "device": "cpu",
+            "batch_size": 4, "max_epochs": 2, "scaler": None, "random_state": 0, "device": "cpu",
         }
         return [
             tiny,
@@ -676,9 +677,9 @@ class iVDFM(BaseFactorModel):
         ----------
         data : PanelData, DataFrame or 2-D array
             Targets in ``y`` and, optionally, context variables in ``exog``.
-            Missing values are interpolated linearly, then filled forward,
-            backward and with zeros (in targets and exog). Mixed frequency and
-            ``series_exog`` are rejected.
+            Missing and infinite values are interpolated linearly, then
+            filled forward, backward and with zeros (in targets and exog).
+            Mixed frequency and ``series_exog`` are rejected.
 
         Raises
         ------
@@ -686,6 +687,9 @@ class iVDFM(BaseFactorModel):
             For an invalid hyperparameter.
         UnsupportedInputError
             For ``series_exog`` or a mixed-frequency panel.
+        DataValidationError
+            For a target series with fewer than 2 observed (finite) values,
+            or with the same value at every observation.
 
         Warns
         -----

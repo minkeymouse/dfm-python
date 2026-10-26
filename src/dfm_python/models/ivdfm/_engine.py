@@ -558,7 +558,7 @@ class iVDFMEngine(nn.Module):
             y_win = dataset.data[T_total - T_init:T_total, :]  # (T_init, N)
             f_init, _ = extract_pca_factors(y_win, n_components=max_components)
             f0_mean = np.mean(f_init, axis=0)  # (max_components,)
-        except Exception as e:
+        except (np.linalg.LinAlgError, ValueError) as e:  # the PCA's failures (SVD, non-finite data)
             self._set_random_f0()
             _logger.warning(f"PCA init failed: {e}. Using random f_0.")
             return
@@ -627,7 +627,7 @@ class iVDFMEngine(nn.Module):
                 f"AR coeffs range: [{ar_coeffs.min():.4f}, {ar_coeffs.max():.4f}], "
                 f"B range: [{B_diag.min():.4f}, {B_diag.max():.4f}]"
             )
-        except Exception as e:
+        except (np.linalg.LinAlgError, ValueError) as e:  # the PCA's or the OLS's failures
             _logger.warning(f"AR coefficient initialization failed: {e}. Using random initialization.")
 
     def _build_optimizer(self):

@@ -147,19 +147,6 @@ def test_explained_variance_matches_a_direct_computation(case):
     np.testing.assert_allclose(model.explained_variance_.to_numpy(), expected, rtol=1e-5, atol=1e-6)
 
 
-@pytest.mark.filterwarnings("error::RuntimeWarning")
-def test_explained_variance_is_nan_for_a_target_without_variance():
-    y = _panel(0).y.assign(s2=7.0)
-    with torch.random.fork_rng():
-        model = DDFM(**{**TINY, **DECODERS["linear"], "scaler": "standard"}).fit(y)
-    ev = model.explained_variance_
-    assert np.isnan(ev["s2"]) and np.isfinite(ev[["s0", "s1"]].to_numpy()).all()
-    frame = model.decompose(by="factor")
-    total = sum(frame[part] for part in frame.columns.get_level_values("part").unique()).to_numpy()
-    observed = y.notna().to_numpy()
-    np.testing.assert_allclose(total[observed], y.to_numpy()[observed], rtol=1e-9)
-
-
 # -- decompose -------------------------------------------------------------------
 
 

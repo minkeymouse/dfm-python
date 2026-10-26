@@ -436,7 +436,7 @@ def validate_dfm_initialization(
                     f"{name} has very small eigenvalues (min={min_eigenval:.2e}). "
                     f"This may cause numerical instability."
                 )
-        except Exception as e:
+        except (np.linalg.LinAlgError, ValueError) as e:  # not square, empty, or eigvalsh failed
             _logger.warning(f"Could not check eigenvalues for {name}: {e}")
 
     C_scale = np.abs(C).mean()

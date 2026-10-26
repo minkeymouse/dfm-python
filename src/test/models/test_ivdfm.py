@@ -255,7 +255,7 @@ class TestiVDFM:
             assert params[name] == value, name
         # The spec's per-model seed default, and the device / verbosity conventions.
         assert params["random_state"] == 3 and params["device"] == "auto" and params["verbose"] == 0
-        assert params["stride"] is None and params["window"] is None and params["scaler"] is None
+        assert params["stride"] is None and params["window"] is None and params["scaler"] == "standard"
 
     def test_defaults_are_the_engine_defaults(self):
         """The defaults are what ran when an argument was omitted (the engine's own defaults)."""

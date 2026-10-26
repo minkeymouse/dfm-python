@@ -210,7 +210,7 @@ def _deep_equal(a: Any, b: Any) -> bool:
         return False
     try:
         result = a == b
-    except Exception:
+    except (TypeError, ValueError):  # values that cannot be compared are not equal
         return False
     return bool(result) if isinstance(result, (bool, np.bool_)) else False
 
@@ -373,7 +373,7 @@ def _expect_raises(exc_type: type, func: Callable[[], Any], what: str) -> BaseEx
         func()
     except exc_type as err:
         return err
-    except Exception as err:
+    except Exception as err:  # harness boundary: the wrong exception is the check's failure (chained)
         raise AssertionError(f"{what} raised {type(err).__name__} ({err}), expected {exc_type.__name__}.") from err
     raise AssertionError(f"{what} did not raise {exc_type.__name__}.")
 
@@ -1163,7 +1163,7 @@ def check_estimator(estimator_or_class: Any, *, data: Any = None) -> list[str]:
                 continue
             try:
                 check(ctx)
-            except Exception as err:
+            except Exception as err:  # harness boundary: any failure is reported with the check and parameters
                 detail = str(err) if isinstance(err, AssertionError) else f"{type(err).__name__}: {err}"
                 raise AssertionError(f"check_estimator: check {name!r} failed for {label}: {detail}") from err
             if name not in ran:

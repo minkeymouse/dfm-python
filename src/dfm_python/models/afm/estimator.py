@@ -348,8 +348,8 @@ class AFM(BaseFactorModel):
         ----------
         data : PanelData, DataFrame or 2-D array
             Asset returns in ``y`` (T x N) and, for attention factors, firm
-            characteristics in ``series_exog``. ``exog``, mixed frequency and
-            missing values are rejected.
+            characteristics in ``series_exog``. ``exog``, mixed frequency,
+            missing and infinite values are rejected.
 
         Raises
         ------
@@ -358,6 +358,8 @@ class AFM(BaseFactorModel):
         UnsupportedInputError
             For ``exog``, mixed frequency, NaN, or attention factors without
             ``series_exog``.
+        DataValidationError
+            For infinite values in ``y`` or ``series_exog``.
 
         A failed fit leaves the model unfitted (earlier fitted attributes are
         removed).

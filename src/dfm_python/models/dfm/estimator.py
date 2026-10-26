@@ -200,12 +200,12 @@ class DFM(BaseFactorModel):
         at a given ``tol`` it usually stops at a higher log-likelihood than
         plain EM; every E-step counts towards ``max_iter``, and ``ar_clip`` and
         ``damping_factor`` apply to every EM map. None runs plain EM.
-    scaler : str or sklearn transformer, optional
+    scaler : str, sklearn transformer or None, default "standard"
         Scaler of the series: "standard", "robust", "minmax", "maxabs",
-        "quantile", or an unfitted transformer, which is cloned. None (the
-        default) fits on the data as given, which must then already be on a
-        comparable scale (the engine rejects series with a standard deviation
-        above 100 or below 1e-4). Forecasts are always in data units.
+        "quantile", or an unfitted transformer, which is cloned. None fits on
+        the data as given, which must then already be on a comparable scale
+        (the engine rejects series with a standard deviation above 100 or
+        below 1e-4). Forecasts are always in data units.
     verbose : int, default 0
         0 is silent; 1 logs the engine's progress; 2 also logs debug records.
 
@@ -322,7 +322,7 @@ class DFM(BaseFactorModel):
         regularization: Optional[Mapping] = None,
         damping_factor: Optional[float] = None,
         em_acceleration: Optional[str] = "squarem",
-        scaler: Any = None,
+        scaler: Any = "standard",
         verbose: int = 0,
     ) -> None:
         self.n_factors = n_factors
@@ -664,8 +664,9 @@ class DFM(BaseFactorModel):
             For ``exog``, ``series_exog``, a series faster than the clock or
             two slower frequencies.
         DataValidationError
-            For a block naming a series that is not in the data, or a
-            non-string series name.
+            For a block naming a series that is not in the data, a
+            non-string series name, infinite values, or a series with fewer
+            than 2 observed values or the same value at every observation.
 
         Warns
         -----

@@ -173,7 +173,7 @@ def remNaNs_spline(x: np.ndarray, optNaN: Dict[str, Any]) -> Tuple[np.ndarray, n
                 try:
                     kind = 'cubic' if valid_mask.sum() >= k + 1 else 'linear'
                     col_processed[~valid_mask] = _interpolate(col_processed, kind)[~valid_mask]
-                except Exception:
+                except (ValueError, np.linalg.LinAlgError):  # too few points, or a singular spline system
                     col_processed = pd.Series(col_processed).ffill().bfill().fillna(0.0).values
             xBal[:, j] = col_processed
     elif method == 3:
@@ -185,7 +185,7 @@ def remNaNs_spline(x: np.ndarray, optNaN: Dict[str, Any]) -> Tuple[np.ndarray, n
             elif valid_mask.sum() >= k + 1:
                 try:
                     xBal[:, j] = _interpolate(col, 'cubic')
-                except Exception:
+                except (ValueError, np.linalg.LinAlgError):  # as in method 2
                     xBal[:, j] = _interpolate(col, 'linear')
             else:
                 xBal[:, j] = pd.Series(col).ffill().bfill().fillna(0.0).values

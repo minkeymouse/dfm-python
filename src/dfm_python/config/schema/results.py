@@ -74,7 +74,7 @@ class BaseResult(ABC):
         if self.r is not None:
             try:
                 return int(np.sum(self.r))
-            except Exception:
+            except (TypeError, ValueError):  # r holds something that does not sum to a number
                 pass
         return self.num_state()
 
@@ -117,17 +117,18 @@ class BaseResult(ABC):
         lines = ["=" * 80, f"{model_type} Model Summary", "=" * 80, ""]
 
         lines.append("Data Dimensions:")
+        # The num_* methods raise ValueError when the array they read is not set.
         try:
             lines.append(f"  Series: {self.num_series()}")
-        except Exception:
+        except ValueError:
             lines.append("  Series: N/A")
         try:
             lines.append(f"  Factors: {self.num_factors()} (state dim: {self.num_state()})")
-        except Exception:
+        except ValueError:
             lines.append("  Factors: N/A")
         try:
             lines.append(f"  Time periods: {self.num_periods()}")
-        except Exception:
+        except ValueError:
             lines.append("  Time periods: N/A")
         lines.append("")
 
@@ -137,7 +138,7 @@ class BaseResult(ABC):
         else:
             try:
                 lines.append(f"  Total factors: {self.num_factors()}")
-            except Exception:
+            except ValueError:
                 lines.append("  Total factors: N/A")
         lines.append(f"  AR order: {self.p if self.p is not None else 'N/A'}")
         lines.append("")

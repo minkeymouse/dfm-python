@@ -211,7 +211,7 @@ class DDFM(BaseFactorModel):
     interpolation_limit_direction : {"forward", "backward", "both"}, default "both"
         Direction in which consecutive missing values are filled (the
         ``limit_direction`` of ``pandas.DataFrame.interpolate``).
-    scaler : str or sklearn transformer, optional
+    scaler : str, sklearn transformer or None, default "standard"
         Scaler of the targets: "standard", "robust", "minmax", "maxabs",
         "quantile", or an unfitted transformer, which is cloned. The
         covariates are scaled with a fresh instance of the same class, fitted
@@ -252,8 +252,7 @@ class DDFM(BaseFactorModel):
         Per target (index ``feature_names_in_``, name ``"explained_variance"``):
         ``1 - var(data - common) / var(data)`` over the observed training
         entries of the scaled targets, where ``common`` is the decoder's
-        output on ``factors_``; NaN for a target without variance there
-        (constant, or observed once).
+        output on ``factors_``.
     network_ : torch.nn.Module
         The trained engine.
     device_ : torch.device
@@ -316,7 +315,7 @@ class DDFM(BaseFactorModel):
         interpolation_method: str = "linear",
         interpolation_limit: Optional[int] = 10,
         interpolation_limit_direction: str = "both",
-        scaler: Any = None,
+        scaler: Any = "standard",
         random_state: Optional[int] = 3,
         device: Any = "auto",
         verbose: int = 0,
@@ -347,7 +346,7 @@ class DDFM(BaseFactorModel):
         """Small CPU parameter sets: a linear decoder, and an MLP decoder with a scaler."""
         tiny = {
             "n_factors": 2, "encoder_layers": (4,), "n_mc_samples": 2, "window_size": 16, "max_iter": 3,
-            "random_state": 0, "device": "cpu",
+            "scaler": None, "random_state": 0, "device": "cpu",
         }
         return [tiny, {**tiny, "decoder_type": "mlp", "encoder_layers": (6, 4), "scaler": "standard"}]
 
@@ -520,6 +519,9 @@ class DDFM(BaseFactorModel):
             For an invalid hyperparameter.
         UnsupportedInputError
             For ``series_exog`` or a mixed-frequency panel.
+        DataValidationError
+            For infinite values, or a target series with fewer than 2
+            observed values or the same value at every observation.
 
         Warns
         -----

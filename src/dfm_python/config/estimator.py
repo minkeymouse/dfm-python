@@ -244,7 +244,7 @@ class EstimatorConfig:
         """Fields annotated as a tuple (also inside Optional/Union) or with a tuple default."""
         try:
             hints = typing.get_type_hints(cls)
-        except Exception:  # unresolvable forward references: fall back to the defaults
+        except (NameError, TypeError):  # unresolvable forward references: fall back to the defaults
             hints = {}
         out = set()
         for f in dataclasses.fields(cls):
@@ -360,6 +360,8 @@ def _read_yaml(path: Path) -> Any:
             return OmegaConf.to_container(OmegaConf.load(path), resolve=True)
         except OSError:
             raise
+        # Translation boundary: omegaconf fails with its YAML backend's errors, its grammar's and its
+        # resolvers'; each becomes a ConfigurationError naming the file, chained to the original error.
         except Exception as err:
             raise _configuration_error(f"Could not read YAML file {str(path)!r}: {err}") from err
     try:

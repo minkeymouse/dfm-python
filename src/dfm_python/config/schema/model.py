@@ -518,7 +518,7 @@ class iVDFMConfig(EstimatorConfig):
     scheduler_patience: int = 10
     scheduler_factor: float = 0.1
     scheduler_min_lr: float = 0.0
-    scaler: Any = None
+    scaler: Any = "standard"
     random_state: Optional[int] = 3
     device: str = "auto"
     verbose: int = 0
@@ -553,7 +553,7 @@ class DDFMConfig(EstimatorConfig):
     interpolation_method: str = "linear"
     interpolation_limit: Optional[int] = 10
     interpolation_limit_direction: str = "both"
-    scaler: Any = None
+    scaler: Any = "standard"
     random_state: Optional[int] = 3
     device: str = "auto"
     verbose: int = 0
@@ -586,5 +586,5 @@ class DFMConfig(EstimatorConfig):
     regularization: Optional[Dict[str, float]] = None
     damping_factor: Optional[float] = None
     em_acceleration: Optional[str] = "squarem"
-    scaler: Any = None
+    scaler: Any = "standard"
     verbose: int = 0

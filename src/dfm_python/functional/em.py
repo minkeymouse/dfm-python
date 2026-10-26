@@ -884,7 +884,7 @@ class _EMRun:
             _logger.error(f"EM: the E-step failed at iteration {k + 1} ({e}); stopping.")
             self.stop_reason = "E-step failed"
             return None
-        except Exception as e:
+        except (np.linalg.LinAlgError, ValueError, FloatingPointError) as e:  # other errors are bugs: not wrapped
             _logger.error(f"EM step failed at iteration {k + 1}: {e}", exc_info=True)
             _logger.error(f"  Current parameters shapes - A: {state.A.shape if state.A is not None else None}, C: {state.C.shape if state.C is not None else None}, Q: {state.Q.shape if state.Q is not None else None}, R: {state.R.shape if state.R is not None else None}")
             _logger.error(f"  Data shape: {self.X.shape}, Block structure: {self.block_structure is not None}")
@@ -954,7 +954,7 @@ class _EMRun:
             try:
                 _logger.info(f"Saving checkpoint at iteration {num_iter}...")
                 self.checkpoint_callback(num_iter, state)
-            except Exception as e:
+            except Exception as e:  # documented boundary: a failing checkpoint must not abort a long EM run
                 _logger.warning(f"Checkpoint callback failed at iteration {num_iter}: {e}", exc_info=True)
 
     def _finite(self, state: DFMModelState) -> bool:

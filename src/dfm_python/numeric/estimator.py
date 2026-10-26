@@ -776,7 +776,7 @@ def estimate_arp_ols(
                 compute_var_safe(residuals, ddof=0, min_variance=MIN_DIAGONAL_VARIANCE),
                 MIN_DIAGONAL_VARIANCE
             ))
-        except Exception as e:
+        except (np.linalg.LinAlgError, ValueError) as e:  # the solve's failures (pinv not converging)
             _logger.warning(f"AR({order}) estimation failed for factor {i}: {e}. Using zeros.")
             ar_coeffs[i, :] = 0.0
             B_diag[i] = DEFAULT_PROCESS_NOISE
@@ -850,7 +850,7 @@ def estimate_constrained_ols(
                     XTX_reg = XTX + create_scaled_identity(XTX.shape[0], adaptive_reg, dtype=dtype)
                 else:
                     XTX_reg = XTX + create_scaled_identity(XTX.shape[0], regularization, dtype=dtype)
-            except:
+            except (np.linalg.LinAlgError, ValueError):  # eigvalsh failed, or every eigenvalue is 0
                 XTX_reg = XTX + create_scaled_identity(XTX.shape[0], regularization, dtype=dtype)
 
             constraint_term = R @ beta_unconstrained - q

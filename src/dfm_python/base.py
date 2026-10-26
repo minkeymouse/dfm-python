@@ -6,8 +6,10 @@ The four models (``DFM``, ``DDFM``, ``iVDFM``, ``AFM``) subclass
 - ``__init__`` takes keyword-only hyperparameters and only stores them, so
   ``get_params``, ``set_params``, ``clone`` and ``repr`` work unchanged.
 - ``fit(data)`` coerces ``data`` to :class:`~dfm_python.PanelData`, rejects
-  inputs the tags exclude, records the data attributes, runs the subclass's
-  ``_fit`` inside :func:`~dfm_python.logger.fit_verbosity` and returns ``self``.
+  inputs the tags exclude, infinite values and (forecasting models) target
+  series without two distinct observed values, records the data attributes,
+  runs the subclass's ``_fit`` inside :func:`~dfm_python.logger.fit_verbosity`
+  and returns ``self``.
 - Fitted state lives in attributes ending in ``_``; before ``fit`` they raise
   :class:`~dfm_python.utils.errors.NotFittedError` (an ``AttributeError``), so
   ``hasattr(model, "result_")`` is False.
@@ -145,6 +147,8 @@ class BaseFactorModel(BaseEstimator):
     #: Hyperparameters ``_validate_params`` checks against a fixed set of values: ``{name: values}``,
     #: the ``enum`` of the config's ``json_schema()``.
     _param_choices: ClassVar[dict] = {}
+    #: True when the model fills infinite values like missing ones, so ``_validate_data`` lets them through.
+    _interpolates_non_finite: ClassVar[bool] = False
 
     @_class_or_instance_method
     def get_tags(cls, self: Optional[BaseFactorModel] = None) -> dict:
@@ -298,12 +302,17 @@ class BaseFactorModel(BaseEstimator):
     def _validate_data(self, data: Any) -> PanelData:
         """Coerce ``data`` to ``PanelData`` and reject what the tags exclude.
 
+        Infinite values are rejected in every slot, unless the model fills
+        them like missing values (``_interpolates_non_finite``).
+
         Raises
         ------
         UnsupportedInputError
             For ``exog``, ``series_exog``, a mixed-frequency layout or missing
             values when the matching ``capability:*`` tag is False; the
             message names the tag.
+        DataValidationError
+            For infinite values, naming the slot and the columns.
         """
         panel = PanelData._coerce(data)
         tags = self.get_tags()
@@ -323,14 +332,54 @@ class BaseFactorModel(BaseEstimator):
                 f"{name} does not accept mixed-frequency data (tag capability:mixed_frequency is False); got "
                 f"freq={panel.freq}. Pass series sampled at one frequency."
             )
-        if not tags["capability:missing_values"]:
-            for slot, frame in (("y", panel.y), ("exog", panel.exog), ("series_exog", panel.series_exog)):
-                if frame is not None and frame.isna().to_numpy().any():
-                    raise UnsupportedInputError(
-                        f"{name} does not accept missing values (tag capability:missing_values is False); "
-                        f"{slot} contains NaN. Impute or drop them before fitting."
-                    )
+        for slot, frame in (("y", panel.y), ("exog", panel.exog), ("series_exog", panel.series_exog)):
+            if frame is None:
+                continue
+            values = frame.to_numpy()
+            if not tags["capability:missing_values"] and np.isnan(values).any():
+                raise UnsupportedInputError(
+                    f"{name} does not accept missing values (tag capability:missing_values is False); "
+                    f"{slot} contains NaN. Impute or drop them before fitting."
+                )
+            infinite = np.isinf(values).any(axis=0)
+            if infinite.any() and not self._interpolates_non_finite:
+                fix = "finite values or NaN (missing)" if tags["capability:missing_values"] else "finite values"
+                raise DataValidationError(
+                    f"{name}: {slot} contains infinite values in columns {list(frame.columns[infinite])[:10]}. "
+                    f"Replace them with {fix}."
+                )
         return panel
+
+    def _check_training_targets(self, panel: PanelData) -> None:
+        """Reject training data with target series a forecasting model cannot learn from.
+
+        Each target series of a model with tag ``task="forecast"`` is judged
+        on its observed (finite) entries, so a slower series on its
+        observation dates only. Allocation models keep their own rules.
+
+        Raises
+        ------
+        DataValidationError
+            Naming each series with no observed value, a single one, or the
+            same value at every observation.
+        """
+        if self.get_tags()["task"] != "forecast":
+            return
+        problems = []
+        for series, column in zip(panel.series_names, panel.y.to_numpy().T):
+            observed = column[np.isfinite(column)]
+            if observed.size == 0:
+                problems.append(f"{series!r} has no observed value")
+            elif observed.size == 1:
+                problems.append(f"{series!r} has a single observed value")
+            elif np.all(observed == observed[0]):
+                problems.append(f"{series!r} is constant (every observed value is {float(observed[0])!r})")
+        if problems:
+            raise DataValidationError(
+                f"{type(self).__name__} cannot be fitted on these target series: {'; '.join(problems)}. A target "
+                "series needs at least 2 observed values that are not all equal: drop these series from y, or "
+                "supply more observations."
+            )
 
     def _set_data_attributes(self, data: PanelData) -> None:
         """Record the fitted data attributes shared by every model."""
@@ -456,6 +505,7 @@ class BaseFactorModel(BaseEstimator):
         ``verbose`` hyperparameter (0 silent, 1 progress, 2 debug).
         """
         panel = self._validate_data(data)
+        self._check_training_targets(panel)
         verbose = getattr(self, "verbose", 0)
         self._clear_fitted()
         try:
