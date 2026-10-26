@@ -583,7 +583,7 @@ class DFMConfig(EstimatorConfig):
     clock: str = "m"
     tent_weights: Optional[Dict[str, List[float]]] = None
     max_iter: int = 5000
-    tol: float = 1e-5
+    tol: float = 1e-6
     max_time: Optional[float] = None
     ar_clip: Optional[Dict[str, float]] = None
     data_clip: Optional[float] = None

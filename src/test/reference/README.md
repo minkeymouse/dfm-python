@@ -9,7 +9,8 @@ PYTHONPATH=src python -m pytest src/test/reference -q
 
 It needs statsmodels (dev group; skipped without it) and takes about 40 s
 (10 tests). Measured with statsmodels 0.15.0, numpy 2.3.5, scipy 1.15.3,
-pandas 2.3.3, dfm-python 0.8.3 (commit ad3b0eb).
+pandas 2.3.3, dfm-python 0.8.3 (commit ad3b0eb); the `tol=1e-6` rows after
+the default changed.
 
 ## Configuration
 
@@ -24,7 +25,7 @@ Both libraries run the EM of Banbura and Modugno (2014) for this model:
 | initial state | `em_initialization=True` (default): E[x_0 \| Y], Cov(x_0 \| Y) | the same, always |
 | scaling | `standardize=False` on pre-standardized data | `scaler=None` on the same data |
 | start values | PCA, OLS loadings, SARIMAX AR(1)s | BM14 `InitCond` (PCA on splined data) |
-| iterations | plain EM, stops when `2 \|dl\| / (\|l_1\| + \|l_2\|) < 1e-6` or after `maxiter=500` | SQUAREM, stops when `\|dl / l\| < tol = 1e-5` |
+| iterations | plain EM, stops when `2 \|dl\| / (\|l_1\| + \|l_2\|) < 1e-6` or after `maxiter=500` | SQUAREM, stops when `\|dl / l\| < tol` (default 1e-6; the test's own fit uses 1e-5) |
 
 Data: `data/macro.csv` resampled to month ends (weekly series: monthly mean;
 monthly series: their value), 2000-01 to 2025-10 (310 months; KOROCOINF and
@@ -70,9 +71,11 @@ here), statsmodels keeps it fixed. With dfm-python's R update disabled
 
 ### 3. Each library's own fit
 
-dfm-python with its defaults (SQUAREM, `tol=1e-5`: 66 and 143 E-steps)
-against statsmodels' EM after 200 iterations (the test) and 500 (its
-default; neither converges by its tolerance). Common component: lowest
+dfm-python with SQUAREM at `tol=1e-5` (66 and 143 E-steps; the 0.8
+default) against statsmodels' EM after 200 iterations (the test) and 500
+(its default; neither converges by its tolerance). The last two rows are
+dfm-python's default `tol=1e-6` (106 and 710 E-steps, 10 s and 90 s), not
+part of the test because of the mixed fit's run time. Common component: lowest
 per-series correlation, rows 5 to 310. Forecasts: largest difference over
 h = 1..12 and the series, in standardized units and in forecast standard
 deviations (`predict_interval`, 0.77 to 1.13).
@@ -83,6 +86,8 @@ deviations (`predict_interval`, 0.77 to 1.13).
 | monthly | 500 | 0.999983 | 0.999983 | 0.108 | 0.101 | -0.62 |
 | mixed | 200 | 0.999497 | 0.999797 | 0.052 | 0.055 | +5.16 |
 | mixed | 500 | 0.999982 | 0.999993 | 0.032 | 0.034 | -1.43 |
+| monthly, `tol=1e-6` | 500 | 0.999963 | 0.999963 | 0.059 | 0.061 | +29.19 |
+| mixed, `tol=1e-6` | 500 | 0.999894 | 0.999938 | 0.059 | 0.061 | +32.19 |
 
 Test thresholds: correlation > 0.999, forecast difference <= 0.2 sd, loglik
 gap < 0.003 per observed entry (13 and 12 here).
@@ -177,10 +182,12 @@ comparison table in `docs/models.md` does not list:
   series of the mixed fit).
 - `scaler="standard"` uses the ddof=0 standard deviation, statsmodels ddof=1
   (log-likelihoods about 0.5 per series apart).
-- Default stopping: `tol=1e-5` on `|dl / l|` against statsmodels' `1e-6` on
+- Default stopping: `tol` on `|dl / l|` against statsmodels' `1e-6` on
   `2 |dl| / (|l_1| + |l_2|)`, with SQUAREM against plain EM. SQUAREM reaches a
-  higher loglik per E-step, but `tol=1e-5` can stop far from the maximum
-  (the 2005 slice above).
+  higher loglik per E-step, but the former default `tol=1e-5` could stop far
+  from the maximum (the 2005 slice above), so the default is now `1e-6`: on
+  the two slices it ends 29 and 32 loglik units above statsmodels' 500
+  iterations.
 - Start values: BM14 `InitCond` can start in a different basin than
   statsmodels' start values (the 12-series panel above).
 

@@ -8,15 +8,22 @@ optional packages the tests import.
 ```bash
 git clone https://github.com/minkeymouse/dfm-python
 cd dfm-python
-uv sync --group dev --all-extras    # or: pip install -e ".[all]" --group dev
+uv sync --group dev --all-extras    # or: pip install -e ".[all]" --group dev; --all-extras brings torch
 uv run pytest                       # test suite (src/test)
 uv run ruff check                   # lint; also run by pre-commit and CI
 uvx pre-commit install              # optional: ruff and the file checks on every commit
 ```
 
 CI (`.github/workflows/ci.yml`) runs the test suite on Python 3.10 to 3.13,
-every `tutorial/` script on truncated data, `ruff check` and a package build
-with `twine check`.
+the DFM tests and `src/test/test_optional_torch.py` in an environment
+without torch (`uv sync --group dev`, no extras), every `tutorial/` script on
+truncated data, `ruff check` and a package build with `twine check`.
+
+DFM must keep working without torch: the core package imports torch only
+inside the torch models' `fit` and `load`, the `dfm_python.utils.optional`
+helpers (`require_torch`, the lazy `torch` stand-in, `lazy_torch_exports`)
+defer it, and `test_optional_torch.py` checks it in an interpreter where
+torch and einops cannot be imported.
 
 ## Tests
 
@@ -26,6 +33,9 @@ with `twine check`.
 | `src/test/parity/` | golden tests (below) |
 | `src/test/ssm/test_estep_oracle.py`, `src/test/functional/test_em_oracle.py`, `src/test/functional/test_mstep_qfunction.py` | DFM E-step, EM monotonicity and M-step against a reference Kalman filter that does not import the package (`src/test/ssm/_reference_kf.py`), and against statsmodels' `KalmanSmoother` when installed |
 | `src/test/test_readme.py` | runs every Python code block of `README.md` and `docs/*.md` (except `docs/design/`) |
+| `src/test/reference/` | DFM against statsmodels' `DynamicFactorMQ` on `data/macro.csv` (about 50 s; measurements in its README) |
+| `src/test/test_optional_torch.py` | the DFM workflow and the torch models' `ImportError` without torch |
+| `src/test/test_robustness.py`, `src/test/test_evaluation.py` | degenerate and infinite inputs; the walk-forward `backtest` |
 | the rest of `src/test/` | unit tests by subpackage |
 
 `test_readme.py` runs each `##` or `###` section's Python blocks in order in

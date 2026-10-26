@@ -77,13 +77,13 @@ def fitted() -> DFM:
 
 def test_defaults_are_the_values_that_ran_when_omitted():
     assert DFM().get_params() == {
-        "n_factors": None, "blocks": None, "clock": "m", "tent_weights": None, "max_iter": 5000, "tol": 1e-5,
+        "n_factors": None, "blocks": None, "clock": "m", "tent_weights": None, "max_iter": 5000, "tol": 1e-6,
         "max_time": None, "ar_clip": None, "data_clip": None, "regularization": None, "damping_factor": None,
         "em_acceleration": "squarem", "scaler": "standard", "verbose": 0,
     }
     # The engine config defaults these came from.
     assert _DFMEngineConfig(blocks={"b": {"num_factors": 1, "series": []}}).max_iter == 5000
-    assert _DFMEngineConfig(blocks={"b": {"num_factors": 1, "series": []}}).threshold == 1e-5
+    assert _DFMEngineConfig(blocks={"b": {"num_factors": 1, "series": []}}).threshold == 1e-6
     assert _DFMEngineConfig(blocks={"b": {"num_factors": 1, "series": []}}).em_acceleration == "squarem"
     assert _DFMEngineConfig.from_dict({"blocks": {"b": {"num_factors": 1, "series": []}}}).em_acceleration == "squarem"
 

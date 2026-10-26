@@ -16,7 +16,7 @@ class TestDFMConfig:
         from dfm_python import DFM
         config = DFMConfig()
         assert config.to_dict() == DFM().get_params()
-        assert config.tol == 1e-5 and config.max_iter == 5000 and config.blocks is None
+        assert config.tol == 1e-6 and config.max_iter == 5000 and config.blocks is None
 
     def test_engine_config_initialization(self):
         """The engine config can be initialized with default values."""

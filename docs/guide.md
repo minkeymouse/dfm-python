@@ -77,15 +77,18 @@ naming the tag (`Model.get_tags()`):
 
 - `Model(**hyperparameters)` stores keyword-only hyperparameters and does
   nothing else.
-- `fit(data)` takes a `PanelData` (or a DataFrame) and returns the model.
+- `fit(data, callback=None)` takes a `PanelData` (or a DataFrame) and
+  returns the model. `max_time` and `callback` bound training (see
+  [Run control](#run-control)); `stop_reason_` says why it stopped.
 - `predict(h)` returns a DataFrame of the `h` steps after the last
   conditioning date, one column per series in your order, in data units.
   `predict_factors(h)` returns the factor forecast, one column per name in
   `factor_names_`. AFM allocates instead: `allocate()` and `backtest(data)`;
   its `predict` raises `TypeError`.
 - Fitted state lives in attributes ending in `_`: `result_`, `n_iter_`,
-  `converged_`, `scaler_`, `factors_`, ... Before `fit` they raise
-  `NotFittedError`.
+  `converged_`, `stop_reason_`, `scaler_`, `factors_`, ... Before `fit` they
+  raise `NotFittedError`. `describe()` summarizes the model as a
+  JSON-serializable dict (see [describe and JSON Schema](#describe-and-json-schema)).
 - Where the tags below allow it, `decompose(by=)` and the interpretation
   attributes (`factors_`, `loadings_`, `explained_variance_`) describe the
   training data and `predict_interval(h, coverage)` gives prediction
@@ -100,6 +103,9 @@ naming the tag (`Model.get_tags()`):
   scikit-learn. `get_config()` / `Model.from_config(cfg)` convert to and from
   the typed config mirror (`DFMConfig`, `DDFMConfig`, `iVDFMConfig`,
   `AFMConfig`).
+- DDFM, iVDFM and AFM (tag `backend="torch"`) need the `deep` extra. Without
+  torch they can be built, cloned and configured, and `fit` and `load` raise
+  `ImportError` naming `pip install "dfm-python[deep]"`.
 
 ```python
 import numpy as np
@@ -141,14 +147,16 @@ False raises `UnsupportedInputError` naming the tag:
 | `capability:update` | `update(data)` | yes | yes | yes | yes |
 | `capability:factor_forecast` | `predict_factors(h)` | yes | yes | yes | no |
 | `capability:interpret` | `factor_names_`, `factors_`, `loadings_`, `loadings_kind_`, `explained_variance_`, `decompose()` | yes | yes | yes | no |
-| `capability:pred_int` | `predict_interval(h, coverage, data)` | yes | no | no | no |
+| `capability:pred_int` | `predict_interval(h, coverage, data)` | yes | yes | yes | no |
 | `capability:device` | the `device` hyperparameter | no | yes | yes | yes |
 
 Public names exported from `dfm_python`: the models `DFM`, `DDFM`, `iVDFM`,
 `AFM` and their base `BaseFactorModel`; the configs `DFMConfig`, `DDFMConfig`,
 `iVDFMConfig`, `AFMConfig`; `PanelData`; `load`; the results `BaseResult`,
 `DFMResult`, `DDFMResult`; `calculate_rmse`; the errors `NotFittedError` and
-`UnsupportedInputError`; `set_verbosity` and `get_verbosity`.
+`UnsupportedInputError`; `set_verbosity` and `get_verbosity`. The
+walk-forward `backtest` and its `BacktestResult` are in
+`dfm_python.evaluation`.
 
 ## update and predict(data=)
 
@@ -173,6 +181,75 @@ filtered state. `update(data)` leaves the interpretation attributes and
 recomputes them, on all rows. To re-estimate a model from scratch, call `fit`
 on the whole panel.
 
+## Run control
+
+Every model trains in iterations: DFM's E-steps (those of the SQUAREM
+cycles included), DDFM's MCMC iterations, iVDFM's and AFM's epochs. Besides
+the model's own criterion (`tol`, and `patience` for iVDFM and AFM) and the
+iteration budget (`max_iter`, `max_epochs` for iVDFM and AFM), two controls
+end training:
+
+- `max_time`, a hyperparameter of every model (seconds, None by default):
+  training stops after the first iteration that ends past the budget,
+  keeping what a `max_iter` stop there would keep. `converged_` is False and
+  `fit` warns with `sklearn.exceptions.ConvergenceWarning`. For DFM the
+  budget includes the initialization.
+- `fit(data, callback=f)`: `f(info)` runs after every iteration, and a true
+  return value stops training there, without a warning. An exception raised
+  by `f` propagates and leaves the model unfitted.
+
+`stop_reason_` (also in `describe()` and saved runs) says which ended it.
+When the model's own stop and a callback or time stop fall on the same
+iteration, the model's own is reported.
+
+| `stop_reason_` | Meaning |
+|---|---|
+| `"converged"` | the objective changed by less than `tol`; AFM with `factor_model="pca", trading="ou"`, which has nothing to train |
+| `"early_stopping"` | iVDFM and AFM: `patience` epochs without improvement. DFM: a numerical guard (a log-likelihood decrease, a failed E-step or M-step, non-finite values) stopped EM, which keeps the accepted parameters with the best log-likelihood |
+| `"max_iter"` | the iteration budget ran out |
+| `"max_time"` | the time budget ran out |
+| `"callback"` | the callback returned a true value |
+
+The `info` dict:
+
+| Key | Contents |
+|---|---|
+| `model` | the class name |
+| `iteration` | the iterations run so far, from 1 |
+| `max_iter` | the iteration budget |
+| `elapsed` | seconds since training started |
+| `objective`, `objective_name` | DFM: `"loglik"`, the log-likelihood of that E-step's parameters (NaN at a SQUAREM extrapolation whose E-step or M-step failed). DDFM: `"loss"`, the mean squared error that `tol` watches. iVDFM: `"elbo"`, the epoch's mean negative ELBO. AFM: `"loss"`, the epoch's `-(Sharpe + lambda_var * EV)` |
+| `state` | DFM only: the engine's `DFMModelState` of the parameters EM would end on there (series in the internal order `[clock \| slower]`) |
+
+Apart from DFM's `state`, `info` is JSON-serializable, so a callback can log
+it as is.
+
+```python
+import warnings
+
+import numpy as np
+import pandas as pd
+from sklearn.exceptions import ConvergenceWarning
+from dfm_python import DFM, PanelData
+
+idx = pd.date_range("2015-01-31", periods=96, freq="ME", name="date")
+df = pd.DataFrame(np.random.default_rng(0).standard_normal((96, 3)), index=idx, columns=["a", "b", "c"])
+
+trace = []
+def log_and_stop(info):
+    trace.append((info["iteration"], info["objective"]))   # (E-step, log-likelihood)
+    return info["iteration"] >= 5                          # stop after 5 E-steps
+
+model = DFM(n_factors=1).fit(PanelData(y=df), callback=log_and_stop)
+assert model.stop_reason_ == "callback" and model.n_iter_ == 5 and not model.converged_
+
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter("always")
+    rushed = DFM(n_factors=1, max_time=1e-9).fit(PanelData(y=df))   # stops after the first E-step
+assert rushed.stop_reason_ == "max_time"
+assert any(issubclass(w.category, ConvergenceWarning) for w in caught)
+```
+
 ## Interpretation
 
 DFM, DDFM and iVDFM (tag `capability:interpret`) describe the training data
@@ -187,11 +264,12 @@ through their factors. `fit` and `load` set:
 | `explained_variance_` | per series, `1 - var(x - common) / var(x)` over the observed training entries of the scaled data `x`, where `common` is the model's common component; NaN for a series with fewer than two observed entries or no variance, negative when `common` fits worse than a constant |
 
 `loadings_kind_` says what `loadings_` holds. `"exact"`: the series are
-linear in the factors (DFM, DDFM with `decoder_type="linear"`) and
-`loadings_` are the model's coefficients. `"mean_jacobian"`: the decoder is
-nonlinear (DDFM with `decoder_type="mlp"`, every iVDFM) and `loadings_` is its
-Jacobian with respect to the factors averaged over the rows of `factors_`, a
-local linear summary rather than coefficients.
+linear in the factors (DFM, DDFM with `decoder_type="linear"`, iVDFM with
+`decoder_type="linear"` and `n_regimes=1`) and `loadings_` are the model's
+coefficients. `"mean_jacobian"`: the decoder is nonlinear (DDFM with
+`decoder_type="mlp"`, the other iVDFMs) and `loadings_` is its Jacobian with
+respect to the factors averaged over the rows of `factors_`, a local linear
+summary rather than coefficients.
 
 `decompose(by=...)` splits the training data, in data units, on the rows of
 `factors_`. The parts add up to the data.
@@ -199,7 +277,7 @@ local linear summary rather than coefficients.
 | `by` | Columns | Models |
 |------|---------|--------|
 | `"component"` (default) | `(component, series)`: `"common"`, the factors through the loadings or the decoder, inverse-scaled (so it includes the series mean), and `"idiosyncratic"`, the data minus `"common"` (NaN where the data is missing) | DFM, DDFM, iVDFM |
-| `"factor"` | `(part, series)`: one part per name in `factor_names_`, `"mean"` (the scaler's offset; for DDFM plus the decoder bias in data units) and `"idiosyncratic"` | DFM, DDFM with `decoder_type="linear"`; scaler None, `"standard"`, `"robust"`, `"minmax"` or `"maxabs"` |
+| `"factor"` | `(part, series)`: one part per name in `factor_names_`, `"mean"` (the scaler's offset; for DDFM and iVDFM plus the decoder bias in data units) and `"idiosyncratic"` | `loadings_kind_` `"exact"`; scaler None, `"standard"`, `"robust"`, `"minmax"` or `"maxabs"` |
 
 `by="factor"` with another model, decoder or scaler raises
 `UnsupportedInputError`; another `by` raises `ConfigurationError`.
@@ -232,21 +310,34 @@ common = model.decompose()["common"]          # DataFrame 96 x 3, data units
 
 ## Prediction intervals
 
-DFM (tag `capability:pred_int`) gives `predict_interval(h, coverage=0.9,
-data=None)`: central Gaussian intervals of the `h` steps after the last
-conditioning date, in data units. The result is indexed like `predict(h)`,
-with MultiIndex columns `(series, bound)`, `bound` `"lower"` or `"upper"`,
-and `attrs["coverage"]`. The bounds are the numbers `predict(h)` returns
-minus and plus `z * sd`, with `z` the standard normal quantile of
-`(1 + coverage) / 2`. The standard deviations come from the Kalman forecast
-moments: the filtered state covariance `P` at the last conditioning row,
-propagated by `P <- A P A' + Q` for each step, gives the scaled series
-variance `diag(C P C' + R)`, which the scaler's slope converts to data units.
-This needs an affine scaler (None, `"standard"`, `"robust"`, `"minmax"` or
-`"maxabs"`); any other raises `UnsupportedInputError`. The fitted parameters
-are taken as known, so the intervals leave out estimation uncertainty.
-`data=` conditions on new rows on a copy, as in `predict(h, data=)`. The
-other models raise `UnsupportedInputError`.
+DFM, DDFM and iVDFM (tag `capability:pred_int`) give
+`predict_interval(h, coverage=0.9, data=None)`: intervals of the `h` steps
+after the last conditioning date, in data units, each holding `coverage` of
+the forecast distribution. The result is indexed like `predict(h)`, with
+MultiIndex columns `(series, bound)`, `bound` `"lower"` or `"upper"`, and
+`attrs["coverage"]`. `data=` conditions on new rows on a copy, as in
+`predict(h, data=)`. Every model takes its fitted parameters as known, so
+the intervals leave out estimation uncertainty. AFM raises
+`UnsupportedInputError`.
+
+| Model | Distribution | Centre |
+|-------|--------------|--------|
+| DFM | Gaussian, from the Kalman forecast moments: the filtered state covariance `P` at the last conditioning row, propagated by `P <- A P A' + Q`, gives the scaled series variance `diag(C P C' + R)` | `predict(h)` |
+| DDFM, linear decoder | Gaussian: the factor covariance starts from the covariance of the Monte Carlo factor draws at the last conditioning row and propagates through the AR(1) transition; the decoder weight maps it to the series, plus per series the mean square of the training residual around the decoder | `predict(h)` |
+| DDFM, MLP decoder | the quantiles of 2000 simulated paths: factors drawn from the same Gaussian state space, decoded, plus the residual noise; seeded with `random_state` | not `predict(h)` |
+| iVDFM | the quantiles of 1000 sampled forecast paths: innovations from the prior given the future context (`futr_exog=`, as in `predict`), decoded, plus the decoder noise `decoder_var`; drawn from the torch RNG seeded with `random_state_`, which is restored afterwards | not `predict(h)` |
+
+The Gaussian bounds are `predict(h)` minus and plus `z * sd`, with `z` the
+standard normal quantile of `(1 + coverage) / 2`, and need an affine scaler
+(None, `"standard"`, `"robust"`, `"minmax"` or `"maxabs"`): DFM raises
+`UnsupportedInputError` for any other, and DDFM inverse-transforms the
+scaled bounds, which assumes the scaler maps each series separately and
+monotonically (`"quantile"` does). The simulated bounds are the empirical
+`(1 - coverage) / 2` and `(1 + coverage) / 2` quantiles of the paths after
+the inverse transform, so they take any scaler; their centre is the
+distribution's, which differs from `predict`'s forecast where the decoder is
+nonlinear or, for iVDFM, the prior is not centred at zero. With
+`random_state=None` the simulated bounds change from call to call.
 
 ```python
 import numpy as np
@@ -255,13 +346,101 @@ from dfm_python import DFM, PanelData
 
 idx = pd.date_range("2015-01-31", periods=96, freq="ME", name="date")
 df = pd.DataFrame(np.random.default_rng(0).standard_normal((96, 3)), index=idx, columns=["a", "b", "c"])
-model = DFM(n_factors=1, max_iter=50, scaler="standard").fit(PanelData(y=df.iloc[:84]))
+model = DFM(n_factors=1, max_iter=50).fit(PanelData(y=df.iloc[:84]))
 
 bands = model.predict_interval(6, coverage=0.9)   # DataFrame 6 x 6: (a, lower), (a, upper), ...
 bands["a"]                                        # columns lower, upper
 mid = (bands.xs("lower", axis=1, level="bound") + bands.xs("upper", axis=1, level="bound")) / 2
 np.testing.assert_allclose(mid.to_numpy(), model.predict(6).to_numpy())   # centred on predict
 later = model.predict_interval(6, data=PanelData(y=df.iloc[84:]))        # after 12 new rows; model unchanged
+```
+
+## Backtesting
+
+`dfm_python.evaluation.backtest(estimator, data, *, start, h, step=1,
+refit=False, coverage=None)` evaluates a forecasting model walk-forward. The
+origins are the rows `start`, `start + step`, ... of `data` that at least
+one row follows (`start` is a row position, negative from the end, or a
+time stamp). At each origin the model sees the rows up to and including it,
+and nothing later:
+
+- at the first origin, and wherever `refit` says so, a fresh clone of
+  `estimator` is fitted on them (`refit=True`: every origin; `refit=k`:
+  every k-th origin);
+- elsewhere the current model's `update` conditions on them with its fitted
+  parameters (the rows since the previous origin for DFM and DDFM, every
+  row up to the origin for iVDFM).
+
+Then `predict(h)`, and with `coverage` `predict_interval(h, coverage)`,
+forecast the `h` rows after the origin. An iVDFM fitted with exog gets the
+exog rows after the origin as `futr_exog` when `data` holds them, which
+treats exog as known in advance. `estimator` itself is never fitted.
+
+The `BacktestResult` holds `forecasts`, a long frame with one row per
+origin, horizon and series (`origin`, `time`, `horizon`, `series`,
+`forecast`, `actual`, and `lower`, `upper` with `coverage`; the actual is NaN
+where the data is missing or ends), `origins`, `fit_seconds` (per origin)
+and `coverage`. `metrics(by=)` gives RMSE, MAE, bias (mean of forecast minus
+actual), `n` and, with intervals, the empirical coverage, over the rows with
+an actual: by `"horizon"` (the default), `"series"`, both as a tuple, or
+`None` for one row.
+
+```python
+import numpy as np
+import pandas as pd
+from dfm_python import DFM, PanelData
+from dfm_python.evaluation import backtest
+
+rng = np.random.default_rng(6)
+f = np.zeros(120)
+for t in range(1, 120):
+    f[t] = 0.7 * f[t - 1] + rng.standard_normal()
+idx = pd.date_range("2015-01-31", periods=120, freq="ME", name="date")
+df = pd.DataFrame(np.outer(f, [1.0, 0.8, -0.6]) + 0.5 * rng.standard_normal((120, 3)),
+                  index=idx, columns=["a", "b", "c"])
+
+result = backtest(DFM(n_factors=1), PanelData(y=df), start="2022-12-31", h=3,
+                  step=3, refit=4, coverage=0.8)       # refit at every 4th origin, update between
+result.origins                       # 2022-12-31, 2023-03-31, ..., 2024-09-30
+result.forecasts.head(3)             # origin, time, horizon, series, forecast, actual, lower, upper
+result.metrics()                     # RMSE, MAE, bias, n, coverage per horizon
+result.metrics(by=("horizon", "series"))
+```
+
+## describe and JSON Schema
+
+`model.describe()` returns a small JSON-serializable summary of a model,
+fitted or not: `model` (class name), `version`, `params` (`get_params()`,
+with tuples as lists and a transformer as its class name), `tags` and
+`fitted`. A fitted model adds `n_features_in`, `feature_names`, `index`
+(`start`, `end`, `length`, `freq`), `n_iter`, `converged`, `stop_reason`,
+`factor_names` and `explained_variance` where it has them, DFM its `loglik`
+and AFM its `sharpe`. Non-finite floats become None.
+
+`XConfig.json_schema()` returns a JSON Schema (draft 2020-12) of the
+model's hyperparameters, built from the constructor: one property per
+parameter with its `type`, `default`, the accepted values as `enum` where
+the choices are fixed, and the first sentence of its docstring entry as
+`description`. Unknown keys are invalid (`additionalProperties: false`).
+The schema covers the values JSON can hold: a `scaler` given as a
+transformer object is valid for the constructor but not for the schema.
+`cfg.to_plain_dict()` is the instance to validate.
+
+```python
+import json
+
+import numpy as np
+import pandas as pd
+from dfm_python import DFM, DFMConfig, PanelData
+
+schema = DFMConfig.json_schema()
+schema["properties"]["tol"]          # {"type": "number", "default": 1e-06, "description": "EM convergence ..."}
+schema["properties"]["clock"]["enum"]                 # ["a", "d", "m", "q", "sa", "w"]
+
+df = pd.DataFrame(np.random.default_rng(7).standard_normal((60, 3)), columns=["a", "b", "c"])
+summary = DFM(n_factors=1, max_iter=20).fit(PanelData(y=df)).describe()
+json.dumps(summary)                  # no default= needed
+summary["stop_reason"], summary["index"]              # e.g. "max_iter", {"start": 0, "end": 59, ...}
 ```
 
 ## polars input and output
@@ -473,10 +652,11 @@ The same data and hyperparameters give the same numbers. Seeds:
 | AFM   | `random_state` | None    | `torch.manual_seed` before the network is built |
 
 `random_state` is recorded in `config.json`, and saving a run with
-`random_state=None` warns. Results are bitwise reproducible on CPU with one
+`random_state=None` warns. The simulated prediction intervals (DDFM with the
+MLP decoder, iVDFM) are seeded with it too. Results are bitwise reproducible on CPU with one
 BLAS thread, one torch thread and deterministic algorithms, on the same
 machine and library versions; elsewhere expect agreement to rounding. GPU
-runs are not bitwise reproducible.
+runs are not bitwise reproducible. The example needs the `deep` extra.
 
 ```python
 import numpy as np
@@ -529,11 +709,14 @@ the value to pass.
 |---|---|---|
 | `DFMError` | `Exception` | root of the library's errors |
 | `ConfigurationError`, `ConfigValidationError` | `DFMError`, `ValueError` | invalid hyperparameters; unknown config keys; flat YAML; single-file checkpoints; an invalid `by`, `coverage`, `output` or `layout` |
-| `DataValidationError` | `DFMError`, `ValueError` | malformed `PanelData`, misaligned index, overlapping `new_rows` data, a polars frame with several Date/Datetime columns |
+| `DataValidationError` | `DFMError`, `ValueError` | malformed `PanelData`, misaligned index, overlapping `new_rows` data, a polars frame with several Date/Datetime columns; infinite values in `fit`, `predict(data=)` or `update` data (iVDFM fills them like missing values); a target series with no observed value, a single one, or the same value at every observation up to rounding (`fit`, naming each series) |
 | `UnsupportedInputError` | `DataValidationError` | a slot, frequency layout, `refit` or method that the tags exclude; `decompose(by="factor")` or `predict_interval` with a decoder or scaler that does not allow it |
 | `NotFittedError` | `DFMError`, `sklearn.exceptions.NotFittedError` | `predict`, `allocate`, `update`, `save` or `result_` before `fit` |
 | `ModelNotTrainedError` | alias of `NotFittedError` | raised inside the engines |
 | `NumericalError`, `NumericalStabilityError` | `DFMError`, `ArithmeticError` | numerical failures inside the engines |
+
+A missing optional dependency raises `ImportError` naming the extra to
+install, for example `pip install "dfm-python[deep]"` for the torch models.
 
 ## Upgrading from 0.8
 
@@ -560,6 +743,23 @@ numbers:
   gives the same model. Before, `[2, 4, 6, 4, 2]` gave loadings proportional
   to `[1, 4, 6, 4, 2]`. Kernels that start with 1, such as `[1, 2, 3, 2, 1]`
   and `[1, 2, 1]`, are unchanged.
+- DFM's default `tol` is 1e-6 (was 1e-5): EM runs longer and ends at a
+  higher log-likelihood. DFM, DDFM and iVDFM default to `scaler="standard"`
+  (was None). Pass `tol=1e-5, scaler=None` for the 0.8 defaults.
+- DFM `fit(data, checkpoint_callback=...)` is removed: use
+  `fit(data, callback=...)` (see [Run control](#run-control)).
+- DDFM, iVDFM and AFM need the `deep` extra, `pip install
+  "dfm-python[deep]"`; a plain `pip install dfm-python` no longer installs
+  torch. `dfm_python.config.Tensor`, `Loss` and `Optimizer` are removed.
+- `fit` raises `DataValidationError` for a target series with no observed
+  value, a single one, or a constant one, and `fit`, `predict(data=)` and
+  `update` for infinite values.
+- iVDFM forecasts change: with `factor_order=1` (the default) step h was one
+  transition too far ahead; with `factor_order` > 1 the companion matrix
+  gave the factors no autoregressive dynamics and the forecast started from
+  zero lags. DDFM forecasts change: they now run the trained decoder,
+  including its bias (and the MLP for `decoder_type="mlp"`), instead of the
+  first columns of its output weight.
 
 Numbers: the DFM Kalman filter and smoother use the model's structure from
 56 states up, and the M-step reads only the covariance blocks it needs; with
@@ -567,7 +767,9 @@ Numbers: the DFM Kalman filter and smoother use the model's structure from
 0.8.3 up to rounding.
 
 Saved runs: runs saved by 0.8.x load. A DFM run loads with
-`em_acceleration=None` (it was fitted by plain EM). An iVDFM run has no
+`em_acceleration=None` (it was fitted by plain EM). An iVDFM run with
+`factor_order` > 1 saved before this release loads with a warning: it was
+trained with the defective companion matrix, so refit it. An iVDFM run has no
 `explained_variance_` and cannot `decompose`; one saved before 0.8.3 holds
 the average over its training windows in `factors_`. Refit to get the new
 attributes.

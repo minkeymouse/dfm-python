@@ -58,6 +58,7 @@ SLICES = ("monthly", "mixed")
 HORIZON = 12
 SM_MAXITER = 200  # statsmodels' EM iterations in its own fit; its default 500 doubles the run time
 EM_ITERATIONS = 10  # plain EM iterations compared in check 2
+OWN_TOL = 1e-5  # dfm-python's tol in its own fit; the default 1e-6 takes 106 and 710 E-steps (README)
 # The first rows of the common components depend on the EM-estimated initial
 # state, which the data hardly pin down: the factor in the first row, and for
 # a quarterly series the pre-sample factor lags in its first len(TENT) - 1
@@ -157,9 +158,9 @@ def _forecast_sd(model: DFM) -> np.ndarray:
 
 @pytest.fixture(scope="module", params=SLICES)
 def own_fits(request):
-    """Each library's own fit: dfm-python's defaults (SQUAREM, tol=1e-5), statsmodels' EM for SM_MAXITER iterations."""
+    """Each library's own fit: dfm-python's SQUAREM at OWN_TOL, statsmodels' EM for SM_MAXITER iterations."""
     z, n_quarterly = _standardized_panel(request.param)
-    model = _dfm(n_quarterly).fit(_panel_data(z, n_quarterly))
+    model = _dfm(n_quarterly, tol=OWN_TOL).fit(_panel_data(z, n_quarterly))
     assert list(model.internal_feature_names_) == list(z.columns)  # result_ rows are in the data's order
     res = _statsmodels_fit(_statsmodels_model(z, n_quarterly), maxiter=SM_MAXITER)
     return SimpleNamespace(z=z, n_quarterly=n_quarterly, model=model, res=res)

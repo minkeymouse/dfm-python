@@ -6,7 +6,7 @@ import numpy as np
 
 # Convergence
 DEFAULT_CONVERGENCE_THRESHOLD = 1e-4  # EM (general)
-DEFAULT_EM_THRESHOLD = 1e-5  # EM (DFM)
+DEFAULT_EM_THRESHOLD = 1e-6  # EM (DFM)
 DEFAULT_TOLERANCE = 0.0005  # MCMC/denoising
 DEFAULT_MIN_DELTA = 1e-6  # minimum change counted as an improvement
 

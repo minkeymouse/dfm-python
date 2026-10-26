@@ -2,14 +2,19 @@
 
 ## Unreleased
 
-Speed and API release. DFM fits are faster and use SQUAREM by default, the
-factor models share an interpretation API, DFM gives prediction intervals,
-and every model reads and writes polars frames. The breaking changes are
-listed under "Upgrading from 0.8" (also in docs/guide.md).
+Speed, API and production release. DFM fits are faster and use SQUAREM by
+default, the factor models share an interpretation API, DFM, DDFM and iVDFM
+give prediction intervals, every model reads and writes polars frames,
+training runs take a time budget and a callback, `dfm_python.evaluation`
+backtests a model walk-forward, and torch is an optional extra, so DFM
+installs and imports without it. Forecast bugs in iVDFM and DDFM are fixed.
+The breaking changes are listed under "Upgrading from 0.8" (also in
+docs/guide.md).
 
 ### DFM speed
 
-Measured on one 4-core machine, default settings, against 0.8.3:
+Measured on one 4-core machine against 0.8.3, default settings except
+`tol=1e-5` (the 0.8 default; see "Production use" for the new one):
 
 | Fit | 0.8.3 | now |
 |-----|-------|-----|
@@ -51,14 +56,77 @@ Measured on one 4-core machine, default settings, against 0.8.3:
   scaled training data explained by the common component).
 - `decompose(by="component")`: common and idiosyncratic parts in data units,
   adding up to the data; `by="factor"` splits the common part by factor for
-  models linear in the factors (DFM, DDFM with the linear decoder).
+  models linear in the factors (DFM, DDFM with the linear decoder, iVDFM
+  with the linear decoder and one regime).
+- iVDFM with `decoder_type="linear"` and `n_regimes=1`: `loadings_` is the
+  decoder weight times the mixing matrix, exactly, and `loadings_kind_` is
+  `"exact"`.
 
 ### Prediction intervals
 
-- `DFM.predict_interval(h, coverage=0.9, data=None)` (tag
-  `capability:pred_int`): Gaussian intervals from the Kalman forecast
-  moments, centred on `predict`, in data units (scalers that are affine per
-  series). They do not include parameter uncertainty.
+`predict_interval(h, coverage=0.9, data=None)` (tag `capability:pred_int`)
+returns the bounds in data units, columns `(series, "lower" | "upper")`.
+They take the fitted parameters as known, so they leave out estimation
+uncertainty.
+
+- DFM: Gaussian intervals from the Kalman forecast moments, centred on
+  `predict` (scalers that are affine per series).
+- DDFM: the factor state starts from the covariance of the Monte Carlo
+  factor draws at the last conditioning row, propagates through the AR(1)
+  transition, and adds per target the residual variance of the training
+  data around the decoder. Linear decoder: Gaussian, centred on `predict`.
+  MLP decoder: the quantiles of 2000 simulated paths, seeded with
+  `random_state`.
+- iVDFM (`futr_exog=` as in `predict`): the quantiles of 1000 forecast paths
+  that sample the prior's innovations given the future context and add the
+  decoder noise; drawn from the torch RNG seeded with `random_state_`, which
+  is restored afterwards.
+
+### Production use
+
+- Run control on every model: `max_time` (seconds, None by default) stops
+  training at the first E-step, iteration or epoch boundary past the budget,
+  keeping what a `max_iter` stop there keeps, with `converged_` False and a
+  `ConvergenceWarning`. `fit(data, callback=f)` calls `f(info)` after every
+  DFM E-step, DDFM MCMC iteration and iVDFM or AFM epoch, with `model`,
+  `iteration`, `max_iter`, `elapsed`, `objective` and `objective_name` (DFM
+  adds the engine `state`); a true return value stops training. The new
+  `stop_reason_` says why training stopped: `"converged"`,
+  `"early_stopping"`, `"max_iter"`, `"max_time"` or `"callback"`.
+- `dfm_python.evaluation.backtest(estimator, data, *, start, h, step=1,
+  refit=False, coverage=None)`: walk-forward evaluation. It fits a clone at
+  the first origin, then updates it (or refits it, every origin or every
+  k-th), forecasts `h` steps at each origin and returns a `BacktestResult`
+  with the long frame of forecasts and actuals (and interval bounds), the
+  seconds spent per origin, and `metrics(by=)`: RMSE, MAE, bias, n and
+  coverage by horizon, series, both or overall.
+- `describe()` on every model: a JSON-serializable summary (model, version,
+  params, tags, and when fitted the data, training index, `n_iter`,
+  `converged`, `stop_reason`, factor names, explained variance, DFM's
+  `loglik`, AFM's `sharpe`). `DFMConfig.json_schema()` (and the other
+  config classes): a JSON Schema (draft 2020-12) of the hyperparameters with
+  types, defaults, the accepted choices and a description each.
+- torch is optional. The core dependencies are numpy, pandas, scipy,
+  scikit-learn and threadpoolctl; DDFM, iVDFM and AFM need the `deep` extra
+  (`pip install "dfm-python[deep]"`, torch and einops). Without it, DFM
+  works in full, the torch models can be built, cloned and configured, and
+  their `fit` and `load` raise `ImportError` naming the extra.
+  `import dfm_python` no longer imports torch (about 1.5 s instead of 4.4 s).
+- Input checks before training: `fit` rejects a target series with no
+  observed value, a single one, or the same value at every observation (up
+  to rounding), naming each series, and `fit`, `predict(data=)` and `update`
+  reject infinite values in `y`, `exog` and `series_exog`
+  (`DataValidationError`). iVDFM still fills infinite values like missing
+  ones.
+- DFM, DDFM and iVDFM default to `scaler="standard"`.
+- DFM's default `tol` is 1e-6 (was 1e-5). EM climbs slowly near the
+  maximum, and 1e-5 often stopped well below it: on the 14 monthly series of
+  `data/macro.csv` (310 months) the fit goes from 66 E-steps at
+  log-likelihood -5143.36 to 106 at -5113.55 (1e-7: -5110.47); with two of
+  them quarterly from 143 E-steps (18 s) at -4621.64 to 710 (91 s) at
+  -4588.02. Pass `tol=1e-5` or `max_time` to trade accuracy for time.
+- Exception handlers that could hide bugs are narrowed to the errors that
+  occur.
 
 ### polars
 
@@ -79,8 +147,28 @@ Measured on one 4-core machine, default settings, against 0.8.3:
   is 1 (`[2, 4, 6, 4, 2]` gave loadings proportional to `[1, 4, 6, 4, 2]`).
   The lag loadings are now proportional to the whole kernel. Kernels with a
   first weight of 1, including the default, are unchanged.
+- iVDFM with `factor_order` p > 1: the companion matrix had the AR
+  coefficients in its last row instead of its first, so each factor block
+  was `[[0, 0], [a1, a2]]` for p = 2, and since the decoder reads each
+  block's first state the factors had no autoregressive dynamics. The
+  coefficients now fill the first row (the layout `[f_t, f_{t-1}, ...]` the
+  rest of the model uses), and the observation selector is fixed instead of
+  trained, as documented. Present since the first release of iVDFM.
+- iVDFM forecasts with p > 1 started from `[f_T, 0, ..., 0]`; they start
+  from the last p rows of the factor path.
+- iVDFM forecasts with p = 1 (the default) were one step ahead of their
+  stamps: step h applied h + 1 transitions to `f_T`. It applies h.
+- DDFM `predict` multiplied the factor forecast by the first `n_factors`
+  columns of the decoder's output weight: the decoder bias was left out
+  (an offset of minus the bias in scaled units), and with
+  `decoder_type="mlp"` the MLP was not evaluated. Forecasts and
+  `result_.x_sm` now run the trained decoder.
+- iVDFM student-t prior sampling drew a whole array per location entry; it
+  draws one value per entry.
 
 ### Upgrading from 0.8
+
+The DFM constructor is now `DFM(*, n_factors=None, blocks=None, clock="m", tent_weights=None, max_iter=5000, tol=1e-6, max_time=None, ar_clip=None, data_clip=None, regularization=None, damping_factor=None, em_acceleration="squarem", scaler="standard", verbose=0)`.
 
 - DFM `factors_` holds the current factors (columns `factor_names_`); the
   full state frame it held before is `states_`.
@@ -92,6 +180,22 @@ Measured on one 4-core machine, default settings, against 0.8.3:
   numbers agree with 0.8.3 to rounding (the DFM golden fixtures were
   recaptured and agree with 0.8.3's within 8e-13).
 - DFM fits with a tent kernel whose first weight is not 1 change.
+- DFM's default `tol` is 1e-6 and DFM, DDFM and iVDFM default to
+  `scaler="standard"`: code that left them out gets other numbers. Pass
+  `tol=1e-5, scaler=None` for the 0.8 defaults.
+- DFM `fit(data, checkpoint_callback=...)` is removed; use
+  `fit(data, callback=...)`, which every model takes.
+- DDFM, iVDFM and AFM need the `deep` extra: `pip install
+  "dfm-python[deep]"` (`all` includes it).
+- `dfm_python.config.Tensor`, `Loss` and `Optimizer` (unused aliases of
+  torch classes) are removed.
+- `fit` raises `DataValidationError` for a target series that is empty,
+  observed once or constant, and `fit`, `predict(data=)` and `update` for
+  infinite values.
+- iVDFM forecasts change (AR(1): one step earlier; AR(p): other dynamics),
+  and DDFM forecasts change (decoder bias; the MLP decoder). An iVDFM run
+  with `factor_order` > 1 saved before this release loads with a warning:
+  its companion matrix was the defective one, so refit it.
 
 ## 0.8.3
 

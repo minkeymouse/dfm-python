@@ -170,9 +170,12 @@ class DFM(BaseFactorModel):
         of ``generate_tent_weights`` to pass.
     max_iter : int, default 5000
         Maximum number of EM iterations (E-steps, each one EM map).
-    tol : float, default 1e-5
+    tol : float, default 1e-6
         EM convergence threshold on the relative change of the
-        log-likelihood between consecutive accepted parameters.
+        log-likelihood between consecutive accepted parameters. EM climbs
+        slowly near the maximum: on a monthly macro panel 1e-5 stopped about
+        30 log-likelihood units below it, 1e-6 within about 3. Raise it (or
+        set ``max_time``) to trade accuracy for speed.
     max_time : float, optional
         Training budget in seconds (initialization and EM). After the first
         E-step that ends past it, EM stops as ``max_iter`` E-steps would stop
@@ -328,7 +331,7 @@ class DFM(BaseFactorModel):
         clock: str = "m",
         tent_weights: Optional[Mapping] = None,
         max_iter: int = 5000,
-        tol: float = 1e-5,
+        tol: float = 1e-6,
         max_time: Optional[float] = None,
         ar_clip: Optional[Mapping] = None,
         data_clip: Optional[float] = None,

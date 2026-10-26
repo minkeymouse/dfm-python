@@ -4,6 +4,8 @@ One section per model: what it does, a full example, the main
 hyperparameters with their defaults, notes and the method reference. The
 complete parameter list of each model is in its docstring (`help(DFM)`). The
 shared API is in [guide.md](https://github.com/minkeymouse/dfm-python/blob/main/docs/guide.md).
+DFM needs only the core dependencies; DDFM, iVDFM and AFM need the `deep`
+extra (`pip install "dfm-python[deep]"`).
 
 ## DFM
 
@@ -35,7 +37,7 @@ more = PanelData(y=df.iloc[-3:], freq={"gdp": "q"})    # rows after those
 model = DFM(n_factors=1, clock="m", tent_weights={"q:m": [1, 2, 3, 2, 1]},
             max_iter=50, tol=1e-5, scaler="standard")   # blocks=None: one global block
 model.fit(data)                                         # initialization, then EM (SQUAREM)
-model.result_.loglik, model.n_iter_, model.converged_   # n_iter_: E-steps run
+model.result_.loglik, model.n_iter_, model.stop_reason_  # n_iter_: E-steps run; "converged" or "max_iter"
 model.factors_                                          # DataFrame 114 x 1 (factor_0); states_ is 114 x 13
 model.loadings_, model.explained_variance_              # 4 x 1 (scaled space); Series per series
 fc = model.predict(6)                                   # DataFrame 6 x 4, data units, your column order
@@ -55,18 +57,19 @@ model = DFM.load("runs/dfm")                            # no data needed
 | `blocks`         | None    | `{"name": {"n_factors": 2, "series": [...]}, ...}`; replaces `n_factors` (set one of the two); the block order is the factor order |
 | `clock`          | `"m"`   | frequency of the factors: `"d"`, `"w"`, `"m"`, `"q"`, `"sa"` or `"a"` |
 | `tent_weights`   | None    | tent kernel of the slower frequency, for example `{"q:m": [1, 2, 3, 2, 1]}` or `{"m:w": [1, 2, 1]}`; required with mixed frequencies |
-| `max_iter`, `tol` | 5000, 1e-5 | the most E-steps EM runs, and the convergence threshold on the relative change of the log-likelihood between accepted parameters |
+| `max_iter`, `tol` | 5000, 1e-6 | the most E-steps EM runs, and the convergence threshold on the relative change of the log-likelihood between accepted parameters |
+| `max_time`       | None    | training budget in seconds, initialization included (guide: run control) |
 | `em_acceleration` | `"squarem"` | `"squarem"` (EM accelerated by SQUAREM) or None (plain EM) |
-| `scaler`         | None    | `"standard"`, `"robust"`, `"minmax"`, `"maxabs"`, `"quantile"` or an unfitted transformer |
+| `scaler`         | `"standard"` | `"standard"`, `"robust"`, `"minmax"`, `"maxabs"`, `"quantile"`, an unfitted transformer, or None |
 | `ar_clip`, `data_clip`, `damping_factor` | None | opt-in stabilizers, off by default; `ar_clip` and `damping_factor` give up the monotone log-likelihood of EM |
 | `regularization` | None    | only sets the smallest loading norm that the final factor normalization rescales |
 
 Notes:
 
-- Scaling: `scaler=None` fits the data as given; the engine then rejects
-  series whose standard deviation is above 100 or below 1e-4. Pass
-  `scaler="standard"` (or another scaler) unless the data is already
-  standardized.
+- Scaling: the default `scaler="standard"` standardizes each series.
+  `scaler=None` fits the data as given; the engine then rejects series whose
+  standard deviation is above 100 or below 1e-4, so use it only for data
+  that is already standardized.
 - Column order: the engine orders the series `[clock | slower]` internally,
   a stable partition of your order (`internal_feature_names_`). Forecasts,
   intervals, `decompose`, `loadings_`, `explained_variance_` and `freq_`
@@ -82,10 +85,19 @@ Notes:
   at the returned parameters. The log-likelihood of the accepted parameters
   (every iterate of plain EM) does not decrease; EM stops when its relative
   change between accepted parameters is below `tol` (`converged_=True`) or
-  after `max_iter` E-steps (`converged_=False`). If, after the first E-step,
-  the log-likelihood falls or a parameter or the filter becomes non-finite,
-  EM stops early and returns the best accepted parameters, with
-  `converged_=False` (in the first E-step it raises).
+  after `max_iter` E-steps, `max_time` seconds or a stop from the `fit`
+  callback (`converged_=False`). If, after the first E-step, the
+  log-likelihood falls or a parameter or the filter becomes non-finite, EM
+  stops early and returns the best accepted parameters, with
+  `converged_=False` and `stop_reason_="early_stopping"` (in the first
+  E-step it raises).
+- Stopping: EM climbs slowly near the maximum, so the relative change
+  falls below a loose `tol` well before the log-likelihood stops rising. On
+  the 14 monthly series of `data/macro.csv` (310 months) `tol=1e-5` stops
+  after 66 E-steps at -5143.36, the default `1e-6` after 106 at -5113.55,
+  and `1e-7` after 124 at -5110.47; with two of the series quarterly, after
+  143 E-steps (18 s), 710 (91 s) and 986. Raise `tol` or set `max_time` to
+  trade accuracy for time.
 - Acceleration: `em_acceleration="squarem"` runs the SqS3 scheme of Varadhan
   and Roland (2008) in cycles of three E-steps: from an accepted point, two
   EM maps, a quadratic extrapolation along them (the step length is clipped
@@ -95,8 +107,8 @@ Notes:
   otherwise EM keeps the second EM map's output. `n_iter_` counts every
   E-step and `max_iter` bounds them; `ar_clip` and `damping_factor` apply to
   every EM map. At the same `tol`, SQUAREM usually stops in fewer E-steps at
-  a log-likelihood at least as high as plain EM's (the README quick start:
-  about 110 E-steps against 222). `em_acceleration=None` runs plain EM.
+  a log-likelihood at least as high as plain EM's (the README quick start
+  at `tol=1e-5`: about 110 E-steps against 222). `em_acceleration=None` runs plain EM.
 - Stationarity: the transition matrix `A` is not capped. On non-stationary
   inputs (trending levels, unit roots) the maximum-likelihood `A` can be
   explosive, and long-horizon forecasts then grow geometrically. Difference
@@ -175,9 +187,9 @@ The deep dynamic factor model encodes each time step with a nonlinear
 encoder into `n_factors` factors and reconstructs the targets with a linear
 (or MLP) decoder. The autoencoder is pre-trained, then trained with MCMC
 denoising (`n_mc_samples` corrupted copies of the targets per iteration, at
-most `max_iter` iterations). `fit` then builds a linear state space on the
-factors, an AR(1) transition and the decoder's last linear layer, which the
-forecasts use. The `exog` columns are the encoder's covariates: encoded with
+most `max_iter` iterations). `fit` then fits an AR(1) transition to the
+factors; forecasts roll the factors forward with it and decode them with the
+trained decoder. The `exog` columns are the encoder's covariates: encoded with
 the targets but not reconstructed or forecast. Missing values are
 interpolated.
 
@@ -203,6 +215,7 @@ model.explained_variance_                   # Series s0, s1, s2
 parts = model.decompose(by="factor")        # factor_0, factor_1, mean, idiosyncratic: sum = data
 fc = model.predict(6)                       # DataFrame 6 x 3 (s0, s1, s2), data units
 zf = model.predict_factors(6)               # DataFrame 6 x 2
+bands = model.predict_interval(6, coverage=0.9)   # columns (series, lower | upper), Gaussian, data units
 
 new = PanelData.from_wide(raw.iloc[120:], time_col="date", exog_cols=["oil", "fx"])  # the 12 new rows
 fc_new = model.predict(6, data=new)         # conditions on the new rows on a copy
@@ -224,7 +237,8 @@ model = DDFM.load("runs/ddfm", device="cpu")
 | `window_size`     | 100         | time steps per training batch |
 | `max_iter`, `tol` | 200, 5e-4   | MCMC iterations and the stopping threshold on the relative change of the reconstruction MSE |
 | `interpolation_method`, `interpolation_limit`, `interpolation_limit_direction` | `"linear"`, 10, `"both"` | how missing values are filled |
-| `scaler`          | None        | scaler of the targets; the covariates get a fresh instance of its class |
+| `max_time`        | None        | training budget in seconds (guide: run control) |
+| `scaler`          | `"standard"` | scaler of the targets; the covariates get a fresh instance of its class |
 | `random_state`    | 3           | seed; None does not seed |
 | `device`          | `"auto"`    | CUDA if available, else CPU |
 
@@ -237,7 +251,13 @@ Notes:
   the conditioning rows, and gaps the interpolation leaves carry the last
   value forward. Only the new rows' factors are appended.
 - `update(data, refit=True)` raises `UnsupportedInputError`.
-- `result_.C` is N x r (series by factors), as in DFM.
+- `result_.C` is N x r (series by factors), as in DFM: the weight of the
+  decoder's last linear layer (for the linear decoder, its only layer).
+- Forecasts: `predict_factors(h)` rolls the last factor row forward with
+  `result_.A`; `predict(h)` decodes those factors with the trained decoder
+  (its bias included, and the whole MLP for `decoder_type="mlp"`) and
+  inverse-scales them. `result_.x_sm` is the decoder's output on
+  `factors_`.
 - `factors_` is `result_.Z`, the MC-averaged encoder factors on `index_`,
   columns `factor_names_` (`factor_0` ... `factor_{r-1}`).
 - `loadings_` (targets x factors, scaled space; the exog columns are not
@@ -254,7 +274,14 @@ Notes:
   is `s_i H_ij f_jt` (`H` is `loadings_`) and `"mean"` is
   `offset_i + s_i b_i` (`b` the decoder bias). The MLP decoder or another
   scaler raises `UnsupportedInputError`.
-- No `predict_interval` (tag `capability:pred_int` is False).
+- `predict_interval(h, coverage, data)`: the factor state starts from the
+  covariance of the `n_mc_samples` factor draws at the last conditioning row
+  (zero at a row appended by `update` or `data`) and propagates through
+  `result_.A` and `result_.Q`; each target adds the mean square of its
+  training residual around the decoder. With the linear decoder the
+  intervals are Gaussian and centred on `predict(h)`; with the MLP decoder
+  they hold the quantiles of 2000 simulated paths, seeded with
+  `random_state` (guide: prediction intervals).
 
 Tutorials: `tutorial/tutorial_{macro,finance,exchange}_ddfm.py`.
 
@@ -293,6 +320,7 @@ common = model.decompose()["common"]        # DataFrame 144 x 3: the decoded pat
 future = raw.set_index("date")[["policy_rate"]]                # future values of the exog
 fc = model.predict(6, futr_exog=future.iloc[144:150])          # DataFrame 6 x 3, data units
 zf = model.predict_factors(6, futr_exog=future.iloc[144:150])  # DataFrame 6 x 2
+bands = model.predict_interval(6, coverage=0.9, futr_exog=future.iloc[144:150])  # 1000 sampled paths
 
 new = PanelData.from_wide(raw.iloc[96:150], time_col="date", exog_cols=["policy_rate"])
 fc_new = model.predict(6, new, futr_exog=future.iloc[150:156])  # encodes new on a copy
@@ -315,7 +343,8 @@ model = iVDFM.load("runs/ivdfm", device="cpu")
 | `beta_kl`                 | 1.0           | weight of the KL term in the ELBO |
 | `learning_rate`, `batch_size`, `max_epochs` | 1e-3, 32, 100 | training |
 | `tol`, `patience`         | 5e-4, 20      | stopping on the ELBO; early stopping restores the best epoch |
-| `scaler`                  | None          | scaler of the targets (not of exog) |
+| `max_time`                | None          | training budget in seconds (guide: run control) |
+| `scaler`                  | `"standard"`  | scaler of the targets (not of exog) |
 | `random_state`, `device`  | 3, `"auto"`   | seed and device |
 
 The network widths and depths (`encoder_hidden_dim`, `decoder_hidden_dim`,
@@ -329,6 +358,11 @@ Notes:
 - The AR coefficients are initialized by OLS on the PCA factors of the last
   training window; with `factor_order > 1` the factors beyond those keep the
   default random initialization.
+- Dynamics: each factor's state is `[f_t, f_{t-1}, ..., f_{t-p+1}]` with
+  `p = factor_order`, and its companion matrix has the AR coefficients in
+  its first row; the decoder reads the first entry of each block through a
+  fixed selector. Forecasts start from the last `p` rows of the factor
+  path and apply one transition per step.
 - Without `futr_exog`, a model fitted with exog warns and fills the future
   context with time features. A `futr_exog` DataFrame is matched by column
   name and its index must be the forecast dates (a default `RangeIndex` or an
@@ -341,8 +375,11 @@ Notes:
   every training window on a `(window, time)` MultiIndex in chronological
   order, so a date covered by several windows appears once per window.
   `update` changes neither.
-- `loadings_kind_` is `"mean_jacobian"` for every `decoder_type`: `loadings_`
-  (targets x factors, scaled space) is the Jacobian of the decoded path
+- `loadings_` (targets x factors, scaled space): with
+  `decoder_type="linear"` and `n_regimes=1` the decoder is
+  `x = W (M f) + b`, `M` the mixing matrix (the identity without `mixing`),
+  so `loadings_` is exactly `W M` (`loadings_kind_="exact"`). Otherwise
+  (`"mean_jacobian"`) it is the Jacobian of the decoded path
   `result_.x_sm` with respect to the factors, averaged over the rows of
   `factors_`. The path is decoded as for `result_.x_sm`: through the
   `mixing` layer when there is one, and with `n_regimes` K > 1 the K
@@ -350,8 +387,16 @@ Notes:
   of the context. `explained_variance_` compares the observed (finite)
   scaled targets with `result_.x_sm`.
 - `decompose()`: `"common"` is `result_.x_sm` inverse-scaled.
-  `decompose(by="factor")` raises `UnsupportedInputError`, and there is no
-  `predict_interval`.
+  `decompose(by="factor")` needs exact loadings and an affine scaler: factor
+  `j`'s part of target `i` is `s_i (W M)_ij f_jt` and `"mean"` is
+  `offset_i + s_i b_i`; otherwise it raises `UnsupportedInputError`.
+- `predict_interval(h, coverage, data, futr_exog)`: the empirical quantiles
+  of 1000 forecast paths, each sampling its innovations from the prior given
+  the future context, decoding the factors and adding N(0, `decoder_var`)
+  noise, then inverse-scaled (any scaler). They are drawn from the torch RNG
+  seeded with `random_state_`, which is restored afterwards, so repeated
+  calls agree. Their centre is the sampled distribution's, not `predict`'s
+  forecast, which sets the innovations to zero.
 
 Hyperparameter search uses optuna (the `tune` extra). It fits clones of the
 estimator on a holdout split, never changes the estimator, and returns the
@@ -436,6 +481,7 @@ pca.fit(PanelData(y=pd.DataFrame(returns, index=dates, columns=tickers)))
 | `lambda_var`    | 0.1            | weight of the explained-variance regularizer |
 | `turnover_cost`, `short_cost`, `risk_free` | 5e-4, 1e-4, 0.0 | costs per unit turnover (5 bps) and short position (1 bp), risk-free rate |
 | `learning_rate`, `max_epochs`, `patience` | 1e-3, 50, None | full-batch Adam training |
+| `max_time`      | None           | training budget in seconds, also for `update(data, refit=True)` (guide: run control) |
 | `random_state`, `device` | None, `"auto"` | seed (None does not seed) and device |
 
 Notes:

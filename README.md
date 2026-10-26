@@ -14,23 +14,27 @@ save directories.
 | Model   | What it is                                                                                     | Backend |
 |---------|------------------------------------------------------------------------------------------------|---------|
 | `DFM`   | linear, mixed-frequency dynamic factor model, estimated by EM with Kalman filtering and smoothing | numpy   |
-| `DDFM`  | deep dynamic factor model: a nonlinear encoder trained with MCMC denoising and a linear state space on its factors | PyTorch |
-| `iVDFM` | identifiable variational dynamic factor model, trained on the ELBO with a context-conditioned innovation prior | PyTorch |
-| `AFM`   | Attention Factor Model of Epstein, Wang, Choi and Pelger (2025): a cross-sectional conditional factor model whose residuals are traded portfolios, with PCA and Avellaneda-Lee benchmarks | PyTorch |
+| `DDFM`  | deep dynamic factor model: a nonlinear encoder trained with MCMC denoising and a linear state space on its factors | PyTorch (`deep` extra) |
+| `iVDFM` | identifiable variational dynamic factor model, trained on the ELBO with a context-conditioned innovation prior | PyTorch (`deep` extra) |
+| `AFM`   | Attention Factor Model of Epstein, Wang, Choi and Pelger (2025): a cross-sectional conditional factor model whose residuals are traded portfolios, with PCA and Avellaneda-Lee benchmarks | PyTorch (`deep` extra) |
 
 ## Installation
 
 ```bash
-pip install dfm-python        # or: uv add dfm-python
+pip install dfm-python              # DFM; or: uv add dfm-python
+pip install "dfm-python[deep]"      # also DDFM, iVDFM and AFM
 ```
 
-Python 3.10 to 3.13. The dependencies are numpy, pandas, scipy, scikit-learn,
-einops and torch 2.10 or newer; torch is required for the numpy `DFM` too. For
-a CPU-only or a specific CUDA torch build, install `torch` from the
+Python 3.10 to 3.13. The dependencies are numpy, pandas, scipy, scikit-learn
+and threadpoolctl. The torch models need the `deep` extra (torch 2.10 or
+newer and einops); without it they can be built and configured, and `fit`
+and `load` raise `ImportError` naming the extra. For a CPU-only or a specific
+CUDA torch build, install `torch` from the
 [PyTorch index](https://pytorch.org/get-started/locally/) first.
 
 | Extra     | Adds              | Needed for                                                  |
 |-----------|-------------------|-------------------------------------------------------------|
+| `deep`    | torch, einops     | DDFM, iVDFM, AFM (`dfm_python.tuning` too)                  |
 | `yaml`    | omegaconf         | YAML configs (`load_yaml`, `XConfig.from_yaml`), `tutorial/` |
 | `tune`    | optuna            | iVDFM hyperparameter search (`dfm_python.tuning`)           |
 | `metrics` | sktime            | `calculate_rmse`, `calculate_mae`                           |
@@ -39,7 +43,7 @@ a CPU-only or a specific CUDA torch build, install `torch` from the
 | `dev`     | pytest, ruff, build, twine, omegaconf, pyyaml, optuna, statsmodels | tests and packaging |
 
 ```bash
-pip install "dfm-python[yaml,tune]"
+pip install "dfm-python[deep,yaml,tune]"
 ```
 
 Code that needs a missing extra raises `ImportError` naming it.
@@ -47,7 +51,7 @@ Code that needs a missing extra raises `ImportError` naming it.
 ## Quick start
 
 A one-factor DFM on three monthly indicators and quarterly GDP growth, on a
-monthly clock. It runs in a few seconds.
+monthly clock. It runs in about ten seconds.
 
 ```python
 import numpy as np
@@ -65,9 +69,8 @@ df["gdp"] = np.convolve(f, [1, 2, 3, 2, 1])[:120] / 9   # tent-weighted monthly 
 df.loc[df.index.month % 3 != 0, "gdp"] = np.nan          # quarterly: NaN between releases
 
 data = PanelData(y=df, freq={"gdp": "q"})                # unlisted series run at the clock
-model = DFM(n_factors=1, clock="m", tent_weights={"q:m": [1, 2, 3, 2, 1]},
-            scaler="standard", max_iter=200).fit(data)
-model.result_.loglik, model.n_iter_, model.converged_    # n_iter_: E-steps run (about 110), converged_ True
+model = DFM(n_factors=1, clock="m", tent_weights={"q:m": [1, 2, 3, 2, 1]}).fit(data)
+model.loglik_, model.n_iter_, model.stop_reason_         # n_iter_: E-steps run (about 230), 'converged'
 fc = model.predict(6)               # DataFrame 6 x 4, every series at every month, data units
 zf = model.predict_factors(6)       # DataFrame 6 x 1, column factor_0
 model.save("runs/quickstart", overwrite=True)            # dfm_python.load() reads it back
@@ -85,9 +88,22 @@ model.set_output(output="polars")   # predict, predict_interval, decompose, ... 
 model.predict(6).columns            # ['date', 'ip', 'sales', 'jobs', 'gdp']
 ```
 
+A walk-forward backtest, a time budget, and a JSON summary of the fit:
+
+```python
+from dfm_python.evaluation import backtest
+
+spec = DFM(n_factors=1, tent_weights={"q:m": [1, 2, 3, 2, 1]}, max_time=60)  # stop EM after 60 s
+result = backtest(spec, data, start=95, h=3, step=3, coverage=0.9)  # fit to row 95, then update every 3 rows
+result.forecasts                    # origin, time, horizon, series, forecast, actual, lower, upper
+result.metrics(by="horizon")        # RMSE, MAE, bias, n, coverage for h = 1, 2, 3
+model.describe()                    # JSON-serializable: params, tags, n_iter, stop_reason, loglik, ...
+```
+
 ## Other models
 
-DDFM: targets `s0..s2`, encoder covariates `oil` and `fx` in `exog`.
+These need the `deep` extra. DDFM: targets `s0..s2`, encoder covariates
+`oil` and `fx` in `exog`.
 
 ```python
 import numpy as np
@@ -140,7 +156,7 @@ model.result_.sharpe, model.book_returns_
 
 | Page | Contents |
 |------|----------|
-| [User guide](https://github.com/minkeymouse/dfm-python/blob/main/docs/guide.md) | `PanelData`, the estimator contract, `update` and `predict(data=)`, interpretation, prediction intervals, polars, saving and loading, YAML configs, reproducibility, logging, errors, upgrading from 0.8 |
+| [User guide](https://github.com/minkeymouse/dfm-python/blob/main/docs/guide.md) | `PanelData`, the estimator contract, `update` and `predict(data=)`, run control, interpretation, prediction intervals, backtesting, `describe` and JSON Schema, polars, saving and loading, YAML configs, reproducibility, logging, errors, upgrading from 0.8 |
 | [Models](https://github.com/minkeymouse/dfm-python/blob/main/docs/models.md) | DFM, DDFM, iVDFM and AFM: full examples, hyperparameters, notes, method references |
 | [Migrating from 0.7](https://github.com/minkeymouse/dfm-python/blob/main/docs/migration-0.7.md) | the 0.7 to 0.8 API table |
 | [Development](https://github.com/minkeymouse/dfm-python/blob/main/docs/development.md) | setup, tests, lint, repository layout, golden tests, releases |
