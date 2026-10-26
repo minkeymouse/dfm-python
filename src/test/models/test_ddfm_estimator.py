@@ -319,7 +319,10 @@ def test_result_c_is_series_by_factors(fitted):
     H = fitted.network_.training_state.H
     assert fitted.result_.C.shape == (3, 2) == H.shape
     np.testing.assert_array_equal(fitted.result_.C, H)
-    np.testing.assert_allclose(fitted.result_.x_sm, fitted.result_.Z @ fitted.result_.C.T, rtol=1e-6)
+    # x_sm decodes the factors with the trained decoder: for the linear decoder Z C' plus its bias.
+    np.testing.assert_array_equal(fitted.result_.x_sm, fitted.network_.decode(fitted.result_.Z))
+    bias = fitted.network_.decoder.get_last_linear_layer().bias.detach().numpy()
+    np.testing.assert_allclose(fitted.result_.x_sm, fitted.result_.Z @ fitted.result_.C.T + bias, rtol=1e-5, atol=1e-6)
 
 
 def test_engine_keeps_no_training_data(fitted):
@@ -396,8 +399,7 @@ def test_predict_frame(fitted):
 
 def test_predict_is_the_engine_forecast_in_data_units(fitted):
     y_forecast, z_forecast = fitted.network_._forecast(5)
-    H = fitted.network_.training_state.H
-    model_space = z_forecast @ H.T
+    model_space = fitted.network_.decode(z_forecast)
     np.testing.assert_array_equal(fitted.predict(5).to_numpy(), y_forecast)
     np.testing.assert_allclose(fitted.predict(5).to_numpy(), fitted.scaler_.inverse_transform(model_space))
     np.testing.assert_array_equal(fitted.predict_factors(5).to_numpy(), z_forecast)
@@ -416,7 +418,7 @@ def test_scaler_none_forecasts_in_model_space():
     assert model.scaler_ is None
     fc = model.predict(3)
     _, z_forecast = model.network_._forecast(3)
-    np.testing.assert_array_equal(fc.to_numpy(), z_forecast @ model.network_.training_state.H.T)
+    np.testing.assert_array_equal(fc.to_numpy(), model.network_.decode(z_forecast))
     assert fc.index.equals(pd.RangeIndex(48, 51, name="time"))
 
 

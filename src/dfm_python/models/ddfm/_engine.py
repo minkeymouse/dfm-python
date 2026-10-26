@@ -518,6 +518,19 @@ class DDFMEngine(nn.Module):
             )
         return self._forecast(horizon)
 
+    def decode(self, Z: np.ndarray) -> np.ndarray:
+        """The trained decoder (bias and hidden layers included) on factors ``Z`` (n, r): scaled targets (n, N), float64."""
+        decoder = self.decoder
+        param = next(decoder.parameters())
+        was_training = decoder.training
+        decoder.eval()
+        try:
+            with torch.no_grad():
+                out = decoder(torch.as_tensor(np.asarray(Z), dtype=param.dtype, device=param.device))
+        finally:
+            decoder.train(was_training)
+        return out.detach().cpu().numpy().astype(np.float64)
+
     def _forecast(self, horizon: int) -> Tuple[np.ndarray, np.ndarray]:
         """Forecast the targets and factors ``horizon`` steps ahead.
 
@@ -529,17 +542,15 @@ class DDFMEngine(nn.Module):
         # Unstable training can leave NaN/Inf in the state space and the factors;
         # they are zeroed so that the forecast still runs.
         F = np.nan_to_num(self.training_state.F, nan=0.0, posinf=0.0, neginf=0.0)
-        H = np.nan_to_num(self.training_state.H, nan=0.0, posinf=0.0, neginf=0.0)
         factors_avg = average_3d_array(self.factors, axis=0)
         Z_last = factors_avg[-1, :] if len(factors_avg) > 0 else self.training_state.mu_0
         Z_last = np.nan_to_num(Z_last, nan=0.0, posinf=0.0, neginf=0.0)
 
         validate_no_nan_inf(Z_last, name="last factor state Z_last")
         validate_no_nan_inf(F, name="transition matrix F")
-        validate_no_nan_inf(H, name="observation matrix H")
 
         Z_forecast = forecast_ar1_factors(Z_last, F, horizon, dtype=DEFAULT_DTYPE)
-        y_forecast_std = Z_forecast @ H.T  # (horizon, num_target_series)
+        y_forecast_std = self.decode(Z_forecast)  # (horizon, num_target_series), the trained decoder
         if self.scaler is not None:
             y_forecast = self.scaler.inverse_transform(y_forecast_std)
         else:
@@ -568,7 +579,7 @@ class DDFMEngine(nn.Module):
         st = self.training_state
         Z = average_3d_array(self.factors, axis=0)
         return DDFMResult(
-            x_sm=Z @ st.H.T,  # (T, num_target_series): the targets only
+            x_sm=self.decode(Z),  # (T, num_target_series): the targets only, through the trained decoder
             Z=Z,
             C=st.H,  # (num_target_series x num_factors), the DFMResult.C orientation
             R=st.R,

@@ -133,7 +133,7 @@
     "python": "3.12",
     "torch": "2.14.1+cu130"
   },
-  "git_commit": "bfa0053022b3fcbb83e363fbacf452d6f464fc11",
+  "git_commit": "38a329d11328dfacf09ac89d70a98604b489c62e",
   "global_rng_preseed": 20251019,
   "hyperparameters": {
     "activation": "relu",
@@ -268,7 +268,7 @@
       ]
     },
     "result_x_sm": {
-      "dtype": "float32",
+      "dtype": "float64",
       "shape": [
         288,
         1
@@ -590,5 +590,5 @@
     }
   },
   "raised": null,
-  "src_dirty": false
+  "src_dirty": true
 }

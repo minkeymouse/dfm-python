@@ -129,8 +129,7 @@ def test_forecast_without_scaler_is_the_identity_and_predict_still_raises():
     engine = _fitted(_dataset(_frame(), scaler=None))
     assert engine.scaler is None
     y_forecast, Z_forecast = engine._forecast(6)
-    H = np.nan_to_num(engine.training_state.H, nan=0.0, posinf=0.0, neginf=0.0)
-    expected = np.nan_to_num(Z_forecast @ H.T)
+    expected = np.nan_to_num(engine.decode(Z_forecast))  # the trained decoder, bias included
     assert y_forecast.tobytes() == expected.tobytes()
     with pytest.raises(ConfigurationError):
         engine.predict(horizon=6)

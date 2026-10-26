@@ -154,6 +154,10 @@ def _decode_covariate_scaler(json_dict: Any, arrays: dict, allow_pickle: bool, p
     return decode_scaler(json_dict, {SCALER_PREFIX + k[len(prefix):]: v for k, v in arrays.items() if k.startswith(prefix)})
 
 
+#: Simulated paths behind the MLP decoder's prediction intervals.
+_INTERVAL_PATHS = 2000
+
+
 def _is_int(value: Any) -> bool:
     return isinstance(value, (int, np.integer)) and not isinstance(value, (bool, np.bool_))
 
@@ -622,6 +626,21 @@ class DDFM(BaseFactorModel):
         """``factors_`` as a float64 tensor (a copy: under pandas copy-on-write the frame's array is read-only)."""
         return torch.tensor(self.factors_.to_numpy(), dtype=torch.float64)
 
+    def _decoder_jacobians(self, decoder: torch.nn.Module, Z: torch.Tensor) -> np.ndarray:
+        """The Jacobian (n, N, r) of ``decoder`` (from :meth:`_decoder64`) at each row of ``Z`` (n, r), float64.
+
+        The linear decoder's is its weight at every row. For the MLP the
+        output layer is linear, so the Jacobian is its weight times the
+        hidden layers' Jacobian: reverse mode through the hidden layers alone
+        costs memory in the last hidden width per row, through the whole
+        decoder N x N per row.
+        """
+        weight = decoder.get_last_linear_layer().weight.detach()
+        if self.network_.decoder_type == "linear":
+            return np.broadcast_to(weight.numpy(), (Z.shape[0], *weight.shape)).copy()
+        hidden = torch.func.vmap(torch.func.jacrev(decoder.get_intermediate()))(Z)
+        return (weight @ hidden).detach().numpy()
+
     def _common_scaled(self, decoder: torch.nn.Module) -> np.ndarray:
         """``decoder`` (from :meth:`_decoder64`) applied to ``factors_``: the common component (T x N, model space)."""
         with torch.no_grad():
@@ -637,16 +656,8 @@ class DDFM(BaseFactorModel):
         self.factor_names_ = np.asarray(names, dtype=object)
         self.factors_ = pd.DataFrame(np.asarray(self.result_.Z, dtype=np.float64), index=self.index_, columns=names)
         decoder = self._decoder64()
-        if self.network_.decoder_type == "linear":
-            loadings = decoder.get_last_linear_layer().weight.detach().numpy()
-            self.loadings_kind_ = "exact"
-        else:
-            # The output layer is linear, so the mean Jacobian is its weight times the mean Jacobian of
-            # the hidden layers. Reverse mode through the hidden layers alone costs memory in the last
-            # hidden width per row; through the whole decoder it costs T x N x N.
-            hidden = torch.func.vmap(torch.func.jacrev(decoder.get_intermediate()))(self._factor_path())
-            loadings = (decoder.get_last_linear_layer().weight @ hidden.mean(dim=0)).detach().numpy()
-            self.loadings_kind_ = "mean_jacobian"
+        loadings = self._decoder_jacobians(decoder, self._factor_path()).mean(axis=0)
+        self.loadings_kind_ = "exact" if self.network_.decoder_type == "linear" else "mean_jacobian"
         series = pd.Index(self.feature_names_in_)
         self.loadings_ = pd.DataFrame(loadings, index=series, columns=names)
         data = self._training_targets()
@@ -915,39 +926,67 @@ class DDFM(BaseFactorModel):
         _, z_forecast, h, origin = self._run_forecast("predict_factors", h, data)
         return self._emit(self._frame(z_forecast, h, list(self.factor_names_), "factors", origin))
 
-    def _noise_variance(self, C: np.ndarray) -> np.ndarray:
-        """Per target (N,), the mean square of ``x_t - C z_t`` over the observed training entries.
+    def _noise_variance(self, decoder: torch.nn.Module) -> np.ndarray:
+        """Per target (N,), the mean square of ``x_t - g(z_t)`` over the observed training entries.
 
-        ``x`` is the scaled training targets and ``z`` the MC-averaged factors
-        ``result_.Z``: the maximum-likelihood variance of zero-mean Gaussian
-        noise around the forecast's observation map ``C``.
+        ``x`` is the scaled training targets, ``z`` the factor path
+        ``factors_`` and ``g`` the trained decoder (from :meth:`_decoder64`):
+        the maximum-likelihood variance of zero-mean Gaussian noise around
+        the decoder that the forecast uses.
         """
-        residual = self._training_targets() - np.asarray(self.result_.Z, dtype=np.float64) @ C.T
+        residual = self._training_targets() - self._common_scaled(decoder)
         observed = np.isfinite(residual)
         return (np.where(observed, residual, 0.0) ** 2).sum(axis=0) / observed.sum(axis=0)
 
-    def predict_interval(self, h: int, coverage: float = 0.9, data: Any = None) -> pd.DataFrame:
-        """Central Gaussian prediction intervals of the targets ``h`` steps ahead, in data units.
+    def _mlp_quantiles(self, decoder: torch.nn.Module, z0: np.ndarray, P0: np.ndarray, A: np.ndarray,
+                       Q: np.ndarray, noise: np.ndarray, h: int, coverage: float) -> tuple[np.ndarray, np.ndarray]:
+        """Scaled (h, N) quantiles ``(1 -+ coverage) / 2`` of ``_INTERVAL_PATHS`` simulated forecast paths.
 
-        The intervals are those of the linear state space that :meth:`predict`
-        forecasts with: factors ``z_{t+1} = A z_t + w_t`` with ``w_t ~ N(0,
-        Q)`` (``result_.A``, ``result_.Q``) and scaled targets ``x_t = C z_t +
-        e_t`` (``result_.C``) with ``e_t ~ N(0, diag(s2))`` independent over
-        time. This holds for both decoder types: with the MLP decoder,
-        ``result_.C`` is the first ``n_factors`` columns of the output layer's
-        weight, and neither the forecast nor the intervals evaluate the
-        decoder's hidden layers. ``s2`` is, per target, the mean square of
-        ``x_t - C z_t`` over the observed training rows (``z_t`` from
-        ``result_.Z``): the maximum-likelihood variance of zero-mean noise
-        around the forecast map. It holds the idiosyncratic part, which the
-        forecast sets to zero, and stands in for ``result_.R``, a fixed
-        ``1e-15 * I``.
+        Factor paths start at ``N(z0, P0)`` and follow ``z <- A z + N(0, Q)``;
+        each step's targets are ``decoder(z) + N(0, diag(noise))``. The
+        generator is seeded with ``random_state_`` (unseeded when None).
+        """
+        rng = np.random.default_rng(self.random_state_)
+        r = len(z0)
+        z = rng.multivariate_normal(z0, P0, size=_INTERVAL_PATHS, method="eigh")
+        sd = np.sqrt(noise)
+        lower, upper = np.empty((h, len(noise))), np.empty((h, len(noise)))
+        for step in range(h):
+            z = z @ A.T + rng.multivariate_normal(np.zeros(r), Q, size=_INTERVAL_PATHS, method="eigh")
+            with torch.no_grad():
+                y = decoder(torch.from_numpy(z)).numpy()
+            y = y + sd * rng.standard_normal(y.shape)
+            lower[step], upper[step] = np.quantile(y, [(1 - coverage) / 2, (1 + coverage) / 2], axis=0)
+        return lower, upper
+
+    def predict_interval(self, h: int, coverage: float = 0.9, data: Any = None) -> pd.DataFrame:
+        """Prediction intervals of the targets ``h`` steps ahead, in data units.
+
+        The model is the one :meth:`predict` forecasts with: factors
+        ``z_{t+1} = A z_t + w_t`` with ``w_t ~ N(0, Q)`` (``result_.A``,
+        ``result_.Q``) and scaled targets ``x_t = g(z_t) + e_t``, ``g`` the
+        trained decoder, with ``e_t ~ N(0, diag(s2))`` independent over time.
+        ``s2`` is, per target, the mean square of ``x_t - g(z_t)`` over the
+        observed training rows (``z_t`` from ``factors_``): the
+        maximum-likelihood variance of zero-mean noise around the decoder. It
+        holds the idiosyncratic part, which the forecast sets to zero, and
+        stands in for ``result_.R``, a fixed ``1e-15 * I``.
 
         The factor state at the last conditioning row has covariance ``P``,
         the covariance of the engine's ``n_mc_samples`` Monte Carlo factor
         draws at that row (zero at a row that ``update`` or ``data``
         appended: the encoder maps it to one value). For each step ahead
-        ``P <- A P A' + Q`` and the scaled variance is ``diag(C P C') + s2``.
+        ``P <- A P A' + Q``.
+
+        Linear decoder (weight ``C``): the targets are Gaussian, with scaled
+        variance ``diag(C P C') + s2``, and the interval is central around
+        :meth:`predict`'s forecast. MLP decoder: the interval holds the
+        empirical ``(1 -+ coverage) / 2`` quantiles of 2000 simulated paths
+        (factors drawn from ``N(z_T, P)`` and the transition, each step
+        decoded and given ``N(0, s2)`` noise), so it is not centred on
+        :meth:`predict`; the generator is seeded with ``random_state``, and
+        with ``random_state=None`` the bounds vary between calls. The rest of
+        this paragraph describes the linear decoder.
         With ``q`` the standard normal quantile of ``(1 + coverage) / 2``
         and ``sd`` the scaled standard deviation, the bounds in data units are:
 
@@ -1000,25 +1039,32 @@ class DDFM(BaseFactorModel):
         engine, origin = self._conditioned_engine("predict_interval", data)
         y_forecast, z_forecast = engine._forecast(h)
         state = engine.training_state
-        # The forecast zeroes non-finite entries of A and C; so does the variance.
-        A, C = (np.nan_to_num(m, nan=0.0, posinf=0.0, neginf=0.0) for m in (state.F, state.H))
+        # The forecast zeroes non-finite entries of A; so does the variance.
+        A = np.nan_to_num(state.F, nan=0.0, posinf=0.0, neginf=0.0)
         draws = np.asarray(engine.factors[:, -1, :], dtype=np.float64)
         deviation = draws - draws.mean(axis=0)
         P = deviation.T @ deviation / len(draws)
-        noise = self._noise_variance(C)
-        variance = np.empty((h, C.shape[0]))
-        for step in range(h):
-            P = A @ P @ A.T + state.Q
-            variance[step] = np.einsum("ij,ij->i", C @ P, C) + noise
-        # q = -Phi^-1((1 - coverage) / 2): (1 + coverage) / 2 rounds to 1 for the floats just below 1.
-        half = -NormalDist().inv_cdf((1 - coverage) / 2) * np.sqrt(variance)
-        affine = affine_scaler_params(self.scaler_, self.n_features_in_)
-        if affine is not None:
-            half = half * np.abs(affine[1])
-            lower, upper = y_forecast - half, y_forecast + half
+        decoder = self._decoder64()
+        noise = self._noise_variance(decoder)
+        if self.network_.decoder_type == "linear":
+            C = decoder.get_last_linear_layer().weight.detach().numpy()
+            variance = np.empty((h, C.shape[0]))
+            for step in range(h):
+                P = A @ P @ A.T + state.Q
+                variance[step] = np.einsum("ij,ij->i", C @ P, C) + noise
+            # q = -Phi^-1((1 - coverage) / 2): (1 + coverage) / 2 rounds to 1 for the floats just below 1.
+            half = -NormalDist().inv_cdf((1 - coverage) / 2) * np.sqrt(variance)
+            affine = affine_scaler_params(self.scaler_, self.n_features_in_)
+            if affine is not None:
+                half = half * np.abs(affine[1])
+                lower, upper = y_forecast - half, y_forecast + half
+            else:
+                centre = engine.decode(z_forecast)
+                low, high = self._to_data_units(centre - half), self._to_data_units(centre + half)
+                lower, upper = np.minimum(low, high), np.maximum(low, high)
         else:
-            centre = z_forecast @ C.T
-            low, high = self._to_data_units(centre - half), self._to_data_units(centre + half)
+            low, high = self._mlp_quantiles(decoder, draws.mean(axis=0), P, A, state.Q, noise, h, coverage)
+            low, high = self._to_data_units(low), self._to_data_units(high)
             lower, upper = np.minimum(low, high), np.maximum(low, high)
         columns = pd.MultiIndex.from_product([list(self.feature_names_in_), ["lower", "upper"]], names=["series", "bound"])
         frame = self._frame(np.stack([lower, upper], axis=2).reshape(h, -1), h, columns, "forecast", origin)
