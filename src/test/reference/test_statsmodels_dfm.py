@@ -28,7 +28,8 @@ and the diagnosis of the differences are in ``README.md`` next to this file):
 1. The likelihoods are the same function: statsmodels' log-likelihood at
    dfm-python's fitted parameters is dfm-python's ``loglik_``.
 2. The EM maps are the same: plain EM iterations from the same parameters
-   give the same parameters, log-likelihood, common components and forecasts.
+   give the same parameters, log-likelihood, common components, forecasts
+   and forecast standard deviations.
 3. Each library's own fit (its own start values, acceleration and stopping)
    gives the same common components and forecasts up to optimization error,
    and log-likelihoods a few units apart.
@@ -45,6 +46,8 @@ import pytest
 
 dynamic_factor_mq = pytest.importorskip("statsmodels.tsa.statespace.dynamic_factor_mq")
 
+from statsmodels.tools.sm_exceptions import ConvergenceWarning
+
 from dfm_python import DFM, PanelData
 
 DATA = Path(__file__).resolve().parents[3] / "data" / "macro.csv"
@@ -55,9 +58,10 @@ SLICES = ("monthly", "mixed")
 HORIZON = 12
 SM_MAXITER = 200  # statsmodels' EM iterations in its own fit; its default 500 doubles the run time
 EM_ITERATIONS = 10  # plain EM iterations compared in check 2
-# The common component of a quarterly series in the first len(TENT) - 1 rows
-# involves pre-sample factor lags, which only the EM-estimated initial state
-# pins down (README); the correlations skip those rows.
+# The first rows of the common components depend on the EM-estimated initial
+# state, which the data hardly pin down: the factor in the first row, and for
+# a quarterly series the pre-sample factor lags in its first len(TENT) - 1
+# rows (README). The correlations of the own fits skip those rows.
 BURN_IN = len(TENT) - 1
 
 
@@ -100,8 +104,8 @@ def _statsmodels_model(z: pd.DataFrame, n_quarterly: int, obs_var: np.ndarray | 
 
 
 def _statsmodels_fit(mod, **kwargs):
-    with warnings.catch_warnings():  # EM stops at maxiter on this data (ConvergenceWarning)
-        warnings.simplefilter("ignore")
+    with warnings.catch_warnings():  # EM stops at maxiter on this data
+        warnings.simplefilter("ignore", ConvergenceWarning)
         return mod.fit_em(**kwargs)
 
 
@@ -143,6 +147,12 @@ def _statsmodels_common(res, n_quarterly: int) -> np.ndarray:
     n_factor_states = len(TENT) if n_quarterly else 1
     design = res.filter_results.design[:, :n_factor_states, 0]
     return (design @ res.smoothed_state[:n_factor_states]).T
+
+
+def _forecast_sd(model: DFM) -> np.ndarray:
+    """Standard deviations (HORIZON x N) of dfm-python's forecasts: half the width of its one-sd ``predict_interval``."""
+    band = model.predict_interval(HORIZON, coverage=math.erf(1 / math.sqrt(2)))
+    return (band.xs("upper", axis=1, level="bound") - band.xs("lower", axis=1, level="bound")).to_numpy() / 2
 
 
 @pytest.fixture(scope="module", params=SLICES)
@@ -200,11 +210,12 @@ def test_em_iterations_match(em_path):
     Measured after 10 iterations (monthly / mixed): parameters (statsmodels'
     vector, the factor rescaled as dfm-python reports it) within 7.7e-9 /
     9.8e-9, loglik within 1.9e-8 / 3.1e-8 relative, common component within
-    3.8e-8 / 5.4e-8 and 12-step forecasts within 2.4e-9 / 9.7e-9
-    (standardized units). These residuals come from R alone: dfm-python
-    re-estimates it each iteration (up to 1e-8 above its floor here) where
-    statsmodels keeps the start value; one EM map from the same parameters
-    agrees to 3e-11 in every other parameter (README).
+    3.8e-8 / 5.4e-8, 12-step forecasts within 2.4e-9 / 9.7e-9 (standardized
+    units) and their standard deviations (``predict_interval`` against
+    ``get_forecast``) within 6.6e-9 / 9.0e-9 relative. These residuals come
+    from R alone: dfm-python re-estimates it each iteration (up to 1e-8 above
+    its floor here) where statsmodels keeps the start value; with dfm-python's
+    R update disabled they drop below 7e-10 (README).
     """
     model, res, n_quarterly = em_path.model, em_path.res, em_path.n_quarterly
     assert model.n_iter_ == EM_ITERATIONS + 1
@@ -217,6 +228,8 @@ def test_em_iterations_match(em_path):
     np.testing.assert_allclose(common, _statsmodels_common(res, n_quarterly), rtol=0, atol=1e-6)
     forecast = model.predict(HORIZON).to_numpy()
     np.testing.assert_allclose(forecast, res.forecast(HORIZON).to_numpy(), rtol=0, atol=1e-7)
+    sm_sd = np.sqrt(np.diagonal(res.get_forecast(HORIZON).var_pred_mean, axis1=1, axis2=2))
+    np.testing.assert_allclose(_forecast_sd(model), sm_sd, rtol=1e-7, atol=0)
 
 
 def test_own_fits_common_component(own_fits):
@@ -225,8 +238,10 @@ def test_own_fits_common_component(own_fits):
     Measured (rows from the fifth on): lowest correlation 0.999626 (monthly,
     KOROCOINF) and 0.999497 (mixed, KOEQUIPTE); |corr| of the factors
     0.999626 / 0.999797. Against statsmodels' default 500 iterations: 0.999983
-    / 0.999982. Over all rows the quarterly series reach only 0.9745: their
-    first rows depend on the EM-estimated pre-sample factor lags (README).
+    / 0.999982. Over all rows the lowest correlations are 0.998963 (monthly:
+    the first row's factor, -1.02 against 0.27 for a factor of standard
+    deviation 2.1, depends on the EM-estimated initial state) and 0.9745
+    (mixed, the quarterly series: the pre-sample factor lags) (README).
     """
     dfm_common = own_fits.model.decompose()["common"].to_numpy()[BURN_IN:]
     sm_common = _statsmodels_common(own_fits.res, own_fits.n_quarterly)[BURN_IN:]
@@ -240,17 +255,15 @@ def test_own_fits_forecasts(own_fits):
     """The 1- to 12-step forecasts differ by at most 0.2 forecast standard deviations.
 
     The standard deviation is dfm-python's (``predict_interval`` at one
-    standard deviation, 0.77 to 1.13 here). Measured largest ratio: 0.101
+    standard deviation, 0.77 to 1.13 here; check 2 matches it with
+    statsmodels' at the same parameters). Measured largest ratio: 0.101
     (monthly, KOEQUIPTE at h = 2) and 0.055 (mixed, KOWRCCNSE at h = 2);
     largest absolute differences 0.108 / 0.052 standardized units. Against
     statsmodels' default 500 iterations: 0.101 / 0.034.
     """
-    model = own_fits.model
-    forecast = model.predict(HORIZON)
+    forecast = own_fits.model.predict(HORIZON)
     sm_forecast = own_fits.res.forecast(HORIZON).to_numpy()
-    band = model.predict_interval(HORIZON, coverage=math.erf(1 / math.sqrt(2)))
-    sd = (band.xs("upper", axis=1, level="bound") - band.xs("lower", axis=1, level="bound")).to_numpy() / 2
-    ratio = np.abs(forecast.to_numpy() - sm_forecast) / sd
+    ratio = np.abs(forecast.to_numpy() - sm_forecast) / _forecast_sd(own_fits.model)
     assert ratio.max() <= 0.2, pd.DataFrame(ratio, columns=forecast.columns).max().round(3).to_dict()
 
 

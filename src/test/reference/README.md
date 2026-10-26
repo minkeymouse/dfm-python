@@ -54,16 +54,19 @@ Both add `-log(2 pi) / 2` per observed entry (-3986.36 and -3606.83).
 iteration), dfm-python's result against statsmodels' (factor rescaled to a
 unit loading column as dfm-python reports it):
 
-| slice | parameters | loglik (relative) | common component | 12-step forecasts |
-|---|---|---|---|---|
-| monthly | 7.7e-9 | 1.9e-8 | 3.8e-8 | 2.4e-9 |
-| mixed | 9.8e-9 | 3.1e-8 | 5.4e-8 | 9.7e-9 |
+| slice | parameters | loglik (relative) | common component | 12-step forecasts | forecast sd (relative) |
+|---|---|---|---|---|---|
+| monthly | 7.7e-9 | 1.9e-8 | 3.8e-8 | 2.4e-9 | 6.6e-9 |
+| mixed | 9.8e-9 | 3.1e-8 | 5.4e-8 | 9.7e-9 | 9.0e-9 |
 
-These residuals come from R: dfm-python re-estimates it every iteration (at
-most 1e-8 above its floor here), statsmodels keeps it fixed. One EM map from
-statsmodels' start values (dfm-python's `em_step` on the permuted state, not
-part of the test) agrees to 3e-11 (monthly) and 1e-15 (mixed) in A, C, Q,
-Z_0 and V_0, and to 1e-8 in R.
+The forecast standard deviations are dfm-python's `predict_interval` against
+statsmodels' `get_forecast(12).var_pred_mean`. These residuals come from R:
+dfm-python re-estimates it every iteration (at most 1e-8 above its floor
+here), statsmodels keeps it fixed. With dfm-python's R update disabled
+(patched, not part of the test) every column drops below 7e-10 (monthly) and
+2e-13 (mixed). One EM map from statsmodels' start values (dfm-python's
+`em_step` on the permuted state, not part of the test) agrees to 3e-11
+(monthly) and 1e-15 (mixed) in A, C, Q, Z_0 and V_0, and to 1e-8 in R.
 
 ### 3. Each library's own fit
 
@@ -84,9 +87,11 @@ deviations (`predict_interval`, 0.77 to 1.13).
 Test thresholds: correlation > 0.999, forecast difference <= 0.2 sd, loglik
 gap < 0.003 per observed entry (13 and 12 here).
 
-Run to tight convergence (statsmodels 3000 iterations, dfm-python
-`tol=1e-9`: 169 and 1523 E-steps) the logliks still differ (monthly -5117.27
-against -5110.37, mixed -4593.78 against -4586.82), while the factors
+Run to tight convergence (statsmodels 3000 iterations with `tolerance=0`,
+since its default tolerance stops the monthly run after 2497 at -5119.47;
+dfm-python `tol=1e-9`: 169 and 1523 E-steps) the logliks still differ
+(statsmodels against dfm-python: monthly -5117.27 against -5110.37, mixed
+-4593.78 against -4586.82), while the factors
 correlate to 0.9999995 and 0.9999997, the monthly series' common components
 to 1.0000 (4 decimals) and the forecasts differ by at most 0.050 and 0.047.
 
@@ -103,6 +108,14 @@ each run starts and stops on a flat likelihood:
   variance 1.8e-4), dfm-python's SQUAREM gets to 1e-5 in 169 E-steps. The
   common components hardly change along the ridge; the loglik does (tens of
   units).
+- Initial state. EM sets the prior of the first row's state to its smoothed
+  moments, so the prior variance shrinks every iteration (the factor's is
+  0.0017 at dfm-python's monthly fit) and the first row follows the prior
+  more than the data. In the monthly slice the first row's factor is 0.27
+  (dfm-python) against -1.02 (statsmodels after 200 iterations, mapped to
+  dfm-python's scale; -0.09 after 500), for a factor of standard deviation
+  2.1: the lowest correlation over all rows is 0.99896, 0.99957 from the
+  second row on.
 - Pre-sample factor lags. A quarterly observation in 2000-03 loads on
   `f_{-2}, f_{-1}`, which only the EM-estimated initial state pins down. The
   smoothed lags at the first row are 14.7, 11.2, 3.6, 1.1 (statsmodels) and
@@ -111,8 +124,9 @@ each run starts and stops on a flat likelihood:
   standardized units; correlation over all rows 0.97) and agree from the
   fifth (statsmodels 500 iterations).
 - Start values. With KORMCMP and KORELEC dropped (12 series, same rows) the
-  two fits end in different maxima: statsmodels -4641.89 (3000 iterations),
-  dfm-python -4655.00 (`tol=1e-8`, 986 E-steps; -4654.89 after 6000), with
+  two fits end in different maxima: statsmodels -4641.89 (3000 iterations,
+  `tolerance=0`; its default stops after 164 at -4643.23), dfm-python
+  -4655.00 (`tol=1e-8`, 986 E-steps; -4654.89 after 6000), with
   KOEQUIPTE's loading 0.13 against 0.31 factor standard deviations. Swapping
   the starts swaps the results: dfm-python's EM from statsmodels' start values
   reaches -4641.85, statsmodels' EM from dfm-python's start -4655.04.
