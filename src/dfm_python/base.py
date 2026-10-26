@@ -7,7 +7,7 @@ The four models (``DFM``, ``DDFM``, ``iVDFM``, ``AFM``) subclass
   ``get_params``, ``set_params``, ``clone`` and ``repr`` work unchanged.
 - ``fit(data)`` coerces ``data`` to :class:`~dfm_python.PanelData`, rejects
   inputs the tags exclude, infinite values and (forecasting models) target
-  series without two distinct observed values, records the data attributes,
+  series observed fewer than twice or constant, records the data attributes,
   runs the subclass's ``_fit`` inside :func:`~dfm_python.logger.fit_verbosity`
   and returns ``self``.
 - Fitted state lives in attributes ending in ``_``; before ``fit`` they raise
@@ -355,16 +355,22 @@ class BaseFactorModel(BaseEstimator):
 
         Each target series of a model with tag ``task="forecast"`` is judged
         on its observed (finite) entries, so a slower series on its
-        observation dates only. Allocation models keep their own rules.
+        observation dates only. Allocation models keep their own rules. A
+        series is constant when the standard deviation of its ``n`` observed
+        values is at most ``n * eps * |mean|`` (``eps`` the float64 machine
+        epsilon), the rounding error of computing it, so values equal up to
+        rounding count as constant (``StandardScaler`` leaves such a series
+        unscaled).
 
         Raises
         ------
         DataValidationError
             Naming each series with no observed value, a single one, or the
-            same value at every observation.
+            same value (up to rounding) at every observation.
         """
         if self.get_tags()["task"] != "forecast":
             return
+        eps = np.finfo(np.float64).eps
         problems = []
         for series, column in zip(panel.series_names, panel.y.to_numpy().T):
             observed = column[np.isfinite(column)]
@@ -372,8 +378,10 @@ class BaseFactorModel(BaseEstimator):
                 problems.append(f"{series!r} has no observed value")
             elif observed.size == 1:
                 problems.append(f"{series!r} has a single observed value")
-            elif np.all(observed == observed[0]):
-                problems.append(f"{series!r} is constant (every observed value is {float(observed[0])!r})")
+            elif observed.std() <= observed.size * eps * abs(observed.mean()):
+                problems.append(
+                    f"{series!r} is constant (every observed value is {float(observed[0])!r}, up to rounding)"
+                )
         if problems:
             raise DataValidationError(
                 f"{type(self).__name__} cannot be fitted on these target series: {'; '.join(problems)}. A target "

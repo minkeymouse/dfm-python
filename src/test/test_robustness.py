@@ -92,14 +92,19 @@ def _degenerate(case: str) -> pd.DataFrame:
     elif case == "constant with gaps":
         df["b"] = 2.5
         df.iloc[::3, 1] = np.nan
+    elif case == "constant up to rounding":
+        # 0.1 + 0.2 is 0.30000000000000004: StandardScaler leaves this series unscaled, and DFM used to
+        # reject it as "unscaled".
+        df["b"] = np.where(np.arange(_T) % 2 == 0, 0.1 + 0.2, 0.3)
     return df
 
 
 _MESSAGES = {
     "no observed value": "'b' has no observed value",
     "a single observed value": "'b' has a single observed value",
-    "constant": r"'b' is constant \(every observed value is 2.5\)",
-    "constant with gaps": r"'b' is constant \(every observed value is 2.5\)",
+    "constant": r"'b' is constant \(every observed value is 2.5, up to rounding\)",
+    "constant with gaps": r"'b' is constant \(every observed value is 2.5, up to rounding\)",
+    "constant up to rounding": r"'b' is constant \(every observed value is 0.30000000000000004, up to rounding\)",
 }
 
 
@@ -134,6 +139,13 @@ def test_two_distinct_observed_values_are_enough():
     df["b"] = np.nan
     df.iloc[[3, 9], 1] = [0.0, 1.0]
     DFM()._check_training_targets(PanelData(y=df))
+
+
+def test_a_small_variation_above_rounding_is_not_constant():
+    df = _frame()
+    df["b"] = 2.5 + 1e-9 * df["b"]
+    model = DFM(max_iter=2).fit(df)
+    np.testing.assert_allclose(np.std(model.scaler_.transform(df.to_numpy())[:, 1]), 1.0)
 
 
 def _quarterly(df: pd.DataFrame) -> PanelData:

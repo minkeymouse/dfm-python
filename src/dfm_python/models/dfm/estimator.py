@@ -666,7 +666,8 @@ class DFM(BaseFactorModel):
         DataValidationError
             For a block naming a series that is not in the data, a
             non-string series name, infinite values, or a series with fewer
-            than 2 observed values or the same value at every observation.
+            than 2 observed values or the same value (up to rounding) at
+            every observation.
 
         Warns
         -----
@@ -898,8 +899,8 @@ class DFM(BaseFactorModel):
         ------
         DataValidationError
             If the series or frequencies differ from the training data, the
-            index type differs, the rows overlap the conditioning data or
-            ``data`` is empty.
+            index type differs, the rows overlap the conditioning data,
+            ``data`` is empty or holds infinite values.
         UnsupportedInputError
             For ``exog`` or ``series_exog``.
         """

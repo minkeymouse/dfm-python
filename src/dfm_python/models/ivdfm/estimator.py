@@ -689,7 +689,7 @@ class iVDFM(BaseFactorModel):
             For ``series_exog`` or a mixed-frequency panel.
         DataValidationError
             For a target series with fewer than 2 observed (finite) values,
-            or with the same value at every observation.
+            or with the same value (up to rounding) at every observation.
 
         Warns
         -----

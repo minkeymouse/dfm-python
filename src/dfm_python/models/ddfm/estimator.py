@@ -521,7 +521,8 @@ class DDFM(BaseFactorModel):
             For ``series_exog`` or a mixed-frequency panel.
         DataValidationError
             For infinite values, or a target series with fewer than 2
-            observed values or the same value at every observation.
+            observed values or the same value (up to rounding) at every
+            observation.
 
         Warns
         -----
@@ -775,8 +776,8 @@ class DDFM(BaseFactorModel):
             For ``refit=True``, ``series_exog`` or a mixed-frequency panel.
         DataValidationError
             If the series or exog names differ from the training data, the
-            index type differs, the rows overlap the conditioning data or
-            ``data`` is empty.
+            index type differs, the rows overlap the conditioning data,
+            ``data`` is empty or holds infinite values.
         """
         self._check_is_fitted("update")
         if refit:
