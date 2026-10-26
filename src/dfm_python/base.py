@@ -15,7 +15,9 @@ The four models (``DFM``, ``DDFM``, ``iVDFM``, ``AFM``) subclass
   default ``predict``, ``predict_factors``, ``update`` and ``allocate`` raise
   ``TypeError`` or ``UnsupportedInputError`` when the tags exclude them.
 - ``get_config()`` / ``from_config()`` convert to and from the model's
-  :class:`~dfm_python.config.EstimatorConfig` mirror.
+  :class:`~dfm_python.config.EstimatorConfig` mirror, whose ``json_schema()``
+  describes the hyperparameters; ``describe()`` summarizes the model as a
+  small JSON-serializable dict.
 - ``save(path)`` writes the pickle-free save directory through
   :func:`~dfm_python.io.atomic_save_dir` (temporary sibling, reload to verify,
   rename); ``Model.load(path)`` reads it back without a dataset. The base class
@@ -28,6 +30,7 @@ The four models (``DFM``, ``DDFM``, ``iVDFM``, ``AFM``) subclass
 from __future__ import annotations
 
 import functools
+import math
 import warnings
 from collections.abc import Iterable, Mapping
 from pathlib import Path
@@ -37,7 +40,7 @@ import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator
 
-from .config.estimator import EstimatorConfig, _unknown_keys_message
+from .config.estimator import EstimatorConfig, _is_torch_device, _unknown_keys_message
 from .dataset.panel import PanelData
 from .io.codecs import (
     is_encoded_estimator,
@@ -89,6 +92,18 @@ DEFAULT_TAGS: dict = {
     "non_deterministic": False,
 }
 
+#: ``describe()`` keys of a fitted model and the attributes they come from; a missing attribute omits its key.
+_DESCRIBED_ATTRIBUTES = (
+    ("n_features_in", "n_features_in_"),
+    ("feature_names", "feature_names_in_"),
+    ("index", "index_"),
+    ("n_iter", "n_iter_"),
+    ("converged", "converged_"),
+    ("stop_reason", "stop_reason_"),
+    ("factor_names", "factor_names_"),
+    ("explained_variance", "explained_variance_"),
+)
+
 
 class _class_or_instance_method:
     """Like ``classmethod``, but also passes the instance (None when called on the class).
@@ -127,6 +142,9 @@ class BaseFactorModel(BaseEstimator):
 
     _tags: ClassVar[dict] = dict(DEFAULT_TAGS)
     _config_class: ClassVar[Optional[type]] = None
+    #: Hyperparameters ``_validate_params`` checks against a fixed set of values: ``{name: values}``,
+    #: the ``enum`` of the config's ``json_schema()``.
+    _param_choices: ClassVar[dict] = {}
 
     @_class_or_instance_method
     def get_tags(cls, self: Optional[BaseFactorModel] = None) -> dict:
@@ -201,6 +219,47 @@ class BaseFactorModel(BaseEstimator):
                 f"{cls.__name__}.from_config expects a {cfg_cls.__name__} (or a mapping), got {type(cfg).__name__}."
             )
         return cls(**cfg.to_dict())
+
+    def describe(self) -> dict:
+        """A small JSON-serializable summary of the model, for logs, APIs and tool servers.
+
+        Values are only ``str``, ``int``, ``float``, ``bool``, ``None``, lists
+        and dicts, and non-finite floats are None, so ``json.dumps`` needs no
+        ``default``. The keys:
+
+        - ``model`` (class name), ``version`` (``dfm_python.__version__``),
+          ``tags`` (``get_tags()``) and ``fitted`` (bool);
+        - ``params``: ``get_params(deep=False)`` with tuples as lists, numpy
+          scalars as Python scalars, a ``torch.device`` as its string and any
+          other object (a transformer) as its class name.
+
+        A fitted model adds, for each attribute it has: ``n_features_in``,
+        ``feature_names``, ``index`` (``start`` and ``end`` as str, int for a
+        ``RangeIndex``, ``length`` and ``freq``), ``n_iter``, ``converged``,
+        ``stop_reason``, ``factor_names``, ``explained_variance`` (``{series:
+        float or None}``) and the model's own entries (``loglik`` for DFM,
+        ``sharpe`` for AFM). A key whose attribute the model lacks is omitted.
+        """
+        from . import __version__
+
+        out: dict = {
+            "model": type(self).__name__,
+            "version": str(__version__),
+            "params": self.get_params(deep=False),
+            "tags": self.get_tags(),
+            "fitted": self._is_fitted(),
+        }
+        if out["fitted"]:
+            attrs = vars(self)
+            out.update({key: attrs[attr] for key, attr in _DESCRIBED_ATTRIBUTES if attr in attrs})
+            if "index" in out:
+                out["index"] = _index_summary(out["index"])
+            out.update(self._describe_fitted())
+        return _json_safe(out)
+
+    def _describe_fitted(self) -> dict:
+        """The model's own entries of :meth:`describe` for a fitted model (made JSON-safe there); none by default."""
+        return {}
 
     @classmethod
     def get_test_params(cls) -> list[dict]:
@@ -778,6 +837,40 @@ class BaseFactorModel(BaseEstimator):
             )
             return torch.device("cpu")
         return resolved
+
+
+def _json_safe(value: Any) -> Any:
+    """``value`` as JSON builtins for :meth:`BaseFactorModel.describe`.
+
+    numpy scalars become Python scalars and non-finite floats None; tuples,
+    lists and arrays become lists, and mappings and ``pandas.Series`` dicts
+    with string keys; a ``torch.device`` becomes its string and any other
+    object its class name.
+    """
+    if isinstance(value, np.generic):
+        value = value.item()
+    if value is None or isinstance(value, (bool, int, str)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, np.ndarray):
+        value = value.tolist()
+    if isinstance(value, pd.Series):
+        value = value.to_dict()
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, Mapping):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if _is_torch_device(value):
+        return str(value)
+    return type(value).__name__
+
+
+def _index_summary(index: pd.Index) -> dict:
+    """``{"start", "end", "length", "freq"}`` of a training index: stamps as str (int for a ``RangeIndex``)."""
+    stamp = int if isinstance(index, pd.RangeIndex) else str
+    freq = getattr(index, "freqstr", None)
+    return {"start": stamp(index[0]), "end": stamp(index[-1]), "length": len(index), "freq": freq}
 
 
 def _contains_encoded_estimator(value: Any) -> bool:

@@ -306,6 +306,7 @@ class DFM(BaseFactorModel):
         "non_deterministic": False,
     }
     _config_class = DFMConfig
+    _param_choices = {"clock": VALID_FREQUENCIES, "em_acceleration": EM_ACCELERATIONS, "scaler": (*_SCALERS, None)}
 
     def __init__(
         self,
@@ -353,6 +354,9 @@ class DFM(BaseFactorModel):
             "pair": {"n_factors": 1, "series": ["s1", "s2"]},
         }
         return [{**base, "em_acceleration": None}, {**base, "blocks": blocks, "em_acceleration": "squarem"}]
+
+    def _describe_fitted(self) -> dict:
+        return {"loglik": self.loglik_}
 
     def _fail(self, message: str) -> None:
         raise ConfigurationError(f"{type(self).__name__}: {message}")

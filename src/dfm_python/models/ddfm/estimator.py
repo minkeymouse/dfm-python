@@ -185,9 +185,14 @@ class DDFM(BaseFactorModel):
         ``(*encoder_layers, n_factors)``. May be empty with the linear decoder;
         the MLP decoder mirrors the hidden layers, so it needs at least one.
     decoder_type : {"linear", "mlp"}, default "linear"
+        Decoder from the factors to the targets: one linear layer, or an MLP
+        that mirrors the encoder's hidden layers.
     activation : {"relu", "tanh", "sigmoid"}, default "relu"
+        Activation of the hidden layers of the encoder and the MLP decoder.
     learning_rate : float, default 0.005
+        Learning rate of the optimizer.
     optimizer : {"Adam", "AdamW", "SGD"}, default "Adam"
+        Optimizer of the autoencoder's weights.
     n_mc_samples : int, default 10
         Monte Carlo samples (corrupted copies of the targets) per MCMC
         iteration; pre-training also runs this many epochs.
@@ -204,6 +209,8 @@ class DDFM(BaseFactorModel):
     interpolation_limit : int, optional, default 10
         Maximum number of consecutive missing values filled; None fills all.
     interpolation_limit_direction : {"forward", "backward", "both"}, default "both"
+        Direction in which consecutive missing values are filled (the
+        ``limit_direction`` of ``pandas.DataFrame.interpolate``).
     scaler : str or sklearn transformer, optional
         Scaler of the targets: "standard", "robust", "minmax", "maxabs",
         "quantile", or an unfitted transformer, which is cloned. The
@@ -285,6 +292,13 @@ class DDFM(BaseFactorModel):
         "non_deterministic": False,
     }
     _config_class = DDFMConfig
+    _param_choices = {
+        "decoder_type": _DECODER_TYPES,
+        "activation": _ACTIVATIONS,
+        "optimizer": VALID_OPTIMIZERS,
+        "interpolation_limit_direction": _LIMIT_DIRECTIONS,
+        "scaler": (*_SCALERS, None),
+    }
 
     def __init__(
         self,

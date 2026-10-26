@@ -186,9 +186,13 @@ class iVDFM(BaseFactorModel):
         Hidden widths of the innovation encoder (default 200), the decoder
         (default 200) and the prior network (default 100).
     encoder_n_hidden_layers, decoder_n_hidden_layers, prior_n_hidden_layers : int
-        Hidden layers of the same networks (defaults 2, 2 and 1).
+        Number of hidden layers of the innovation encoder (default 2), the
+        decoder (default 2) and the prior network (default 1).
     decoder_type : {"mlp", "residual", "linear"}, default "mlp"
+        Decoder from the factors to the targets: an MLP, a linear map plus an
+        MLP correction, or a linear map.
     activation : {"lrelu", "relu", "tanh", "sigmoid"}, default "lrelu"
+        Activation of the hidden layers of every network.
     slope : float, default 0.1
         Leaky ReLU slope.
     factor_order : int, default 1
@@ -215,13 +219,17 @@ class iVDFM(BaseFactorModel):
         Global post-factor mixing f -> M f (identity initialized) before
         decoding.
     learning_rate : float, default 1e-3
+        Learning rate of the optimizer.
     optimizer : {"Adam", "AdamW", "SGD"}, default "Adam"
+        Optimizer of the networks' weights.
     optimizer_weight_decay : float, default 0.0
+        Weight decay of the optimizer.
     optimizer_momentum : float, default 0.9
         Momentum of SGD.
     batch_size : int, default 32
         Windows per batch.
     max_epochs : int, default 100
+        Maximum number of training epochs.
     tol : float, default 5e-4
         Training stops when the mean ELBO of the last five batches changes by
         less than ``tol``.
@@ -328,6 +336,14 @@ class iVDFM(BaseFactorModel):
         "non_deterministic": False,
     }
     _config_class = iVDFMConfig
+    _param_choices = {
+        "decoder_type": _DECODER_TYPES,
+        "activation": _ACTIVATIONS,
+        "innovation_distribution": _INNOVATION_DISTRIBUTIONS,
+        "optimizer": VALID_OPTIMIZERS,
+        "scheduler_type": _SCHEDULERS,
+        "scaler": (*_SCALERS, None),
+    }
 
     def __init__(
         self,

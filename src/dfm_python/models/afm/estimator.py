@@ -120,7 +120,7 @@ class AFM(BaseFactorModel):
         ``"auto"`` uses CUDA if available, else CPU. A ``torch.device`` is
         written to ``config.json`` and YAML as its string.
     verbose : int, default 0
-        0 is silent. 1 logs one record when training starts and one when it
+        0 is silent; 1 logs one record when training starts and one when it
         ends (``fit`` and ``update(refit=True)``); 2 also logs the engine
         hyperparameters. Training is full-batch, with no per-epoch log.
 
@@ -167,6 +167,7 @@ class AFM(BaseFactorModel):
         "non_deterministic": True,  # the class default random_state=None; see _instance_tags
     }
     _config_class = AFMConfig
+    _param_choices = {"factor_model": _FACTOR_MODELS, "trading": _TRADING}
 
     def __init__(
         self,
@@ -225,6 +226,9 @@ class AFM(BaseFactorModel):
             {**tiny, "factor_model": "pca", "trading": "longconv", "n_kernels": 4, "pca_window": 20, "reestim": 5},
             {**tiny, "factor_model": "pca", "trading": "ou", "pca_window": 20, "reestim": 5},
         ]
+
+    def _describe_fitted(self) -> dict:
+        return {"sharpe": self.result_.sharpe}
 
     def _validate_params(self) -> None:
         """Raise ``ConfigurationError`` naming the first invalid hyperparameter."""
