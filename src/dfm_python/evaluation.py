@@ -15,6 +15,7 @@ MAE, bias and interval coverage by horizon, by series or overall::
 
 from __future__ import annotations
 
+import datetime
 import inspect
 import math
 import time
@@ -80,10 +81,11 @@ class BacktestResult:
         pandas.DataFrame
             Columns ``RMSE`` and ``MAE`` (root mean squared and mean absolute
             error), ``bias`` (mean of forecast minus actual), ``n`` (the number
-            of forecasts with an observed actual) and, when the backtest gave
-            intervals, ``coverage`` (the share of those actuals within
-            ``[lower, upper]``). Forecasts whose actual is NaN count nowhere; a
-            group without an observed actual has ``n`` 0 and NaN metrics.
+            of rows whose forecast and actual are both not NaN) and, when the
+            backtest gave intervals, ``coverage`` (the share of those actuals
+            within ``[lower, upper]``). Rows with a NaN actual (or forecast)
+            count nowhere; a group without such a pair has ``n`` 0 and NaN
+            metrics.
 
         Raises
         ------
@@ -115,12 +117,20 @@ class BacktestResult:
 
 
 def _origin_position(index: pd.Index, start: Any) -> int:
-    """The position of ``start`` in ``index``: an int is a position (negative from the end), else a label."""
+    """The position of ``start`` in ``index``: an int is a position (negative from the end), else a label.
+
+    A ``datetime.date`` (a polars ``Date`` value) is read as midnight on a ``DatetimeIndex``.
+    """
     if isinstance(start, (int, np.integer)) and not isinstance(start, (bool, np.bool_)):
         position = int(start) + (len(index) if start < 0 else 0)
         if not 0 <= position < len(index):
-            raise ConfigurationError(f"start={start} is not a position of data, which has {len(index)} rows.")
+            raise ConfigurationError(
+                f"start={start} is not a row position of data, which has {len(index)} rows (an int start counts "
+                "rows, even on an integer index)."
+            )
         return position
+    if isinstance(index, pd.DatetimeIndex) and isinstance(start, datetime.date):
+        start = pd.Timestamp(start)
     try:
         position = index.get_loc(start)
     except (KeyError, TypeError, pd.errors.InvalidIndexError):
@@ -140,6 +150,13 @@ def _refit_every(refit: Any) -> int:
     if isinstance(refit, (int, np.integer)) and refit > 0:
         return int(refit)
     raise ConfigurationError(f"refit must be True, False or a positive integer, got {refit!r}.")
+
+
+def _futr_exog(method: Any, futr_exog: Optional[np.ndarray]) -> dict:
+    """The keyword arguments that pass ``futr_exog`` to ``method``: none when it is None or ``method`` takes none."""
+    if futr_exog is None or "futr_exog" not in inspect.signature(method).parameters:
+        return {}
+    return {"futr_exog": futr_exog}
 
 
 def backtest(
@@ -168,12 +185,13 @@ def backtest(
 
     Then ``predict(h)``, and with ``coverage`` ``predict_interval(h,
     coverage)``, forecast the ``h`` rows after the origin: horizon ``k`` of
-    the origin at row ``p`` is compared with row ``p + k`` of ``data``. A
-    model fitted with exog whose ``predict`` takes ``futr_exog`` (iVDFM) gets
-    the exog rows ``p + 1`` to ``p + h`` as ``futr_exog`` when ``data`` holds
-    them all, finite; this treats exog as known in advance, so its forecasts
-    use exog values from after the origin. Otherwise it forecasts without
-    them, and the model warns. Other models see no exog after the origin.
+    the origin at row ``p`` is compared with row ``p + k`` of ``data``. For a
+    model fitted with exog, ``predict`` and ``predict_interval`` get the exog
+    rows ``p + 1`` to ``p + h`` as ``futr_exog`` when they take that argument
+    (iVDFM) and ``data`` holds those rows, all finite; this treats exog as
+    known in advance, so their forecasts use exog values from after the
+    origin. Otherwise they forecast without them, and the model warns. Other
+    models see no exog after the origin.
 
     Parameters
     ----------
@@ -184,7 +202,8 @@ def backtest(
         Anything the estimator's ``fit`` accepts.
     start : int or index label
         The first origin: an int is a row position (negative counts from the
-        end), anything else a time stamp of ``data``'s index.
+        end), anything else a time stamp of ``data``'s index (a string or a
+        ``datetime.date`` names one of a ``DatetimeIndex``).
     h : int
         Forecast horizon: the number of steps forecast at each origin. Steps
         past the end of ``data`` get the time stamps that continue its index
@@ -271,23 +290,19 @@ def backtest(
         else:
             model.update(panel.loc(None, origin))
         seconds.append(time.perf_counter() - tic)
-        kwargs = {}
-        if (
-            exog is not None
-            and len(model.exog_names_in_)
-            and "futr_exog" in inspect.signature(model.predict).parameters
-            and p + h < n_rows
-            and np.isfinite(exog[p + 1 : p + 1 + h]).all()
-        ):
-            kwargs["futr_exog"] = exog[p + 1 : p + 1 + h]
-        forecasts.append(model.predict(h, **kwargs)[series].to_numpy(dtype=np.float64))
+        # The exog rows after the origin, when the data holds all h of them, finite.
+        futr_exog = exog[p + 1 : p + 1 + h] if exog is not None and len(model.exog_names_in_) else None
+        if futr_exog is not None and (len(futr_exog) < h or not np.isfinite(futr_exog).all()):
+            futr_exog = None
+        forecasts.append(model.predict(h, **_futr_exog(model.predict, futr_exog))[series].to_numpy(dtype=np.float64))
         if coverage is not None:
-            bands = model.predict_interval(h, coverage)
+            bands = model.predict_interval(h, coverage, **_futr_exog(model.predict_interval, futr_exog))
             lower.append(bands.xs("lower", axis=1, level="bound")[series].to_numpy(dtype=np.float64))
             upper.append(bands.xs("upper", axis=1, level="bound")[series].to_numpy(dtype=np.float64))
 
-    # Row p + k of the data, extended past its end by h stamps (and NaN values).
-    stamps = index.append(BaseFactorModel._forecast_index(index, h))
+    # Row p + k of the data, extended past its end by h stamps (and NaN values), in the index's dtype
+    # (the forecast index of a datetime64[ms] index, from a polars Date column, is in ns).
+    stamps = index.append(BaseFactorModel._forecast_index(index, h)).astype(index.dtype)
     values = np.vstack([panel.y.to_numpy(dtype=np.float64), np.full((h, n_series), np.nan)])
     rows = np.repeat((positions[:, None] + np.arange(1, h + 1)).reshape(-1), n_series)
     columns = np.tile(np.arange(n_series), len(positions) * h)

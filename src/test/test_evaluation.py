@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime
 import functools
 import warnings
 
@@ -81,12 +82,15 @@ class _LastValue(BaseFactorModel):
         self._condition(panel)
         return self
 
-    def predict(self, h, data=None, **predict_kwargs):
+    def _point(self, h):
         index = self._forecast_index(self.conditioning_index_, h)
         return pd.DataFrame(np.tile(self.last_, (h, 1)), index=index, columns=list(self.feature_names_in_))
 
+    def predict(self, h, data=None, **predict_kwargs):
+        return self._point(h)
+
     def predict_interval(self, h, coverage=0.9, data=None):
-        point = self.predict(h)
+        point = self._point(h)
         columns = pd.MultiIndex.from_product([point.columns, ["lower", "upper"]], names=["series", "bound"])
         values = np.stack([point - self.width, point + self.width], axis=2).reshape(h, -1)
         return pd.DataFrame(values, index=point.index, columns=columns)
@@ -98,6 +102,20 @@ class _WindowLastValue(_LastValue):
 
 class _NoUpdate(_LastValue):
     _tags = {"capability:update": False, "capability:pred_int": False, "predict_data": None}
+
+
+class _FutrExog(_LastValue):
+    """Logs the ``futr_exog`` that predict and predict_interval get (as iVDFM's, both take it)."""
+
+    _tags = {"capability:exog": True}
+
+    def predict(self, h, data=None, *, futr_exog=None):
+        _LOG.append(("predict", futr_exog))
+        return super().predict(h)
+
+    def predict_interval(self, h, coverage=0.9, data=None, *, futr_exog=None):
+        _LOG.append(("predict_interval", futr_exog))
+        return super().predict_interval(h, coverage)
 
 
 def _panel(T: int = 20, *, seed: int = 0, columns=("a", "b")) -> PanelData:
@@ -262,6 +280,19 @@ def test_ivdfm_is_updated_with_the_window_and_gets_the_future_exog(monkeypatch):
             np.testing.assert_array_equal(_at(result, index[p])["forecast"], _flat(expected))
 
 
+def test_predict_and_predict_interval_get_the_same_future_exog():
+    y = _panel(T=12).y
+    exog = pd.DataFrame(np.arange(24.0).reshape(12, 2), index=y.index, columns=["x0", "x1"])
+    exog.iloc[10, 1] = np.nan
+    _LOG.clear()
+    backtest(_FutrExog(), PanelData(y=y, exog=exog), start=6, h=2, coverage=0.9)
+    # Origins 6 to 10: the two rows after origins 8 and 9 include the NaN, and only one row follows origin 10.
+    expected = [[[14.0, 15.0], [16.0, 17.0]], [[16.0, 17.0], [18.0, 19.0]], None, None, None]
+    for method in ("predict", "predict_interval"):
+        passed = [entry[1] for entry in _LOG if entry[0] == method]
+        assert [None if futr is None else futr.tolist() for futr in passed] == expected, method
+
+
 def test_the_estimator_is_cloned_and_not_fitted():
     est = DFM(**TINY_DFM)
     params = est.get_params()
@@ -278,13 +309,18 @@ def test_polars_and_dataframe_input_give_the_panel_result():
     est = DFM(max_iter=5, scaler="standard")
     expected = backtest(est, PanelData(y=df), start=-6, h=2).forecasts
     pd.testing.assert_frame_equal(backtest(est, df, start=-6, h=2).forecasts, expected)
-    frame = pl.from_pandas(df.reset_index())  # its Date column becomes the index
+    frame = pl.from_pandas(df.reset_index())  # its Datetime column becomes the index
     pd.testing.assert_frame_equal(backtest(est, frame, start=-6, h=2).forecasts, expected)
+    # A Date column gives datetime64[ms] stamps; start can be one of its values (a datetime.date).
+    dates = frame.with_columns(pl.col("date").cast(pl.Date))
+    fc = backtest(est, dates, start=dates["date"][-6], h=2).forecasts
+    assert fc["origin"].dtype == fc["time"].dtype == "datetime64[ms]"
+    pd.testing.assert_frame_equal(fc, expected, check_dtype=False)
 
 
 def test_start_is_a_label_or_a_position():
     data = _panel(T=12)
-    for start in (8, np.int64(8), -4, data.index[8], "2020-09-30"):
+    for start in (8, np.int64(8), -4, data.index[8], "2020-09-30", datetime.date(2020, 9, 30)):
         assert backtest(_LastValue(), data, start=start, h=1).origins.equals(data.index[[8, 9, 10]]), start
     assert backtest(_LastValue(), data, start=0, h=1, step=4).origins.equals(data.index[[0, 4, 8]])
 
