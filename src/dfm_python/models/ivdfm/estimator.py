@@ -449,8 +449,11 @@ class iVDFM(BaseFactorModel):
 
     @classmethod
     def get_test_params(cls) -> list[dict]:
-        """Small CPU parameter sets: one regime, and two regimes with AR(2) factors, mixing, a linear decoder, a
-        scaler and a time budget it does not reach."""
+        """Small CPU parameter sets: one regime, and two regimes with AR(2) factors and more.
+
+        The second set adds mixing, a linear decoder, a scaler and a time
+        budget it does not reach.
+        """
         tiny = {
             "n_factors": 2, "window": 12, "encoder_hidden_dim": 8, "decoder_hidden_dim": 8, "prior_hidden_dim": 8,
             "encoder_n_hidden_layers": 1, "decoder_n_hidden_layers": 1, "prior_n_hidden_layers": 1,

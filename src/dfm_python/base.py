@@ -8,10 +8,11 @@ The four models (``DFM``, ``DDFM``, ``iVDFM``, ``AFM``) subclass
 - ``fit(data, *, callback=None)`` coerces ``data`` to
   :class:`~dfm_python.PanelData`, rejects inputs the tags exclude, infinite
   values and (forecasting models) target series observed fewer than twice or
-  constant, records the data attributes, runs the subclass's ``_fit`` inside
-  :func:`~dfm_python.logger.fit_verbosity` (which hands ``callback`` to the
-  training loop through :class:`~dfm_python.utils.run_control.RunControl`)
-  and returns ``self``.
+  constant, records the data attributes, runs the subclass's
+  ``_fit(data, callback=callback)`` inside
+  :func:`~dfm_python.logger.fit_verbosity`, warns when ``max_time`` stopped
+  training and returns ``self``. ``_fit`` hands ``callback`` and ``max_time``
+  to its training loop through :class:`~dfm_python.utils.run_control.RunControl`.
 - Fitted state lives in attributes ending in ``_``; before ``fit`` they raise
   :class:`~dfm_python.utils.errors.NotFittedError` (an ``AttributeError``), so
   ``hasattr(model, "result_")`` is False.
@@ -141,8 +142,8 @@ class BaseFactorModel(BaseEstimator):
 
     Subclasses set ``_tags`` (overrides of :data:`DEFAULT_TAGS`) and
     ``_config_class``, declare keyword-only hyperparameters in ``__init__``
-    that are stored unchanged, and implement ``_fit(data, **fit_kwargs)`` plus
-    the methods their tags enable.
+    that are stored unchanged, and implement ``_fit(data, *, callback=None)``
+    (setting ``stop_reason_``) plus the methods their tags enable.
     """
 
     _tags: ClassVar[dict] = dict(DEFAULT_TAGS)

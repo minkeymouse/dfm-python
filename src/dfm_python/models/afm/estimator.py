@@ -431,12 +431,13 @@ class AFM(BaseFactorModel):
         run()
         if self.verbose >= 1:
             state = engine.training_state
-            if not any(p.requires_grad for p in engine.parameters()):
-                stop = "no trainable parameters"
-            elif state.converged:
-                stop = f"early stop (patience={engine.patience})"
-            else:
-                stop = "no early stop"
+            stop = {
+                "converged": "no trainable parameters",
+                "early_stopping": f"early stop (patience={engine.patience})",
+                "max_iter": "no early stop",
+                "max_time": f"stopped by max_time={self.max_time}",
+                "callback": "stopped by the callback",
+            }[engine._stop_reason]
             _logger.info(
                 "AFM: finished after %d epoch(s), %s; loss %.6g, Sharpe %.6g, explained variance %.6g.",
                 state.num_iter, stop, state.loss_now, state.sharpe, state.explained_variance,
@@ -545,10 +546,17 @@ class AFM(BaseFactorModel):
     def update(self, data: Any, *, refit: bool = False) -> AFM:
         """Attach ``data`` for later ``allocate()``; with ``refit=True`` also continue training on it.
 
-        ``refit=True`` trains from the current weights (the engine's
-        ``update(..., retrain=True)``, within ``max_time``) and refreshes
-        ``result_``, ``residuals_``, ``book_returns_``, ``n_iter_``,
-        ``converged_``, ``stop_reason_`` and ``index_``. Returns ``self``.
+        ``refit=True`` validates the hyperparameters as ``fit`` does, trains
+        from the current weights (the engine's ``update(..., retrain=True)``,
+        within ``max_time``) and refreshes ``result_``, ``residuals_``,
+        ``book_returns_``, ``n_iter_``, ``converged_``, ``stop_reason_`` and
+        ``index_``. Returns ``self``.
+
+        Raises
+        ------
+        ConfigurationError
+            With ``refit=True``, for an invalid hyperparameter (for example a
+            ``max_time`` set with ``set_params`` after ``fit``).
 
         Warns
         -----
@@ -558,6 +566,7 @@ class AFM(BaseFactorModel):
         self._check_is_fitted("update")
         panel = self._panel(data, "update")
         if refit:
+            self._validate_params()
             dataset = self._adapter(panel)
             engine = self.network_
             with fit_verbosity(self.verbose):
@@ -598,8 +607,9 @@ class AFM(BaseFactorModel):
     def _load_state(cls, est: AFM, path: Path, device: Any, allow_pickle: bool) -> None:
         """Rebuild the engine without data or seeding, load its weights and restore the fitted attributes.
 
-        A run saved without ``stop_reason`` (0.8.x) gets ``"converged"`` or
-        ``"max_iter"`` from ``converged``.
+        A run saved without ``stop_reason`` (0.8.x) gets ``"early_stopping"``
+        (AFM converges only through ``patience``) or ``"max_iter"`` from
+        ``converged``.
         """
         arrays, meta = cls._read_state(path)
         device = est._load_device(device)
@@ -627,4 +637,4 @@ class AFM(BaseFactorModel):
         )
         est._set_fitted(engine, device)
         est._set_results(est.index_)  # result_ is the engine's (cached) result, as after fit
-        est.stop_reason_ = meta.get("stop_reason", "converged" if est.converged_ else "max_iter")
+        est.stop_reason_ = meta.get("stop_reason", "early_stopping" if est.converged_ else "max_iter")

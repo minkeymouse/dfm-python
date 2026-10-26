@@ -185,8 +185,10 @@ def test_max_time_stops_at_the_first_boundary_past_the_budget(case, monkeypatch)
         elapsed.append(info["elapsed"])
         now[0] += 1.0
 
-    with pytest.warns(ConvergenceWarning, match=rf"{cls.__name__}: training stopped after 3 .*max_time=2\.5"):
+    with pytest.warns(ConvergenceWarning, match=rf"{cls.__name__}: training stopped after 3 .*max_time=2\.5") as record:
         model = cls(**params, max_time=2.5).fit(data, callback=tick)
+    # The warning points at the caller of fit.
+    assert [w.filename for w in record if w.category is ConvergenceWarning] == [__file__]
     assert model.stop_reason_ == "max_time" and model.converged_ is False
     assert model.n_iter_ == 3 and elapsed == [0.0, 1.0, 2.0]
     _assert_same_fit(model, _fit(cls, _budget(cls, params, 3), data))
@@ -260,6 +262,45 @@ def test_afm_early_stopping_and_nothing_to_train():
     assert ou.stop_reason_ == "converged" and ou.n_iter_ == 1 and not ou.converged_
 
 
+OWN_STOPS = [
+    ("DFM-plain", {"tol": 1e-2, "max_iter": 200}, "converged"),
+    ("DFM-squarem", {"tol": 1e-2, "max_iter": 200}, "converged"),
+    ("DDFM", {"tol": 10.0}, "converged"),
+    ("iVDFM", {"tol": 1e9}, "converged"),
+    ("iVDFM", {"max_epochs": 30, "learning_rate": 1e-12, "patience": 2}, "early_stopping"),
+    ("AFM", {"learning_rate": 1e-12, "patience": 1}, "early_stopping"),
+]
+
+
+@pytest.mark.parametrize(("name", "extra", "reason"), OWN_STOPS, ids=[f"{n}-{r}" for n, _, r in OWN_STOPS])
+def test_the_models_own_stop_wins_at_the_same_iteration(name, extra, reason, monkeypatch):
+    """A callback stop and a max_time stop at the iteration where the model's own rule stops give way to it."""
+    cls, params = CASES[name]
+    params, data = {**params, **extra}, make_panel(cls)
+    infos = []
+    reference = _fit(cls, params, data, callback=infos.append)
+    assert reference.stop_reason_ == reason
+    last = infos[-1]["iteration"]
+    now = [0.0]
+    monkeypatch.setattr(run_control, "perf_counter", lambda: now[0])
+
+    def stop_at_last(info):
+        if info["iteration"] == last:
+            now[0] = 10.0  # past max_time
+            return True
+        return None
+
+    model = _fit(cls, {**params, "max_time": 5.0}, data, callback=stop_at_last)  # no ConvergenceWarning
+    assert model.stop_reason_ == reason and model.converged_ == reference.converged_
+    _assert_same_fit(model, reference)
+
+
+def test_afm_progress_names_the_stop(capsys):
+    cls, params = CASES["AFM"]
+    _fit(cls, {**params, "verbose": 1}, make_panel(cls), callback=lambda info: info["iteration"] == 2)
+    assert "AFM: finished after 2 epoch(s), stopped by the callback;" in capsys.readouterr().out
+
+
 # -- update(refit=True), save and load ----------------------------------------------
 
 
@@ -281,9 +322,15 @@ def test_afm_refit_refreshes_stop_reason_within_max_time():
     model.update(data, refit=True)
     assert model.stop_reason_ == "max_iter" and model.n_iter_ == params["max_epochs"]
     model.set_params(max_time=1e-9)
-    with pytest.warns(ConvergenceWarning, match="max_time"):
+    with pytest.warns(ConvergenceWarning, match="max_time") as record:
         model.update(data, refit=True)
+    assert [w.filename for w in record if w.category is ConvergenceWarning] == [__file__]
     assert model.stop_reason_ == "max_time" and model.n_iter_ == 1
+    # The refit validates a max_time set after fit.
+    model.set_params(max_time=-1.0)
+    with pytest.raises(ConfigurationError, match="max_time must be None or a finite number of seconds > 0"):
+        model.update(data, refit=True)
+    assert model.stop_reason_ == "max_time"
 
 
 def _drop_stop_reason(path):
@@ -311,3 +358,13 @@ def test_runs_saved_without_stop_reason_load_converged_runs_as_converged(tmp_pat
     assert cls.load(tmp_path / "run").max_time == 600.0
     _drop_stop_reason(tmp_path / "run")
     assert cls.load(tmp_path / "run").stop_reason_ == "converged"
+
+
+def test_afm_runs_saved_without_stop_reason_load_patience_stops_as_early_stopping(tmp_path):
+    """AFM's converged_ means a patience stop, so a 0.8.x run with converged=True loads as "early_stopping"."""
+    cls, params = CASES["AFM"]
+    model = _fit(cls, {**params, "learning_rate": 1e-12, "patience": 1}, make_panel(cls))
+    model.save(tmp_path / "run")
+    _drop_stop_reason(tmp_path / "run")
+    loaded = cls.load(tmp_path / "run")
+    assert loaded.converged_ and loaded.stop_reason_ == "early_stopping"

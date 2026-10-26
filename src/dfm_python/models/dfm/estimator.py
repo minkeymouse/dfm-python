@@ -676,7 +676,8 @@ class DFM(BaseFactorModel):
             (``"DFM"``), ``"iteration"`` (the E-steps run, 1-based),
             ``"max_iter"``, ``"elapsed"`` (seconds since training started),
             ``"objective"`` (the exact log-likelihood of that E-step's
-            parameters), ``"objective_name"`` (``"loglik"``) and ``"state"``
+            parameters; NaN at a SQUAREM extrapolation whose E-step or M-step
+            failed), ``"objective_name"`` (``"loglik"``) and ``"state"``
             (the engine's ``DFMModelState`` of the parameters EM would end on
             there; its series-indexed matrices are in the internal order
             ``[clock | slower]``). Without ``"state"`` the dict is
