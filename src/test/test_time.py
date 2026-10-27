@@ -306,6 +306,18 @@ def test_target_errors():
         grid.resolve("2010Q1", start="2010Q1")
     with pytest.raises(ConfigurationError, match="before the first conditioning stamp"):
         grid.resolve(0, start="2010Q1")
+    # A grid stamp before the data lies before it; a stamp off the grid there is still off the grid.
+    with pytest.raises(ConfigurationError, match=r"^start=.*2014-12-31.* lies before .* \(1 step\(s\) earlier\)"):
+        grid.resolve(0, start=pd.Timestamp("2014-12-31"))
+    with pytest.raises(ConfigurationError, match=r"^end=.*2014-11-30.* lies before .* \(2 step\(s\) earlier\)"):
+        grid.resolve(pd.Timestamp("2014-11-30"))
+    with pytest.raises(ConfigurationError, match="not a stamp of the model's 'ME' grid"):
+        grid.resolve(0, start=pd.Timestamp("2014-12-15"))
+    hourly = Grid(pd.date_range("2000-01-03 01:00", periods=10, freq="h"), to_offset("h"), None)
+    with pytest.raises(ConfigurationError, match=r"lies before .* \(2 step\(s\) earlier\)"):
+        hourly.resolve(pd.Timestamp("2000-01-02 23:00"))
+    with pytest.raises(ConfigurationError, match="not a stamp of the model's 'h' grid"):
+        hourly.resolve(pd.Timestamp("2000-01-02 23:30"))
     for bad in (1.5, None, True, [1], {"a": 1}):
         with pytest.raises(TypeError):
             grid.resolve(bad)

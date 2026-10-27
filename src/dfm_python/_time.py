@@ -573,12 +573,26 @@ class Grid:
             return int(period.ordinal - self.index[0].ordinal)
         stamp = _as_timestamp(value, self.index.tz)
         pos = self._last_at_or_before(stamp)
+        if pos < 0:
+            # A grid stamp before the first one is a negative position: resolve() names it as such.
+            steps = self._steps_before(stamp)
+            if steps is not None:
+                return -steps
         if pos < 0 or self._times(pos, pos)[0] != stamp:
             raise ConfigurationError(
                 f"{role}={_fmt_stamp(stamp)} is not a stamp of the model's {self.freq.freqstr!r} grid "
                 f"(the conditioning data runs {_fmt_stamp(self.index[0])} .. {_fmt_stamp(self.index[-1])})."
             )
         return pos
+
+    def _steps_before(self, stamp: pd.Timestamp) -> Optional[int]:
+        """Grid steps from ``stamp`` (earlier than the first stamp) to the first stamp; None when it is off the grid."""
+        first = self.index[0]
+        if isinstance(self.freq, pd.offsets.Tick):
+            steps, rest = divmod(first - stamp, pd.Timedelta(self.freq))
+            return int(steps) if rest == pd.Timedelta(0) else None
+        back = pd.date_range(stamp, first, freq=self.freq)
+        return len(back) - 1 if len(back) > 1 and back[0] == stamp and back[-1] == first else None
 
     def _period_position(self, value: Any, role: str) -> int:
         """``end``: the last grid stamp in the period; ``start``: the first."""
