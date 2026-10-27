@@ -82,6 +82,8 @@ _CANDIDATE_GRIDS = (
     *(f"YS-{m}" for m in _MONTHS), *(f"YE-{m}" for m in _MONTHS),
 )
 _N_SHOWN = 5
+# The longest grid built from an intraday index's smallest step (a guard against a tiny step).
+_MAX_STEP_GRID = 1_000_000
 
 
 # ---------------------------------------------------------------------------
@@ -255,26 +257,49 @@ def _gaps_error(index: pd.Index, missing: pd.Index, freqstr: str, what: str) -> 
     )
 
 
+def _intraday_step(stamps: pd.DatetimeIndex) -> Optional[pd.DateOffset]:
+    """The smallest step of an index as a fixed-length grid (``h``, ``5min``), when it is shorter than a day.
+
+    None for daily or coarser steps (the calendar grids cover those), and when
+    that grid would exceed ``_MAX_STEP_GRID`` stamps.
+    """
+    steps = np.diff(stamps.asi8)
+    steps = steps[steps > 0]
+    if not steps.size:
+        return None
+    step = int(steps.min())
+    day = pd.Timedelta(days=1).value
+    if step >= day or (stamps.asi8[-1] - stamps.asi8[0]) // step + 1 > _MAX_STEP_GRID:
+        return None
+    return to_offset(pd.Timedelta(step))
+
+
 def _search_grid(index: pd.DatetimeIndex, what: str) -> pd.DateOffset:
     """The coarsest calendar grid holding every stamp; raise naming the gaps, or the irregular stamps.
 
-    Gaps explain an index only on a grid at most twice its length: a finer
-    grid holds any set of dates (every date is on the daily grid), so an index
-    that needs one is reported as irregular, with the plausible grid that
-    holds the most stamps.
+    The candidates are the calendar grids and, for intraday data, the index's
+    smallest step. Gaps explain an index only on a grid at most twice its
+    length: a finer grid holds any set of dates (every date is on the daily
+    grid), so an index that needs one is reported as irregular, with the
+    plausible grid that holds the most stamps. A plausible grid also has at
+    least half as many stamps as the index: on a coarser one most rows would
+    share a stamp (a daily grid for hourly data).
     """
     stamps = _ns(index)
     first, last = stamps[0], stamps[-1]
     n = len(stamps)
+    candidates = [to_offset(alias) for alias in _CANDIDATE_GRIDS]
+    step = _intraday_step(stamps)
+    if step is not None:
+        candidates.append(step)
     containing: Optional[tuple[int, pd.DateOffset]] = None
     closest: Optional[tuple[int, pd.DateOffset, np.ndarray]] = None
-    for alias in _CANDIDATE_GRIDS:
-        offset = to_offset(alias)
+    for offset in candidates:
         grid = pd.date_range(first, last, freq=offset)
         on = stamps.isin(grid)
         if on.all() and (containing is None or len(grid) < containing[0]):
             containing = (len(grid), offset)
-        if len(grid) <= 2 * n and (closest is None or on.sum() > closest[2].sum()):
+        if n <= 2 * len(grid) <= 4 * n and (closest is None or on.sum() > closest[2].sum()):
             closest = (len(grid), offset, on)
     if containing is not None and (containing[0] <= 2 * n or closest is None):
         offset = containing[1]
@@ -623,9 +648,11 @@ class Grid:
                 "no target stamps."
             )
         if first < 0:
+            # Without start, the first target is end itself.
+            role, value = ("start", start) if start is not None else ("end", end)
             raise ConfigurationError(
-                f"start={start if start is not None else end!r} lies before the first conditioning stamp "
-                f"{_fmt_stamp(self.index[0])} ({-first} step(s) earlier)."
+                f"{role}={value!r} lies before the first conditioning stamp {_fmt_stamp(self.index[0])} "
+                f"({-first} step(s) earlier)."
             )
         return first, last
 
@@ -673,6 +700,12 @@ class Grid:
         return keys[:-1] != keys[1:]
 
     def _label(self, key: int, code: Optional[str], residue: Optional[int], last: int) -> Any:
+        """The ``nowcast`` label of a period: a ``pd.Period``, or on a ``RangeIndex`` the period-end stamp.
+
+        The ``RangeIndex`` label is the stamp value (the row label ``predict``
+        gives that stamp), not its position from ``index[0]``: the two agree
+        on ``RangeIndex(n)`` and differ on, say, ``RangeIndex(100, 180, 2)``.
+        """
         if self.is_range:
             return self.stamps(last, last)[0]
         if code is not None:

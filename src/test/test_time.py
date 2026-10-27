@@ -141,6 +141,19 @@ def test_irregular_index_names_the_closest_grid():
     assert "freq='W-FRI'" in text
 
 
+def test_intraday_gaps_are_named_on_the_intraday_grid():
+    # an hourly or 5-minute index with gaps is not "irregular on a daily grid"
+    hourly = pd.date_range("2025-01-01", periods=10, freq="h").delete(3)
+    hourly = pd.DatetimeIndex(list(hourly))  # no freq
+    with pytest.raises(DataValidationError, match=r"'h' grid but misses 1 stamp\(s\), first 2025-01-01 03:00:00") as info:
+        _time.grid_freq(hourly)
+    assert "freq='h'" in str(info.value) and "'D'" not in str(info.value)
+    five = pd.DatetimeIndex(list(pd.date_range("2025-01-02 09:30", periods=40, freq="5min").delete([4, 20])))
+    with pytest.raises(DataValidationError, match=r"'5min' grid but misses 2 stamp\(s\), first 2025-01-02 09:50:00"):
+        _time.grid_freq(five)
+    assert _time.grid_freq(pd.DatetimeIndex(["2025-01-01 00:00", "2025-01-01 03:00"])) == to_offset("3h")
+
+
 def test_bundled_macro_csv_is_irregular_on_a_weekly_clock():
     from pathlib import Path
 
@@ -285,10 +298,10 @@ def test_target_errors():
     grid = _grid()
     with pytest.raises(ConfigurationError, match="lies after end"):
         grid.resolve(-1, start=2)
-    with pytest.raises(ConfigurationError, match="before the first conditioning stamp 2015-01-31"):
+    with pytest.raises(ConfigurationError, match="^start=-500 lies before the first conditioning stamp 2015-01-31"):
         grid.resolve(0, start=-500)
-    with pytest.raises(ConfigurationError, match="before the first conditioning stamp"):
-        grid.resolve(-500)
+    with pytest.raises(ConfigurationError, match="^end=-500 lies before the first conditioning stamp"):
+        grid.resolve(-500)  # without start the first target is end itself
     with pytest.raises(ConfigurationError, match="2010Q1 lies before the first conditioning stamp"):
         grid.resolve("2010Q1", start="2010Q1")
     with pytest.raises(ConfigurationError, match="before the first conditioning stamp"):
