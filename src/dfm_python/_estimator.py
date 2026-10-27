@@ -137,6 +137,50 @@ def _closest_name_message(unknown: Sequence[str], valid: Sequence[str], what: st
     return f"unknown {what}{'s' if len(unknown) > 1 else ''} {', '.join(parts)}; valid {what}s: {sorted(valid)}."
 
 
+def _is_estimator(value: Any) -> bool:
+    """An object with parameters, as sklearn's ``get_params(deep=True)`` recurses into."""
+    return hasattr(value, "get_params") and not isinstance(value, type)
+
+
+def _check_param_names(
+    estimator: Any, params: Mapping[str, Any], prefix: str = ""
+) -> tuple[list[str], list[str], list[str]]:
+    """The names of ``params`` that ``estimator.set_params`` would reject.
+
+    A nested name ``a__b`` is checked against the sub-estimator ``a``: the
+    value passed for ``a`` in the same call, else the current one.
+
+    Returns
+    -------
+    unknown : list of str
+        The rejected names, with ``prefix``.
+    valid : list of str
+        The valid names of every level visited, with ``prefix``.
+    plain : list of str
+        The visited names that hold no estimator but were given nested names.
+    """
+    names = estimator.get_params(deep=False)
+    valid = [prefix + name for name in names]
+    unknown, plain, nested = [], [], {}
+    for key, value in params.items():
+        head, _, rest = key.partition("__")
+        if head not in names:
+            unknown.append(prefix + key)
+        elif rest:
+            nested.setdefault(head, {})[rest] = value
+    for head, sub in nested.items():
+        target = params[head] if head in params else names[head]
+        if not _is_estimator(target):
+            unknown += [f"{prefix}{head}__{rest}" for rest in sub]
+            plain.append(prefix + head)
+            continue
+        found = _check_param_names(target, sub, f"{prefix}{head}__")
+        unknown += found[0]
+        valid += found[1]
+        plain += found[2]
+    return unknown, valid, plain
+
+
 # ---------------------------------------------------------------------------
 # Training history and the callback
 # ---------------------------------------------------------------------------
@@ -240,11 +284,18 @@ class _FactorModel(BaseEstimator):
     # sklearn shell
 
     def set_params(self, **params: Any) -> _FactorModel:
-        """Set hyperparameters; an unknown name raises ``ConfigurationError`` naming the closest one."""
-        valid = self._get_param_names()
-        unknown = [k for k in params if k.split("__", 1)[0] not in valid]
+        """Set hyperparameters; an unknown name raises ``ConfigurationError`` naming the closest one.
+
+        Nested names (``factors__embed_dim``) are checked against the
+        sub-estimator: the one passed in the same call, else the current one.
+        Nothing is set when a name is unknown.
+        """
+        unknown, valid, plain = _check_param_names(self, params)
         if unknown:
-            raise ConfigurationError(f"{type(self).__name__}.set_params: " + _closest_name_message(unknown, valid, "parameter"))
+            message = _closest_name_message(unknown, valid, "parameter")
+            if plain:
+                message += f" These hold no estimator, so they take no nested parameters: {plain}."
+            raise ConfigurationError(f"{type(self).__name__}.set_params: " + message)
         return super().set_params(**params)
 
     @classmethod
@@ -801,6 +852,50 @@ def _panel_from_files(arrays: Mapping, values: Mapping) -> PanelData:
 # ---------------------------------------------------------------------------
 
 
+def _stamp_rows(index: pd.Index, stamps: pd.Index) -> np.ndarray:
+    """The row of each target stamp in a user's ``index`` (-1 where absent), matched by kind.
+
+    Datetime stamps match a ``DatetimeIndex`` of any unit, period stamps a
+    ``PeriodIndex`` of the same frequency, and integer stamps (``RangeIndex``
+    data) any integer index; any other pairing matches nothing.
+    """
+    absent = np.full(len(stamps), -1, dtype=np.intp)
+    if isinstance(stamps, pd.DatetimeIndex):
+        if not isinstance(index, pd.DatetimeIndex):
+            return absent
+        return _time._ns(index).get_indexer(_time._ns(stamps))
+    if isinstance(stamps, pd.PeriodIndex):
+        if not (isinstance(index, pd.PeriodIndex) and index.freq == stamps.freq):
+            return absent
+        return index.get_indexer(stamps)
+    if not pd.api.types.is_integer_dtype(index.dtype):
+        return absent
+    return pd.Index(index).get_indexer(stamps)
+
+
+def _nowcast_index(series: Sequence, labels: Sequence) -> pd.MultiIndex:
+    """The ``(series, period)`` rows of ``nowcast``, in the given order.
+
+    The levels are built without sorting all labels together: Periods of two
+    frequencies (a quarterly and a monthly series) do not compare. The period
+    level is a ``PeriodIndex`` when every label shares one frequency, and an
+    object Index otherwise; it is ordered by frequency, then time, so each
+    series' rows stay lexsorted.
+    """
+    names = list(dict.fromkeys(series))
+    periods = sorted(
+        dict.fromkeys(labels),
+        key=lambda p: (p.freqstr, p.ordinal) if isinstance(p, pd.Period) else ("", p),
+    )
+    name_code = {name: i for i, name in enumerate(names)}
+    label_code = {label: i for i, label in enumerate(periods)}
+    return pd.MultiIndex(
+        levels=[pd.Index(names), pd.Index(periods)],
+        codes=[[name_code[s] for s in series], [label_code[p] for p in labels]],
+        names=["series", "period"],
+    )
+
+
 def _check_coverage(coverage: Any) -> float:
     valid = isinstance(coverage, (int, float, np.integer, np.floating)) and not isinstance(coverage, (bool, np.bool_))
     if not (valid and math.isfinite(coverage) and 0 < coverage < 1):
@@ -933,11 +1028,12 @@ class _Forecaster(_FactorModel):
         missing_cols = [c for c in names if c not in exog.columns]
         if missing_cols:
             raise DataValidationError(f"{name}.{method}: exog lacks the columns {missing_cols} (needed: {names}).")
-        index = exog.index
-        if isinstance(stamps, pd.DatetimeIndex) and isinstance(index, pd.DatetimeIndex):
-            rows = index.as_unit("ns").get_indexer(stamps.as_unit("ns"))
-        else:
-            rows = index.get_indexer(stamps) if type(index) is type(stamps) else np.full(len(stamps), -1)
+        if not exog.index.is_unique:
+            repeated = exog.index[exog.index.duplicated()].unique()
+            raise DataValidationError(
+                f"{name}.{method}: exog repeats the stamps {_time._fmt_stamps(repeated)}; give each stamp one row."
+            )
+        rows = _stamp_rows(exog.index, stamps)
         if (rows < 0).any():
             absent = stamps[rows < 0]
             raise DataValidationError(
@@ -1084,7 +1180,8 @@ class _Forecaster(_FactorModel):
             ``lower``, ``upper``, ``actual`` and ``status`` (``"released"``,
             ``"backcast"``, ``"nowcast"`` or ``"forecast"``). Labels are
             ``pd.Period`` at the series' frequency (on a ``RangeIndex``, the
-            period-end stamp).
+            period-end stamp, as labeled by :meth:`predict`). With series of
+            two frequencies the period level is an object Index.
 
         Raises
         ------
@@ -1115,15 +1212,16 @@ class _Forecaster(_FactorModel):
         bands = self.predict_interval(hi - (n - 1), start=lo - (n - 1), coverage=coverage, exog=exog)
         lower = bands.xs("lower", axis=1, level="bound").to_numpy()
         upper = bands.xs("upper", axis=1, level="bound").to_numpy()
-        keys, rows = [], []
+        keys, labels, rows = [], [], []
         for name, j, periods in plan:
             for period in periods:
                 at = period.last - lo
                 actual = y[period.last, j] if period.last < n else np.nan
                 status = period.status(n - 1, released=not np.isnan(actual))
-                keys.append((name, period.label))
+                keys.append(name)
+                labels.append(period.label)
                 rows.append((point[at, j], lower[at, j], upper[at, j], actual, status))
-        index = pd.MultiIndex.from_tuples(keys, names=["series", "period"])
+        index = _nowcast_index(keys, labels)
         frame = pd.DataFrame(rows, index=index, columns=["estimate", "lower", "upper", "actual", "status"])
         for col in ("estimate", "lower", "upper", "actual"):
             frame[col] = frame[col].astype(np.float64)

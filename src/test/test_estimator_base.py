@@ -10,7 +10,7 @@ import warnings
 import numpy as np
 import pandas as pd
 import pytest
-from sklearn.base import clone
+from sklearn.base import BaseEstimator, clone
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.exceptions import NotFittedError as SklearnNotFittedError
 
@@ -103,6 +103,31 @@ def test_set_params_names_the_closest_parameter():
     assert model.set_params(max_iter=5) is model and model.max_iter == 5
     with pytest.raises(ConfigurationError, match=r"'max_itr' \(did you mean 'max_iter'\?\)"):
         model.set_params(max_itr=5)
+
+
+class _Spec(BaseEstimator):
+    def __init__(self, *, width=3):
+        self.width = width
+
+
+class _NestedForecaster(DummyForecaster):
+    """A forecaster with a spec hyperparameter, like the AFM specs (``factors__embed_dim``)."""
+
+    def __init__(self, *, max_iter=3, tol=0.0, sign_anchors=None, clock=None, verbose=0, spec=None):
+        super().__init__(max_iter=max_iter, tol=tol, sign_anchors=sign_anchors, clock=clock, verbose=verbose)
+        self.spec = spec
+
+
+def test_set_params_checks_nested_names():
+    model = _NestedForecaster(spec=_Spec())
+    assert model.set_params(spec__width=5).spec.width == 5
+    with pytest.raises(ConfigurationError, match=r"'spec__widht' \(did you mean 'spec__width'\?\)"):
+        model.set_params(max_iter=9, spec__widht=5)
+    assert model.max_iter == 3  # nothing is set when a name is unknown
+    # a spec passed in the same call is the one checked
+    assert _NestedForecaster().set_params(spec=_Spec(), spec__width=7).spec.width == 7
+    with pytest.raises(ConfigurationError, match=r"'spec__width'.*hold no estimator.*\['spec'\]"):
+        _NestedForecaster().set_params(spec__width=5)
 
 
 def test_no_metadata_request_setters():
@@ -350,8 +375,23 @@ def test_nowcast_table(mixed):
     clock = model.nowcast(["s2", "s1"], end=0, start=-2)
     assert list(clock.index.get_level_values("series")) == ["s1"] * 3 + ["s2"] * 3  # the user's order
     assert set(clock["status"]) <= {"released", "nowcast", "backcast"}
+    both = model.nowcast(["s1", "s0"], end=0, start=-1)  # a quarterly and a monthly series together
+    assert list(both.index.get_level_values("series")) == ["s0"] * 2 + ["s1"] * 2
+    assert [str(p) for p in both.index.get_level_values("period")] == ["2003Q3", "2003Q4", "2003-10", "2003-11"]
+    assert both.loc[("s0", pd.Period("2003Q4")), "estimate"] == table.loc[("s0", pd.Period("2003Q4")), "estimate"]
+    assert both.loc["s1"].equals(model.nowcast("s1", end=0, start=-1).loc["s1"])
     with pytest.raises(ConfigurationError, match="unknown series"):
         model.nowcast("gdp")
+
+
+def test_nowcast_labels_on_a_range_index_are_the_predict_row_labels():
+    # the period-end stamp value, not its position from index_[0] (38, 39, 40 here)
+    model = _fit(data=_frame(pd.RangeIndex(100, 180, 2)))
+    table = model.nowcast("s1", end=1, start=-1)
+    assert list(table.index.get_level_values("period")) == [176, 178, 180]
+    point = model.predict(1, start=-1)["s1"]
+    assert list(point.index) == [176, 178, 180]
+    np.testing.assert_array_equal(table["estimate"].to_numpy(), point.to_numpy())
 
 
 def test_nowcast_backcast_status_for_an_unreleased_past_period():
@@ -417,6 +457,25 @@ def test_future_exog_rules():
         unexog.predict(1, exog=future)
     nowcast = model.nowcast("s0", end=1, start=0, exog=future)
     assert list(nowcast["status"]) == ["released", "forecast"]
+    with pytest.raises(DataValidationError, match="repeats the stamps 2022-07-31"):
+        model.predict(1, exog=pd.concat([future, future.iloc[:1]]))
+
+
+def test_future_exog_on_range_index_data_matches_any_integer_index():
+    rng = np.random.default_rng(0)
+    y = pd.DataFrame(rng.standard_normal((30, 3)), columns=["s0", "s1", "s2"])
+    model = _fit(_ExogForecaster, data=PanelData(y, exog=pd.DataFrame({"u": rng.standard_normal(30)})))
+    expected = model.predict(2, exog=pd.DataFrame({"u": [1.0, 2.0]}, index=pd.RangeIndex(30, 32)))
+    for index in ([30, 31], np.arange(30, 32), np.array([30, 31], dtype=np.uint32)):
+        frame = model.predict(2, exog=pd.DataFrame({"u": [1.0, 2.0]}, index=index))
+        pd.testing.assert_frame_equal(frame, expected)
+    # extra rows in any order are ignored
+    frame = model.predict(2, exog=pd.DataFrame({"u": [9.0, 2.0, 1.0]}, index=[40, 31, 30]))
+    pd.testing.assert_frame_equal(frame, expected)
+    with pytest.raises(DataValidationError, match="lacks the stamps 31"):
+        model.predict(2, exog=pd.DataFrame({"u": [1.0, 2.0]}, index=[30, 32]))
+    with pytest.raises(DataValidationError, match="lacks the stamps 30, 31"):
+        model.predict(2, exog=pd.DataFrame({"u": [1.0, 2.0]}, index=pd.date_range("2020-01-31", periods=2)))
 
 
 # ---------------------------------------------------------------------------
@@ -460,6 +519,9 @@ def test_update_checks_the_grid_and_the_anchors(mixed):
     with pytest.raises(TypeError, match="replace"):
         model.update(panel, replace="yes")
     assert model.index_[-1] == pd.Timestamp("2003-11-30")  # a failed update changes nothing
+    ranged = _fit(data=PanelData(make_panel(DummyForecaster).y[["s1", "s2"]].reset_index(drop=True)))
+    with pytest.raises(DataValidationError, match=r"misses 2 row\(s\), first 48, 49"):
+        ranged.update(pd.DataFrame({"s1": [1.0], "s2": [1.0]}, index=pd.RangeIndex(50, 51)))
 
 
 def test_failed_conditioning_leaves_the_model_as_it_was():
