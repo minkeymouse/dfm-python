@@ -96,6 +96,7 @@ DEFAULT_TAGS: dict = {
     "non_deterministic": False,
 }
 
+
 class _class_or_instance_method:
     """Like ``classmethod``, but also passes the instance (None when called on the class).
 
