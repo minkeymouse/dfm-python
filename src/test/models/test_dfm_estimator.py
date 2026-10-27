@@ -1242,7 +1242,8 @@ def test_shipped_yaml_builds_the_estimator(name):
     # Every column the data: section names is in the shipped CSV (finance.csv gets its 'date' in the tutorial).
     header = set(pd.read_csv(_REPO / "data" / _SHIPPED[name]["csv"], nrows=0).columns) | {"date"}
     assert set(sections["data"]["y"]) <= header
-    assert set(sections["data"].get("freq", {}).get("m", [])) <= header
+    # The freq: map ({series: code}) names only series the data: section selects.
+    assert set(sections["data"].get("freq", {})) <= set(sections["data"]["y"])
     # The blocks name only series the data: section selects.
     for spec in (model.blocks or {}).values():
         assert set(spec["series"]) <= set(sections["data"]["y"])
