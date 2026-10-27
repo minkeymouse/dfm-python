@@ -223,8 +223,19 @@ def _state_hash(est: _FactorModel) -> str:
     return h.hexdigest()
 
 
+def _python_scalar(value: Any) -> Any:
+    """A numpy scalar as its Python value (``np.str_`` as ``str``); datetimes stay (``.item()`` may give an int)."""
+    if isinstance(value, np.generic) and not isinstance(value, (np.datetime64, np.timedelta64)):
+        return value.item()
+    return value
+
+
 def _deep_equal(a: Any, b: Any) -> bool:
-    """Structural equality: arrays by value (NaN equals NaN), estimators by params, tuple != list."""
+    """Structural equality: arrays by value (NaN equals NaN), estimators by params, tuple != list.
+
+    A numpy scalar equals its Python value (a JSON round trip turns ``np.str_``
+    series names into ``str``).
+    """
     if a is b:
         return True
     if isinstance(a, np.ndarray) or isinstance(b, np.ndarray):
@@ -235,6 +246,7 @@ def _deep_equal(a: Any, b: Any) -> bool:
         return bool(np.array_equal(a, b, equal_nan=a.dtype.kind in "fc"))
     if isinstance(a, (pd.DataFrame, pd.Series, pd.Index)):
         return type(a) is type(b) and a.equals(b)
+    a, b = _python_scalar(a), _python_scalar(b)
     if isinstance(a, float) and isinstance(b, float) and np.isnan(a) and np.isnan(b):
         return True
     if hasattr(a, "get_params") and hasattr(b, "get_params") and not isinstance(a, type):

@@ -38,9 +38,32 @@ def _fit(cls=DummyForecaster, data=None, **params):
 # ---------------------------------------------------------------------------
 
 
+def _unnamed(panel: PanelData) -> PanelData:
+    """``panel`` with its time index unnamed."""
+    def unnamed(frame):
+        return None if frame is None else frame.rename_axis(None)
+
+    return PanelData(unnamed(panel.y), exog=unnamed(panel.exog), characteristics=unnamed(panel.characteristics),
+                     freq=panel.freq)
+
+
+@pytest.mark.parametrize("named", [True, False], ids=["named", "unnamed"])
 @pytest.mark.parametrize("cls", [DummyForecaster, DummyAllocator, DummyTorchForecaster], ids=lambda c: c.__name__)
-def test_dummies_pass_check_estimator(cls):
-    assert check_estimator(cls) == ALL_CHECKS
+def test_dummies_pass_check_estimator(cls, named):
+    # An unnamed time index is named "time" in the namespace frames (spec section 5).
+    data = make_panel(cls) if named else _unnamed(make_panel(cls))
+    assert data.index.name == ("date" if named else None)
+    assert check_estimator(cls, data=data) == ALL_CHECKS
+
+
+def test_numpy_string_series_names_pass_check_estimator():
+    # save/load returns np.str_ names as str: the same names, so the reload keeps feature_names_in_.
+    panel = make_panel(DummyForecaster)
+    names = list(np.array(panel.series_names))
+    assert type(names[0]) is np.str_
+    data = PanelData(panel.y.set_axis(names, axis=1), freq=panel.freq)
+    assert type(data.series_names[0]) is np.str_
+    assert check_estimator(DummyForecaster, data=data) == ALL_CHECKS
 
 
 def test_instance_is_checked_with_its_own_params():

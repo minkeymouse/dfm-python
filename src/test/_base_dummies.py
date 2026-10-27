@@ -39,6 +39,11 @@ def _shape(data: dict) -> tuple:
     return (len(data["index"]), len(data["series"]))
 
 
+def _time_index(index: pd.Index) -> pd.Index:
+    """The namespace frames' time index: the data's, named ``"time"`` when unnamed (spec section 5)."""
+    return index.rename(index.name if index.name is not None else "time")
+
+
 class DummyForecaster(_Forecaster):
     """One-factor forecaster: f_t = sum_i l_i x_it / sum_i l_i^2 over observed standardized x_it."""
 
@@ -127,8 +132,8 @@ class DummyForecaster(_Forecaster):
         self._f_ = f
         reported = _identify.apply_factors(f[:, None], self._transform_)
         data = {
-            "f": reported, "index": panel.index, "factor_names": ["factor_0"], "series": list(panel.series_names),
-            "center": self._center_, "scale": self._scale_,
+            "f": reported, "index": _time_index(panel.index), "factor_names": ["factor_0"],
+            "series": list(panel.series_names), "center": self._center_, "scale": self._scale_,
             "loadings": _identify.apply_loadings(self._loadings_[:, None], self._transform_),
         }
         self.states_ = Namespace("DummyForecaster.states_", [
@@ -295,11 +300,11 @@ class DummyAllocator(_Allocator):
     def _condition(self, panel, previous):
         returns = panel._y.to_numpy()
         decided = self._decisions(returns)
-        index = panel.index.append(pd.Index([_time.forward_stamp(panel.index)]))
+        index = _time_index(panel.index.append(pd.Index([_time.forward_stamp(panel.index)])).rename(panel.index.name))
         held = np.vstack([np.full((1, panel.n_series), np.nan), decided])
         factor = np.append(np.nanmean(returns, axis=1), np.nan)[:, None]
         self._next_ = decided[-1]
-        data = {"weights": held, "f": factor, "index": index.rename(panel.index.name), "series": list(panel.series_names),
+        data = {"weights": held, "f": factor, "index": index, "series": list(panel.series_names),
                 "factor_names": ["factor_0"]}
         self.states_ = Namespace("DummyAllocator.states_", [
             Field("factors", "the cross-sectional mean return", "return units", build=_factor_frame),
