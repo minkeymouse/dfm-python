@@ -767,7 +767,10 @@ def test_merge_range_index_continues_its_grid():
     assert isinstance(merged.index, pd.RangeIndex) and merged.index.equals(pd.RangeIndex(0, 2 * T + 2, 2))
     with pytest.raises(DataValidationError, match="off the conditioning grid"):
         base._merge(PanelData(pd.DataFrame([[1.0, 2.0, 3.0]], index=pd.RangeIndex(17, 18), columns=SERIES)))
-    with pytest.raises(DataValidationError, match="evenly spaced"):
+    # rows 16 and 18 missing after the last row 14: named, with the reindex fix
+    with pytest.raises(
+        DataValidationError, match=r"gap after .*last row 14\): it misses 2 row\(s\), first 16, 18\..*RangeIndex\(16, 22, 2\)"
+    ):
         base._merge(PanelData(pd.DataFrame([[1.0, 2.0, 3.0]], index=pd.RangeIndex(20, 22, 2), columns=SERIES)))
 
 

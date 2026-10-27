@@ -44,6 +44,7 @@ from typing import Any, Optional
 import numpy as np
 import pandas as pd
 
+from .._time import _fmt_stamps
 from .._time import window as _window
 from ..config.constants import VALID_FREQUENCIES
 from ..utils.errors import DataValidationError
@@ -848,7 +849,8 @@ class PanelData:
         DataValidationError
             For other series, exog or characteristic names, another ``freq``,
             another index type, or (``replace=False``) data that starts before
-            this panel or has stamps inside it that it does not have.
+            this panel, has stamps inside it that it does not have, or (on a
+            ``RangeIndex``) leaves a gap after its last row.
         """
         new = PanelData._coerce(new)
         known = list(self._series_names)
@@ -910,6 +912,15 @@ class PanelData:
                 "data does not have; stamps up to its last one must be its own (new rows come after it)."
             )
         after = new_index[new_index > index[-1]]
+        if isinstance(index, pd.RangeIndex) and len(after) and after[0] != index[-1] + index.step:
+            # A RangeIndex cannot hold the gap; the new data is on the grid, so it can only lie here.
+            step = index.step
+            missing = range(index[-1] + step, after[0], step)
+            raise DataValidationError(
+                f"The new data leaves a gap after the conditioning data (last row {index[-1]}): it misses "
+                f"{len(missing)} row(s), first {_fmt_stamps(missing)}. New rows must continue the grid: insert the "
+                f"missing rows as NaN with df.reindex(pd.RangeIndex({index[-1] + step}, {after[-1] + step}, {step}))."
+            )
         if isinstance(index, pd.DatetimeIndex):
             after = after.as_unit(index.unit)
         merged = index.append(after) if len(after) else index
