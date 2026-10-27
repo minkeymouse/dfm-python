@@ -46,5 +46,5 @@ model:
 # PanelData.from_wide arguments (all series daily, at the clock frequency).
 data:
   time_col: date
-  target_cols: [D1, D5, D9, E1, E10, E15, E20, E5, I1, I5, I9, M1, M10, M15, M18, M5,
-                P1, P10, P13, P5, S1, S10, S5, V1, V10, V5, market_forward_excess_returns]
+  y: [D1, D5, D9, E1, E10, E15, E20, E5, I1, I5, I9, M1, M10, M15, M18, M5,
+      P1, P10, P13, P5, S1, S10, S5, V1, V10, V5, market_forward_excess_returns]

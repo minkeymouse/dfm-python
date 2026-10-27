@@ -183,7 +183,7 @@ def test_allocation_model_keeps_its_own_rules():
     rng = np.random.default_rng(0)
     returns = rng.standard_normal((40, 4)) * 0.01
     returns[:, 1] = 0.0
-    panel = PanelData.from_arrays(returns, series_exog=rng.standard_normal((40, 4, 2)))
+    panel = PanelData.from_arrays(returns, characteristics=rng.standard_normal((40, 4, 2)))
     AFM()._check_training_targets(panel)
 
 
@@ -220,14 +220,14 @@ def test_infinite_new_rows_are_rejected():
     pd.testing.assert_frame_equal(model.predict(2), before)
 
 
-@pytest.mark.parametrize("slot", ["y", "series_exog"])
+@pytest.mark.parametrize("slot", ["y", "characteristics"])
 def test_afm_rejects_infinite_values(monkeypatch, slot):
     _no_training(monkeypatch, AFM)
     rng = np.random.default_rng(0)
     returns, chars = rng.standard_normal((40, 4)) * 0.01, rng.standard_normal((40, 4, 2))
     (returns if slot == "y" else chars)[5, 1] = np.inf
     with pytest.raises(DataValidationError, match=f"AFM: {slot} contains infinite values .* finite values\\.$"):
-        AFM(**AFM.get_test_params()[1]).fit(PanelData.from_arrays(returns, series_exog=chars))
+        AFM(**AFM.get_test_params()[1]).fit(PanelData.from_arrays(returns, characteristics=chars))
 
 
 def test_ivdfm_fills_infinite_values_like_missing_ones():

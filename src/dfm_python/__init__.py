@@ -19,7 +19,7 @@ one ``PanelData`` container, fitted state in attributes ending in ``_`` and a
 pickle-free save directory::
 
     >>> from dfm_python import AFM, PanelData
-    >>> data = PanelData.from_arrays(y=returns, series_exog=characteristics)  # (T, N), (T, N, M)
+    >>> data = PanelData.from_arrays(returns, characteristics=characteristics)  # (T, N), (T, N, M)
     >>> model = AFM(n_factors=3, hist_len=20, max_epochs=20, random_state=0).fit(data)
     >>> weights = model.allocate()               # DataFrame (T - hist_len) x N
     >>> model.result_.sharpe, model.book_returns_

@@ -204,8 +204,8 @@ def test_unexpected_fit_keywords_raise():
 def test_series_exog_and_mixed_frequency_are_rejected():
     panel = _panel(K=0)
     rng = np.random.default_rng(1)
-    with_series_exog = PanelData.from_arrays(rng.standard_normal((20, 2)), series_exog=rng.standard_normal((20, 2, 3)))
-    with pytest.raises(UnsupportedInputError, match="series_exog"):
+    with_series_exog = PanelData.from_arrays(rng.standard_normal((20, 2)), characteristics=rng.standard_normal((20, 2, 3)))
+    with pytest.raises(UnsupportedInputError, match="characteristics"):
         DDFM(**TINY).fit(with_series_exog)
     mixed = PanelData(y=panel.y, freq={"s0": "q"})
     with pytest.raises(UnsupportedInputError, match="mixed"):
@@ -686,8 +686,8 @@ def test_update_and_predict_data_check_the_names(fitted, change):
 
 def test_update_rejects_excluded_inputs(fitted):
     rng = np.random.default_rng(0)
-    with_series_exog = PanelData.from_arrays(rng.standard_normal((20, 3)), series_exog=rng.standard_normal((20, 3, 2)))
-    with pytest.raises(UnsupportedInputError, match="series_exog"):
+    with_series_exog = PanelData.from_arrays(rng.standard_normal((20, 3)), characteristics=rng.standard_normal((20, 3, 2)))
+    with pytest.raises(UnsupportedInputError, match="characteristics"):
         copy.deepcopy(fitted).update(with_series_exog)
 
 
@@ -1073,7 +1073,7 @@ _SHIPPED = {
                   "learning_rate": 0.001, "optimizer": "Adam", "n_mc_samples": 1, "window_size": 100,
                   "max_iter": 200, "tol": 5e-4, "interpolation_method": "linear", "interpolation_limit": 10,
                   "interpolation_limit_direction": "both", "scaler": "standard", "random_state": 3},
-        "data": {"time_col": "date", "target_cols": ["KOEQUIPTE"], "exog_cols": _MACRO_EXOG},
+        "data": {"time_col": "date", "y": ["KOEQUIPTE"], "exog": _MACRO_EXOG},
         "csv": "macro.csv",
     },
     "finance": {
@@ -1081,7 +1081,7 @@ _SHIPPED = {
                   "learning_rate": 0.001, "optimizer": "Adam", "n_mc_samples": 10, "window_size": 200,
                   "max_iter": 10, "tol": 5e-4, "interpolation_method": "linear", "interpolation_limit": 10,
                   "interpolation_limit_direction": "both", "scaler": "standard", "random_state": 3},
-        "data": {"time_col": "date", "target_cols": [_FINANCE_TARGET], "exog_cols": _finance_exog()},
+        "data": {"time_col": "date", "y": [_FINANCE_TARGET], "exog": _finance_exog()},
         "csv": "finance.csv",
     },
     "exchange": {
@@ -1089,7 +1089,7 @@ _SHIPPED = {
                   "learning_rate": 0.005, "optimizer": "Adam", "n_mc_samples": 10, "window_size": 200,
                   "max_iter": 10, "tol": 5e-4, "interpolation_method": "linear", "interpolation_limit": 10,
                   "interpolation_limit_direction": "both", "scaler": "standard", "random_state": 3},
-        "data": {"time_col": "date", "target_cols": _EXCHANGE, "exog_cols": []},
+        "data": {"time_col": "date", "y": _EXCHANGE, "exog": []},
         "csv": "exchange_rate.csv",
     },
 }
@@ -1108,7 +1108,7 @@ def test_shipped_yaml_builds_the_estimator(name):
     # Every column the data: section names is in the shipped CSV (finance.csv gets its 'date' in the tutorial).
     header = set(pd.read_csv(_REPO / "data" / _SHIPPED[name]["csv"], nrows=0).columns) | {"date"}
     data = sections["data"]
-    assert set(data["target_cols"]) | set(data["exog_cols"]) <= header
+    assert set(data["y"]) | set(data["exog"]) <= header
 
 
 @pytest.mark.skipif(not _YAML, reason="YAML needs omegaconf or PyYAML")
@@ -1117,7 +1117,7 @@ def test_shipped_yaml_covariates_are_the_ones_the_tutorials_ran(name):
     """The exog columns, in order, are the engine covariates the golden fixtures recorded from the old tutorials."""
     manifest = json.loads((_REPO / "src" / "test" / "parity" / "fixtures" / f"ddfm_{name}.json").read_text())
     data = load_yaml(_REPO / "config" / f"ddfm_{name}.yaml")["data"]
-    assert data["exog_cols"] == manifest["data"]["covariates"]
+    assert data["exog"] == manifest["data"]["covariates"]
 
 
 @pytest.mark.skipif(not _YAML, reason="YAML needs omegaconf or PyYAML")
@@ -1137,6 +1137,6 @@ def test_tutorial_runs_on_truncated_data(name, tmp_path):
     expected = {**_SHIPPED[name]["model"], "max_iter": 1, "device": "cpu"}
     assert {k: loaded.get_params()[k] for k in expected} == expected
     assert loaded.n_iter_ == 1 and loaded.index_.size == 120
-    assert list(loaded.feature_names_in_) == _SHIPPED[name]["data"]["target_cols"]
-    assert list(loaded.exog_names_in_) == _SHIPPED[name]["data"]["exog_cols"]
+    assert list(loaded.feature_names_in_) == _SHIPPED[name]["data"]["y"]
+    assert list(loaded.exog_names_in_) == _SHIPPED[name]["data"]["exog"]
     assert np.isfinite(loaded.predict(6).to_numpy()).all()

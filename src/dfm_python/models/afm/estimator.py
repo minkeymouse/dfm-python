@@ -3,7 +3,7 @@
 A thin layer over the private engine
 :class:`~dfm_python.models.afm._engine.AFMEngine`. ``fit`` builds the engine's
 dataset from :class:`~dfm_python.PanelData` (returns from ``y``,
-characteristics from ``series_exog``), constructs the engine with every
+characteristics from ``characteristics``), constructs the engine with every
 hyperparameter passed explicitly (the engine seeds, then builds its network)
 and trains it.
 
@@ -70,7 +70,7 @@ class AFM(BaseFactorModel):
     model classes:
 
     - ``factor_model="attention", trading="longconv"``: Attention Factors
-      (needs ``series_exog``, the firm characteristics);
+      (needs ``characteristics``, the firm characteristics);
     - ``factor_model="pca", trading="longconv"``: PCA + LongConv benchmark;
     - ``factor_model="pca", trading="ou"``: PCA + Avellaneda-Lee.
 
@@ -82,7 +82,7 @@ class AFM(BaseFactorModel):
         Number of factors K. Required (the default None raises in ``fit``).
     factor_model : {"attention", "pca"}, default "attention"
         Attention factors on the characteristics, or rolling-window PCA on the
-        returns. PCA does not read ``series_exog``.
+        returns. PCA does not read ``characteristics``.
     trading : {"longconv", "ou"}, default "longconv"
         Learned LongConv filter, or the Avellaneda-Lee OU rule.
     embed_dim : int, default 32
@@ -164,7 +164,7 @@ class AFM(BaseFactorModel):
         train: ``factor_model="pca", trading="ou"`` runs one epoch).
     n_factors_ : int
     n_char_ : int or None
-        Number of characteristics (None without ``series_exog``).
+        Number of characteristics (None without ``characteristics``).
     scaler_ : None
         AFM does not scale its inputs.
     random_state_ : int or None
@@ -295,10 +295,10 @@ class AFM(BaseFactorModel):
 
     @staticmethod
     def _require_characteristics(panel: PanelData, factor_model: str) -> None:
-        if factor_model == "attention" and not panel.series_exog_names:
+        if factor_model == "attention" and not panel.characteristic_names:
             raise UnsupportedInputError(
-                "AFM with factor_model='attention' needs firm characteristics in series_exog "
-                "(PanelData(..., series_exog=...) or PanelData.from_arrays(..., series_exog=chars)); got none. "
+                "AFM with factor_model='attention' needs firm characteristics "
+                "(PanelData(..., characteristics=...) or PanelData.from_arrays(..., characteristics=chars)); got none. "
                 "Pass them, or use factor_model='pca'."
             )
 
@@ -312,10 +312,10 @@ class AFM(BaseFactorModel):
                 "Pass the same assets in the same order."
             )
         trained = list(self.series_exog_names_in_)
-        if (self.network_.factor_model == "attention" and panel.series_exog_names
-                and list(panel.series_exog_names) != trained):
+        if (self.network_.factor_model == "attention" and panel.characteristic_names
+                and list(panel.characteristic_names) != trained):
             raise DataValidationError(
-                f"AFM.{method}: data has series_exog features {list(panel.series_exog_names)}, but the model was "
+                f"AFM.{method}: data has characteristics {list(panel.characteristic_names)}, but the model was "
                 f"fitted on {trained}. Pass the same characteristics in the same order."
             )
         self._require_characteristics(panel, self.network_.factor_model)
@@ -323,7 +323,7 @@ class AFM(BaseFactorModel):
 
     @staticmethod
     def _adapter(panel: PanelData) -> AFMDataset:
-        """The engine's dataset: returns (T, N) from ``y``, characteristics (T, N, M) from ``series_exog``.
+        """The engine's dataset: returns (T, N) from ``y``, characteristics (T, N, M) from ``characteristics``.
 
         Both arrays are made C-contiguous: ``DataFrame.to_numpy`` can return a
         Fortran-ordered array, whose strided float32 tensor takes other BLAS
@@ -332,7 +332,7 @@ class AFM(BaseFactorModel):
         from ...dataset.afm_dataset import AFMDataset
 
         returns = np.ascontiguousarray(panel.y.to_numpy(np.float64))
-        characteristics = panel.series_exog_array()
+        characteristics = panel._characteristic_values()
         if characteristics is not None:
             characteristics = np.ascontiguousarray(characteristics)
         return AFMDataset(returns=returns, characteristics=characteristics)
@@ -367,7 +367,7 @@ class AFM(BaseFactorModel):
         ----------
         data : PanelData, DataFrame or 2-D array
             Asset returns in ``y`` (T x N) and, for attention factors, firm
-            characteristics in ``series_exog``. ``exog``, mixed frequency,
+            characteristics in ``characteristics``. ``exog``, mixed frequency,
             missing and infinite values are rejected.
         callback : callable, optional
             Called as ``callback(info)`` after every epoch. ``info`` is a
@@ -388,9 +388,9 @@ class AFM(BaseFactorModel):
             For an invalid hyperparameter.
         UnsupportedInputError
             For ``exog``, mixed frequency, NaN, or attention factors without
-            ``series_exog``.
+            ``characteristics``.
         DataValidationError
-            For infinite values in ``y`` or ``series_exog``.
+            For infinite values in ``y`` or ``characteristics``.
         TypeError
             For a ``callback`` that is not callable.
 

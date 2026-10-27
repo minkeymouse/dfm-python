@@ -694,7 +694,7 @@ class iVDFM(BaseFactorModel):
             Targets in ``y`` and, optionally, context variables in ``exog``.
             Missing and infinite values are interpolated linearly, then
             filled forward, backward and with zeros (in targets and exog).
-            Mixed frequency and ``series_exog`` are rejected.
+            Mixed frequency and ``characteristics`` are rejected.
         callback : callable, optional
             Called as ``callback(info)`` after every epoch. ``info`` is a
             dict with ``"model"`` (``"iVDFM"``), ``"iteration"`` (the epoch,
@@ -713,7 +713,7 @@ class iVDFM(BaseFactorModel):
         ConfigurationError
             For an invalid hyperparameter.
         UnsupportedInputError
-            For ``series_exog`` or a mixed-frequency panel.
+            For ``characteristics`` or a mixed-frequency panel.
         DataValidationError
             For a target series with fewer than 2 observed (finite) values,
             or with the same value (up to rounding) at every observation.
@@ -864,8 +864,8 @@ class iVDFM(BaseFactorModel):
                 f"iVDFM.{method}: data has exog {list(panel.exog_names)}, but the model was fitted on {trained}. "
                 "Pass the same exog columns in the same order."
             )
-        if panel.n_timesteps < 2:
-            raise DataValidationError(f"iVDFM.{method}: data needs at least 2 time steps, got {panel.n_timesteps}.")
+        if panel.n_periods < 2:
+            raise DataValidationError(f"iVDFM.{method}: data needs at least 2 time steps, got {panel.n_periods}.")
         return panel
 
     def _condition(self, engine: iVDFMEngine, panel: PanelData) -> None:
@@ -914,7 +914,7 @@ class iVDFM(BaseFactorModel):
         Raises
         ------
         UnsupportedInputError
-            For ``refit=True``, ``series_exog`` or a mixed-frequency panel.
+            For ``refit=True``, ``characteristics`` or a mixed-frequency panel.
         DataValidationError
             If the series or exog names differ from the training data.
         """

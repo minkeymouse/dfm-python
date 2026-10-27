@@ -69,7 +69,7 @@ def main(argv: list[str] | None = None) -> None:
     df = pd.read_csv(DATA).iloc[-args.rows:].reset_index(drop=True)
     df["date"] = pd.date_range("1980-01-01", periods=len(df), freq="D")
     data = PanelData.from_wide(df, **sections["data"])
-    print(f"   {len(data.series_names)} series (the blocks' series), {data.n_timesteps} days "
+    print(f"   {len(data.series_names)} series (the blocks' series), {data.n_periods} days "
           f"{data.index[0].date()} .. {data.index[-1].date()}")
 
     # 3. Fit: initialization, then EM with the Kalman filter and smoother.

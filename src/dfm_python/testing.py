@@ -132,7 +132,7 @@ def make_panel(tags: Any, *, seed: int = 0) -> PanelData:
     ----------
     tags : dict, or an estimator class or instance
         Missing tags take their defaults. The panel holds ``exog`` (2
-        columns), ``series_exog`` (2 features) and a mixed-frequency ``freq``
+        columns), ``characteristics`` (2 of them) and a mixed-frequency ``freq``
         only when the matching ``capability:*`` tag is True. With
         ``capability:missing_values``, two target values are NaN (and a
         quarterly series is NaN off quarter ends when the panel is mixed).
@@ -166,15 +166,15 @@ def make_panel(tags: Any, *, seed: int = 0) -> PanelData:
         y[[3, 17], n_series - 1] = np.nan
 
     exog = rng.standard_normal((n_time, 2)) if tags["capability:exog"] else None
-    series_exog = rng.standard_normal((n_time, n_series, 2)) if tags["capability:series_exog"] else None
+    characteristics = rng.standard_normal((n_time, n_series, 2)) if tags["capability:series_exog"] else None
     return PanelData.from_arrays(
         y,
         exog=exog,
-        series_exog=series_exog,
+        characteristics=characteristics,
         index=index,
-        names=names,
+        series_names=names,
         exog_names=["x0", "x1"] if exog is not None else None,
-        series_exog_names=["c0", "c1"] if series_exog is not None else None,
+        characteristic_names=["c0", "c1"] if characteristics is not None else None,
         freq=freq,
     )
 
@@ -465,7 +465,7 @@ def _split(data: PanelData) -> tuple[PanelData, PanelData]:
     k = max(1, min(6, n // 6))
     if n - k < 2:
         raise ValueError(f"check_estimator needs at least {k + 2} time steps, got {n}.")
-    return data.loc(None, index[n - k - 1]), data.loc(index[n - k], None)
+    return data.between(None, index[n - k - 1]), data.between(index[n - k], None)
 
 
 # ---------------------------------------------------------------------------
@@ -680,7 +680,7 @@ def _check_fit_attributes(ctx: _Context) -> None:
     assert not bad, f"fit added attributes without a trailing underscore: {bad}."
     diff = _diff_keys(est.get_params(deep=False), params)
     assert not diff, f"fit changed hyperparameters {diff}."
-    assert ctx.train.equals(data), "fit mutated the input PanelData."
+    assert ctx.train._equals(data), "fit mutated the input PanelData."
 
     required = ["result_", "n_features_in_", "feature_names_in_", "exog_names_in_", "index_"]
     if ctx.tags["backend"] == "torch":
@@ -695,7 +695,7 @@ def _check_fit_attributes(ctx: _Context) -> None:
         assert isinstance(est.network_, torch.nn.Module), "network_ is not a torch.nn.Module."
 
     y = ctx.train.y
-    if not ctx.train.exog_names and not ctx.train.series_exog_names and ctx.train.freq is None:
+    if not ctx.train.exog_names and not ctx.train.characteristic_names and ctx.train.freq is None:
         snapshot = y.copy(deep=True)
         ctx.make().fit(y)
         assert y.equals(snapshot) and y.columns.equals(snapshot.columns), "fit mutated an input DataFrame."
@@ -780,38 +780,39 @@ def _check_purity(ctx: _Context) -> None:
         outputs += [est.allocate(), est.allocate()]
         est.allocate(data=ctx.data)
     assert _state_hash(est) == before, "predict/allocate changed the fitted state."
-    assert ctx.data.equals(data), "predict/allocate mutated the input PanelData."
+    assert ctx.data._equals(data), "predict/allocate mutated the input PanelData."
     if not tags["non_deterministic"]:
         assert outputs[0].equals(outputs[1]), "two identical predict/allocate calls returned different values."
 
 
 def _with_exog(data: PanelData) -> PanelData:
-    exog = pd.DataFrame({"x_unsupported": np.linspace(0.0, 1.0, data.n_timesteps)}, index=data.index)
-    return PanelData(data.y, exog=exog, series_exog=data.series_exog, freq=data.freq)
+    exog = pd.DataFrame({"x_unsupported": np.linspace(0.0, 1.0, data.n_periods)}, index=data.index)
+    return PanelData(data.y, exog=exog, characteristics=data.characteristics, freq=data.freq)
 
 
 def _with_series_exog(data: PanelData) -> PanelData:
-    columns = pd.MultiIndex.from_product([["c_unsupported"], list(data.series_names)], names=["feature", "series"])
-    values = np.ones((data.n_timesteps, len(data.series_names)))
-    return PanelData(data.y, exog=data.exog, series_exog=pd.DataFrame(values, index=data.index, columns=columns), freq=data.freq)
+    columns = pd.MultiIndex.from_product([["c_unsupported"], list(data.series_names)], names=["characteristic", "series"])
+    values = np.ones((data.n_periods, len(data.series_names)))
+    characteristics = pd.DataFrame(values, index=data.index, columns=columns)
+    return PanelData(data.y, exog=data.exog, characteristics=characteristics, freq=data.freq)
 
 
 def _with_mixed_frequency(data: PanelData) -> Optional[PanelData]:
     names = list(data.series_names)
     if len(names) < 2:
         return None
-    return PanelData(data.y, exog=data.exog, series_exog=data.series_exog, freq={names[0]: "q", names[1]: "m"})
+    return PanelData(data.y, exog=data.exog, characteristics=data.characteristics, freq={names[0]: "q", names[1]: "m"})
 
 
 def _with_missing_values(data: PanelData) -> PanelData:
     y = data.y
     y.iloc[min(1, len(y) - 1), 0] = np.nan
-    return PanelData(y, exog=data.exog, series_exog=data.series_exog, freq=data.freq)
+    return PanelData(y, exog=data.exog, characteristics=data.characteristics, freq=data.freq)
 
 
 _EXCLUDABLE = (
     ("capability:exog", "exog", _with_exog),
-    ("capability:series_exog", "series_exog", _with_series_exog),
+    ("capability:series_exog", "characteristics", _with_series_exog),
     ("capability:mixed_frequency", "mixed-frequency data", _with_mixed_frequency),
     ("capability:missing_values", "missing values", _with_missing_values),
 )

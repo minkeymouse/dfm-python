@@ -268,7 +268,7 @@ def backtest(
 
     panel = PanelData._coerce(data)
     index = panel.index
-    n_rows, n_series = panel.n_timesteps, len(panel.series_names)
+    n_rows, n_series = panel.n_periods, panel.n_series
     first = _origin_position(index, start)
     if first > n_rows - 2:
         raise ConfigurationError(
@@ -284,11 +284,11 @@ def backtest(
         origin = index[p]
         tic = time.perf_counter()
         if i == 0 or (every and i % every == 0):
-            model = clone(estimator).fit(panel.loc(None, origin))
+            model = clone(estimator).fit(panel.between(None, origin))
         elif tags["predict_data"] == "new_rows":
-            model.update(panel.loc(index[positions[i - 1] + 1], origin))
+            model.update(panel.between(index[positions[i - 1] + 1], origin))
         else:
-            model.update(panel.loc(None, origin))
+            model.update(panel.between(None, origin))
         seconds.append(time.perf_counter() - tic)
         # The exog rows after the origin, when the data holds all h of them, finite.
         futr_exog = exog[p + 1 : p + 1 + h] if exog is not None and len(model.exog_names_in_) else None

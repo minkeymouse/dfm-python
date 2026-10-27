@@ -43,7 +43,7 @@ from dfm_python import DFM
 from dfm_python.testing import make_panel
 
 panel = make_panel(DFM)
-train, new = panel.loc(None, panel.index[-7]), panel.loc(panel.index[-6], None)
+train, new = panel.between(None, panel.index[-7]), panel.between(panel.index[-6], None)
 model = DFM(**DFM.get_test_params()[0]).fit(train)
 forecast = model.predict(3)
 assert forecast.shape == (3, 3) and np.isfinite(forecast.to_numpy()).all()

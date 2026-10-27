@@ -42,8 +42,20 @@ model:
 # PanelData.from_wide arguments.
 data:
   time_col: date
-  target_cols: [KORFBEV, KORWHLS, KORMCMP, KORELEC, KORCNST, KORMACH, KOROCOINF,
-                KOEMPTOTO, KOHWRWEMP, KOWRCDURE, KOCONPRCF, KOEQUIPTE, KOWRCCNSE, KOIMPCONA]
-  freq:                          # grouped form; unlisted series use the clock
-    w: [KORFBEV, KORWHLS, KORMCMP, KORELEC, KORCNST, KORMACH, KOROCOINF]
-    m: [KOEMPTOTO, KOHWRWEMP, KOWRCDURE, KOCONPRCF, KOEQUIPTE, KOWRCCNSE, KOIMPCONA]
+  y: [KORFBEV, KORWHLS, KORMCMP, KORELEC, KORCNST, KORMACH, KOROCOINF,
+      KOEMPTOTO, KOHWRWEMP, KOWRCDURE, KOCONPRCF, KOEQUIPTE, KOWRCCNSE, KOIMPCONA]
+  freq:                          # {series: code}; unlisted series use the clock
+    KORFBEV: w
+    KORWHLS: w
+    KORMCMP: w
+    KORELEC: w
+    KORCNST: w
+    KORMACH: w
+    KOROCOINF: w
+    KOEMPTOTO: m
+    KOHWRWEMP: m
+    KOWRCDURE: m
+    KOCONPRCF: m
+    KOEQUIPTE: m
+    KOWRCCNSE: m
+    KOIMPCONA: m

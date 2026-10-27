@@ -103,7 +103,7 @@ class TestiVDFMWorkflow:
         """Context columns are exog: u_t is the time feature plus the exog columns."""
         values = np.random.default_rng(0).standard_normal((100, 4))
         df = pd.DataFrame(values, columns=["target1", "target2", "context1", "context2"])
-        data = PanelData.from_wide(df, exog_cols=["context1", "context2"])
+        data = PanelData.from_wide(df, exog=["context1", "context2"])
         model = _model().fit(data)
         assert model.network_.data_dim == 2  # targets only
         assert model.context_dim_ == 3 and model.network_.context_dim == 3  # time (1) + exog (2)
@@ -419,7 +419,7 @@ _SHIPPED = {
                   "prior_n_hidden_layers": 2, "activation": "lrelu", "slope": 0.1, "learning_rate": 0.001,
                   "optimizer": "Adam", "batch_size": 256, "max_epochs": 10, "tol": 1e-5, "scaler": "standard",
                   "random_state": 3},
-        "data": {"time_col": "date", "target_cols": ["KOEQUIPTE", "KOEMPTOTO", "KOHWRWEMP"], "exog_cols": []},
+        "data": {"time_col": "date", "y": ["KOEQUIPTE", "KOEMPTOTO", "KOHWRWEMP"], "exog": []},
         "csv": "macro.csv",
     },
     "finance": {
@@ -429,7 +429,7 @@ _SHIPPED = {
                   "prior_n_hidden_layers": 2, "activation": "lrelu", "slope": 0.1, "learning_rate": 0.001,
                   "optimizer": "Adam", "batch_size": 128, "max_epochs": 10, "tol": 1e-5, "scaler": "standard",
                   "random_state": 3},
-        "data": {"time_col": "date", "target_cols": ["market_forward_excess_returns"], "exog_cols": []},
+        "data": {"time_col": "date", "y": ["market_forward_excess_returns"], "exog": []},
         "csv": "finance.csv",
     },
     "exchange": {
@@ -440,9 +440,9 @@ _SHIPPED = {
                   "optimizer": "Adam", "batch_size": 256, "max_epochs": 10, "tol": 1e-5, "scaler": None,
                   "random_state": 3},
         "data": {"time_col": "date",
-                 "target_cols": ["AUD_USD", "GBP_USD", "CAD_USD", "CHF_USD", "CNY_USD", "JPY_USD", "SGD_USD",
+                 "y": ["AUD_USD", "GBP_USD", "CAD_USD", "CHF_USD", "CNY_USD", "JPY_USD", "SGD_USD",
                                  "NZD_USD"],
-                 "exog_cols": []},
+                 "exog": []},
         "csv": "exchange_rate.csv",
     },
 }
@@ -461,7 +461,7 @@ def test_shipped_yaml_builds_the_estimator(name):
     # Every column the data: section names is in the shipped CSV (finance.csv gets its 'date' in the tutorial).
     header = set(pd.read_csv(_REPO / "data" / _SHIPPED[name]["csv"], nrows=0).columns) | {"date"}
     data = sections["data"]
-    assert set(data["target_cols"]) | set(data["exog_cols"]) <= header
+    assert set(data["y"]) | set(data["exog"]) <= header
 
 
 @pytest.mark.skipif(not _YAML, reason="YAML needs omegaconf or PyYAML")

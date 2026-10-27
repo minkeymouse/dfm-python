@@ -70,7 +70,7 @@ def main(argv: list[str] | None = None) -> None:
         df = df.iloc[-args.rows:]
     data = PanelData.from_wide(df, **sections["data"])
     monthly = [name for name, code in data.freq.items() if code == "m"]
-    print(f"   {len(data.series_names)} series ({len(monthly)} monthly), {data.n_timesteps} weeks "
+    print(f"   {len(data.series_names)} series ({len(monthly)} monthly), {data.n_periods} weeks "
           f"{data.index[0].date()} .. {data.index[-1].date()}")
 
     # 3. Fit: initialization, then EM with the Kalman filter and smoother.

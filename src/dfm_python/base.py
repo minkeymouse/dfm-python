@@ -259,7 +259,7 @@ class BaseFactorModel(BaseEstimator):
         Raises
         ------
         UnsupportedInputError
-            For ``exog``, ``series_exog``, a mixed-frequency layout or missing
+            For ``exog``, ``characteristics``, a mixed-frequency layout or missing
             values when the matching ``capability:*`` tag is False; the
             message names the tag.
         DataValidationError
@@ -273,17 +273,17 @@ class BaseFactorModel(BaseEstimator):
                 f"{name} does not accept exog (tag capability:exog is False); got exog columns "
                 f"{list(panel.exog_names)}. Pass the data without exog."
             )
-        if panel.series_exog_names and not tags["capability:series_exog"]:
+        if panel.characteristic_names and not tags["capability:series_exog"]:
             raise UnsupportedInputError(
-                f"{name} does not accept series_exog (tag capability:series_exog is False); got features "
-                f"{list(panel.series_exog_names)}. Pass the data without series_exog."
+                f"{name} does not accept characteristics (tag capability:series_exog is False); got "
+                f"{list(panel.characteristic_names)}. Pass the data without characteristics."
             )
-        if panel.is_mixed_frequency and not tags["capability:mixed_frequency"]:
+        if panel._is_mixed_frequency() and not tags["capability:mixed_frequency"]:
             raise UnsupportedInputError(
                 f"{name} does not accept mixed-frequency data (tag capability:mixed_frequency is False); got "
                 f"freq={panel.freq}. Pass series sampled at one frequency."
             )
-        for slot, frame in (("y", panel.y), ("exog", panel.exog), ("series_exog", panel.series_exog)):
+        for slot, frame in (("y", panel.y), ("exog", panel.exog), ("characteristics", panel.characteristics)):
             if frame is None:
                 continue
             values = frame.to_numpy()
@@ -346,7 +346,7 @@ class BaseFactorModel(BaseEstimator):
         self.feature_names_in_ = np.asarray(data.series_names, dtype=object)
         self.exog_names_in_ = np.asarray(data.exog_names, dtype=object)
         if self.get_tags()["capability:series_exog"]:
-            self.series_exog_names_in_ = np.asarray(data.series_exog_names, dtype=object)
+            self.series_exog_names_in_ = np.asarray(data.characteristic_names, dtype=object)
         self.index_ = data.index
 
     @staticmethod

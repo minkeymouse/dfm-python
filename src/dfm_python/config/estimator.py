@@ -275,8 +275,8 @@ def load_yaml(path: PathLike) -> dict:
 
     The file must have a top-level ``model:`` section with the constructor
     parameters. An optional ``data:`` section holds the arguments of
-    :meth:`dfm_python.PanelData.from_wide` (``time_col``, ``target_cols``,
-    ``exog_cols``, ``freq``); it is ``{}`` when absent. Interpolations are
+    :meth:`dfm_python.PanelData.from_wide` (``time_col``, ``y``, ``exog``,
+    ``freq``); it is ``{}`` when absent. Interpolations are
     resolved when omegaconf is installed.
 
     Raises

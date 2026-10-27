@@ -75,8 +75,8 @@ def test_save_load_check_runs_last():
 def test_make_panel_default_slots():
     panel = make_panel({})
     assert isinstance(panel, PanelData)
-    assert panel.n_timesteps == 48 and panel.series_names == ("s0", "s1", "s2")
-    assert panel.exog_names == () and panel.series_exog_names == () and panel.freq is None
+    assert panel.n_periods == 48 and panel.series_names == ("s0", "s1", "s2")
+    assert panel.exog_names == () and panel.characteristic_names == () and panel.freq is None
     assert not panel.y.isna().to_numpy().any()
     assert isinstance(panel.index, pd.DatetimeIndex) and panel.index.name == "date"
 
@@ -90,8 +90,8 @@ def test_make_panel_follows_capabilities():
     }
     panel = make_panel(tags)
     assert panel.exog_names == ("x0", "x1")
-    assert panel.series_exog_names == ("c0", "c1")
-    assert panel.is_mixed_frequency and panel.freq["s0"] == "q"
+    assert panel.characteristic_names == ("c0", "c1")
+    assert panel._is_mixed_frequency() and panel.freq["s0"] == "q"
     y = panel.y
     assert y["s0"].isna().sum() == 32  # observed at quarter ends only
     assert y["s2"].isna().sum() == 2
@@ -102,8 +102,8 @@ def test_make_panel_accepts_a_class_and_is_seeded_locally():
     np_state = np.random.get_state()
     a = make_panel(_DummyAllocator, seed=3)
     b = make_panel(_DummyAllocator.get_tags(), seed=3)
-    assert a.equals(b) and not a.equals(make_panel(_DummyAllocator, seed=4))
-    assert a.series_exog_names == ("c0", "c1")
+    assert a._equals(b) and not a._equals(make_panel(_DummyAllocator, seed=4))
+    assert a.characteristic_names == ("c0", "c1")
     assert np.abs(a.y.to_numpy()).max() < 0.1  # return-sized
     assert torch.equal(torch_state, torch.random.get_rng_state())
     assert np.array_equal(np_state[1], np.random.get_state()[1])
@@ -485,7 +485,7 @@ def test_broken_estimator_fails_its_check(estimator, check):
 
 
 def test_capability_failure_names_the_slot():
-    with pytest.raises(AssertionError, match="fit with series_exog while capability:series_exog is False"):
+    with pytest.raises(AssertionError, match="fit with characteristics while capability:series_exog is False"):
         check_estimator(_AllocatorIgnoresSeriesExogTag)
 
 

@@ -231,9 +231,9 @@ def test_backtest_is_the_manual_fit_and_update_sequence(name, refit):
         torch.manual_seed(0)
         for i, p in enumerate(POSITIONS):
             if i == 0 or (refit and i % refit == 0):
-                model = cls(**params).fit(data.loc(None, index[p]))
+                model = cls(**params).fit(data.between(None, index[p]))
             else:
-                model.update(data.loc(index[p - 1], index[p]))  # the rows after the previous origin
+                model.update(data.between(index[p - 1], index[p]))  # the rows after the previous origin
             rows = _at(result, index[p])
             np.testing.assert_array_equal(rows["forecast"], _flat(model.predict(3)))
             if coverage is not None:
@@ -268,10 +268,10 @@ def test_ivdfm_is_updated_with_the_window_and_gets_the_future_exog(monkeypatch):
     assert sum("futr_exog" in str(w.message) for w in caught) == 1
     with torch.random.fork_rng():
         torch.manual_seed(0)
-        model = iVDFM(**TINY_IVDFM).fit(data.loc(None, index[40]))
+        model = iVDFM(**TINY_IVDFM).fit(data.between(None, index[40]))
         for p in POSITIONS:
             if p > 40:
-                model.update(data.loc(None, index[p]))  # tag predict_data="window": every row up to the origin
+                model.update(data.between(None, index[p]))  # tag predict_data="window": every row up to the origin
             if p + 3 < 48:
                 expected = model.predict(3, futr_exog=exog[p + 1:p + 4])
             else:

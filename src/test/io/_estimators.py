@@ -81,7 +81,7 @@ class ScaledMean(BaseFactorModel):
         z = y if scaler is None else scaler.fit_transform(y)
         self.scaler_ = scaler
         self.mean_ = z.mean(axis=0)
-        self.result_ = ScaledMeanResult(mean=self.mean_.copy(), n_obs=data.n_timesteps)
+        self.result_ = ScaledMeanResult(mean=self.mean_.copy(), n_obs=data.n_periods)
 
     def predict(self, h, data=None, **predict_kwargs):
         self._check_is_fitted("predict")

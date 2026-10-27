@@ -55,5 +55,5 @@ model:
 # PanelData.from_wide arguments.
 data:
   time_col: date
-  target_cols: [market_forward_excess_returns]
-  exog_cols: []
+  y: [market_forward_excess_returns]
+  exog: []

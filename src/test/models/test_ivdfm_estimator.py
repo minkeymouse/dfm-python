@@ -183,8 +183,8 @@ def test_unsupported_inputs():
     series_exog = pd.DataFrame(
         np.zeros((40, 3)), index=panel.index, columns=pd.MultiIndex.from_product([["c"], panel.series_names])
     )
-    with pytest.raises(UnsupportedInputError, match="series_exog"):
-        iVDFM(**TINY).fit(PanelData(y=panel.y, series_exog=series_exog))
+    with pytest.raises(UnsupportedInputError, match="characteristics"):
+        iVDFM(**TINY).fit(PanelData(y=panel.y, characteristics=series_exog))
     with pytest.raises(TypeError, match="unexpected keyword"):
         iVDFM(**TINY).fit(panel, epochs=3)
 
@@ -467,7 +467,7 @@ def test_excluded_inputs_are_rejected_before_anything_else(fitted):
     series_exog = pd.DataFrame(
         np.zeros((40, 3)), index=panel.index, columns=pd.MultiIndex.from_product([["c"], panel.series_names])
     )
-    bad = PanelData(y=panel.y, series_exog=series_exog)
+    bad = PanelData(y=panel.y, characteristics=series_exog)
     for call in (lambda: fitted.predict(3, data=bad), lambda: fitted.predict_factors(3, data=bad),
                  lambda: fitted.update(bad)):
         with pytest.raises(UnsupportedInputError, match="capability:series_exog"):
@@ -634,7 +634,7 @@ def test_update_scales_with_the_fitted_scaler_after_filling_missing_values():
 
 def test_update_with_a_short_window_clips_it(fitted):
     est = copy.deepcopy(fitted)
-    short = _extended().loc(_extended().index[-5], None)
+    short = _extended().between(_extended().index[-5], None)
     est.update(short)
     assert est.network_.factors.shape[0] == est.window_ + 1
     assert est.conditioning_index_.equals(short.index)

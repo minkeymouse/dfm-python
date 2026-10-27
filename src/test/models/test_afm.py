@@ -103,9 +103,9 @@ def _panel(T=60, N=6, M=8, seed=0, chars=True):
     returns, characteristics = _make_data(T, N, M, seed)
     index = pd.date_range("2020-01-01", periods=T, freq="B", name="date")
     return PanelData.from_arrays(
-        returns, series_exog=characteristics if chars else None, index=index,
-        names=[f"a{i}" for i in range(N)],
-        series_exog_names=[f"c{j}" for j in range(M)] if chars else None)
+        returns, characteristics=characteristics if chars else None, index=index,
+        series_names=[f"a{i}" for i in range(N)],
+        characteristic_names=[f"c{j}" for j in range(M)] if chars else None)
 
 
 def _model(**params):
@@ -261,13 +261,13 @@ class TestAFM:
         model = _model().fit(_panel())
         returns, chars = _make_data()
         with pytest.raises(DataValidationError, match="same assets"):
-            model.allocate(data=PanelData.from_arrays(returns, series_exog=chars))  # names s0.. vs a0..
-        renamed = PanelData.from_arrays(returns, series_exog=chars, names=[f"a{i}" for i in range(6)],
-                                        series_exog_names=[f"z{j}" for j in range(8)])
+            model.allocate(data=PanelData.from_arrays(returns, characteristics=chars))  # names s0.. vs a0..
+        renamed = PanelData.from_arrays(returns, characteristics=chars, series_names=[f"a{i}" for i in range(6)],
+                                        characteristic_names=[f"z{j}" for j in range(8)])
         with pytest.raises(DataValidationError, match="same characteristics"):
             model.allocate(data=renamed)
-        with pytest.raises(UnsupportedInputError, match="series_exog"):
-            model.allocate(data=PanelData.from_arrays(returns, names=[f"a{i}" for i in range(6)]))
+        with pytest.raises(UnsupportedInputError, match="characteristics"):
+            model.allocate(data=PanelData.from_arrays(returns, series_names=[f"a{i}" for i in range(6)]))
 
     def test_predict_raises_type_error(self):
         model = _model().fit(_panel())
@@ -313,15 +313,15 @@ class TestAFM:
         data = _panel()
         if bad == "exog":
             exog = pd.DataFrame({"x": np.arange(60.0)}, index=data.index)
-            data = PanelData(data.y, exog=exog, series_exog=data.series_exog)
+            data = PanelData(data.y, exog=exog, characteristics=data.characteristics)
             tag = "capability:exog"
         elif bad == "mixed":
-            data = PanelData(data.y, series_exog=data.series_exog, freq={"a0": "q", "a1": "m"})
+            data = PanelData(data.y, characteristics=data.characteristics, freq={"a0": "q", "a1": "m"})
             tag = "capability:mixed_frequency"
         else:
             y = data.y
             y.iloc[3, 2] = np.nan
-            data = PanelData(y, series_exog=data.series_exog)
+            data = PanelData(y, characteristics=data.characteristics)
             tag = "capability:missing_values"
         with pytest.raises(UnsupportedInputError, match=tag):
             _model().fit(data)
@@ -364,12 +364,12 @@ class TestAFM:
 
     def test_does_not_mutate_input(self):
         data = _panel()
-        copy = PanelData(data.y, series_exog=data.series_exog)
+        copy = PanelData(data.y, characteristics=data.characteristics)
         model = _model()
         params = model.get_params()
         model.fit(data)
         model.allocate()
-        assert data.equals(copy)
+        assert data._equals(copy)
         assert model.get_params() == params
 
     def test_update_reattaches_without_changing_parameters(self):
@@ -494,7 +494,7 @@ class TestAFMConfig:
         cfg = AFMConfig.from_dict({"n_factors": 4, "hist_len": 8, "embed_dim": 12,
                                    "max_epochs": 2, "device": "cpu", "random_state": 0})
         returns, characteristics = _make_data(T=40, N=5, M=7)
-        model = AFM.from_config(cfg).fit(PanelData.from_arrays(returns, series_exog=characteristics))
+        model = AFM.from_config(cfg).fit(PanelData.from_arrays(returns, characteristics=characteristics))
         assert model.network_.n_factors == 4
         assert model.network_.hist_len == 8
         assert model.network_.embed_dim == 12
@@ -569,7 +569,7 @@ class TestFidelity:
     def test_pca_model_ignores_characteristics_after_fit(self):
         model = _model(factor_model="pca", trading="ou").fit(_panel(chars=False))
         returns, chars = _make_data(seed=1)
-        with_chars = PanelData.from_arrays(returns, series_exog=chars, names=list(model.feature_names_in_))
+        with_chars = PanelData.from_arrays(returns, characteristics=chars, series_names=list(model.feature_names_in_))
         assert model.allocate(data=with_chars).shape == (50, 6)
 
     def test_refit_resets_converged(self):

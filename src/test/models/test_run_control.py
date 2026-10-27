@@ -307,9 +307,9 @@ def test_dfm_refit_refreshes_stop_reason():
     cls, params = CASES["DFM-plain"]
     data = make_panel(cls)
     index = data.index
-    model = _fit(cls, params, data.loc(None, index[39]), callback=lambda info: info["iteration"] == 2)
+    model = _fit(cls, params, data.between(None, index[39]), callback=lambda info: info["iteration"] == 2)
     assert model.stop_reason_ == "callback"
-    model.update(data.loc(index[40], None), refit=True)
+    model.update(data.between(index[40], None), refit=True)
     assert model.stop_reason_ == "max_iter" and model.n_iter_ == 1
 
 

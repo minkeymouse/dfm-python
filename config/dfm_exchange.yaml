@@ -25,4 +25,4 @@ model:
 # PanelData.from_wide arguments.
 data:
   time_col: date
-  target_cols: [AUD_USD, GBP_USD, CAD_USD, CHF_USD, CNY_USD, JPY_USD, SGD_USD, NZD_USD]
+  y: [AUD_USD, GBP_USD, CAD_USD, CHF_USD, CNY_USD, JPY_USD, SGD_USD, NZD_USD]

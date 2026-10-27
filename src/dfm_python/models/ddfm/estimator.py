@@ -530,7 +530,7 @@ class DDFM(BaseFactorModel):
             Targets in ``y`` and, optionally, encoder covariates in ``exog``.
             Missing values are allowed (interpolated for the encoder, and
             missing targets imputed during training). Mixed frequency and
-            ``series_exog`` are rejected.
+            ``characteristics`` are rejected.
         callback : callable, optional
             Called as ``callback(info)`` after every MCMC iteration. ``info``
             is a dict with ``"model"`` (``"DDFM"``), ``"iteration"``
@@ -549,7 +549,7 @@ class DDFM(BaseFactorModel):
         ConfigurationError
             For an invalid hyperparameter.
         UnsupportedInputError
-            For ``series_exog`` or a mixed-frequency panel.
+            For ``characteristics`` or a mixed-frequency panel.
         DataValidationError
             For infinite values, or a target series with fewer than 2
             observed values or the same value (up to rounding) at every
@@ -764,7 +764,7 @@ class DDFM(BaseFactorModel):
                 f"DDFM.{method}: data has exog {list(panel.exog_names)}, but the model was fitted on {trained}. "
                 "Pass the same exog columns in the same order."
             )
-        if panel.n_timesteps < 1:
+        if panel.n_periods < 1:
             raise DataValidationError(f"DDFM.{method}: data has no time steps.")
         extended = self._extend_conditioning_index(panel.index, f"DDFM.{method}")
         return self._engine_frame(panel), extended
@@ -816,7 +816,7 @@ class DDFM(BaseFactorModel):
         Raises
         ------
         UnsupportedInputError
-            For ``refit=True``, ``series_exog`` or a mixed-frequency panel.
+            For ``refit=True``, ``characteristics`` or a mixed-frequency panel.
         DataValidationError
             If the series or exog names differ from the training data, the
             index type differs, the rows overlap the conditioning data,

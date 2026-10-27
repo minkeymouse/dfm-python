@@ -203,7 +203,7 @@ dates = pd.date_range("2010-01-31", periods=132, freq="ME", name="date")
 raw = pd.DataFrame(rng.standard_normal((132, 5)), columns=["s0", "s1", "s2", "oil", "fx"])
 raw.insert(0, "date", dates)
 
-data = PanelData.from_wide(raw.iloc[:120], time_col="date", exog_cols=["oil", "fx"])
+data = PanelData.from_wide(raw.iloc[:120], time_col="date", exog=["oil", "fx"])
 model = DDFM(n_factors=2, encoder_layers=(16,), decoder_type="linear",  # encoder 5 -> 16 -> 2
              learning_rate=0.005, n_mc_samples=10, max_iter=50, tol=5e-4,
              scaler="standard", random_state=3, device="auto")
@@ -217,7 +217,7 @@ fc = model.predict(6)                       # DataFrame 6 x 3 (s0, s1, s2), data
 zf = model.predict_factors(6)               # DataFrame 6 x 2
 bands = model.predict_interval(6, coverage=0.9)   # columns (series, lower | upper), Gaussian, data units
 
-new = PanelData.from_wide(raw.iloc[120:], time_col="date", exog_cols=["oil", "fx"])  # the 12 new rows
+new = PanelData.from_wide(raw.iloc[120:], time_col="date", exog=["oil", "fx"])  # the 12 new rows
 fc_new = model.predict(6, data=new)         # conditions on the new rows on a copy
 model.update(new)                           # encodes the new rows; the scalers are not refitted
 pd.testing.assert_frame_equal(model.predict(6), fc_new)
@@ -305,7 +305,7 @@ dates = pd.date_range("2010-01-31", periods=156, freq="ME", name="date")
 raw = pd.DataFrame(rng.standard_normal((156, 4)), columns=["s0", "s1", "s2", "policy_rate"])
 raw.insert(0, "date", dates)
 
-data = PanelData.from_wide(raw.iloc[:144], time_col="date", exog_cols=["policy_rate"])
+data = PanelData.from_wide(raw.iloc[:144], time_col="date", exog=["policy_rate"])
 model = iVDFM(n_factors=2, factor_order=2, window=48, stride=None,  # stride=None: window // 2
               time_context=1, scaler="standard", max_epochs=20,
               random_state=3, device="auto")
@@ -322,7 +322,7 @@ fc = model.predict(6, futr_exog=future.iloc[144:150])          # DataFrame 6 x 3
 zf = model.predict_factors(6, futr_exog=future.iloc[144:150])  # DataFrame 6 x 2
 bands = model.predict_interval(6, coverage=0.9, futr_exog=future.iloc[144:150])  # 1000 sampled paths
 
-new = PanelData.from_wide(raw.iloc[96:150], time_col="date", exog_cols=["policy_rate"])
+new = PanelData.from_wide(raw.iloc[96:150], time_col="date", exog=["policy_rate"])
 fc_new = model.predict(6, new, futr_exog=future.iloc[150:156])  # encodes new on a copy
 model.update(new)                           # encoder forward pass; factors_ is unchanged
 pd.testing.assert_frame_equal(model.predict(6, futr_exog=future.iloc[150:156]), fc_new)
@@ -446,8 +446,8 @@ characteristics = rng.standard_normal((T, N, M))
 dates = pd.bdate_range("2020-01-01", periods=T, name="date")
 tickers = [f"a{i}" for i in range(N)]
 
-data = PanelData.from_arrays(y=returns, series_exog=characteristics, index=dates,
-                             names=tickers, series_exog_names=[f"c{j}" for j in range(M)])
+data = PanelData.from_arrays(returns, characteristics=characteristics, index=dates,
+                             series_names=tickers, characteristic_names=[f"c{j}" for j in range(M)])
 model = AFM(n_factors=3, hist_len=20, max_epochs=20, random_state=0, device="auto")
 model.fit(data)
 
@@ -456,7 +456,7 @@ model.result_.sharpe, model.result_.explained_variance
 model.residuals_                            # DataFrame T x N of residual returns
 model.book_returns_                         # Series of after-cost returns on dates[hist_len:]
 
-res = model.backtest(data.loc(dates[60], None))   # AFMResult on other data, no training
+res = model.backtest(data.between(dates[60], None))   # AFMResult on other data, no training
 res.sharpe, res.weights.shape               # (1, n_eval, N)
 
 model.save("runs/afm", overwrite=True)
@@ -471,7 +471,7 @@ pca.fit(PanelData(y=pd.DataFrame(returns, index=dates, columns=tickers)))
 | Hyperparameter  | Default        | Meaning |
 |-----------------|----------------|---------|
 | `n_factors`     | None           | number of factors K; required (None raises in `fit`) |
-| `factor_model`  | `"attention"`  | `"attention"` (needs `series_exog`) or `"pca"` (rolling-window PCA on the returns) |
+| `factor_model`  | `"attention"`  | `"attention"` (needs `characteristics`) or `"pca"` (rolling-window PCA on the returns) |
 | `trading`       | `"longconv"`   | learned LongConv filter, or `"ou"` for the Avellaneda-Lee rule |
 | `embed_dim`     | 32             | characteristic embedding dimension (attention) |
 | `hist_len`      | 20             | residual-history length; the first `hist_len` dates get no weights |
@@ -492,7 +492,7 @@ Notes:
   (PCA + Avellaneda-Lee).
 - In long format (`unique_id`, `ds`, `y` plus one column per characteristic)
   build the same panel with
-  `PanelData.from_long(df, series_exog_cols=["c0", ..., "c7"])`.
+  `PanelData.from_long(df, characteristics=["c0", ..., "c7"])`.
 - `update(data)` attaches the data for later `allocate()`;
   `update(data, refit=True)` continues training from the current weights.
 - `set_output(output="polars")` applies to `allocate`. AFM has no

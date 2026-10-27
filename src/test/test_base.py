@@ -278,8 +278,8 @@ def _frame(index, columns, value=0.0):
 def test_validate_data_coerces(panel):
     est = _Bare()
     assert est._validate_data(panel) is panel
-    assert est._validate_data(panel.y).equals(panel)
-    assert est._validate_data(panel.y.to_numpy()).n_timesteps == 12
+    assert est._validate_data(panel.y)._equals(panel)
+    assert est._validate_data(panel.y.to_numpy()).n_periods == 12
     with pytest.raises(TypeError):
         est._validate_data([1, 2, 3])
 
@@ -291,8 +291,8 @@ def test_validate_data_rejects_excluded_slots(panel):
         est._validate_data(with_exog)
     assert "'x'" in str(info.value)
 
-    columns = pd.MultiIndex.from_product([["c"], ["a", "b"]], names=["feature", "series"])
-    with_series_exog = PanelData(panel.y, series_exog=_frame(panel.index, columns))
+    columns = pd.MultiIndex.from_product([["c"], ["a", "b"]], names=["characteristic", "series"])
+    with_series_exog = PanelData(panel.y, characteristics=_frame(panel.index, columns))
     with pytest.raises(UnsupportedInputError, match="capability:series_exog"):
         est._validate_data(with_series_exog)
 
@@ -326,8 +326,8 @@ def test_validate_data_allows_what_the_tags_enable(panel):
 
     y = panel.y
     y.iloc[0, 0] = np.nan
-    columns = pd.MultiIndex.from_product([["c"], ["a", "b"]], names=["feature", "series"])
-    data = PanelData(y, exog=_frame(panel.index, ["x"]), series_exog=_frame(panel.index, columns), freq={"a": "q"})
+    columns = pd.MultiIndex.from_product([["c"], ["a", "b"]], names=["characteristic", "series"])
+    data = PanelData(y, exog=_frame(panel.index, ["x"]), characteristics=_frame(panel.index, columns), freq={"a": "q"})
     assert _All()._validate_data(data) is data
 
 
@@ -350,8 +350,8 @@ def test_fit_returns_self_and_sets_data_attributes(panel):
 
 
 def test_fit_sets_series_exog_names_when_capable(panel):
-    columns = pd.MultiIndex.from_product([["c", "d"], ["a", "b"]], names=["feature", "series"])
-    data = PanelData(panel.y * 0.01, series_exog=_frame(panel.index, columns))
+    columns = pd.MultiIndex.from_product([["c", "d"], ["a", "b"]], names=["characteristic", "series"])
+    data = PanelData(panel.y * 0.01, characteristics=_frame(panel.index, columns))
     est = _DummyAllocator(hist_len=2).fit(data)
     assert list(est.series_exog_names_in_) == ["c", "d"]
 
@@ -432,7 +432,7 @@ def test_fit_is_silent_with_verbose_0(panel, capsys, caplog):
         def _fit(self, data, **fit_kwargs):
             super()._fit(data)
             if self.verbose:
-                logging.getLogger("dfm_python.test_progress").info("fitted %d rows", data.n_timesteps)
+                logging.getLogger("dfm_python.test_progress").info("fitted %d rows", data.n_periods)
 
     with caplog.at_level(logging.INFO):
         _Progress().fit(panel)

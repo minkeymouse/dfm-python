@@ -90,7 +90,7 @@ class _DummyForecaster(BaseFactorModel):
         mean = self._means(data.y)
         self.mean_ = mean
         self.conditioning_index_ = data.index
-        self.result_ = _DummyResult(mean=mean.copy(), n_obs=data.n_timesteps, scale=float(np.abs(mean).sum()))
+        self.result_ = _DummyResult(mean=mean.copy(), n_obs=data.n_periods, scale=float(np.abs(mean).sum()))
 
     def predict(self, h, data=None, **predict_kwargs):
         self._check_is_fitted("predict")

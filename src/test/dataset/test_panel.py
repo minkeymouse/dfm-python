@@ -1,4 +1,4 @@
-"""Tests for dfm_python.dataset.panel.PanelData."""
+"""Tests for dfm_python.dataset.panel.PanelData: slots, constructors, between and the merge rule."""
 
 import copy
 import pickle
@@ -11,11 +11,11 @@ import dfm_python
 from dfm_python import PanelData
 from dfm_python.config.constants import VALID_FREQUENCIES
 from dfm_python.dataset.panel import _normalize_freq
-from dfm_python.utils.errors import ConfigurationError, DataValidationError, UnsupportedInputError
+from dfm_python.errors import DataValidationError
 
 T, N, M, K = 8, 3, 2, 2
 SERIES = ["gdp", "cpi", "ip"]
-FEATURES = ["size", "value"]
+CHARS = ["size", "value"]
 
 
 def _index():
@@ -34,21 +34,21 @@ def _exog(index=None):
     return pd.DataFrame(values, index=_index() if index is None else index, columns=["oil", "fx"])
 
 
-def _sexog_array():
+def _chars_array():
     arr = 1000.0 + np.arange(T * N * M, dtype=float).reshape(T, N, M)
     arr[3, 2, 1] = np.nan
     return arr
 
 
-def _sexog(index=None):
-    arr = _sexog_array()
-    columns = pd.MultiIndex.from_product([FEATURES, SERIES], names=["feature", "series"])
+def _chars(index=None):
+    arr = _chars_array()
+    columns = pd.MultiIndex.from_product([CHARS, SERIES], names=["characteristic", "series"])
     flat = np.column_stack([arr[:, n, m] for m in range(M) for n in range(N)])
     return pd.DataFrame(flat, index=_index() if index is None else index, columns=columns)
 
 
 def _full():
-    return PanelData(_y(), exog=_exog(), series_exog=_sexog(), freq={"gdp": "q"})
+    return PanelData(_y(), exog=_exog(), characteristics=_chars(), freq={"gdp": "q"})
 
 
 # ---------------------------------------------------------------------------
@@ -64,27 +64,54 @@ def test_exported_at_top_level():
     assert from_subpackage is PanelData
 
 
+def test_public_members():
+    public = sorted(name for name in dir(PanelData) if not name.startswith("_"))
+    assert public == sorted([
+        "between", "characteristic_names", "characteristics", "exog", "exog_names", "freq", "from_arrays",
+        "from_long", "from_wide", "index", "n_periods", "n_series", "series_names", "to_long", "y",
+    ])
+
+
 def test_constructor_slots_and_accessors():
     data = _full()
     assert data.series_names == tuple(SERIES)
     assert data.exog_names == ("oil", "fx")
-    assert data.series_exog_names == tuple(FEATURES)
-    assert data.n_timesteps == T
+    assert data.characteristic_names == tuple(CHARS)
+    assert data.n_periods == T and data.n_series == N
     assert data.index.equals(_index())
     assert data.index.name == "date"
     pd.testing.assert_frame_equal(data.y, _y())
     pd.testing.assert_frame_equal(data.exog, _exog())
-    pd.testing.assert_frame_equal(data.series_exog, _sexog())
+    pd.testing.assert_frame_equal(data.characteristics, _chars())
     assert data.freq == {"gdp": "q"}
-    assert data.is_mixed_frequency
+
+
+def test_constructor_is_keyword_only_after_y():
+    with pytest.raises(TypeError):
+        PanelData(_y(), _exog())
 
 
 def test_constructor_minimal():
     data = PanelData(_y())
-    assert data.exog is None and data.series_exog is None and data.freq is None
-    assert data.exog_names == () and data.series_exog_names == ()
-    assert data.series_exog_array() is None
-    assert not data.is_mixed_frequency
+    assert data.exog is None and data.characteristics is None and data.freq is None
+    assert data.exog_names == () and data.characteristic_names == ()
+    assert data._characteristic_values() is None
+    assert not data._is_mixed_frequency()
+
+
+def test_characteristics_are_stored_as_a_t_n_m_array():
+    data = _full()
+    assert data._chars.shape == (T, N, M) and data._chars.dtype == np.float64
+    np.testing.assert_array_equal(data._characteristic_values(), _chars_array())
+    # the column order of the input frame does not matter; names follow first appearance
+    shuffled = _chars().iloc[:, [5, 0, 3, 1, 4, 2]]
+    other = PanelData(_y(), characteristics=shuffled)
+    assert other.characteristic_names == ("value", "size")
+    np.testing.assert_array_equal(other._characteristic_values(), _chars_array()[:, :, ::-1])
+    # the property is built on each access, in (characteristic, series) order
+    frame = other.characteristics
+    assert frame is not other.characteristics
+    assert list(frame.columns) == [(c, s) for c in ("value", "size") for s in SERIES]
 
 
 def test_values_cast_to_float64_and_nan_kept():
@@ -118,18 +145,20 @@ def test_wrong_slot_type_raises_type_error():
         PanelData(_y()["gdp"])
     with pytest.raises(TypeError):
         PanelData(_y(), exog=np.ones((T, 1)))
+    with pytest.raises(TypeError):
+        PanelData(_y(), characteristics=_chars_array())
 
 
-def test_empty_exog_and_series_exog_become_none():
+def test_empty_exog_and_characteristics_become_none():
     empty = pd.DataFrame(index=_index())
-    data = PanelData(_y(), exog=empty, series_exog=empty)
-    assert data.exog is None and data.series_exog is None
+    data = PanelData(_y(), exog=empty, characteristics=empty)
+    assert data.exog is None and data.characteristics is None
 
 
 def test_from_wide_with_time_col():
     raw = _y().join(_exog()).reset_index()
     raw["date"] = raw["date"].dt.strftime("%Y-%m-%d")  # strings, as read_csv gives them
-    data = PanelData.from_wide(raw, time_col="date", exog_cols=["oil", "fx"], freq={"q": ["gdp"]})
+    data = PanelData.from_wide(raw, time_col="date", exog=["oil", "fx"], freq={"gdp": "q"})
     assert isinstance(data.index, pd.DatetimeIndex)
     assert data.index.name == "date"
     assert data.series_names == tuple(SERIES)
@@ -141,7 +170,7 @@ def test_from_wide_with_time_col():
 
 def test_from_wide_uses_index_and_selects_targets():
     raw = _y().join(_exog())
-    data = PanelData.from_wide(raw, target_cols=["cpi", "gdp"])
+    data = PanelData.from_wide(raw, y=["cpi", "gdp"])
     assert data.series_names == ("cpi", "gdp")
     assert data.exog is None
     assert data.index.equals(_index())
@@ -151,59 +180,72 @@ def test_from_wide_uses_index_and_selects_targets():
 def test_from_wide_errors():
     raw = _y().join(_exog())
     with pytest.raises(DataValidationError, match="not found"):
-        PanelData.from_wide(raw, exog_cols=["missing"])
+        PanelData.from_wide(raw, exog=["missing"])
     with pytest.raises(DataValidationError, match="both"):
-        PanelData.from_wide(raw, target_cols=["gdp", "oil"], exog_cols=["oil"])
+        PanelData.from_wide(raw, y=["gdp", "oil"], exog=["oil"])
     with pytest.raises(DataValidationError, match="no target"):
-        PanelData.from_wide(raw[["oil", "fx"]], exog_cols=["oil", "fx"])
+        PanelData.from_wide(raw[["oil", "fx"]], exog=["oil", "fx"])
     with pytest.raises(DataValidationError, match="parse"):
         PanelData.from_wide(raw.reset_index().assign(date="not a date"), time_col="date")
+    with pytest.raises(TypeError, match="list of column names"):
+        PanelData.from_wide(raw, y="gdp")
 
 
 def test_from_arrays_defaults():
     y = np.arange(T * N, dtype=float).reshape(T, N)
-    data = PanelData.from_arrays(y, exog=np.ones((T, K)), series_exog=_sexog_array())
+    data = PanelData.from_arrays(y, exog=np.ones((T, K)), characteristics=_chars_array())
     assert isinstance(data.index, pd.RangeIndex) and data.index.equals(pd.RangeIndex(T))
     assert data.series_names == ("series_0", "series_1", "series_2")
     assert data.exog_names == ("exog_0", "exog_1")
-    assert data.series_exog_names == ("feature_0", "feature_1")
+    assert data.characteristic_names == ("characteristic_0", "characteristic_1")
     np.testing.assert_array_equal(data.y.to_numpy(), y)
-    np.testing.assert_array_equal(data.series_exog_array(), _sexog_array())
+    np.testing.assert_array_equal(data._characteristic_values(), _chars_array())
 
 
 def test_from_arrays_names_and_index():
     data = PanelData.from_arrays(
         _y().to_numpy(),
-        series_exog=_sexog_array(),
+        characteristics=_chars_array(),
         index=_index(),
-        names=SERIES,
-        series_exog_names=FEATURES,
+        series_names=SERIES,
+        characteristic_names=CHARS,
         exog=_exog().to_numpy(),
         exog_names=["oil", "fx"],
         freq={"gdp": "q"},
     )
-    assert data.equals(_full())
-    pd.testing.assert_frame_equal(data.series_exog, _sexog())
+    assert data._equals(_full())
+    pd.testing.assert_frame_equal(data.characteristics, _chars())
 
 
 def test_from_arrays_shape_errors():
     y = np.zeros((T, N))
     with pytest.raises(DataValidationError, match=r"\(T, N\)"):
         PanelData.from_arrays(np.zeros(T))
-    with pytest.raises(DataValidationError, match="series_exog"):
-        PanelData.from_arrays(y, series_exog=np.zeros((T, N + 1, M)))
+    with pytest.raises(DataValidationError, match="characteristics"):
+        PanelData.from_arrays(y, characteristics=np.zeros((T, N + 1, M)))
     with pytest.raises(DataValidationError, match="exog"):
         PanelData.from_arrays(y, exog=np.zeros((T - 1, K)))
-    with pytest.raises(DataValidationError, match="names"):
-        PanelData.from_arrays(y, names=["a", "b"])
+    with pytest.raises(DataValidationError, match="series_names"):
+        PanelData.from_arrays(y, series_names=["a", "b"])
+    with pytest.raises(DataValidationError, match="unique"):
+        PanelData.from_arrays(y, series_names=["a", "b", "a"])
     with pytest.raises(DataValidationError, match="index"):
         PanelData.from_arrays(y, index=pd.RangeIndex(T + 1))
+
+
+def test_from_arrays_copies_its_inputs():
+    arr = _y().to_numpy(copy=True)
+    chars = _chars_array()
+    data = PanelData.from_arrays(arr, characteristics=chars)
+    arr[0, 0] = -1.0
+    chars[0, 0, 0] = -1.0
+    assert data.y.iloc[0, 0] == 0.0 and data._characteristic_values()[0, 0, 0] == 1000.0
 
 
 def test_from_long_basic_and_missing_rows():
     long = _full().to_long()
     long = long.drop(index=[0, 5]).sample(frac=1.0, random_state=0)  # drop two rows, shuffle the rest
-    data = PanelData.from_long(long, series_exog_cols=FEATURES, exog_cols=["oil", "fx"])
+    data = PanelData.from_long(long, characteristics=CHARS, exog=["oil", "fx"])
     assert set(data.series_names) == set(SERIES)  # first-appearance order of the shuffled rows
     assert data.index.equals(_index())
     expected = _y()
@@ -223,31 +265,31 @@ def test_from_long_series_follow_first_appearance():
 def test_from_long_exog_must_be_constant_across_ids():
     long = _full().to_long()
     long.loc[(long["unique_id"] == "cpi") & (long["ds"] == _index()[3]), "oil"] = -1.0
-    with pytest.raises(DataValidationError, match="oil"):
-        PanelData.from_long(long, exog_cols=["oil", "fx"])
+    with pytest.raises(DataValidationError, match="oil.*belongs in characteristics"):
+        PanelData.from_long(long, exog=["oil", "fx"])
 
 
 def test_from_long_exog_nan_in_one_id_is_missing_not_a_conflict():
     long = _full().to_long()
     at = (long["unique_id"] == "cpi") & (long["ds"] == _index()[3])
     long.loc[at, "oil"] = np.nan
-    data = PanelData.from_long(long, exog_cols=["oil", "fx"])
+    data = PanelData.from_long(long, exog=["oil", "fx"])
     np.testing.assert_array_equal(data.exog.to_numpy(), _exog().to_numpy())
 
 
 def test_from_long_errors():
     long = _full().to_long()
     with pytest.raises(DataValidationError, match="not found"):
-        PanelData.from_long(long, exog_cols=["missing"])
+        PanelData.from_long(long, exog=["missing"])
     with pytest.raises(DataValidationError, match="duplicated"):
         PanelData.from_long(pd.concat([long, long.iloc[:1]]))
     with pytest.raises(DataValidationError, match="one role"):
-        PanelData.from_long(long, exog_cols=["oil"], series_exog_cols=["oil"])
+        PanelData.from_long(long, exog=["oil"], characteristics=["oil"])
 
 
 def test_from_long_custom_column_names():
     long = _full().to_long().rename(columns={"unique_id": "ticker", "ds": "when", "y": "ret"})
-    data = PanelData.from_long(long, id_col="ticker", time_col="when", target_col="ret")
+    data = PanelData.from_long(long, id_col="ticker", time_col="when", y="ret")
     assert data.series_names == tuple(SERIES)
     assert data.index.name == "when"
 
@@ -272,7 +314,7 @@ def test_polars_constructor(pl):
 
 def test_polars_from_wide(pl):
     frame = pl.from_pandas(_y().join(_exog()).reset_index())
-    data = PanelData.from_wide(frame, time_col="date", exog_cols=["oil", "fx"])
+    data = PanelData.from_wide(frame, time_col="date", exog=["oil", "fx"])
     assert isinstance(data.index, pd.DatetimeIndex)
     np.testing.assert_array_equal(data.y.to_numpy(), _y().to_numpy())
     np.testing.assert_array_equal(data.exog.to_numpy(), _exog().to_numpy())
@@ -280,14 +322,14 @@ def test_polars_from_wide(pl):
 
 def test_polars_from_long(pl):
     long = _full().to_long()
-    data = PanelData.from_long(pl.from_pandas(long), series_exog_cols=FEATURES, exog_cols=["oil", "fx"])
+    data = PanelData.from_long(pl.from_pandas(long), characteristics=CHARS, exog=["oil", "fx"])
     np.testing.assert_array_equal(data.y.to_numpy(), _y().to_numpy())
-    np.testing.assert_array_equal(data.series_exog_array(), _sexog_array())
+    np.testing.assert_array_equal(data._characteristic_values(), _chars_array())
 
 
 def test_polars_from_arrays_and_coerce(pl):
     frame = pl.from_pandas(_y().reset_index(drop=True))
-    data = PanelData.from_arrays(frame, names=SERIES)
+    data = PanelData.from_arrays(frame, series_names=SERIES)
     np.testing.assert_array_equal(data.y.to_numpy(), _y().to_numpy())
     coerced = PanelData._coerce(frame)
     assert coerced.series_names == tuple(SERIES)
@@ -323,66 +365,14 @@ def test_polars_coerce_rejects_two_temporal_columns(pl):
 
 
 # ---------------------------------------------------------------------------
-# polars output
-# ---------------------------------------------------------------------------
-
-
-def test_to_polars_long_is_to_long(pl):
-    data = _full()
-    out = data.to_polars()
-    assert isinstance(out, pl.DataFrame)
-    pd.testing.assert_frame_equal(out.to_pandas(), data.to_long())
-    back = PanelData.from_long(out, series_exog_cols=FEATURES, exog_cols=["oil", "fx"], freq=data.freq)
-    assert back.equals(data)
-
-
-def test_to_polars_wide_layout_and_round_trip(pl):
-    data = PanelData(_y(), exog=_exog(), freq={"gdp": "q"})
-    wide = data.to_polars(layout="wide")
-    assert wide.columns == ["date", *SERIES, "oil", "fx"]
-    np.testing.assert_array_equal(wide.select(SERIES).to_numpy(), _y().to_numpy())
-    back = PanelData.from_wide(wide, time_col="date", exog_cols=["oil", "fx"], freq=data.freq)
-    assert back.equals(data)
-    y_only = PanelData(_y())
-    assert PanelData._coerce(y_only.to_polars(layout="wide")).equals(y_only)
-
-
-def test_to_polars_range_and_period_index(pl):
-    ranged = PanelData(_y(index=pd.RangeIndex(10, 10 + 3 * T, 3)))
-    assert ranged.to_polars(layout="wide").columns[0] == "time"  # unnamed index
-    assert PanelData.from_wide(ranged.to_polars(layout="wide"), time_col="time").equals(ranged)
-    assert PanelData.from_long(ranged.to_polars()).equals(ranged)
-    periods = pd.period_range("2001Q1", periods=T, freq="Q")
-    quarterly = PanelData(_y(index=periods))
-    # a PeriodIndex is written as its start timestamps
-    for back in (
-        PanelData.from_long(quarterly.to_polars()),
-        PanelData.from_wide(quarterly.to_polars(layout="wide"), time_col="time"),
-    ):
-        assert back.index.equals(periods.to_timestamp())
-        np.testing.assert_array_equal(back.y.to_numpy(), quarterly.y.to_numpy())
-
-
-def test_to_polars_errors(pl):
-    with pytest.raises(UnsupportedInputError, match="series_exog"):
-        _full().to_polars(layout="wide")
-    with pytest.raises(ConfigurationError, match="layout"):
-        _full().to_polars(layout="tall")
-    with pytest.raises(ValueError, match="index name 'time'"):
-        PanelData(_y(index=pd.RangeIndex(T)).rename(columns={"gdp": "time"})).to_polars(layout="wide")
-    with pytest.raises(DataValidationError, match="clash"):
-        PanelData(_y(), exog=_exog().rename(columns={"oil": "ds"})).to_polars()
-
-
-# ---------------------------------------------------------------------------
 # Round trips
 # ---------------------------------------------------------------------------
 
 
 def test_long_round_trip_full():
     data = _full()
-    back = PanelData.from_long(data.to_long(), series_exog_cols=FEATURES, exog_cols=["oil", "fx"], freq=data.freq)
-    assert back.equals(data)
+    back = PanelData.from_long(data.to_long(), characteristics=CHARS, exog=["oil", "fx"], freq=data.freq)
+    assert back._equals(data)
     # the long format carries no index freq attribute; values, labels and index type survive
     pd.testing.assert_frame_equal(back.y, data.y, check_names=False, check_freq=False)
     pd.testing.assert_frame_equal(back.exog, data.exog, check_names=False, check_freq=False)
@@ -391,17 +381,19 @@ def test_long_round_trip_full():
 def test_long_round_trip_range_and_period_index():
     for index in (pd.RangeIndex(10, 10 + 3 * T, 3), pd.period_range("2001Q1", periods=T, freq="Q")):
         data = PanelData(_y(index=index), exog=_exog(index=index))
-        back = PanelData.from_long(data.to_long(), exog_cols=["oil", "fx"])
+        back = PanelData.from_long(data.to_long(), exog=["oil", "fx"])
         assert type(back.index) is type(index)
-        assert back.equals(data)
+        assert back._equals(data)
 
 
 def test_to_long_layout():
     long = _full().to_long()
-    assert list(long.columns) == ["unique_id", "ds", "y", *FEATURES, "oil", "fx"]
+    assert list(long.columns) == ["unique_id", "ds", "y", "oil", "fx", *CHARS]
     assert len(long) == T * N
     assert long["unique_id"].tolist() == [s for s in SERIES for _ in range(T)]
     assert long["y"].isna().sum() == 1  # NaN targets are kept
+    at = (long["unique_id"] == "ip") & (long["ds"] == _index()[3])
+    assert np.isnan(long.loc[at, "value"]).all()
 
 
 def test_to_long_rejects_reserved_names():
@@ -410,31 +402,18 @@ def test_to_long_rejects_reserved_names():
         data.to_long()
 
 
-def test_series_exog_array_shape_and_order():
-    data = _full()
-    arr = data.series_exog_array()
-    assert arr.shape == (T, N, M) and arr.dtype == np.float64
-    np.testing.assert_array_equal(arr, _sexog_array())
-    # column order of the stored frame does not matter
-    shuffled = _sexog().iloc[:, [5, 0, 3, 1, 4, 2]]
-    other = PanelData(_y(), series_exog=shuffled)
-    assert other.series_exog_names == ("value", "size")
-    expected = _sexog_array()[:, :, ::-1]
-    np.testing.assert_array_equal(other.series_exog_array(), expected)
-
-
-def test_series_exog_column_validation():
-    good = _sexog()
+def test_characteristic_column_validation():
+    good = _chars()
     with pytest.raises(DataValidationError, match="MultiIndex"):
-        PanelData(_y(), series_exog=_exog())
+        PanelData(_y(), characteristics=_exog())
     with pytest.raises(DataValidationError, match="named"):
-        PanelData(_y(), series_exog=good.rename_axis(columns=["series", "feature"]))
+        PanelData(_y(), characteristics=good.rename_axis(columns=["series", "characteristic"]))
     with pytest.raises(DataValidationError, match="series"):
-        PanelData(_y(), series_exog=good.drop(columns="ip", level="series"))
-    with pytest.raises(DataValidationError, match="every feature"):
-        PanelData(_y(), series_exog=good.drop(columns=[("value", "ip")]))
+        PanelData(_y(), characteristics=good.drop(columns="ip", level="series"))
+    with pytest.raises(DataValidationError, match="every characteristic"):
+        PanelData(_y(), characteristics=good.drop(columns=[("value", "ip")]))
     unnamed = good.rename_axis(columns=[None, None])
-    assert PanelData(_y(), series_exog=unnamed).series_exog.columns.names == ["feature", "series"]
+    assert PanelData(_y(), characteristics=unnamed).characteristics.columns.names == ["characteristic", "series"]
 
 
 # ---------------------------------------------------------------------------
@@ -442,14 +421,10 @@ def test_series_exog_column_validation():
 # ---------------------------------------------------------------------------
 
 
-def test_freq_forms_normalize_to_per_series():
-    per_series = {"ip": "m", "gdp": "q"}
-    grouped = {"q": ["gdp"], "m": ("ip",)}
-    expected = {"gdp": "q", "ip": "m"}  # in series order
-    assert _normalize_freq(per_series, SERIES) == expected
-    assert _normalize_freq(grouped, SERIES) == expected
-    assert list(_normalize_freq(grouped, SERIES)) == ["gdp", "ip"]
-    assert PanelData(_y(), freq=per_series).freq == PanelData(_y(), freq=grouped).freq == expected
+def test_freq_is_per_series_in_series_order():
+    assert _normalize_freq({"ip": "m", "gdp": "q"}, SERIES) == {"gdp": "q", "ip": "m"}
+    assert list(_normalize_freq({"ip": "m", "gdp": "q"}, SERIES)) == ["gdp", "ip"]
+    assert PanelData(_y(), freq={"ip": "m", "gdp": "q"}).freq == {"gdp": "q", "ip": "m"}
 
 
 def test_freq_none_and_empty():
@@ -460,16 +435,10 @@ def test_freq_none_and_empty():
 def test_freq_errors():
     with pytest.raises(DataValidationError, match="unknown series"):
         PanelData(_y(), freq={"nope": "q"})
-    with pytest.raises(DataValidationError, match="unknown series"):
-        PanelData(_y(), freq={"q": ["nope"]})
     with pytest.raises(DataValidationError, match="frequency code"):
         PanelData(_y(), freq={"gdp": "quarterly"})
-    with pytest.raises(DataValidationError, match="frequency code"):
-        PanelData(_y(), freq={"Q": ["gdp"]})
-    with pytest.raises(DataValidationError, match="two frequencies"):
-        PanelData(_y(), freq={"q": ["gdp"], "m": ["gdp"]})
-    with pytest.raises(DataValidationError, match="mixes"):
-        PanelData(_y(), freq={"gdp": "q", "m": ["ip"]})
+    with pytest.raises(DataValidationError, match=r"each series to its frequency code.*\['q'\]"):
+        PanelData(_y(), freq={"q": ["gdp"]})  # the grouped form is gone
     with pytest.raises(TypeError):
         PanelData(_y(), freq=["q"])
 
@@ -484,14 +453,12 @@ def test_freq_codes_come_from_constants():
     [
         (None, False),
         ({"gdp": "m", "cpi": "m", "ip": "m"}, False),
-        ({"q": SERIES}, False),
         ({"gdp": "q", "cpi": "m", "ip": "m"}, True),
         ({"gdp": "q"}, True),
-        ({"m": ["gdp"]}, True),
     ],
 )
-def test_is_mixed_frequency(freq, expected):
-    assert PanelData(_y(), freq=freq).is_mixed_frequency is expected
+def test_private_mixed_frequency(freq, expected):
+    assert PanelData(_y(), freq=freq)._is_mixed_frequency() is expected
 
 
 # ---------------------------------------------------------------------------
@@ -548,7 +515,7 @@ def test_slots_must_share_index():
     with pytest.raises(DataValidationError, match="share the index"):
         PanelData(_y(), exog=_exog().iloc[:-1])
     with pytest.raises(DataValidationError, match="share the index"):
-        PanelData(_y(), series_exog=_sexog(index=pd.RangeIndex(T)))
+        PanelData(_y(), characteristics=_chars(index=pd.RangeIndex(T)))
 
 
 def test_datetime_resolution_difference_is_not_a_mismatch():
@@ -564,7 +531,7 @@ def test_column_names_unique():
     with pytest.raises(DataValidationError, match="both"):
         PanelData(_y(), exog=_exog().rename(columns={"oil": "gdp"}))
     with pytest.raises(DataValidationError, match="both"):
-        PanelData(_y(), exog=_exog().rename(columns={"oil": "size"}), series_exog=_sexog())
+        PanelData(_y(), exog=_exog().rename(columns={"oil": "size"}), characteristics=_chars())
 
 
 # ---------------------------------------------------------------------------
@@ -584,43 +551,37 @@ def test_attributes_cannot_be_set_or_deleted():
 
 def test_accessors_return_copies():
     data = _full()
-    for frame in (data.y, data.exog, data.series_exog):
+    for frame in (data.y, data.exog, data.characteristics):
         frame.iloc[0, 0] = -999.0
     data.freq["cpi"] = "q"
     data.index.name = "changed"
-    data.series_exog_array()[0, 0, 0] = -999.0
-    assert data.equals(_full())
+    data._characteristic_values()[0, 0, 0] = -999.0
+    assert data._equals(_full())
     assert data.index.name == "date"
     assert data.freq == {"gdp": "q"}
 
 
 def test_inputs_are_not_mutated_and_are_copied():
-    y, exog, sexog = _y(), _exog(), _sexog()
-    freq = {"q": ["gdp"]}
-    data = PanelData(y, exog=exog, series_exog=sexog, freq=freq)
+    y, exog, chars = _y(), _exog(), _chars()
+    freq = {"gdp": "q"}
+    data = PanelData(y, exog=exog, characteristics=chars, freq=freq)
     pd.testing.assert_frame_equal(y, _y())
     pd.testing.assert_frame_equal(exog, _exog())
-    pd.testing.assert_frame_equal(sexog, _sexog())
-    assert freq == {"q": ["gdp"]}
+    pd.testing.assert_frame_equal(chars, _chars())
     y.iloc[0, 0] = -1.0
     exog.iloc[0, 0] = -1.0
-    sexog.iloc[0, 0] = -1.0
-    freq["q"].append("ip")
-    assert data.equals(_full())
-
-    arr = _y().to_numpy(copy=True)  # writable under pandas copy-on-write too
-    from_arr = PanelData.from_arrays(arr)
-    arr[0, 0] = -1.0
-    assert from_arr.y.iloc[0, 0] == 0.0
+    chars.iloc[0, 0] = -1.0
+    freq["ip"] = "q"
+    assert data._equals(_full())
 
     raw = _y().join(_exog())
     before = raw.copy()
-    PanelData.from_wide(raw, exog_cols=["oil", "fx"])
+    PanelData.from_wide(raw, exog=["oil", "fx"])
     pd.testing.assert_frame_equal(raw, before)
 
     long = _full().to_long()
     before = long.copy()
-    PanelData.from_long(long, series_exog_cols=FEATURES, exog_cols=["oil", "fx"])
+    PanelData.from_long(long, characteristics=CHARS, exog=["oil", "fx"])
     pd.testing.assert_frame_equal(long, before)
 
 
@@ -628,42 +589,203 @@ def test_pickle_and_copy():
     data = _full()
     for clone in (pickle.loads(pickle.dumps(data)), copy.copy(data), copy.deepcopy(data)):
         assert isinstance(clone, PanelData)
-        assert clone.equals(data)
+        assert clone._equals(data)
         with pytest.raises(AttributeError):
             clone._y = None
 
 
 # ---------------------------------------------------------------------------
-# loc
+# between
 # ---------------------------------------------------------------------------
 
 
-def test_loc_datetime_labels():
+def test_between_datetime_labels():
     data = _full()
     index = _index()
-    part = data.loc(index[2], index[5])
+    part = data.between(index[2], index[5])
     assert isinstance(part, PanelData) and part is not data
     assert part.index.equals(index[2:6])  # both ends included
+    assert part.index.freq == index.freq
     np.testing.assert_array_equal(part.y.to_numpy(), _y().to_numpy()[2:6])
     np.testing.assert_array_equal(part.exog.to_numpy(), _exog().to_numpy()[2:6])
-    np.testing.assert_array_equal(part.series_exog_array(), _sexog_array()[2:6])
+    np.testing.assert_array_equal(part._characteristic_values(), _chars_array()[2:6])
     assert part.freq == data.freq
-    assert data.n_timesteps == T  # original untouched
+    assert data.n_periods == T  # original untouched
 
 
-def test_loc_open_ends_and_strings():
+def test_between_open_ends_and_periods():
     data = _full()
-    assert data.loc().equals(data)
-    assert data.loc(stop="2020-03-31").n_timesteps == 3
-    assert data.loc(start="2020-07").n_timesteps == 2
+    assert data.between()._equals(data)
+    assert data.between(end="2020-03-31").n_periods == 3
+    assert data.between(start="2020-07").n_periods == 2
+    # a str or Period covers its whole period: start takes its first stamp, end its last
+    part = data.between("2020Q2", "2020Q2")
+    assert list(part.index.strftime("%m")) == ["04", "05", "06"]
+    assert data.between(start=pd.Period("2020Q3"), end="2020").n_periods == 2
+    assert data.between(end=pd.Timestamp("2020-02-15")).n_periods == 1
 
 
-def test_loc_range_index_and_empty():
+def test_between_period_index():
+    data = PanelData(_y(index=pd.period_range("2020-01", periods=T, freq="M")))
+    assert list(data.between("2020Q2", "2020Q2").index.astype(str)) == ["2020-04", "2020-05", "2020-06"]
+    assert data.between(pd.Timestamp("2020-03-15")).n_periods == T - 2  # the period holding the stamp
+
+
+def test_between_range_index_and_errors():
     data = PanelData(_y(index=pd.RangeIndex(T)))
-    part = data.loc(3, 5)
+    part = data.between(3, 5)
     assert isinstance(part.index, pd.RangeIndex) and part.index.equals(pd.RangeIndex(3, 6))
     with pytest.raises(DataValidationError, match="no rows"):
-        data.loc(100, 200)
+        data.between(100, 200)
+    with pytest.raises(TypeError, match="int"):
+        data.between("2020")
+    with pytest.raises(TypeError):
+        _full().between(start=1.5)
+
+
+# ---------------------------------------------------------------------------
+# The merge rule (update)
+# ---------------------------------------------------------------------------
+
+
+def _rows(start, values, columns=SERIES, **slots):
+    index = pd.date_range(start, periods=len(values), freq="ME", name="date")
+    y = pd.DataFrame(np.asarray(values, dtype=float), index=index, columns=columns)
+    exog = slots.get("exog")
+    return PanelData(y, exog=None if exog is None else pd.DataFrame(exog, index=index, columns=["oil", "fx"]))
+
+
+def test_merge_appends_new_rows():
+    base = PanelData(_y())
+    new = _rows("2020-09-30", [[1.0, 2.0, 3.0], [4.0, np.nan, 6.0]])
+    merged = base._merge(new)
+    assert merged.index.equals(pd.date_range("2020-01-31", periods=T + 2, freq="ME", name="date"))
+    assert merged.index.freq == "ME"
+    np.testing.assert_array_equal(merged.y.to_numpy()[:T], _y().to_numpy())
+    np.testing.assert_array_equal(merged.y.to_numpy()[T:], [[1.0, 2.0, 3.0], [4.0, np.nan, 6.0]])
+
+
+def test_merge_revisions_and_late_releases_overwrite_cell_by_cell():
+    base = PanelData(_y())
+    # a revised gdp at t=1, the late release of cpi at t=2 (missing before), NaN elsewhere
+    values = np.full((2, N), np.nan)
+    values[0, 0] = -1.0
+    values[1, 1] = -2.0
+    merged = base._merge(_rows("2020-02-29", values))
+    expected = _y().to_numpy()
+    expected[1, 0] = -1.0
+    expected[2, 1] = -2.0
+    np.testing.assert_array_equal(merged.y.to_numpy(), expected)
+    assert merged.index.equals(base.index)
+
+
+def test_merge_nan_never_erases_an_observed_value():
+    base = PanelData(_y())
+    merged = base._merge(_rows("2020-01-31", np.full((T, N), np.nan)))
+    assert merged._equals(base)
+
+
+def test_merge_full_vintage_equals_new_cells_only():
+    base = PanelData(_y().iloc[:6])
+    full = PanelData(_y())
+    only_new = full.between(_index()[6])
+    assert base._merge(full)._equals(base._merge(only_new))
+    assert base._merge(full)._equals(full)
+
+
+def test_merge_is_idempotent_and_reorders_columns():
+    base = _full()
+    assert base._merge(base)._equals(base)
+    shuffled = PanelData(
+        _y()[["ip", "gdp", "cpi"]], exog=_exog()[["fx", "oil"]], characteristics=_chars().iloc[:, ::-1]
+    )
+    assert base._merge(shuffled)._equals(base)
+
+
+def test_merge_exog_and_characteristics_follow_the_same_rule():
+    base = _full()
+    index = _index()[-2:]
+    y = pd.DataFrame(np.nan, index=index, columns=SERIES)
+    exog = pd.DataFrame({"oil": [np.nan, -5.0], "fx": [np.nan, np.nan]}, index=index)
+    chars = _chars().iloc[-2:] * np.nan
+    chars.iloc[0, 0] = -7.0  # (size, gdp) at the second-to-last row
+    merged = base._merge(PanelData(y, exog=exog, characteristics=chars))
+    assert merged.exog.iloc[-1, 0] == -5.0 and merged.exog.iloc[-2, 0] == _exog().iloc[-2, 0]
+    expected = _chars_array()
+    expected[-2, 0, 0] = -7.0
+    np.testing.assert_array_equal(merged._characteristic_values(), expected)
+
+
+def test_merge_replace_is_exactly_the_new_data():
+    base = PanelData(_y())
+    vintage = PanelData(_y().iloc[2:5] * 0.0)
+    replaced = base._merge(vintage, replace=True)
+    assert replaced._equals(vintage)
+    # replace=True may also start before the conditioning data
+    earlier = PanelData(_y(index=pd.date_range("2019-01-31", periods=T, freq="ME", name="date")))
+    assert base._merge(earlier, replace=True)._equals(earlier)
+
+
+def test_merge_rejects_data_before_the_conditioning_start_without_replace():
+    base = PanelData(_y().iloc[2:])
+    with pytest.raises(DataValidationError, match="before the conditioning data.*replace=True"):
+        base._merge(PanelData(_y()))
+
+
+def test_merge_rejects_unknown_stamps_inside_the_conditioning_period():
+    base = PanelData(_y())
+    odd = PanelData(pd.DataFrame([[1.0, 2.0, 3.0]], index=pd.DatetimeIndex(["2020-03-15"], name="date"), columns=SERIES))
+    with pytest.raises(DataValidationError, match="inside the conditioning period"):
+        base._merge(odd)
+
+
+def test_merge_shape_checks():
+    base = _full()
+    with pytest.raises(DataValidationError, match=r"misses \['ip'\]"):
+        base._merge(PanelData(_y()[["gdp", "cpi"]], exog=_exog()))
+    with pytest.raises(DataValidationError, match="does not know"):
+        PanelData(_y())._merge(_rows("2020-09-30", [[1.0, 2.0, 3.0, 4.0]], columns=[*SERIES, "new"]))
+    with pytest.raises(DataValidationError, match="exog"):
+        base._merge(PanelData(_y(), characteristics=_chars(), freq={"gdp": "q"}))
+    with pytest.raises(DataValidationError, match="characteristics"):
+        base._merge(PanelData(_y(), exog=_exog(), freq={"gdp": "q"}))
+    with pytest.raises(DataValidationError, match="freq"):
+        base._merge(PanelData(_y(), exog=_exog(), characteristics=_chars(), freq={"cpi": "q"}))
+    # freq=None inherits the conditioning freq
+    assert base._merge(PanelData(_y(), exog=_exog(), characteristics=_chars())).freq == {"gdp": "q"}
+    with pytest.raises(DataValidationError, match="RangeIndex"):
+        PanelData(_y())._merge(PanelData(_y(index=pd.RangeIndex(T))))
+    with pytest.raises(DataValidationError, match="periods of frequency"):
+        quarterly = PanelData(_y(index=pd.period_range("2020Q1", periods=T, freq="Q")))
+        PanelData(_y(index=pd.period_range("2020-01", periods=T, freq="M")))._merge(quarterly)
+
+
+def test_merge_range_index_continues_its_grid():
+    base = PanelData(_y(index=pd.RangeIndex(0, 2 * T, 2)))
+    new = PanelData(pd.DataFrame([[1.0, 2.0, 3.0]], index=pd.RangeIndex(2 * T, 2 * T + 2, 2), columns=SERIES))
+    merged = base._merge(new)
+    assert isinstance(merged.index, pd.RangeIndex) and merged.index.equals(pd.RangeIndex(0, 2 * T + 2, 2))
+    with pytest.raises(DataValidationError, match="off the conditioning grid"):
+        base._merge(PanelData(pd.DataFrame([[1.0, 2.0, 3.0]], index=pd.RangeIndex(17, 18), columns=SERIES)))
+    with pytest.raises(DataValidationError, match="evenly spaced"):
+        base._merge(PanelData(pd.DataFrame([[1.0, 2.0, 3.0]], index=pd.RangeIndex(20, 22, 2), columns=SERIES)))
+
+
+def test_merge_new_series_for_allocators():
+    base = _full()
+    index = pd.date_range("2020-09-30", periods=2, freq="ME", name="date")
+    y = pd.DataFrame(np.ones((2, N + 1)), index=index, columns=["new", *SERIES])
+    chars = pd.DataFrame(
+        2.0, index=index, columns=pd.MultiIndex.from_product([CHARS, ["new", *SERIES]], names=["characteristic", "series"])
+    )
+    exog = pd.DataFrame(3.0, index=index, columns=["oil", "fx"])
+    merged = base._merge(PanelData(y, exog=exog, characteristics=chars, freq=None), new_series=True)
+    assert merged.series_names == (*SERIES, "new")
+    assert np.isnan(merged.y["new"].to_numpy()[:T]).all() and (merged.y["new"].to_numpy()[T:] == 1.0).all()
+    values = merged._characteristic_values()
+    assert values.shape == (T + 2, N + 1, M)
+    assert np.isnan(values[:T, N]).all() and (values[T:] == 2.0).all()
+    np.testing.assert_array_equal(values[:T, :N], _chars_array())
 
 
 # ---------------------------------------------------------------------------
@@ -679,14 +801,14 @@ def test_coerce_panel_is_returned_as_is():
 def test_coerce_dataframe_means_y():
     y = _y()
     data = PanelData._coerce(y)
-    assert data.equals(PanelData(y))
+    assert data._equals(PanelData(y))
     assert data.exog is None
 
 
 def test_coerce_2d_array_means_from_arrays():
     arr = np.arange(12.0).reshape(4, 3)
     data = PanelData._coerce(arr)
-    assert data.equals(PanelData.from_arrays(arr))
+    assert data._equals(PanelData.from_arrays(arr))
     assert isinstance(data.index, pd.RangeIndex)
     with pytest.raises(DataValidationError, match="2-D"):
         PanelData._coerce(np.arange(4.0))
@@ -700,4 +822,5 @@ def test_coerce_other_types_raise_type_error(obj):
 
 def test_repr():
     text = repr(_full())
-    assert text.startswith("PanelData(") and "n_series=3" in text and "mixed_frequency=True" in text
+    assert text.startswith("PanelData(") and "n_series=3" in text and "n_periods=8" in text
+    assert "n_characteristics=2" in text and "'gdp': 'q'" in text

@@ -78,7 +78,7 @@ def test_golden_afm_estimator(case, build, pinned, tmp_path):
 
     model = _build(build, params, tmp_path)
     assert model.get_params() == {**AFM().get_params(), **params}
-    data = PanelData.from_arrays(returns, series_exog=characteristics)
+    data = PanelData.from_arrays(returns, characteristics=characteristics)
 
     _reset_global_rngs()
     assert model.fit(data) is model
@@ -102,7 +102,7 @@ def test_golden_afm_save_load(case, loader, pinned, tmp_path):
     manifest, _ = load_golden(case.name)
     hyper = manifest["hyperparameters"]
     returns, characteristics, _ = afm_inputs(hyper["factor_model"])
-    data = PanelData.from_arrays(returns, series_exog=characteristics)
+    data = PanelData.from_arrays(returns, characteristics=characteristics)
 
     _reset_global_rngs()
     model = AFM(**_estimator_params(hyper)).fit(data)

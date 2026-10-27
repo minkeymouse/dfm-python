@@ -8,8 +8,8 @@ removed. Their tests are ported:
   the same helpers (``_extract_frequency_dict``, ``_normalize_blocks_dict``).
 - ``YamlSource(path).load()`` read a flat file. Its tests now read the
   ``model:``/``data:`` layout with ``load_yaml`` and ``DFMConfig.from_yaml``;
-  the frequencies live in ``data: freq``, which ``PanelData`` normalizes
-  (grouped or per-series form).
+  the frequencies live in ``data: freq``, which ``PanelData`` takes in the
+  per-series form only.
 """
 
 import importlib.util
@@ -24,7 +24,7 @@ import dfm_python.config.adapter as adapter
 from dfm_python import DFM, DFMConfig, PanelData
 from dfm_python.config import EstimatorConfig, load_yaml
 from dfm_python.config.schema.model import _DFMEngineConfig
-from dfm_python.utils.errors import ConfigurationError
+from dfm_python.utils.errors import ConfigurationError, DataValidationError
 
 _YAML = importlib.util.find_spec("omegaconf") is not None or importlib.util.find_spec("yaml") is not None
 
@@ -172,16 +172,16 @@ class TestYamlLayout:
         assert config.blocks == {'block1': {'n_factors': 1, 'series': ['series1']}}
         assert load_yaml(path)["data"] == {"freq": {"series1": "m"}}
 
-    def test_yaml_grouped_frequency(self, tmp_path):
+    def test_yaml_per_series_frequency(self, tmp_path):
         path = _write(tmp_path / "dfm.yaml", (
             "model:\n"
             "  blocks:\n    block1: {n_factors: 2, series: [A001, KOEQUIPTE, KOGCFCNSD]}\n"
             "  clock: w\n  max_iter: 30\n"
             "data:\n"
             "  freq:\n"
-            "    w: [A001, GSCITOT]\n"
-            "    m: [KOEQUIPTE, KOWRCCNSE, KOIPALL.G]\n"
-            "    q: [KOGCFCNSD]\n"
+            "    A001: w\n    GSCITOT: w\n"
+            "    KOEQUIPTE: m\n    KOWRCCNSE: m\n    KOIPALL.G: m\n"
+            "    KOGCFCNSD: q\n"
         ))
         config = DFMConfig.from_yaml(path)
         assert config.clock == 'w' and config.max_iter == 30
@@ -192,14 +192,15 @@ class TestYamlLayout:
             'A001': 'w', 'GSCITOT': 'w', 'KOEQUIPTE': 'm', 'KOWRCCNSE': 'm', 'KOIPALL.G': 'm', 'KOGCFCNSD': 'q',
         }
 
-    def test_yaml_grouped_frequency_empty_groups(self, tmp_path):
+    def test_yaml_grouped_frequency_is_rejected(self, tmp_path):
         path = _write(tmp_path / "dfm.yaml", (
             "model:\n  clock: m\n"
             "data:\n  freq: {w: [], m: [series1, series2], q: []}\n"
         ))
         freq = load_yaml(path)["data"]["freq"]
         y = pd.DataFrame(np.zeros((3, 2)), columns=["series1", "series2"])
-        assert PanelData(y, freq=freq).freq == {'series1': 'm', 'series2': 'm'}
+        with pytest.raises(DataValidationError, match="maps each series to its frequency code"):
+            PanelData(y, freq=freq)
 
     def test_flat_file_is_refused(self, tmp_path):
         # The flat layout YamlSource read is not supported; the error says where the keys go.

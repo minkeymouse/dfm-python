@@ -118,12 +118,12 @@ def test_yaml_round_trip(tmp_path):
 def test_load_yaml_returns_both_sections(tmp_path):
     path = tmp_path / "run.yaml"
     path.write_text(
-        "model:\n  n_factors: 4\n  tol: 1e-5\ndata:\n  time_col: date\n  exog_cols: [oil]\n  freq: {gdp: q}\n"
+        "model:\n  n_factors: 4\n  tol: 1e-5\ndata:\n  time_col: date\n  exog: [oil]\n  freq: {gdp: q}\n"
     )
     sections = load_yaml(path)
     assert sections == {
         "model": {"n_factors": 4, "tol": 1e-5},
-        "data": {"time_col": "date", "exog_cols": ["oil"], "freq": {"gdp": "q"}},
+        "data": {"time_col": "date", "exog": ["oil"], "freq": {"gdp": "q"}},
     }
     assert _Cfg.from_yaml(path) == _Cfg(n_factors=4, tol=1e-5)
 

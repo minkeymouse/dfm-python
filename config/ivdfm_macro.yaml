@@ -53,5 +53,5 @@ model:
 # PanelData.from_wide arguments.
 data:
   time_col: date
-  target_cols: [KOEQUIPTE, KOEMPTOTO, KOHWRWEMP]
-  exog_cols: []
+  y: [KOEQUIPTE, KOEMPTOTO, KOHWRWEMP]
+  exog: []

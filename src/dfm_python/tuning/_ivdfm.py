@@ -334,7 +334,7 @@ def _make_objective(
     search_scope: Optional[str],
 ) -> Callable[[optuna.Trial], float]:
     """An Optuna objective: suggest params, fit a clone of ``estimator``, forecast the holdout, score it."""
-    T_train = train_panel.n_timesteps
+    T_train = train_panel.n_periods
     horizon = test_true.shape[0]
 
     def objective(trial: optuna.Trial) -> float:

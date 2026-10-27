@@ -77,7 +77,7 @@ def main(argv: list[str] | None = None) -> None:
         df = df.iloc[-args.rows:]
     data = PanelData.from_wide(df, **sections["data"])
     print(f"   targets {list(data.series_names)}, {len(data.exog_names)} covariates, "
-          f"{data.n_timesteps} dates {data.index[0].date()} .. {data.index[-1].date()}")
+          f"{data.n_periods} dates {data.index[0].date()} .. {data.index[-1].date()}")
 
     # 3. Fit: pre-training, MCMC denoising and the linear state space on the factors.
     model = DDFM.from_config(config).set_params(**overrides)

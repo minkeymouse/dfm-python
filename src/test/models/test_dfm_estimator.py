@@ -339,8 +339,8 @@ def test_exog_series_exog_and_bad_layouts_are_rejected():
     with pytest.raises(UnsupportedInputError, match="exog"):
         DFM(**TINY).fit(PanelData(y=df[_MONTHLY], exog=df[["gdp"]].fillna(0.0)))
     rng = np.random.default_rng(1)
-    with pytest.raises(UnsupportedInputError, match="series_exog"):
-        DFM(**TINY).fit(PanelData.from_arrays(rng.standard_normal((20, 2)), series_exog=rng.standard_normal((20, 2, 3))))
+    with pytest.raises(UnsupportedInputError, match="characteristics"):
+        DFM(**TINY).fit(PanelData.from_arrays(rng.standard_normal((20, 2)), characteristics=rng.standard_normal((20, 2, 3))))
     with pytest.raises(UnsupportedInputError, match="faster than the clock"):
         DFM(**TINY).fit(PanelData(y=df, freq={"m0": "w"}))
     with pytest.raises(UnsupportedInputError, match="one frequency slower"):
@@ -740,7 +740,7 @@ def test_new_rows_are_validated(split_fit, method):
     with pytest.raises(DataValidationError, match="frequencies"):
         call(PanelData(y=y, freq={"gdp": "q", "m0": "q"}))
     with pytest.raises(DataValidationError, match="DatetimeIndex"):
-        call(PanelData.from_arrays(y.to_numpy(), names=list(y.columns), freq={"gdp": "q"}))
+        call(PanelData.from_arrays(y.to_numpy(), series_names=list(y.columns), freq={"gdp": "q"}))
     with pytest.raises(UnsupportedInputError, match="capability:exog"):
         call(PanelData(y=y, exog=y[["m0"]].rename(columns={"m0": "x"}), freq={"gdp": "q"}))
     assert _state_hash(model) == before
@@ -1112,7 +1112,7 @@ def _sparse_monthly_frame() -> pd.DataFrame:
 def test_ported_mixed_freq_initialization_sparse_monthly():
     """Was test_mixed_freq_initialization_sparse_monthly: monthly series on a weekly clock with ~85% NaN.
 
-    The frequencies come from PanelData.freq (grouped form) and the tent kernel from tent_weights={'m:w': ...};
+    The frequencies come from PanelData.freq and the tent kernel from tent_weights={'m:w': ...};
     the engine's state space is checked as the old test checked the state fit returned, and equals the
     old dataset-and-config engine call bitwise.
     """
@@ -1121,7 +1121,7 @@ def test_ported_mixed_freq_initialization_sparse_monthly():
     monthly = [c for c in columns if c.startswith("monthly_")]
     for col in monthly:
         assert df[col].isna().mean() > 0.7
-    data = PanelData(y=df, freq={"m": monthly})
+    data = PanelData(y=df, freq={name: "m" for name in monthly})
     model = DFM(blocks={"Block_Global": {"n_factors": 2, "series": columns}}, clock="w",
                 tent_weights={"m:w": [1, 2, 1]}, scaler=None)
     model.fit(data)
@@ -1208,19 +1208,19 @@ _SHIPPED = {
         "model": {"blocks": {"Block_Global": {"n_factors": 3, "series": _MACRO_WEEKLY + _MACRO_MONTHLY}},
                   "clock": "w", "tent_weights": {"m:w": [1, 2, 1]}, "max_iter": 10, "tol": 1e-5,
                   "scaler": "standard"},
-        "data": {"time_col": "date", "target_cols": _MACRO_WEEKLY + _MACRO_MONTHLY,
-                 "freq": {"w": _MACRO_WEEKLY, "m": _MACRO_MONTHLY}},
+        "data": {"time_col": "date", "y": _MACRO_WEEKLY + _MACRO_MONTHLY,
+                 "freq": {**{s: "w" for s in _MACRO_WEEKLY}, **{s: "m" for s in _MACRO_MONTHLY}}},
         "csv": "macro.csv",
     },
     "exchange": {
         "model": {"n_factors": 2, "clock": "d", "max_iter": 10, "tol": 1e-4, "scaler": "standard"},
-        "data": {"time_col": "date", "target_cols": _EXCHANGE},
+        "data": {"time_col": "date", "y": _EXCHANGE},
         "csv": "exchange_rate.csv",
     },
     "finance": {
         "model": {"blocks": {name: {"n_factors": 2, "series": series} for name, series in _FINANCE_BLOCKS.items()},
                   "clock": "d", "max_iter": 10, "tol": 1e-5, "scaler": "standard"},
-        "data": {"time_col": "date", "target_cols": _finance_targets()},
+        "data": {"time_col": "date", "y": _finance_targets()},
         "csv": "finance.csv",
     },
 }
@@ -1241,11 +1241,11 @@ def test_shipped_yaml_builds_the_estimator(name):
     assert sections["data"] == _SHIPPED[name]["data"]
     # Every column the data: section names is in the shipped CSV (finance.csv gets its 'date' in the tutorial).
     header = set(pd.read_csv(_REPO / "data" / _SHIPPED[name]["csv"], nrows=0).columns) | {"date"}
-    assert set(sections["data"]["target_cols"]) <= header
+    assert set(sections["data"]["y"]) <= header
     assert set(sections["data"].get("freq", {}).get("m", [])) <= header
     # The blocks name only series the data: section selects.
     for spec in (model.blocks or {}).values():
-        assert set(spec["series"]) <= set(sections["data"]["target_cols"])
+        assert set(spec["series"]) <= set(sections["data"]["y"])
 
 
 @pytest.mark.skipif(not _YAML, reason="YAML needs omegaconf or PyYAML")
@@ -1263,15 +1263,14 @@ def test_shipped_macro_yaml_runs_the_values_of_the_flat_file():
     assert model.ar_clip is None and model.regularization is None
     assert model.scaler == flat["scaler"] == "standard"  # the tutorial's StandardScaler
     freq = load_yaml(path)["data"]["freq"]
-    per_series = {name: code for code, names in freq.items() for name in names}
-    assert per_series == {name: code for code, names in flat["frequency"].items() for name in names}
+    assert freq == {name: code for code, names in flat["frequency"].items() for name in names}
     # The golden weekly/monthly case ran these values (its manifest records the engine config).
     manifest = json.loads((_REPO / "src" / "test" / "parity" / "fixtures" / "dfm_macro_weekly_monthly.json").read_text())
     engine_config = manifest["hyperparameters"]["config"]
     assert engine_config["max_iter"] == model.max_iter and engine_config["threshold"] == model.tol
     assert engine_config["tent_weights"] == model.tent_weights and engine_config["clock"] == model.clock
     assert engine_config["ar_clip"] is None and engine_config["regularization"] is None
-    assert engine_config["frequency"] == per_series
+    assert engine_config["frequency"] == freq
 
 
 @pytest.mark.skipif(not _YAML, reason="YAML needs omegaconf or PyYAML")
@@ -1293,7 +1292,7 @@ def test_tutorial_runs_on_truncated_data(name, tmp_path):
     expected = {**_SHIPPED[name]["model"], "max_iter": 1}
     assert {k: loaded.get_params()[k] for k in expected} == expected
     assert loaded.n_iter_ == 1 and loaded.index_.size == 120
-    assert list(loaded.feature_names_in_) == _SHIPPED[name]["data"]["target_cols"]
+    assert list(loaded.feature_names_in_) == _SHIPPED[name]["data"]["y"]
     assert np.isfinite(loaded.predict(6).to_numpy()).all()
 
 

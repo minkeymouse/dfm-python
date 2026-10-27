@@ -8,17 +8,16 @@ a full example are in [models.md](https://github.com/minkeymouse/dfm-python/blob
 `PanelData` is the one data container. It is frozen and validated, uses only
 numpy and pandas, and never imputes, scales or reorders values.
 
-| Slot          | Shape                                                     | Meaning                                          |
-|---------------|-----------------------------------------------------------|--------------------------------------------------|
-| `y`           | DataFrame, T x N                                          | the target series (macro panel or asset returns) |
-| `exog`        | DataFrame, T x K, or None                                 | per-time inputs that are not forecast            |
-| `series_exog` | DataFrame, T x (M*N), columns `(feature, series)`, or None | per-time, per-series features                   |
-| `freq`        | dict or None                                              | each series' sampling frequency                  |
+| Slot              | Shape                                                                  | Meaning                                          |
+|-------------------|------------------------------------------------------------------------|--------------------------------------------------|
+| `y`               | DataFrame, T x N                                                       | the target series (macro panel or asset returns) |
+| `exog`            | DataFrame, T x K, or None                                              | per-time inputs that are not forecast            |
+| `characteristics` | T x N x M (frame: columns `(characteristic, series)`), or None         | per-time, per-series features                    |
+| `freq`            | dict or None                                                           | each series' sampling frequency                  |
 
 The index is a unique, increasing `DatetimeIndex`, `PeriodIndex` or
-`RangeIndex` (arrays get a `RangeIndex`), shared by every slot. `freq` takes
-the per-series form `{"gdp": "q"}` or the grouped form `{"q": ["gdp"]}` and
-stores the per-series form; unlisted series use the model's clock.
+`RangeIndex` (arrays get a `RangeIndex`), shared by every slot. `freq` maps
+each series to its code, `{"gdp": "q"}`; unlisted series use the model's clock.
 
 ```python
 import numpy as np
@@ -30,18 +29,20 @@ wide = pd.DataFrame({"date": dates, "gdp": np.nan,
                      "ip": np.linspace(0.0, 1.0, 24), "oil": np.ones(24)})
 wide.loc[2::3, "gdp"] = 1.0                       # quarterly: observed every third month
 
-p = PanelData.from_wide(wide, time_col="date", exog_cols=["oil"])   # targets: gdp, ip
-q1 = PanelData.from_wide(wide, time_col="date", target_cols=["gdp", "ip"],
-                         freq={"gdp": "q"})                         # per-series form
-q2 = PanelData(y=wide.set_index("date")[["gdp", "ip"]], freq={"q": ["gdp"]})  # grouped form
+p = PanelData.from_wide(wide, time_col="date", exog=["oil"])        # targets: gdp, ip
+q1 = PanelData.from_wide(wide, time_col="date", y=["gdp", "ip"], freq={"gdp": "q"})
+q2 = PanelData(wide.set_index("date")[["gdp", "ip"]], freq={"gdp": "q"})
 assert q1.freq == q2.freq == {"gdp": "q"}
 
 long = p.to_long()                                # unique_id, ds, y (+ exog columns)
-assert PanelData.from_long(long, exog_cols=["oil"]).equals(p)
+back = PanelData.from_long(long, exog=["oil"])
+assert back.series_names == p.series_names
+assert np.array_equal(back.y.to_numpy(), p.y.to_numpy(), equal_nan=True)
 
-arr = PanelData.from_arrays(np.zeros((24, 2)), series_exog=np.zeros((24, 2, 3)),
-                            index=dates, names=["x", "z"])           # y (T, N), series_exog (T, N, M)
-assert arr.series_exog_array().shape == (24, 2, 3)
+arr = PanelData.from_arrays(np.zeros((24, 2)), characteristics=np.zeros((24, 2, 3)),
+                            index=dates, series_names=["x", "z"])   # y (T, N), characteristics (T, N, M)
+assert arr.characteristics.shape == (24, 6) and arr.n_series == 2 and arr.n_periods == 24
+assert arr.between("2020Q2", "2020Q3").n_periods == 6              # periods cover their whole span
 
 try:
     DFM().fit(p)                                  # DFM takes no exog
@@ -53,20 +54,21 @@ Constructors:
 
 | Constructor | Input |
 |-------------|-------|
-| `PanelData(y, exog=None, series_exog=None, freq=None)` | DataFrames |
-| `from_wide(df, *, time_col, target_cols, exog_cols, freq)` | one wide frame; targets default to every column that is not time or exog |
-| `from_long(df, *, id_col="unique_id", time_col="ds", target_col="y", series_exog_cols=(), exog_cols=(), freq)` | one row per `(series, time)` |
-| `from_arrays(y, *, exog, series_exog, index, names, exog_names, series_exog_names, freq)` | numpy arrays |
+| `PanelData(y, *, exog=None, characteristics=None, freq=None)` | DataFrames |
+| `from_wide(df, *, time_col, y, exog, freq)` | one wide frame; targets default to every column that is not time or exog |
+| `from_long(df, *, id_col="unique_id", time_col="ds", y="y", exog=(), characteristics=(), freq)` | one row per `(series, time)` |
+| `from_arrays(y, *, exog, characteristics, index, series_names, exog_names, characteristic_names, freq)` | numpy arrays |
 
 `fit`, `predict` and `update` also accept a bare DataFrame (`PanelData(y=df)`),
 a polars DataFrame (its Date or Datetime column becomes the index, see
 [polars input and output](#polars-input-and-output)) or a 2-D array.
-`data.loc(start, stop)` slices by time.
+`data.between(start, end)` selects rows by time, both ends included; a str or
+`pd.Period` bound covers its whole period.
 
 Which slots each model accepts; anything else raises `UnsupportedInputError`
 naming the tag (`Model.get_tags()`):
 
-| Model | `y`           | `exog`                   | `series_exog`                       | mixed `freq`              | missing values |
+| Model | `y`           | `exog`                   | `characteristics`                   | mixed `freq`              | missing values |
 |-------|---------------|--------------------------|-------------------------------------|---------------------------|----------------|
 | DFM   | series        | no                       | no                                  | yes, one slower frequency | yes            |
 | DDFM  | targets       | encoder covariates       | no                                  | no                        | interpolated   |
@@ -426,11 +428,8 @@ switches back. Fitted attributes (`factors_`, `loadings_`, `result_`, ...)
 stay pandas. The choice is not a hyperparameter: `get_params`, `clone` and
 `save` leave it out, so a clone or a loaded model returns pandas.
 
-`PanelData.to_polars(layout=...)` converts a panel. `"long"` (the default) is
-`to_long()` as polars (`unique_id`, `ds`, `y`, then the exog columns), which
-`from_long` reads back; `"wide"` is the time column, the `y` columns, then the
-exog columns, which `from_wide(df, time_col=..., exog_cols=...)` reads back.
-`series_exog` has no wide layout (`UnsupportedInputError`).
+`PanelData.from_wide` and `from_long` read polars frames as they read pandas
+ones.
 
 ```python
 import numpy as np
@@ -451,11 +450,8 @@ bands = model.predict_interval(6)                  # polars: date, a__lower, a__
 assert bands.columns[:3] == ["date", "a__lower", "a__upper"]
 assert isinstance(model.factors_, pd.DataFrame)    # fitted attributes stay pandas
 
-panel = PanelData(y=df[["a", "b"]], exog=df[["c"]])
-wide = panel.to_polars(layout="wide")              # date, a, b, c
-long = panel.to_polars(layout="long")              # unique_id, ds, y, c
-assert PanelData.from_wide(wide, time_col="date", exog_cols=["c"]).equals(panel)
-assert PanelData.from_long(long, exog_cols=["c"]).equals(panel)
+panel = PanelData.from_wide(frame, time_col="date", exog=["c"])
+assert panel.series_names == ("a", "b") and panel.exog_names == ("c",)
 ```
 
 ## Saving and loading
@@ -519,7 +515,7 @@ except ConfigurationError:
 
 A YAML file has a `model:` section with the constructor parameters and an
 optional `data:` section with the `PanelData.from_wide` arguments
-(`time_col`, `target_cols`, `exog_cols`, `freq`). Needs the `yaml` extra
+(`time_col`, `y`, `exog`, `freq`). Needs the `yaml` extra
 (PyYAML also works for `load_yaml`).
 
 | Function | Returns |
@@ -551,10 +547,11 @@ model:
   scaler: standard
 data:                            # PanelData.from_wide arguments
   time_col: date
-  target_cols: [KORFBEV, KORWHLS, ..., KOIMPCONA]
-  freq:                          # grouped form; unlisted series use the clock
-    w: [KORFBEV, KORWHLS, ...]
-    m: [KOEMPTOTO, KOHWRWEMP, ...]
+  y: [KORFBEV, KORWHLS, ..., KOIMPCONA]
+  freq:                          # {series: code}; unlisted series use the clock
+    KORFBEV: w
+    KOEMPTOTO: m
+    ...                          # one line per series
 ```
 
 ```python

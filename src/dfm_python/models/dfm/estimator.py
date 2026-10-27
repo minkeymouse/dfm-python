@@ -668,7 +668,7 @@ class DFM(BaseFactorModel):
             The series in ``y`` (any column order) and their sampling
             frequencies in ``freq``; missing values are allowed, and a slower
             series is NaN between its observations. ``exog`` and
-            ``series_exog`` are rejected.
+            ``characteristics`` are rejected.
         callback : callable, optional
             Called as ``callback(info)`` after every E-step (the E-steps of
             the SQUAREM cycles included). ``info`` holds ``"model"``
@@ -689,7 +689,7 @@ class DFM(BaseFactorModel):
             For an invalid hyperparameter, or a slower frequency without tent
             weights.
         UnsupportedInputError
-            For ``exog``, ``series_exog``, a series faster than the clock or
+            For ``exog``, ``characteristics``, a series faster than the clock or
             two slower frequencies.
         DataValidationError
             For a block naming a series that is not in the data, a
@@ -879,7 +879,7 @@ class DFM(BaseFactorModel):
                     f"{name}: data has frequencies {freq}, but the model was fitted with {self.freq_}. Pass the "
                     "same freq, or freq=None to keep the fitted frequencies."
                 )
-        if panel.n_timesteps < 1:
+        if panel.n_periods < 1:
             raise DataValidationError(f"{name}: data has no time steps.")
         extended = self._extend_conditioning_index(panel.index, name)
         X_new = panel.y[list(self.internal_feature_names_)].to_numpy(dtype=np.float64)
@@ -937,7 +937,7 @@ class DFM(BaseFactorModel):
             index type differs, the rows overlap the conditioning data,
             ``data`` is empty or holds infinite values.
         UnsupportedInputError
-            For ``exog`` or ``series_exog``.
+            For ``exog`` or ``characteristics``.
         """
         self._check_is_fitted("update")
         X_new, extended = self._new_rows(data, "update")

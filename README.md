@@ -38,7 +38,7 @@ CUDA torch build, install `torch` from the
 | `yaml`    | omegaconf         | YAML configs (`load_yaml`, `XConfig.from_yaml`), `tutorial/` |
 | `tune`    | optuna            | iVDFM hyperparameter search (`dfm_python.tuning`)           |
 | `metrics` | sktime            | `calculate_rmse`, `calculate_mae`                           |
-| `polars`  | polars, pyarrow   | polars input and output (`set_output`, `to_polars`)         |
+| `polars`  | polars, pyarrow   | polars input and output (`set_output`)                      |
 | `all`     | all of the above  |                                                             |
 | `dev`     | pytest, ruff, build, twine, omegaconf, pyyaml, optuna, statsmodels | tests and packaging |
 
@@ -143,8 +143,8 @@ from dfm_python import AFM, PanelData
 
 rng = np.random.default_rng(0)
 T, N, M = 120, 20, 8
-data = PanelData.from_arrays(y=0.01 * rng.standard_normal((T, N)),
-                             series_exog=rng.standard_normal((T, N, M)),
+data = PanelData.from_arrays(0.01 * rng.standard_normal((T, N)),
+                             characteristics=rng.standard_normal((T, N, M)),
                              index=pd.bdate_range("2020-01-01", periods=T, name="date"))
 model = AFM(n_factors=3, hist_len=20, max_epochs=5, random_state=0).fit(data)
 weights = model.allocate()          # DataFrame (T - hist_len) x N

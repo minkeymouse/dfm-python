@@ -68,7 +68,7 @@ def main(argv: list[str] | None = None) -> None:
     if args.rows is not None:
         df = df.iloc[-args.rows:]
     data = PanelData.from_wide(df, **sections["data"])
-    print(f"   series {list(data.series_names)}, {data.n_timesteps} days "
+    print(f"   series {list(data.series_names)}, {data.n_periods} days "
           f"{data.index[0].date()} .. {data.index[-1].date()}")
 
     # 3. Fit: initialization, then EM with the Kalman filter and smoother.
