@@ -1,4 +1,4 @@
-"""config.json checks, the single-file error and the data_spec index round-trip."""
+"""config.json checks (formats 1 and 2), the single-file error and the index and frequency specs."""
 
 import json
 
@@ -6,7 +6,18 @@ import pandas as pd
 import pytest
 
 from dfm_python.io.codecs import write_json
-from dfm_python.io.layout import FORMAT_VERSION, index_from_spec, index_to_spec, read_config
+from dfm_python.io.layout import (
+    FORMAT_2,
+    FORMAT_VERSION,
+    REQUIRED_FILES_2,
+    index_from_spec,
+    index_to_spec,
+    offset_from_spec,
+    offset_to_spec,
+    read_config,
+    read_config_2,
+    saved_format,
+)
 from dfm_python.utils.errors import ConfigurationError
 
 
@@ -98,3 +109,45 @@ def test_bad_configs(tmp_path, content, message):
     write_json(tmp_path / "config.json", content)
     with pytest.raises(ConfigurationError, match=message):
         read_config(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# Format 2
+# ---------------------------------------------------------------------------
+
+
+def test_integer_index_and_custom_business_day_round_trip():
+    ints = pd.Index([0, 5], name="t")
+    back = index_from_spec(json.loads(json.dumps(index_to_spec(ints))))
+    assert back.equals(ints) and back.name == "t" and back.dtype == ints.dtype
+    cbd = pd.offsets.CustomBusinessDay(holidays=["2024-01-15"])
+    days = pd.date_range("2024-01-08", periods=8, freq=cbd, name="day")
+    spec = json.loads(json.dumps(index_to_spec(days)))
+    assert spec["freq"]["holidays"] == ["2024-01-15"]
+    back = index_from_spec(spec)
+    assert back.equals(days) and back.freq == cbd
+    assert offset_from_spec(offset_to_spec(cbd)) == cbd
+    assert offset_to_spec(None) is None and offset_from_spec(None) is None
+    assert offset_from_spec(offset_to_spec(pd.offsets.MonthEnd())) == pd.offsets.MonthEnd()
+
+
+def test_read_config_2(tmp_path):
+    write_json(tmp_path / "config.json", _config(format_version=FORMAT_2, params={"a": {"spec": "X", "params": {}}}))
+    config = read_config_2(tmp_path)
+    assert config["params"] == {"a": {"spec": "X", "params": {}}}  # as written: decode_params rebuilds specs
+    assert saved_format(tmp_path) == FORMAT_2
+
+
+@pytest.mark.parametrize(
+    "version, message",
+    [(FORMAT_VERSION, r"saved by dfm-python 0.8 \(format 1\); load it with that version"), (3, "format_version 3")],
+)
+def test_read_config_2_refuses_other_formats(tmp_path, version, message):
+    write_json(tmp_path / "config.json", _config(format_version=version))
+    with pytest.raises(ConfigurationError, match=message):
+        read_config_2(tmp_path)
+
+
+def test_format_2_file_names():
+    assert FORMAT_2 == 2
+    assert REQUIRED_FILES_2 == ("config.json", "data.npz", "data.json", "fitted.npz", "fitted.json")

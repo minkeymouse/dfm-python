@@ -5,7 +5,13 @@
   ``{"class": "module.QualName", "params": get_params(deep=False)}`` and
   rebuilt on reading only for the public estimator classes of
   ``sklearn.preprocessing`` (any other class only when the caller explicitly
-  allows importing it).
+  allows importing it). This is the format-1 encoding.
+- :func:`encode_params` / :func:`decode_params`: the ``params`` of a format-2
+  ``config.json``. A component spec (an AFM ``AttentionFactors`` ...) is
+  written as ``{"spec": "AttentionFactors", "params": {...}}`` and rebuilt
+  through an allow-list: only the classes registered with
+  :func:`register_spec`. Any other estimator is refused when saving and any
+  other spec name when loading, so loading imports nothing named in a file.
 - :func:`write_npz` / :func:`read_npz`: a ``.npz`` archive with namespaced
   keys such as ``"ssm/A"``, written and read without pickle (object arrays are
   refused).
@@ -30,6 +36,10 @@ import numpy as np
 from ..utils.errors import ConfigurationError
 
 __all__ = [
+    "register_spec",
+    "encode_params",
+    "decode_params",
+    "read_json_plain",
     "class_path",
     "to_jsonable",
     "from_jsonable",
@@ -218,6 +228,114 @@ def read_json(path: PathLike, *, allow_import: bool = False) -> Any:
     """Read a JSON file written by :func:`write_json` and rebuild estimators (see :func:`from_jsonable`)."""
     with open(path, encoding="utf-8") as fh:
         return from_jsonable(json.load(fh), allow_import=allow_import)
+
+
+def read_json_plain(path: PathLike) -> Any:
+    """Read a JSON file as plain values (no estimator is rebuilt)."""
+    with open(path, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+# Component specs in format-2 params
+
+_SPEC_KEYS = frozenset({"spec", "params"})
+#: The allow-list: spec class name -> class (filled by :func:`register_spec`).
+_SPECS: dict = {}
+
+
+def register_spec(cls: type) -> type:
+    """Allow the component spec ``cls`` in saved params; returns ``cls`` (usable as a class decorator).
+
+    A spec is a :class:`sklearn.base.BaseEstimator` whose ``get_params``
+    hold only JSON-safe values (or other specs). It is written and read back
+    by its class name.
+
+    Raises
+    ------
+    TypeError
+        If ``cls`` is not a ``BaseEstimator`` subclass.
+    ValueError
+        If another class is registered under the same name.
+    """
+    from sklearn.base import BaseEstimator
+
+    if not (isinstance(cls, type) and issubclass(cls, BaseEstimator)):
+        raise TypeError(f"register_spec expects a sklearn BaseEstimator subclass, got {cls!r}.")
+    existing = _SPECS.get(cls.__name__)
+    if existing is not None and existing is not cls:
+        raise ValueError(f"Another spec class is already registered as {cls.__name__!r}: {class_path(existing)}.")
+    _SPECS[cls.__name__] = cls
+    return cls
+
+
+def _encode_value(value: Any, where: str) -> Any:
+    spec = _SPECS.get(type(value).__name__)
+    if spec is not None and type(value) is spec:
+        return {"spec": spec.__name__, "params": encode_params(value.get_params(deep=False), where=f"{where}.params")}
+    if isinstance(value, Mapping):
+        out = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError(f"{where}: JSON needs string keys, got {key!r}.")
+            out[key] = _encode_value(item, f"{where}[{key!r}]")
+        return out
+    if isinstance(value, (list, tuple)):
+        return [_encode_value(item, f"{where}[{i}]") for i, item in enumerate(value)]
+    if _is_estimator(value):
+        raise TypeError(
+            f"{where}: {class_path(type(value))} is not an allowed spec class, so it cannot be saved. Saved runs "
+            "hold only plain values and the registered component specs."
+        )
+    return to_jsonable(value, where=where)
+
+
+def encode_params(params: Mapping[str, Any], *, where: str = "params") -> dict:
+    """``get_params(deep=False)`` as JSON-safe values; a registered spec becomes ``{"spec", "params"}``.
+
+    Raises
+    ------
+    TypeError
+        For a value JSON cannot hold, or an estimator that is not a registered spec.
+    """
+    return {str(key): _encode_value(value, f"{where}[{key!r}]") for key, value in params.items()}
+
+
+def _is_encoded_spec(obj: Any) -> bool:
+    return isinstance(obj, dict) and set(obj) == _SPEC_KEYS and isinstance(obj["spec"], str)
+
+
+def decode_params(obj: Any, cls: Any = None) -> Any:
+    """Inverse of :func:`encode_params`: rebuild the registered specs; lists become tuples where ``cls`` defaults are tuples.
+
+    Parameters
+    ----------
+    obj : dict
+        The ``params`` of a format-2 ``config.json``.
+    cls : type, optional
+        The class the params belong to; a list is turned back into a tuple
+        where its constructor default is a tuple (JSON has no tuples).
+
+    Raises
+    ------
+    ConfigurationError
+        For a spec name that is not registered, or spec params that are not a mapping.
+    """
+    if isinstance(obj, list):
+        return [decode_params(item) for item in obj]
+    if not isinstance(obj, dict):
+        return obj
+    if _is_encoded_spec(obj):
+        spec = _SPECS.get(obj["spec"])
+        if spec is None:
+            allowed = ", ".join(sorted(_SPECS)) or "none"
+            raise ConfigurationError(
+                f"The saved run names the spec {obj['spec']!r}, which is not an allowed spec class (allowed: {allowed})."
+            )
+        if not isinstance(obj["params"], dict):
+            raise ConfigurationError(f"The saved parameters of the spec {obj['spec']!r} are not a mapping.")
+        return spec(**decode_params(obj["params"], spec))
+    decoded = {key: decode_params(value) for key, value in obj.items()}
+    return decoded if cls is None else _tuple_params(cls, decoded)
 
 
 # npz

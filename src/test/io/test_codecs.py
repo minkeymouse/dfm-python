@@ -7,13 +7,18 @@ import zipfile
 import numpy as np
 import pytest
 import torch
+from sklearn.base import BaseEstimator
 from sklearn.linear_model import Ridge
 from sklearn.preprocessing import MinMaxScaler, RobustScaler, StandardScaler
 
+from dfm_python.io import codecs
 from dfm_python.io.codecs import (
+    decode_params,
+    encode_params,
     from_jsonable,
     is_encoded_estimator,
     read_json,
+    read_json_plain,
     read_npz,
     read_weights,
     to_jsonable,
@@ -224,3 +229,70 @@ def test_read_weights_refuses_pickled_objects(tmp_path):
     torch.save({"weight": torch.zeros(1), "obj": DoublingScaler()}, tmp_path / "weights.pt")
     with pytest.raises(Exception, match="(?i)weights_only|unsupported|global"):
         read_weights(tmp_path / "weights.pt")
+
+
+# ---------------------------------------------------------------------------
+# Component specs in format-2 params
+# ---------------------------------------------------------------------------
+
+
+class _Spec(BaseEstimator):
+    def __init__(self, *, width=32, layers=(32,), inner=None):
+        self.width = width
+        self.layers = layers
+        self.inner = inner
+
+
+class _Model:
+    def __init__(self, *, factors=None, sizes=(8, 4), blocks=None):
+        self.factors = factors
+        self.sizes = sizes
+        self.blocks = blocks
+
+
+@pytest.fixture
+def specs(monkeypatch):
+    monkeypatch.setattr(codecs, "_SPECS", dict(codecs._SPECS))
+    return codecs.register_spec(_Spec)
+
+
+def test_specs_round_trip_through_json(specs):
+    params = {"factors": _Spec(width=64, layers=(16, 8), inner=_Spec(layers=())), "sizes": (3, 2),
+              "blocks": {"g": ["a", "b"]}}
+    encoded = json.loads(json.dumps(encode_params(params)))
+    assert encoded["factors"] == {
+        "spec": "_Spec",
+        "params": {"inner": {"spec": "_Spec", "params": {"inner": None, "layers": [], "width": 32}},
+                   "layers": [16, 8], "width": 64},
+    }
+    decoded = decode_params(encoded, _Model)
+    assert isinstance(decoded["factors"], _Spec) and decoded["factors"].layers == (16, 8)
+    assert decoded["factors"].inner.layers == () and decoded["sizes"] == (3, 2)
+    assert decoded["blocks"] == {"g": ["a", "b"]}  # lists stay lists where the default is not a tuple
+
+
+def test_unregistered_estimators_are_refused(specs):
+    with pytest.raises(TypeError, match="not an allowed spec class"):
+        encode_params({"scaler": StandardScaler()})
+    with pytest.raises(ConfigurationError, match=r"names the spec 'Ridge', which is not an allowed spec class"):
+        decode_params({"model": {"spec": "Ridge", "params": {}}})
+    with pytest.raises(ConfigurationError, match="not a mapping"):
+        decode_params({"factors": {"spec": "_Spec", "params": [1]}})
+    with pytest.raises(TypeError, match="string keys"):
+        encode_params({"blocks": {1: ["a"]}})
+
+
+def test_register_spec_checks_its_argument(specs):
+    assert codecs.register_spec(_Spec) is _Spec  # registering the same class again is fine
+    other = type("_Spec", (BaseEstimator,), {})
+    with pytest.raises(ValueError, match="already registered"):
+        codecs.register_spec(other)
+    with pytest.raises(TypeError, match="BaseEstimator"):
+        codecs.register_spec(dict)
+
+
+def test_read_json_plain_keeps_estimator_dicts(tmp_path):
+    path = tmp_path / "x.json"
+    write_json(path, {"s": StandardScaler()})
+    assert read_json_plain(path)["s"] == {"class": "sklearn.preprocessing._data.StandardScaler",
+                                          "params": {"copy": True, "with_mean": True, "with_std": True}}

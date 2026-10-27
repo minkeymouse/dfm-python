@@ -110,6 +110,32 @@ def test_dfm_passes_the_contract_checks_without_torch():
     )
 
 
+def test_the_new_foundation_runs_without_torch():
+    """errors, the namespace, the time grammar, the identification helpers and the new base classes."""
+    _run(
+        """
+        import sys
+
+        import numpy as np
+
+        import dfm_python.errors, dfm_python._identify, dfm_python._namespace, dfm_python._time
+        from dfm_python._testing import check_estimator
+        from test._base_dummies import DummyAllocator, DummyForecaster, DummyTorchForecaster
+
+        assert check_estimator(DummyForecaster)[-1] == "save_load"
+        assert check_estimator(DummyAllocator)[-1] == "save_load"
+        try:
+            DummyTorchForecaster(device="cpu").fit(np.ones((5, 2)))
+        except ImportError as err:
+            assert 'pip install "dfm-python[deep]"' in str(err) and "DummyTorchForecaster.fit" in str(err), str(err)
+        else:
+            raise AssertionError("a torch model fitted without torch")
+        assert "torch" not in sys.modules and "einops" not in sys.modules
+        """,
+        no_deep=True,
+    )
+
+
 def test_torch_models_build_without_torch_and_name_the_extra_when_used():
     _run(
         """
