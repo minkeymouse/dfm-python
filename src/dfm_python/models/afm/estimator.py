@@ -182,7 +182,6 @@ class AFM(BaseFactorModel):
         "non_deterministic": True,  # the class default random_state=None; see _instance_tags
     }
     _config_class = AFMConfig
-    _param_choices = {"factor_model": _FACTOR_MODELS, "trading": _TRADING}
 
     def __init__(
         self,
@@ -244,9 +243,6 @@ class AFM(BaseFactorModel):
              "max_time": 600.0},
             {**tiny, "factor_model": "pca", "trading": "ou", "pca_window": 20, "reestim": 5},
         ]
-
-    def _describe_fitted(self) -> dict:
-        return {"sharpe": self.result_.sharpe}
 
     def _validate_params(self) -> None:
         """Raise ``ConfigurationError`` naming the first invalid hyperparameter."""
@@ -375,14 +371,14 @@ class AFM(BaseFactorModel):
             missing and infinite values are rejected.
         callback : callable, optional
             Called as ``callback(info)`` after every epoch. ``info`` is a
-            JSON-serializable dict with ``"model"`` (``"AFM"``),
-            ``"iteration"`` (the epoch, 1-based), ``"max_iter"``
-            (``max_epochs``), ``"elapsed"`` (seconds since training started),
-            ``"objective"`` (the epoch's loss, ``-(Sharpe + lambda_var *
-            EV)``) and ``"objective_name"`` (``"loss"``). A true return value
-            stops training as ``max_epochs`` would there (``stop_reason_ ==
-            "callback"``, no warning); an exception it raises propagates and
-            leaves the model unfitted.
+            dict with ``"model"`` (``"AFM"``), ``"iteration"`` (the epoch,
+            1-based), ``"max_iter"`` (``max_epochs``), ``"elapsed"`` (seconds
+            since training started), ``"objective"`` (the epoch's loss,
+            ``-(Sharpe + lambda_var * EV)``) and ``"objective_name"``
+            (``"loss"``). A true return value stops training as
+            ``max_epochs`` would there (``stop_reason_ == "callback"``, no
+            warning); an exception it raises propagates and leaves the model
+            unfitted.
 
         Raises
         ------

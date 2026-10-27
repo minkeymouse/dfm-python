@@ -349,14 +349,6 @@ class iVDFM(BaseFactorModel):
         "non_deterministic": False,
     }
     _config_class = iVDFMConfig
-    _param_choices = {
-        "decoder_type": _DECODER_TYPES,
-        "activation": _ACTIVATIONS,
-        "innovation_distribution": _INNOVATION_DISTRIBUTIONS,
-        "optimizer": VALID_OPTIMIZERS,
-        "scheduler_type": _SCHEDULERS,
-        "scaler": (*_SCALERS, None),
-    }
     _interpolates_non_finite = True  # the dataset fills infinite values like missing ones
 
     def __init__(
@@ -705,14 +697,14 @@ class iVDFM(BaseFactorModel):
             Mixed frequency and ``series_exog`` are rejected.
         callback : callable, optional
             Called as ``callback(info)`` after every epoch. ``info`` is a
-            JSON-serializable dict with ``"model"`` (``"iVDFM"``),
-            ``"iteration"`` (the epoch, 1-based), ``"max_iter"``
-            (``max_epochs``), ``"elapsed"`` (seconds since training started),
-            ``"objective"`` (the epoch's mean ELBO loss, the negative ELBO:
-            lower is better) and ``"objective_name"`` (``"elbo"``). A true
-            return value stops training as ``max_epochs`` would there
-            (``stop_reason_ == "callback"``, no warning); an exception it
-            raises propagates and leaves the model unfitted.
+            dict with ``"model"`` (``"iVDFM"``), ``"iteration"`` (the epoch,
+            1-based), ``"max_iter"`` (``max_epochs``), ``"elapsed"`` (seconds
+            since training started), ``"objective"`` (the epoch's mean ELBO
+            loss, the negative ELBO: lower is better) and ``"objective_name"``
+            (``"elbo"``). A true return value stops training as
+            ``max_epochs`` would there (``stop_reason_ == "callback"``, no
+            warning); an exception it raises propagates and leaves the model
+            unfitted.
 
         Raises
         ------

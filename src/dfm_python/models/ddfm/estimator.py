@@ -311,13 +311,6 @@ class DDFM(BaseFactorModel):
         "non_deterministic": False,
     }
     _config_class = DDFMConfig
-    _param_choices = {
-        "decoder_type": _DECODER_TYPES,
-        "activation": _ACTIVATIONS,
-        "optimizer": VALID_OPTIMIZERS,
-        "interpolation_limit_direction": _LIMIT_DIRECTIONS,
-        "scaler": (*_SCALERS, None),
-    }
 
     def __init__(
         self,
@@ -540,15 +533,14 @@ class DDFM(BaseFactorModel):
             ``series_exog`` are rejected.
         callback : callable, optional
             Called as ``callback(info)`` after every MCMC iteration. ``info``
-            is a JSON-serializable dict with ``"model"`` (``"DDFM"``),
-            ``"iteration"`` (1-based), ``"max_iter"``, ``"elapsed"`` (seconds
-            since training started), ``"objective"`` (the loss of the ``tol``
-            check: the mean squared error of the iteration's predictions
-            against the interpolated targets, in model space) and
-            ``"objective_name"`` (``"loss"``). A true return value
-            stops training as ``max_iter`` would there (``stop_reason_ ==
-            "callback"``, no warning); an exception it raises propagates and
-            leaves the model unfitted.
+            is a dict with ``"model"`` (``"DDFM"``), ``"iteration"``
+            (1-based), ``"max_iter"``, ``"elapsed"`` (seconds since training
+            started), ``"objective"`` (the loss of the ``tol`` check: the
+            mean squared error of the iteration's predictions against the
+            interpolated targets, in model space) and ``"objective_name"``
+            (``"loss"``). A true return value stops training as ``max_iter``
+            would there (``stop_reason_ == "callback"``, no warning); an
+            exception it raises propagates and leaves the model unfitted.
 
         Raises
         ------

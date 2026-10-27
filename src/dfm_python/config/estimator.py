@@ -15,9 +15,7 @@ the constructor's fields and defaults, in the role of Hugging Face's
     MyConfig.from_yaml("run.yaml") == cfg
 
 Unknown keys raise :class:`~dfm_python.utils.errors.ConfigurationError`, which
-names the closest field. There is no alias table. ``json_schema()`` returns
-the JSON Schema of the hyperparameters, built from the estimator's signature,
-validation choices and docstring when it is called.
+names the closest field. There is no alias table.
 
 A YAML file has a ``model:`` section (constructor parameters) and an optional
 ``data:`` section (the arguments of :meth:`dfm_python.PanelData.from_wide`).
@@ -29,16 +27,14 @@ from __future__ import annotations
 
 import dataclasses
 import difflib
-import importlib
-import inspect
 import os
 import re
 import sys
 import types
 import typing
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, ClassVar, Union
+from typing import Any, Union
 
 import numpy as np
 
@@ -108,71 +104,6 @@ def _to_plain(value: Any, key: str) -> Any:
     )
 
 
-_JSON_SCHEMA_DIALECT = "https://json-schema.org/draft/2020-12/schema"
-_JSON_TYPES = {bool: "boolean", int: "integer", float: "number", str: "string", type(None): "null"}
-
-
-def _annotation_schema(hint: Any) -> dict:
-    """JSON Schema of a type annotation: ``type``, ``items`` (sequences) and ``additionalProperties`` (mappings).
-
-    ``Optional`` adds ``"null"`` to ``type``; ``Any``, alone or in a union,
-    gives ``{}`` (any value).
-    """
-    if hint in _JSON_TYPES:
-        return {"type": _JSON_TYPES[hint]}
-    origin, args = typing.get_origin(hint) or hint, typing.get_args(hint)
-    if origin is Union or origin is types.UnionType:
-        parts = [_annotation_schema(arg) for arg in args]
-        if not all(parts):
-            return {}
-        out: dict = {"type": [part["type"] for part in parts]}
-        for part in parts:
-            out.update((key, value) for key, value in part.items() if key != "type")
-        return out
-    if origin in (list, tuple, Sequence):
-        out = {"type": "array"}
-        if args and (origin is not tuple or args[-1] is Ellipsis):  # List[X] or Tuple[X, ...]
-            items = _annotation_schema(args[0])
-            if items:
-                out["items"] = items
-        return out
-    if origin in (dict, Mapping):
-        out = {"type": "object"}
-        values = _annotation_schema(args[1]) if args else {}
-        if values:
-            out["additionalProperties"] = values
-        return out
-    return {}
-
-
-def _first_sentence(text: str) -> str:
-    """``text`` up to its first period followed by whitespace or the end (all of it without one)."""
-    match = re.match(r"(.*?\.)(?:\s|$)", text)
-    return match.group(1) if match else text
-
-
-def _docstring_sections(doc: str) -> dict:
-    """The numpy-style sections of a cleaned docstring by title, and the text before the first one under ``""``."""
-    parts = re.split(r"^(\w[\w ]*)\n-{3,}\n", doc, flags=re.M)
-    return {"": parts[0], **dict(zip(parts[1::2], parts[2::2]))}
-
-
-def _parameter_docs(doc: str) -> dict:
-    """The first sentence of each entry of the ``Parameters`` section of a cleaned docstring, by name.
-
-    An entry ``a, b : type`` gives its sentence to every name it lists; an
-    entry without a description is left out.
-    """
-    out = {}
-    for entry in re.split(r"^(?=\S)", _docstring_sections(doc).get("Parameters", ""), flags=re.M):
-        head, _, description = entry.partition("\n")
-        text = " ".join(description.split())
-        if text:
-            for name in head.partition(" : ")[0].split(","):
-                out[name.strip()] = _first_sentence(text)
-    return out
-
-
 def _is_tuple_hint(hint: Any) -> bool:
     if hint is tuple:
         return True
@@ -189,12 +120,9 @@ class EstimatorConfig:
     """Base class of the ``*Config`` dataclasses that mirror an estimator's constructor.
 
     Subclasses are dataclasses whose fields are exactly the constructor's
-    keyword arguments, with the same defaults, and name the estimator in
-    ``_estimator`` (``"module.Class"``). ``to_dict`` returns the values as they
-    are; ``to_yaml`` and JSON writers need plain values.
+    keyword arguments, with the same defaults. ``to_dict`` returns the values
+    as they are; ``to_yaml`` and JSON writers need plain values.
     """
-
-    _estimator: ClassVar[str] = ""
 
     # -- dict --------------------------------------------------------------
 
@@ -273,55 +201,6 @@ class EstimatorConfig:
     def from_yaml(cls, path: PathLike) -> EstimatorConfig:
         """Build a config from the ``model:`` section of a YAML file (see :func:`load_yaml`)."""
         return cls.from_dict(load_yaml(path)["model"])
-
-    # -- JSON Schema -------------------------------------------------------
-
-    @classmethod
-    def json_schema(cls) -> dict:
-        """JSON Schema (draft 2020-12) of the estimator's hyperparameters, built from the estimator when called.
-
-        One property per constructor parameter of the estimator, in signature
-        order:
-
-        - ``type``: from the config field's annotation; ``Optional`` adds
-          ``"null"``, tuples and lists are arrays (with ``items``), dicts are
-          objects (with ``additionalProperties``) and ``Any`` gives no ``type``;
-        - ``default``: the constructor default as plain JSON (tuples become lists);
-        - ``enum``: for the parameters in the estimator's ``_param_choices``,
-          the fixed set of values its validation accepts;
-        - ``description``: the first sentence of the parameter's entry in the
-          estimator's docstring.
-
-        ``additionalProperties`` is false, so an unknown key is invalid; the
-        top-level ``title`` and ``description`` are the estimator's name and
-        the first sentence of its docstring. ``to_plain_dict()`` is the
-        instance to validate (tuples as lists).
-        """
-        module, _, name = cls._estimator.rpartition(".")
-        if not module:
-            raise NotImplementedError(f"{cls.__name__} names no estimator in _estimator, so it has no JSON Schema.")
-        estimator = getattr(importlib.import_module(module), name)
-        hints = typing.get_type_hints(cls)
-        doc = inspect.getdoc(estimator) or ""
-        docs = _parameter_docs(doc)
-        properties = {}
-        for param in list(inspect.signature(estimator.__init__).parameters.values())[1:]:
-            prop = _annotation_schema(hints[param.name])
-            prop["default"] = _to_plain(param.default, param.name)
-            choices = estimator._param_choices.get(param.name)
-            if choices is not None:
-                prop["enum"] = sorted(choices) if isinstance(choices, (set, frozenset)) else list(choices)
-            if param.name in docs:
-                prop["description"] = docs[param.name]
-            properties[param.name] = prop
-        return {
-            "$schema": _JSON_SCHEMA_DIALECT,
-            "title": estimator.__name__,
-            "description": _first_sentence(" ".join(_docstring_sections(doc)[""].split())),
-            "type": "object",
-            "properties": properties,
-            "additionalProperties": False,
-        }
 
 
 # ---------------------------------------------------------------------------

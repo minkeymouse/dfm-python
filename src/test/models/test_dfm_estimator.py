@@ -23,11 +23,13 @@ import dfm_python.models
 import dfm_python.models.dfm
 from dfm_python import PanelData
 from dfm_python.config import DFMConfig, load_yaml
+from dfm_python.config.constants import VALID_FREQUENCIES
 from dfm_python.config.schema.model import _DFMEngineConfig
 from dfm_python.config.schema.results import DFMResult
 from dfm_python.dataset.dfm_dataset import DFMDataset
+from dfm_python.functional.em import EM_ACCELERATIONS
 from dfm_python.models.dfm._engine import DFMEngine
-from dfm_python.models.dfm.estimator import _TIME_COLUMN, DFM
+from dfm_python.models.dfm.estimator import _SCALERS, _TIME_COLUMN, DFM
 from dfm_python.models.dfm.tent import generate_tent_weights
 from dfm_python.registry import all_estimators
 from dfm_python.testing import _state_hash, make_panel
@@ -277,6 +279,16 @@ def test_invalid_parameters_raise_configuration_error_naming_them(params, name, 
     with pytest.raises(ConfigurationError, match=name):
         est.fit(_mixed())
     assert not hasattr(est, "result_")
+
+
+@pytest.mark.parametrize(
+    "name, choices",
+    [("clock", VALID_FREQUENCIES), ("em_acceleration", EM_ACCELERATIONS), ("scaler", (*_SCALERS, None))],
+    ids=["clock", "em_acceleration", "scaler"],
+)
+def test_every_value_of_a_choice_constant_passes_validation(name, choices):
+    for value in choices:
+        DFM(**{name: value})._validate_params()
 
 
 def test_n_factors_and_blocks_are_exclusive():

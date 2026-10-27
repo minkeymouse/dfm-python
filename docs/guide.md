@@ -87,8 +87,7 @@ naming the tag (`Model.get_tags()`):
   its `predict` raises `TypeError`.
 - Fitted state lives in attributes ending in `_`: `result_`, `n_iter_`,
   `converged_`, `stop_reason_`, `scaler_`, `factors_`, ... Before `fit` they
-  raise `NotFittedError`. `describe()` summarizes the model as a
-  JSON-serializable dict (see [describe and JSON Schema](#describe-and-json-schema)).
+  raise `NotFittedError`.
 - Where the tags below allow it, `decompose(by=)` and the interpretation
   attributes (`factors_`, `loadings_`, `explained_variance_`) describe the
   training data and `predict_interval(h, coverage)` gives prediction
@@ -198,7 +197,7 @@ end training:
   return value stops training there, without a warning. An exception raised
   by `f` propagates and leaves the model unfitted.
 
-`stop_reason_` (also in `describe()` and saved runs) says which ended it.
+`stop_reason_` (also in saved runs) says which ended it.
 When the model's own stop and a callback or time stop fall on the same
 iteration, the model's own is reported.
 
@@ -220,9 +219,6 @@ The `info` dict:
 | `elapsed` | seconds since training started |
 | `objective`, `objective_name` | DFM: `"loglik"`, the log-likelihood of that E-step's parameters (NaN at a SQUAREM extrapolation whose E-step or M-step failed). DDFM: `"loss"`, the mean squared error that `tol` watches. iVDFM: `"elbo"`, the epoch's mean negative ELBO. AFM: `"loss"`, the epoch's `-(Sharpe + lambda_var * EV)` |
 | `state` | DFM only: the engine's `DFMModelState` of the parameters EM would end on there (series in the internal order `[clock \| slower]`) |
-
-Apart from DFM's `state`, `info` is JSON-serializable, so a callback can log
-it as is.
 
 ```python
 import warnings
@@ -405,42 +401,6 @@ result.origins                       # 2022-12-31, 2023-03-31, ..., 2024-09-30
 result.forecasts.head(3)             # origin, time, horizon, series, forecast, actual, lower, upper
 result.metrics()                     # RMSE, MAE, bias, n, coverage per horizon
 result.metrics(by=("horizon", "series"))
-```
-
-## describe and JSON Schema
-
-`model.describe()` returns a small JSON-serializable summary of a model,
-fitted or not: `model` (class name), `version`, `params` (`get_params()`,
-with tuples as lists and a transformer as its class name), `tags` and
-`fitted`. A fitted model adds `n_features_in`, `feature_names`, `index`
-(`start`, `end`, `length`, `freq`), `n_iter`, `converged`, `stop_reason`,
-`factor_names` and `explained_variance` where it has them, DFM its `loglik`
-and AFM its `sharpe`. Non-finite floats become None.
-
-`XConfig.json_schema()` returns a JSON Schema (draft 2020-12) of the
-model's hyperparameters, built from the constructor: one property per
-parameter with its `type`, `default`, the accepted values as `enum` where
-the choices are fixed, and the first sentence of its docstring entry as
-`description`. Unknown keys are invalid (`additionalProperties: false`).
-The schema covers the values JSON can hold: a `scaler` given as a
-transformer object is valid for the constructor but not for the schema.
-`cfg.to_plain_dict()` is the instance to validate.
-
-```python
-import json
-
-import numpy as np
-import pandas as pd
-from dfm_python import DFM, DFMConfig, PanelData
-
-schema = DFMConfig.json_schema()
-schema["properties"]["tol"]          # {"type": "number", "default": 1e-06, "description": "EM convergence ..."}
-schema["properties"]["clock"]["enum"]                 # ["a", "d", "m", "q", "sa", "w"]
-
-df = pd.DataFrame(np.random.default_rng(7).standard_normal((60, 3)), columns=["a", "b", "c"])
-summary = DFM(n_factors=1, max_iter=20).fit(PanelData(y=df)).describe()
-json.dumps(summary)                  # no default= needed
-summary["stop_reason"], summary["index"]              # e.g. "max_iter", {"start": 0, "end": 59, ...}
 ```
 
 ## polars input and output

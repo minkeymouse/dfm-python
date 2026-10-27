@@ -321,7 +321,6 @@ class DFM(BaseFactorModel):
         "non_deterministic": False,
     }
     _config_class = DFMConfig
-    _param_choices = {"clock": VALID_FREQUENCIES, "em_acceleration": EM_ACCELERATIONS, "scaler": (*_SCALERS, None)}
 
     def __init__(
         self,
@@ -375,9 +374,6 @@ class DFM(BaseFactorModel):
             {**base, "em_acceleration": None},
             {**base, "blocks": blocks, "em_acceleration": "squarem", "max_time": 600.0},
         ]
-
-    def _describe_fitted(self) -> dict:
-        return {"loglik": self.loglik_}
 
     def _fail(self, message: str) -> None:
         raise ConfigurationError(f"{type(self).__name__}: {message}")
@@ -683,8 +679,7 @@ class DFM(BaseFactorModel):
             failed), ``"objective_name"`` (``"loglik"``) and ``"state"``
             (the engine's ``DFMModelState`` of the parameters EM would end on
             there; its series-indexed matrices are in the internal order
-            ``[clock | slower]``). Without ``"state"`` the dict is
-            JSON-serializable. A true return value stops EM as ``max_iter``
+            ``[clock | slower]``). A true return value stops EM as ``max_iter``
             would there (``stop_reason_ == "callback"``, no warning); an
             exception it raises propagates and leaves the model unfitted.
 

@@ -22,9 +22,18 @@ import dfm_python.models
 import dfm_python.models.ivdfm
 from dfm_python import PanelData
 from dfm_python.config import iVDFMConfig
+from dfm_python.config.constants import VALID_OPTIMIZERS
 from dfm_python.config.schema.results import iVDFMResult
 from dfm_python.models.ivdfm._engine import iVDFMEngine
-from dfm_python.models.ivdfm.estimator import _TIME_COLUMN, iVDFM
+from dfm_python.models.ivdfm.estimator import (
+    _ACTIVATIONS,
+    _DECODER_TYPES,
+    _INNOVATION_DISTRIBUTIONS,
+    _SCALERS,
+    _SCHEDULERS,
+    _TIME_COLUMN,
+    iVDFM,
+)
 from dfm_python.registry import all_estimators
 from dfm_python.utils.errors import ConfigurationError, DataValidationError, NotFittedError, UnsupportedInputError
 
@@ -128,6 +137,20 @@ def test_invalid_parameters_raise_configuration_error(params):
     with pytest.raises(ConfigurationError):
         est.fit(_panel())
     assert not hasattr(est, "result_")
+
+
+@pytest.mark.parametrize(
+    "name, choices",
+    [
+        ("decoder_type", _DECODER_TYPES), ("activation", _ACTIVATIONS),
+        ("innovation_distribution", _INNOVATION_DISTRIBUTIONS), ("optimizer", VALID_OPTIMIZERS),
+        ("scheduler_type", _SCHEDULERS), ("scaler", (*_SCALERS, None)),
+    ],
+    ids=["decoder_type", "activation", "innovation_distribution", "optimizer", "scheduler_type", "scaler"],
+)
+def test_every_value_of_a_choice_constant_passes_validation(name, choices):
+    for value in choices:
+        iVDFM(**{name: value})._validate_params()
 
 
 @pytest.mark.parametrize(

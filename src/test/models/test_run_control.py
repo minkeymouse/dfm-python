@@ -94,7 +94,6 @@ def test_info_dict_after_every_iteration(case):
         assert type(info["iteration"]) is int and type(info["max_iter"]) is int
         assert type(info["elapsed"]) is float and type(info["objective"]) is float
         assert np.isfinite(info["objective"])
-        assert json.loads(json.dumps(info)) == info
     elapsed = [info["elapsed"] for info in infos]
     assert elapsed[0] >= 0 and elapsed == sorted(elapsed)
     # The objective is the training loss the engine reports for its last iteration.

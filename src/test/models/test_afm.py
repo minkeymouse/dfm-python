@@ -29,6 +29,7 @@ from dfm_python import PanelData
 from dfm_python.models.afm import (AFM, AttentionFactors, PCAFactors,
                                    LongConv1d, residuals, ridge_loadings)
 from dfm_python.models.afm._engine import AFMEngine
+from dfm_python.models.afm.estimator import _FACTOR_MODELS, _TRADING
 from dfm_python.dataset.afm_dataset import AFMDataset
 from dfm_python.config.schema.model import AFMConfig
 from dfm_python.config.schema.results import AFMResult
@@ -347,6 +348,12 @@ class TestAFM:
         with pytest.raises(ConfigurationError, match=name):
             model.fit(_panel())
         assert not hasattr(model, "result_")
+
+    @pytest.mark.parametrize("name, choices", [("factor_model", _FACTOR_MODELS), ("trading", _TRADING)],
+                             ids=["factor_model", "trading"])
+    def test_every_value_of_a_choice_constant_passes_validation(self, name, choices):
+        for value in choices:
+            _model(**{name: value})._validate_params()
 
     def test_failed_refit_clears_the_old_fit(self):
         model = _model().fit(_panel())

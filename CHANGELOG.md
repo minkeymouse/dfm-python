@@ -100,12 +100,6 @@ uncertainty.
   with the long frame of forecasts and actuals (and interval bounds), the
   seconds spent per origin, and `metrics(by=)`: RMSE, MAE, bias, n and
   coverage by horizon, series, both or overall.
-- `describe()` on every model: a JSON-serializable summary (model, version,
-  params, tags, and when fitted the data, training index, `n_iter`,
-  `converged`, `stop_reason`, factor names, explained variance, DFM's
-  `loglik`, AFM's `sharpe`). `DFMConfig.json_schema()` (and the other
-  config classes): a JSON Schema (draft 2020-12) of the hyperparameters with
-  types, defaults, the accepted choices and a description each.
 - torch is optional. The core dependencies are numpy, pandas, scipy,
   scikit-learn and threadpoolctl; DDFM, iVDFM and AFM need the `deep` extra
   (`pip install "dfm-python[deep]"`, torch and einops). Without it, DFM

@@ -433,7 +433,7 @@ The next minor release ships the new API for all four models. The work lands mod
 
 ## 13. Implementation plan
 
-Each item fits one agent session, ends with the suite and `ruff check` green, and touches at most one model. Golden capture comes before any production change. Shared infrastructure comes next, beside the old code, and AFM is the first model, because it is the smallest and has the simplest state. Until their own item, DFM, DDFM and iVDFM keep their current public classes and tests unchanged.
+Each item is one reviewable change, ends with the suite and `ruff check` green, and touches at most one model. Golden capture comes before any production change. Shared infrastructure comes next, beside the old code, and AFM is the first model, because it is the smallest and has the simplest state. Until their own item, DFM, DDFM and iVDFM keep their current public classes and tests unchanged.
 
 ### This phase: foundation and AFM
 

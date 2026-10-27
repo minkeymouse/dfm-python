@@ -88,7 +88,7 @@ model.set_output(output="polars")   # predict, predict_interval, decompose, ... 
 model.predict(6).columns            # ['date', 'ip', 'sales', 'jobs', 'gdp']
 ```
 
-A walk-forward backtest, a time budget, and a JSON summary of the fit:
+A walk-forward backtest and a time budget:
 
 ```python
 from dfm_python.evaluation import backtest
@@ -97,7 +97,6 @@ spec = DFM(n_factors=1, tent_weights={"q:m": [1, 2, 3, 2, 1]}, max_time=60)  # s
 result = backtest(spec, data, start=95, h=3, step=3, coverage=0.9)  # fit to row 95, then update every 3 rows
 result.forecasts                    # origin, time, horizon, series, forecast, actual, lower, upper
 result.metrics(by="horizon")        # RMSE, MAE, bias, n, coverage for h = 1, 2, 3
-model.describe()                    # JSON-serializable: params, tags, n_iter, stop_reason, loglik, ...
 ```
 
 ## Other models
@@ -156,7 +155,7 @@ model.result_.sharpe, model.book_returns_
 
 | Page | Contents |
 |------|----------|
-| [User guide](https://github.com/minkeymouse/dfm-python/blob/main/docs/guide.md) | `PanelData`, the estimator contract, `update` and `predict(data=)`, run control, interpretation, prediction intervals, backtesting, `describe` and JSON Schema, polars, saving and loading, YAML configs, reproducibility, logging, errors, upgrading from 0.8 |
+| [User guide](https://github.com/minkeymouse/dfm-python/blob/main/docs/guide.md) | `PanelData`, the estimator contract, `update` and `predict(data=)`, run control, interpretation, prediction intervals, backtesting, polars, saving and loading, YAML configs, reproducibility, logging, errors, upgrading from 0.8 |
 | [Models](https://github.com/minkeymouse/dfm-python/blob/main/docs/models.md) | DFM, DDFM, iVDFM and AFM: full examples, hyperparameters, notes, method references |
 | [Migrating from 0.7](https://github.com/minkeymouse/dfm-python/blob/main/docs/migration-0.7.md) | the 0.7 to 0.8 API table |
 | [Development](https://github.com/minkeymouse/dfm-python/blob/main/docs/development.md) | setup, tests, lint, repository layout, golden tests, releases |

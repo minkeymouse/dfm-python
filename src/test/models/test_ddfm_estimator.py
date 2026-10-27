@@ -23,12 +23,21 @@ import dfm_python.models
 import dfm_python.models.ddfm
 from dfm_python import PanelData
 from dfm_python.config import DDFMConfig, load_yaml
+from dfm_python.config.constants import VALID_OPTIMIZERS
 from dfm_python.config.schema.model import _DFMEngineConfig
 from dfm_python.config.schema.params import DDFMModelState
 from dfm_python.config.schema.results import DDFMResult
 from dfm_python.dataset.ddfm_dataset import DDFMDataset
 from dfm_python.models.ddfm._engine import DDFMEngine
-from dfm_python.models.ddfm.estimator import _TIME_COLUMN, _TRAINING_BUFFERS, DDFM
+from dfm_python.models.ddfm.estimator import (
+    _ACTIVATIONS,
+    _DECODER_TYPES,
+    _LIMIT_DIRECTIONS,
+    _SCALERS,
+    _TIME_COLUMN,
+    _TRAINING_BUFFERS,
+    DDFM,
+)
 from dfm_python.registry import all_estimators
 from dfm_python.testing import _state_hash
 from dfm_python.utils.errors import (
@@ -153,6 +162,19 @@ def test_invalid_parameters_raise_configuration_error_naming_them(params, name, 
     with pytest.raises(ConfigurationError, match=name):
         est.fit(_panel())
     assert not hasattr(est, "result_")
+
+
+@pytest.mark.parametrize(
+    "name, choices",
+    [
+        ("decoder_type", _DECODER_TYPES), ("activation", _ACTIVATIONS), ("optimizer", VALID_OPTIMIZERS),
+        ("interpolation_limit_direction", _LIMIT_DIRECTIONS), ("scaler", (*_SCALERS, None)),
+    ],
+    ids=["decoder_type", "activation", "optimizer", "interpolation_limit_direction", "scaler"],
+)
+def test_every_value_of_a_choice_constant_passes_validation(name, choices):
+    for value in choices:
+        DDFM(**{name: value})._validate_params()
 
 
 def test_valid_edge_parameters_are_accepted(monkeypatch):

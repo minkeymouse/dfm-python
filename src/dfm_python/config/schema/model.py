@@ -444,7 +444,6 @@ class AFMConfig(EstimatorConfig):
     (including the old names ``num_factors`` and ``seed``) raise
     ``ConfigurationError`` in ``from_dict`` and ``from_yaml``.
     """
-    _estimator = "dfm_python.models.afm.estimator.AFM"
 
     n_factors: Optional[int] = None
     factor_model: str = DEFAULT_AFM_FACTOR_MODEL  # 'attention' (learned) | 'pca'
@@ -482,7 +481,6 @@ class iVDFMConfig(EstimatorConfig):
     ``from_yaml``. A list given for a hidden width in YAML or JSON becomes a
     tuple.
     """
-    _estimator = "dfm_python.models.ivdfm.estimator.iVDFM"
 
     n_factors: int = 3
     window: Optional[int] = None
@@ -540,7 +538,6 @@ class DDFMConfig(EstimatorConfig):
     ``ConfigurationError`` in ``from_dict`` and ``from_yaml``. A list given
     for ``encoder_layers`` in YAML or JSON becomes a tuple.
     """
-    _estimator = "dfm_python.models.ddfm.estimator.DDFM"
 
     n_factors: int = 4
     encoder_layers: Tuple[int, ...] = (16,)
@@ -576,7 +573,6 @@ class DFMConfig(EstimatorConfig):
     ``{"n_factors": int, "series": [names]}``; the order of ``blocks`` is the
     order of the factors.
     """
-    _estimator = "dfm_python.models.dfm.estimator.DFM"
 
     n_factors: Optional[int] = None
     blocks: Optional[Dict[str, Dict[str, Any]]] = None
