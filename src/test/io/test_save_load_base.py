@@ -1,4 +1,4 @@
-"""``BaseFactorModel.save`` / ``load`` and ``dfm_python.load`` on the contract dummies."""
+"""``BaseFactorModel.save`` / ``load`` (format 1) and ``dfm_python.load`` on the contract dummies."""
 
 import json
 import warnings

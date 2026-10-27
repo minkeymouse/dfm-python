@@ -1,49 +1,12 @@
-"""Tests for numeric.builder module."""
+"""Tests for the DDFM functions of numeric.builder."""
 
-import pytest
 import numpy as np
+import pytest
 import torch
-from dfm_python.numeric.builder import (
-    build_dfm_structure, build_dfm_blocks,
-    build_ddfm_optimizer, build_ddfm_state_space
-)
-from dfm_python.config.schema.model import _DFMEngineConfig
+
 from dfm_python.models.ddfm.encoder import SimpleAutoencoder
+from dfm_python.numeric.builder import build_ddfm_optimizer, build_ddfm_state_space
 from dfm_python.utils.errors import ModelNotTrainedError
-
-
-class TestBuilder:
-    """Test suite for builder utilities."""
-    
-    def test_build_dfm_structure(self):
-        """Test build_dfm_structure."""
-        config = _DFMEngineConfig(
-            blocks={'block1': {'num_factors': 2, 'series': ['s1', 's2']}},
-            frequency={'s1': 'w', 's2': 'w'},
-            clock='w'
-        )
-        
-        blocks, r, num_factors, p = build_dfm_structure(config)
-        assert blocks is not None
-        assert r is not None
-        assert num_factors > 0
-        assert p >= 0
-    
-    def test_build_dfm_blocks(self):
-        """Test build_dfm_blocks."""
-        config = _DFMEngineConfig(
-            blocks={'block1': {'num_factors': 1, 'series': ['s1', 's2', 's3']}},
-            frequency={'s1': 'w', 's2': 'w', 's3': 'w'},
-            clock='w'
-        )
-        
-        initial_blocks = np.ones((2, 1))
-        columns = ['s1', 's2', 's3']
-        n_series = 3
-        
-        blocks = build_dfm_blocks(initial_blocks, config, columns, n_series)
-        assert blocks.shape[0] == n_series
-        assert blocks.shape[1] == 1
 
 
 class TestDDFMBuilder:
@@ -164,20 +127,3 @@ class TestOptimizerNameValidation:
         autoencoder = SimpleAutoencoder.build(input_dim=4, encoder_size=[8, 2], output_dim=4)
         with pytest.raises(ConfigurationError, match="optimizer"):
             build_ddfm_optimizer(model=autoencoder, learning_rate=0.01, optimizer_type='RMSprop', n_mc_samples=5)
-
-    def test_ivdfm_unknown_optimizer_and_scheduler_raise(self):
-        from dfm_python.numeric.builder import build_ivdfm_optimizer
-        from dfm_python.utils.errors import ConfigurationError
-        model = torch.nn.Linear(3, 3)
-        with pytest.raises(ConfigurationError, match="optimizer"):
-            build_ivdfm_optimizer(model, 0.01, 'adam', max_epochs=3)
-        with pytest.raises(ConfigurationError, match="scheduler_type"):
-            build_ivdfm_optimizer(model, 0.01, 'Adam', max_epochs=3, scheduler_type='linear')
-
-    def test_afm_unknown_optimizer_raises(self):
-        from dfm_python.numeric.builder import build_afm_optimizer
-        from dfm_python.utils.errors import ConfigurationError
-        params = list(torch.nn.Linear(3, 3).parameters())
-        assert isinstance(build_afm_optimizer(params, 1e-3, "AdamW"), torch.optim.AdamW)
-        with pytest.raises(ConfigurationError, match="optimizer"):
-            build_afm_optimizer(params, 1e-3, "nadam")
