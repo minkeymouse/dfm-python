@@ -122,7 +122,7 @@ def test_fitted_state_has_the_bm14_layout(make, k):
 @pytest.fixture(scope="module")
 def mq_init():
     """``initialize_parameters`` on the standardized monthly/quarterly panel."""
-    from ..parity._cases import _MQ_MONTHLY, _MQ_QUARTERLY, _mq_panel
+    from ..parity._cases_dfm import _MQ_MONTHLY, _MQ_QUARTERLY, _mq_panel
 
     df = _mq_panel()
     X = df[_MQ_MONTHLY + _MQ_QUARTERLY].to_numpy(np.float64)

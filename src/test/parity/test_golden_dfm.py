@@ -60,7 +60,9 @@ from dfm_python.config import DFMConfig
 from dfm_python.models.dfm._engine import DFMEngine
 from dfm_python.testing import _state_hash
 
-from ._cases import (
+from ._cases import cases_for, check_case
+from ._cases_common import _digest, _macro_tail, normalized
+from ._cases_dfm import (
     _DFM_WM_ROWS,
     _MQ_MONTHLY,
     _MQ_PERMUTED,
@@ -69,14 +71,9 @@ from ._cases import (
     DFM_HORIZON,
     DFM_UPDATE_KEYS,
     _dfm_hyper,
-    _digest,
-    _macro_tail,
     _mq_panel,
-    cases_for,
-    check_case,
     dfm_fit_outputs,
     dfm_synthetic_inputs,
-    normalized,
 )
 from ._golden import assert_golden, load_golden
 

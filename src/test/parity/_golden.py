@@ -27,7 +27,7 @@ Comparison rules (design spec, section 11):
   entries near zero, whose relative error is meaningless. Off the capture
   platform the suite checks that the code reproduces the same fit, not the
   same bits.
-* A case registered with ``cross_platform=False`` (see ``_cases.Case``) is too
+* A case registered with ``cross_platform=False`` (see ``_cases_common.Case``) is too
   ill-conditioned to compare across platforms at any useful tolerance. Off the
   capture platform every test that consumes it is skipped
   (:func:`skip_unless_comparable`); on the capture platform it is compared

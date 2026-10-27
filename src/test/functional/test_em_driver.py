@@ -53,7 +53,8 @@ def _weekly_monthly():
     from dfm_python import DFM, PanelData
     from dfm_python.config import DFMConfig, load_yaml
 
-    from ..parity._cases import _DFM_WM_ROWS, REPO_ROOT, _macro_tail
+    from ..parity._cases_common import REPO_ROOT, _macro_tail
+    from ..parity._cases_dfm import _DFM_WM_ROWS
 
     sections = load_yaml(REPO_ROOT / "config" / "dfm_macro.yaml")
     panel = PanelData.from_wide(_macro_tail(_DFM_WM_ROWS), **sections["data"])
@@ -205,7 +206,7 @@ def test_refit_runs_one_iteration_and_reports_its_exact_loglik():
     """update(refit=True): one EM iteration on all rows; loglik_ is the exact loglik of the result."""
     from dfm_python import PanelData
 
-    from ..parity._cases import dfm_synthetic_inputs
+    from ..parity._cases_dfm import dfm_synthetic_inputs
 
     df, new_df, config, _ = dfm_synthetic_inputs()
     cols = list(config["frequency"])

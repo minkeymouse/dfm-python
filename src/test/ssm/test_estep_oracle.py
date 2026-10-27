@@ -34,14 +34,8 @@ MOMENT_RTOL = 1e-6
 
 
 def _case_frame_and_config(case: str):
-    from ..parity._cases import (
-        _DFM_WM_ROWS,
-        _dfm_macro_flat_config,
-        _macro_tail,
-        _mq_config,
-        _mq_panel,
-        dfm_synthetic_inputs,
-    )
+    from ..parity._cases_common import _macro_tail
+    from ..parity._cases_dfm import _DFM_WM_ROWS, _dfm_macro_flat_config, _mq_config, _mq_panel, dfm_synthetic_inputs
 
     if case == "dfm_synthetic":
         df, _, config, _ = dfm_synthetic_inputs()
@@ -57,7 +51,7 @@ def standardized_X(case: str) -> np.ndarray:
     """The standardized matrix the engine fed to EM for a golden case, rebuilt from its recipe.
 
     The frame goes through ``DFMDataset`` (the engine's column order) and a
-    fresh ``StandardScaler``, as in ``_cases._dfm_fit``; the result must equal
+    fresh ``StandardScaler``, as in ``_cases_dfm._dfm_fit``; the result must equal
     the fixture's ``data_processed``.
     """
     from sklearn.preprocessing import StandardScaler
@@ -209,7 +203,7 @@ def test_fit_loglik_is_exact_on_mixed_frequency():
     """DFM.fit on the monthly/quarterly case reports the exact loglik of its returned parameters."""
     from dfm_python import DFM, PanelData
 
-    from ..parity._cases import _MQ_MONTHLY, _MQ_QUARTERLY, _mq_panel
+    from ..parity._cases_dfm import _MQ_MONTHLY, _MQ_QUARTERLY, _mq_panel
 
     df = _mq_panel()
     panel = PanelData(y=df.set_index("date"), freq={**{c: "m" for c in _MQ_MONTHLY}, **{c: "q" for c in _MQ_QUARTERLY}})

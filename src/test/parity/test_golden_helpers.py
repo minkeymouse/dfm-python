@@ -9,7 +9,8 @@ import threadpoolctl
 import torch
 
 from . import _golden
-from ._cases import CASES, Case
+from ._cases import CASES
+from ._cases_common import Case
 from ._golden import (
     TOLERANCES,
     GoldenToleranceWarning,

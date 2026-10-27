@@ -20,7 +20,9 @@ import dfm_python
 from dfm_python import AFM, PanelData
 from dfm_python.config import AFMConfig
 
-from ._cases import AFM_ATTRS, _attrs, _reset_global_rngs, afm_inputs, cases_for, check_case, normalized
+from ._cases import cases_for, check_case
+from ._cases_afm import AFM_ATTRS, afm_inputs
+from ._cases_common import _attrs, _reset_global_rngs, normalized
 from ._golden import assert_golden, load_golden
 
 _YAML = importlib.util.find_spec("omegaconf") is not None or importlib.util.find_spec("yaml") is not None

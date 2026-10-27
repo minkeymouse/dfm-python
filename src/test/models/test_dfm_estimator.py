@@ -1251,7 +1251,7 @@ def test_shipped_yaml_builds_the_estimator(name):
 @pytest.mark.skipif(not _YAML, reason="YAML needs omegaconf or PyYAML")
 def test_shipped_macro_yaml_runs_the_values_of_the_flat_file():
     """The model: values and the data: frequencies are the flat dfm_macro.yaml values the golden cases ran."""
-    from ..parity._cases import _DFM_MACRO_FLAT_CONFIG as flat
+    from ..parity._cases_dfm import _DFM_MACRO_FLAT_CONFIG as flat
 
     path = _REPO / "config" / "dfm_macro.yaml"
     model = DFM.from_config(DFMConfig.from_yaml(path))

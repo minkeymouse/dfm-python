@@ -2,7 +2,7 @@
 
 import pytest
 
-from ._cases import Case
+from ._cases_common import Case
 from ._golden import pinned as _pinned
 from ._golden import skip_unless_comparable
 

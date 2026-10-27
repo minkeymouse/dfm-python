@@ -30,20 +30,16 @@ from dfm_python import PanelData, iVDFM
 from dfm_python.config import iVDFMConfig
 from dfm_python.models.ivdfm._engine import iVDFMEngine
 
-from ._cases import (
+from ._cases import cases_for, check_case
+from ._cases_common import _attrs, _macro_tail, _reset_global_rngs, normalized
+from ._cases_ivdfm import (
     _IVDFM_ATTRS,
     IVDFM_EXOG_HORIZON,
     _IVDFM_ROWS,
     _ivdfm_hyper,
-    _attrs,
     _ivdfm_outputs,
-    _macro_tail,
-    _reset_global_rngs,
-    cases_for,
-    check_case,
     ivdfm_exog_context_inputs,
     ivdfm_time_features,
-    normalized,
 )
 from ._golden import assert_golden, load_golden
 

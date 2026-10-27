@@ -83,7 +83,7 @@ def assert_monotone(lls: list[float], label: str) -> None:
 def _synthetic():
     from dfm_python import DFM, PanelData
 
-    from ..parity._cases import dfm_synthetic_inputs
+    from ..parity._cases_dfm import dfm_synthetic_inputs
 
     df, _, config, _ = dfm_synthetic_inputs()
     cols = list(config["frequency"])
@@ -96,7 +96,7 @@ def _synthetic():
 def _monthly_quarterly():
     from dfm_python import DFM, PanelData
 
-    from ..parity._cases import _MQ_MONTHLY, _MQ_QUARTERLY, _mq_panel
+    from ..parity._cases_dfm import _MQ_MONTHLY, _MQ_QUARTERLY, _mq_panel
 
     panel = PanelData(y=_mq_panel().set_index("date"),
                       freq={**{c: "m" for c in _MQ_MONTHLY}, **{c: "q" for c in _MQ_QUARTERLY}})
@@ -110,7 +110,8 @@ def _weekly_monthly():
     from dfm_python import DFM, PanelData
     from dfm_python.config import DFMConfig, load_yaml
 
-    from ..parity._cases import _DFM_WM_ROWS, REPO_ROOT, _macro_tail
+    from ..parity._cases_common import REPO_ROOT, _macro_tail
+    from ..parity._cases_dfm import _DFM_WM_ROWS
 
     sections = load_yaml(REPO_ROOT / "config" / "dfm_macro.yaml")
     panel = PanelData.from_wide(_macro_tail(_DFM_WM_ROWS), **sections["data"])
@@ -170,7 +171,7 @@ def test_macro_truncation_sweep(rows, monkeypatch):
     from dfm_python import DFM, PanelData
     from dfm_python.config import DFMConfig, load_yaml
 
-    from ..parity._cases import MACRO_CSV, REPO_ROOT, _macro_tail
+    from ..parity._cases_common import MACRO_CSV, REPO_ROOT, _macro_tail
 
     sections = load_yaml(REPO_ROOT / "config" / "dfm_macro.yaml")
     if rows == "full":

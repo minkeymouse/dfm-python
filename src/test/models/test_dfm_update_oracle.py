@@ -36,7 +36,7 @@ def _fit(n_new: int):
     """
     from dfm_python import DFM, PanelData
 
-    from ..parity._cases import dfm_synthetic_inputs
+    from ..parity._cases_dfm import dfm_synthetic_inputs
 
     df, _, config, _ = dfm_synthetic_inputs()
     cols = list(config["frequency"])
