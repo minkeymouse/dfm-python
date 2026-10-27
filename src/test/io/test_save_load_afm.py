@@ -25,7 +25,7 @@ def test_package_load_dispatches_to_the_model(tmp_path):
 def test_round_trip_reproduces_the_outputs(tmp_path):
     model = _fitted()
     model.save(tmp_path / "run")
-    loaded = AFM.load(tmp_path / "run", **({"device": "cpu"} if "device" in model.get_params() else {}))
+    loaded = AFM.load(tmp_path / "run", device="cpu")
     assert loaded.index_.equals(model.index_) and list(loaded.feature_names_in_) == list(model.feature_names_in_)
     assert loaded.stop_reason_ == model.stop_reason_ and loaded.n_iter_ == model.n_iter_
     data = make_panel(AFM)  # a loaded AFM keeps no training data: allocate on the panel
